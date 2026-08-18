@@ -17,8 +17,7 @@ use groove::{
 };
 use jazz::db::doctest_support;
 use jazz::db::{
-    DbIdentity, DemandDrivenDbOpen, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent,
+    DbIdentity, DbOpen, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource, SubscriptionEvent,
 };
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{DemandDrivenNodeOpen, MergeableCommit, NodeState};
@@ -480,7 +479,7 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
     let persistence = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 32)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let mut opening = DemandDrivenDbOpen::new(
+    let mut opening = DbOpen::new(
         schema.clone(),
         DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
@@ -615,7 +614,7 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
     let reopened = IndexedDbOrderedStorage::open(page_store, 4096, 32)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let mut reopening = DemandDrivenDbOpen::new(
+    let mut reopening = DbOpen::new(
         schema,
         DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),

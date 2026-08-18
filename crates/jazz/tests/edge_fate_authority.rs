@@ -1,3 +1,4 @@
+use jazz::db::BlockingResultFutureExt;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
@@ -44,7 +45,7 @@ fn schema() -> JazzSchema {
     )])
 }
 
-fn open_db(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemoryStorage> {
+fn open_db(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> Db {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
@@ -55,7 +56,7 @@ fn open_db(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemorySto
     .unwrap()
 }
 
-fn open_core(node_byte: u8, schema: &JazzSchema) -> Db<MemoryStorage> {
+fn open_core(node_byte: u8, schema: &JazzSchema) -> Db {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(DbConfig::new(
@@ -100,7 +101,7 @@ impl WireTransport for QueuedWireTransport {
 
 fn connect_client_to_edge(
     edge: &mut InMemoryServerShell,
-    client: &Db<MemoryStorage>,
+    client: &mut Db,
     client_wire: &QueuedWireTransport,
     identity: AuthorId,
 ) -> ServerSession {
@@ -109,7 +110,7 @@ fn connect_client_to_edge(
 }
 
 fn pump_client_edge(
-    client: &Db<MemoryStorage>,
+    client: &mut Db,
     wire: &QueuedWireTransport,
     edge: &mut InMemoryServerShell,
     session: ServerSession,
@@ -123,7 +124,7 @@ fn pump_client_edge(
     client.tick().unwrap();
 }
 
-fn visible_titles(db: &Db<MemoryStorage>, tier: DurabilityTier) -> Vec<String> {
+fn visible_titles(db: &mut Db, tier: DurabilityTier) -> Vec<String> {
     let query = Query::from("todos");
     let prepared = db.prepare_query(&query).unwrap();
     block_on(db.all(
@@ -154,17 +155,17 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
             .with_role(NodeRole::Edge),
     )
     .unwrap();
-    let core = open_core(0xc0, &schema);
+    let mut core = open_core(0xc0, &schema);
     let (edge_to_core, core_to_edge) = duplex();
     edge.connect_upstream(edge_to_core).unwrap();
     core.accept_subscriber(core_to_edge, AuthorId::SYSTEM);
 
-    let alice = open_db(0xa1, author(0xa1), &schema);
-    let bob = open_db(0xb0, author(0xb0), &schema);
+    let mut alice = open_db(0xa1, author(0xa1), &schema);
+    let mut bob = open_db(0xb0, author(0xb0), &schema);
     let alice_wire = QueuedWireTransport::default();
     let bob_wire = QueuedWireTransport::default();
-    let alice_session = connect_client_to_edge(&mut edge, &alice, &alice_wire, author(0xa1));
-    let bob_session = connect_client_to_edge(&mut edge, &bob, &bob_wire, author(0xb0));
+    let alice_session = connect_client_to_edge(&mut edge, &mut alice, &alice_wire, author(0xa1));
+    let bob_session = connect_client_to_edge(&mut edge, &mut bob, &bob_wire, author(0xb0));
     let query = Query::from("todos");
     let prepared = bob.prepare_query(&query).unwrap();
     let mut bob_global_subscription = block_on(bob.subscribe(
@@ -177,7 +178,7 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
         },
     ))
     .unwrap();
-    pump_client_edge(&bob, &bob_wire, &mut edge, bob_session);
+    pump_client_edge(&mut bob, &bob_wire, &mut edge, bob_session);
     while bob_global_subscription.try_next_event().is_some() {}
 
     let write = alice
@@ -186,13 +187,13 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
             BTreeMap::from([("title".to_owned(), Value::String("edge only".to_owned()))]),
         )
         .unwrap();
-    pump_client_edge(&alice, &alice_wire, &mut edge, alice_session);
-    pump_client_edge(&bob, &bob_wire, &mut edge, bob_session);
+    pump_client_edge(&mut alice, &alice_wire, &mut edge, alice_session);
+    pump_client_edge(&mut bob, &bob_wire, &mut edge, bob_session);
 
     assert!(block_on(write.wait(DurabilityTier::Edge)).is_ok());
     assert!(block_on(write.wait(DurabilityTier::Global)).is_err());
     assert!(bob_global_subscription.try_next_event().is_none());
-    assert!(visible_titles(&bob, DurabilityTier::Global).is_empty());
+    assert!(visible_titles(&mut bob, DurabilityTier::Global).is_empty());
 
     let _ = core;
 }
@@ -206,12 +207,12 @@ fn core_shell_client_upload_still_reports_global_immediately() {
     )
     .unwrap();
 
-    let alice = open_db(0xa1, author(0xa1), &schema);
-    let bob = open_db(0xb1, author(0xb1), &schema);
+    let mut alice = open_db(0xa1, author(0xa1), &schema);
+    let mut bob = open_db(0xb1, author(0xb1), &schema);
     let alice_wire = QueuedWireTransport::default();
     let bob_wire = QueuedWireTransport::default();
-    let alice_session = connect_client_to_edge(&mut core, &alice, &alice_wire, author(0xa1));
-    let bob_session = connect_client_to_edge(&mut core, &bob, &bob_wire, author(0xb1));
+    let alice_session = connect_client_to_edge(&mut core, &mut alice, &alice_wire, author(0xa1));
+    let bob_session = connect_client_to_edge(&mut core, &mut bob, &bob_wire, author(0xb1));
 
     // Bob's Global read consumes the identity-scoped settled view emitted by
     // the authority, rather than Alice's locally uploaded payload. Establish
@@ -228,7 +229,7 @@ fn core_shell_client_upload_still_reports_global_immediately() {
         },
     ))
     .unwrap();
-    pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
+    pump_client_edge(&mut bob, &bob_wire, &mut core, bob_session);
     let Some(jazz::db::SubscriptionEvent::Delta {
         reset: true,
         publishable: true,
@@ -252,8 +253,8 @@ fn core_shell_client_upload_still_reports_global_immediately() {
             BTreeMap::from([("title".to_owned(), Value::String("core global".to_owned()))]),
         )
         .unwrap();
-    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
-    pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
+    pump_client_edge(&mut alice, &alice_wire, &mut core, alice_session);
+    pump_client_edge(&mut bob, &bob_wire, &mut core, bob_session);
 
     assert!(block_on(write.wait(DurabilityTier::Global)).is_ok());
     let Some(jazz::db::SubscriptionEvent::Delta {
@@ -278,7 +279,7 @@ fn core_shell_client_upload_still_reports_global_immediately() {
         Some(Value::String(title)) if title == "core global"
     ));
     assert_eq!(
-        visible_titles(&bob, DurabilityTier::Global),
+        visible_titles(&mut bob, DurabilityTier::Global),
         ["core global"]
     );
 }
@@ -300,12 +301,12 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
             .with_role(NodeRole::Core),
     )
     .unwrap();
-    let alice = open_db(0xa2, author(0xa2), &schema);
-    let bob = open_db(0xb2, author(0xb2), &schema);
+    let mut alice = open_db(0xa2, author(0xa2), &schema);
+    let mut bob = open_db(0xb2, author(0xb2), &schema);
     let alice_wire = QueuedWireTransport::default();
     let bob_wire = QueuedWireTransport::default();
-    let alice_session = connect_client_to_edge(&mut core, &alice, &alice_wire, author(0xa2));
-    let bob_session = connect_client_to_edge(&mut core, &bob, &bob_wire, author(0xb2));
+    let alice_session = connect_client_to_edge(&mut core, &mut alice, &alice_wire, author(0xa2));
+    let bob_session = connect_client_to_edge(&mut core, &mut bob, &bob_wire, author(0xb2));
 
     // Keep every transaction identity distinct and the LWW order explicit:
     // TxId includes each client's already-distinct node id plus this HLC time.
@@ -321,15 +322,15 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
             100,
         )
         .unwrap();
-    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
+    pump_client_edge(&mut alice, &alice_wire, &mut core, alice_session);
 
     let prepared = bob.prepare_query(&Query::from("todos")).unwrap();
     let _subscription = block_on(bob.subscribe(&prepared, ReadOpts::default())).unwrap();
     let alice_prepared = alice.prepare_query(&Query::from("todos")).unwrap();
     let _alice_subscription =
         block_on(alice.subscribe(&alice_prepared, ReadOpts::default())).unwrap();
-    pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
-    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
+    pump_client_edge(&mut bob, &bob_wire, &mut core, bob_session);
+    pump_client_edge(&mut alice, &alice_wire, &mut core, alice_session);
 
     // Neither client is pumped after these writes until both heads exist, so
     // they remain concurrent children of the shared t=100 base.
@@ -360,10 +361,10 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
         .expect("empty patch remains a safe no-op");
     assert_eq!(no_op.mergeable_tx_id(), explicit_write.mergeable_tx_id());
 
-    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
-    pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
-    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
-    assert_eq!(visible_titles(&alice, DurabilityTier::Global), ["base"]);
+    pump_client_edge(&mut alice, &alice_wire, &mut core, alice_session);
+    pump_client_edge(&mut bob, &bob_wire, &mut core, bob_session);
+    pump_client_edge(&mut alice, &alice_wire, &mut core, alice_session);
+    assert_eq!(visible_titles(&mut alice, DurabilityTier::Global), ["base"]);
     let prepared = alice.prepare_query(&Query::from("todos")).unwrap();
     let rows = block_on(alice.all(
         &prepared,

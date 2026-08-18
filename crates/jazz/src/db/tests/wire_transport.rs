@@ -5,15 +5,15 @@ use super::*;
 #[test]
 fn logical_message_larger_than_frame_round_trips_reordered_and_duplicated() {
     let (left, right) = byte_duplex_raw();
-    let staged = Rc::clone(&right.inbound);
+    let mut staged = Rc::clone(&right.inbound);
     let features =
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
     let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
-    let body = (0..(MAX_WIRE_FRAME_BYTES + 700_000))
+    let mut body = (0..(MAX_WIRE_FRAME_BYTES + 700_000))
         .map(|index| ((index.wrapping_mul(31) % 251) as u8) as char)
         .collect::<String>();
-    let message = SyncMessage::SessionClaims {
+    let mut message = SyncMessage::SessionClaims {
         identity: AuthorId::from_bytes([0x71; 16]),
         claims: BTreeMap::from([("large".to_owned(), Value::String(body))]),
     };
@@ -30,7 +30,7 @@ fn logical_message_larger_than_frame_round_trips_reordered_and_duplicated() {
     frames.reverse();
     staged.borrow_mut().extend(frames);
 
-    let repeated = message.clone();
+    let mut repeated = message.clone();
     assert_eq!(receiver.try_recv(), Some(message));
     assert!(receiver.try_recv().is_none());
 
@@ -41,7 +41,7 @@ fn logical_message_larger_than_frame_round_trips_reordered_and_duplicated() {
 #[test]
 fn strict_bootstrap_receive_rejects_bad_physical_frame_before_later_valid_message() {
     let (left, right) = byte_duplex_raw();
-    let staged = Rc::clone(&right.inbound);
+    let mut staged = Rc::clone(&right.inbound);
     let features =
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
@@ -54,7 +54,7 @@ fn strict_bootstrap_receive_rejects_bad_physical_frame_before_later_valid_messag
         .expect("stage valid later message");
     staged.borrow_mut().push_front(vec![0xff]);
 
-    let error = receiver
+    let mut error = receiver
         .try_recv_strict()
         .expect_err("bootstrap must fail on the first malformed physical frame");
     assert_eq!(error.code, crate::wire::WireErrorCode::MalformedFrame);
@@ -66,15 +66,15 @@ fn strict_bootstrap_receive_rejects_bad_physical_frame_before_later_valid_messag
 
 #[test]
 fn schema_lineage_publication_fragments_before_atomic_admission() {
-    let base = schema();
+    let mut base = schema();
     let mut evolved_schema = base.clone();
-    let large_default = Value::String("x".repeat(MAX_WIRE_FRAME_BYTES + 1024));
+    let mut large_default = Value::String("x".repeat(MAX_WIRE_FRAME_BYTES + 1024));
     evolved_schema.tables[0].columns.push(
         crate::schema::ColumnSchema::new("large_default", ColumnType::String)
             .with_default(large_default.clone()),
     );
-    let evolved = crate::protocol::SchemaVersion::new(evolved_schema);
-    let publication = crate::protocol::SchemaLineagePublication::new(
+    let mut evolved = crate::protocol::SchemaVersion::new(evolved_schema);
+    let mut publication = crate::protocol::SchemaLineagePublication::new(
         evolved.clone(),
         crate::protocol::MigrationLens::new(
             base.version_id(),
@@ -91,7 +91,7 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
         Vec::<String>::new(),
         Vec::<String>::new(),
     );
-    let message = SyncMessage::PublishSchemaWithLens {
+    let mut message = SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(publication),
@@ -99,13 +99,13 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
     assert!(postcard::to_allocvec(&message).unwrap().len() > MAX_WIRE_FRAME_BYTES);
 
     let (left, right) = byte_duplex_raw();
-    let staged = Rc::clone(&right.inbound);
+    let mut staged = Rc::clone(&right.inbound);
     let features =
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
     let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
     sender.send(message.clone()).unwrap();
-    let frames = staged.borrow_mut().drain(..).collect::<Vec<_>>();
+    let mut frames = staged.borrow_mut().drain(..).collect::<Vec<_>>();
     assert!(frames.len() > 1);
     assert!(
         frames
@@ -113,7 +113,7 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
             .all(|frame| frame.len() <= MAX_WIRE_FRAME_BYTES)
     );
 
-    let authority = open_core(0x38, AuthorId::SYSTEM, &base);
+    let mut authority = open_core(0x38, AuthorId::SYSTEM, &base);
     for frame in &frames[..frames.len() - 1] {
         staged.borrow_mut().push_back(frame.clone());
         assert!(receiver.try_recv().is_none());
@@ -128,7 +128,7 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
     staged
         .borrow_mut()
         .push_back(frames.last().unwrap().clone());
-    let reassembled = receiver
+    let mut reassembled = receiver
         .try_recv()
         .expect("final fragment completes message");
     assert_eq!(reassembled, message);
@@ -149,12 +149,12 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
 #[test]
 fn corrupt_fragment_never_admits_a_partial_logical_message() {
     let (left, right) = byte_duplex_raw();
-    let staged = Rc::clone(&right.inbound);
+    let mut staged = Rc::clone(&right.inbound);
     let features =
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
     let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
-    let message = SyncMessage::SessionClaims {
+    let mut message = SyncMessage::SessionClaims {
         identity: AuthorId::from_bytes([0x72; 16]),
         claims: BTreeMap::from([(
             "large".to_owned(),
@@ -165,7 +165,7 @@ fn corrupt_fragment_never_admits_a_partial_logical_message() {
     sender.send(message).unwrap();
     {
         let mut staged = staged.borrow_mut();
-        let encoded = staged
+        let mut encoded = staged
             .iter_mut()
             .find(|encoded| {
                 matches!(
@@ -179,7 +179,7 @@ fn corrupt_fragment_never_admits_a_partial_logical_message() {
         let WireFrame::MessageFragment(fragment) = &mut frame else {
             unreachable!("selected a fragment frame")
         };
-        let byte = fragment
+        let mut byte = fragment
             .payload
             .iter_mut()
             .find(|byte| **byte == b'q')
@@ -192,8 +192,8 @@ fn corrupt_fragment_never_admits_a_partial_logical_message() {
 
 #[test]
 fn fragment_admission_bounds_peer_state_and_rejects_conflicting_duplicates() {
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION;
-    let fragment = |message_id, payload: u8| WireMessageFragment {
+    let mut features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION;
+    let mut fragment = |message_id, payload: u8| WireMessageFragment {
         protocol_version: WIRE_PROTOCOL_VERSION,
         features,
         session: None,
@@ -230,8 +230,8 @@ fn fragment_admission_bounds_peer_state_and_rejects_conflicting_duplicates() {
 
 #[test]
 fn fragmented_message_survives_mid_send_backpressure_without_semantic_retry() {
-    let staged = Rc::new(RefCell::new(std::collections::VecDeque::new()));
-    let receiver_inbound = Rc::clone(&staged);
+    let mut staged = Rc::new(RefCell::new(std::collections::VecDeque::new()));
+    let mut receiver_inbound = Rc::clone(&staged);
     let features =
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
     let mut sender = WireTransportAdapter::new(
@@ -254,7 +254,7 @@ fn fragmented_message_survives_mid_send_backpressure_without_semantic_retry() {
         features,
         None,
     );
-    let message = SyncMessage::SessionClaims {
+    let mut message = SyncMessage::SessionClaims {
         identity: AuthorId::from_bytes([0x73; 16]),
         claims: BTreeMap::from([(
             "large".to_owned(),
@@ -273,9 +273,9 @@ fn fragmented_message_survives_mid_send_backpressure_without_semantic_retry() {
 
 #[test]
 fn first_frame_backpressure_queues_compressed_logical_message_without_retry() {
-    let staged = Rc::new(RefCell::new(std::collections::VecDeque::new()));
-    let receiver_inbound = Rc::clone(&staged);
-    let features = current_wire_features();
+    let mut staged = Rc::new(RefCell::new(std::collections::VecDeque::new()));
+    let mut receiver_inbound = Rc::clone(&staged);
+    let mut features = current_wire_features();
     let mut sender = WireTransportAdapter::new(
         OneShotBackpressureTransport {
             outbound: staged,
@@ -296,7 +296,7 @@ fn first_frame_backpressure_queues_compressed_logical_message_without_retry() {
         features,
         None,
     );
-    let message = SyncMessage::SessionClaims {
+    let mut message = SyncMessage::SessionClaims {
         identity: AuthorId::from_bytes([0x75; 16]),
         claims: BTreeMap::from([(
             "large".to_owned(),
@@ -317,7 +317,7 @@ fn first_frame_backpressure_queues_compressed_logical_message_without_retry() {
 fn reconnect_discards_missing_fragments_and_replays_the_logical_message() {
     let features =
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
-    let message = SyncMessage::SessionClaims {
+    let mut message = SyncMessage::SessionClaims {
         identity: AuthorId::from_bytes([0x74; 16]),
         claims: BTreeMap::from([(
             "large".to_owned(),
@@ -326,7 +326,7 @@ fn reconnect_discards_missing_fragments_and_replays_the_logical_message() {
     };
 
     let (left, right) = byte_duplex_raw();
-    let staged = Rc::clone(&right.inbound);
+    let mut staged = Rc::clone(&right.inbound);
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
     let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
     sender.send(message.clone()).unwrap();
@@ -346,7 +346,7 @@ pub(super) fn byte_duplex_with_session(
     epoch: u64,
 ) -> (Box<dyn Transport>, Box<dyn Transport>) {
     let (left, right) = byte_duplex_raw();
-    let session = WireSession {
+    let mut session = WireSession {
         session_id: "test-session".to_owned(),
         epoch,
         identity: Some(identity),
@@ -391,7 +391,7 @@ fn test_catalogue_ack() -> SyncMessage {
 }
 
 fn encode_test_message_frame(session: Option<WireSession>) -> Vec<u8> {
-    let payload = encode_sync_message(&test_catalogue_ack()).unwrap();
+    let mut payload = encode_sync_message(&test_catalogue_ack()).unwrap();
     let mut envelope = WireEnvelope::new(
         WIRE_PROTOCOL_VERSION,
         FEATURE_SYNC_MESSAGE_PAYLOAD
@@ -406,8 +406,8 @@ fn encode_test_message_frame(session: Option<WireSession>) -> Vec<u8> {
 }
 
 fn expect_auth_failed_frame(transport: &mut ByteDuplexTransport, retry: WireRetry, message: &str) {
-    let error = transport.try_recv_frame().expect("structured wire error");
-    let frame = decode_frame(&error).unwrap();
+    let mut error = transport.try_recv_frame().expect("structured wire error");
+    let mut frame = decode_frame(&error).unwrap();
     let WireFrame::Error(WireError {
         code,
         retry: actual_retry,
@@ -427,7 +427,7 @@ fn expect_auth_failed_frame(transport: &mut ByteDuplexTransport, retry: WireRetr
 #[test]
 fn wire_transport_adapter_carries_only_admitted_session_context() {
     let (left, _) = byte_duplex_raw();
-    let context = ConnectionSessionContext {
+    let mut context = ConnectionSessionContext {
         local: crate::wire::WireAuthorityEndpoint {
             node: NodeUuid::from_bytes([0x81; 16]),
             epoch: 17,
@@ -439,7 +439,7 @@ fn wire_transport_adapter_carries_only_admitted_session_context() {
         link_identity: AuthorId::from_bytes([0x83; 16]),
         negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
     };
-    let adapter = WireTransportAdapter::new_with_session_context(
+    let mut adapter = WireTransportAdapter::new_with_session_context(
         left,
         WIRE_PROTOCOL_VERSION,
         context.negotiated_features,
@@ -457,8 +457,8 @@ fn wire_transport_adapter_reports_malformed_frames() {
     let mut adapter = WireTransportAdapter::current(left);
     assert!(adapter.try_recv().is_none());
 
-    let error = right.try_recv_frame().expect("structured wire error");
-    let frame = decode_frame(&error).unwrap();
+    let mut error = right.try_recv_frame().expect("structured wire error");
+    let mut frame = decode_frame(&error).unwrap();
     assert!(matches!(
         frame,
         WireFrame::Error(WireError {
@@ -479,8 +479,8 @@ fn wire_transport_adapter_reports_oversized_frame_without_decoding() {
     let mut adapter = WireTransportAdapter::current(left);
     assert!(adapter.try_recv().is_none());
 
-    let error = right.try_recv_frame().expect("structured wire error");
-    let frame = decode_frame(&error).unwrap();
+    let mut error = right.try_recv_frame().expect("structured wire error");
+    let mut frame = decode_frame(&error).unwrap();
     let WireFrame::Error(WireError { code, message, .. }) = frame else {
         panic!("expected error frame");
     };
@@ -494,8 +494,8 @@ fn wire_transport_adapter_reports_oversized_frame_without_decoding() {
 #[test]
 fn wire_transport_adapter_accepts_matching_session() {
     let (left, mut right) = byte_duplex_raw();
-    let identity = AuthorId::from_bytes([0xa1; 16]);
-    let session = test_wire_session(identity, 3);
+    let mut identity = AuthorId::from_bytes([0xa1; 16]);
+    let mut session = test_wire_session(identity, 3);
     left.inbound
         .borrow_mut()
         .push_back(encode_test_message_frame(Some(session.clone())));
@@ -516,7 +516,7 @@ fn wire_transport_adapter_accepts_matching_session() {
 #[test]
 fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message() {
     let (left, mut right) = byte_duplex_raw();
-    let identity = AuthorId::from_bytes([0xa2; 16]);
+    let mut identity = AuthorId::from_bytes([0xa2; 16]);
     left.inbound
         .borrow_mut()
         .push_back(encode_test_message_frame(None));
@@ -537,12 +537,12 @@ fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message(
 #[test]
 fn fragment_authentication_precedes_reassembly_allocation() {
     let (left, mut right) = byte_duplex_raw();
-    let expected_identity = AuthorId::from_bytes([0xa5; 16]);
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD
+    let mut expected_identity = AuthorId::from_bytes([0xa5; 16]);
+    let mut features = FEATURE_SYNC_MESSAGE_PAYLOAD
         | crate::wire::FEATURE_SESSION_FRAME
         | FEATURE_STRUCTURED_ERRORS
         | FEATURE_MESSAGE_FRAGMENTATION;
-    let fragment = WireMessageFragment {
+    let mut fragment = WireMessageFragment {
         protocol_version: WIRE_PROTOCOL_VERSION,
         features,
         session: Some(test_wire_session(AuthorId::from_bytes([0xb5; 16]), 3)),
@@ -571,8 +571,8 @@ fn fragment_authentication_precedes_reassembly_allocation() {
 #[test]
 fn fragment_negotiation_validation_precedes_reassembly_allocation() {
     let (left, mut right) = byte_duplex_raw();
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION;
-    let fragment = WireMessageFragment {
+    let mut features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION;
+    let mut fragment = WireMessageFragment {
         protocol_version: WIRE_PROTOCOL_VERSION + 1,
         features: features | crate::wire::FEATURE_PAYLOAD_LZ4,
         session: None,
@@ -590,7 +590,7 @@ fn fragment_negotiation_validation_precedes_reassembly_allocation() {
     assert!(adapter.try_recv().is_none());
     assert!(adapter.reassembler.incomplete.is_empty());
     assert_eq!(adapter.reassembler.staged_bytes, 0);
-    let error = right.try_recv_frame().expect("structured wire error");
+    let mut error = right.try_recv_frame().expect("structured wire error");
     assert!(matches!(
         decode_frame(&error).unwrap(),
         WireFrame::Error(WireError {
@@ -603,8 +603,8 @@ fn fragment_negotiation_validation_precedes_reassembly_allocation() {
 #[test]
 fn wire_transport_adapter_rejects_wrong_identity_without_emitting_sync_message() {
     let (left, mut right) = byte_duplex_raw();
-    let expected_identity = AuthorId::from_bytes([0xa3; 16]);
-    let actual_identity = AuthorId::from_bytes([0xb3; 16]);
+    let mut expected_identity = AuthorId::from_bytes([0xa3; 16]);
+    let mut actual_identity = AuthorId::from_bytes([0xb3; 16]);
     left.inbound
         .borrow_mut()
         .push_back(encode_test_message_frame(Some(test_wire_session(
@@ -628,7 +628,7 @@ fn wire_transport_adapter_rejects_wrong_identity_without_emitting_sync_message()
 #[test]
 fn wire_transport_adapter_rejects_stale_epoch_without_emitting_sync_message() {
     let (left, mut right) = byte_duplex_raw();
-    let identity = AuthorId::from_bytes([0xa4; 16]);
+    let mut identity = AuthorId::from_bytes([0xa4; 16]);
     left.inbound
         .borrow_mut()
         .push_back(encode_test_message_frame(Some(test_wire_session(
@@ -670,14 +670,14 @@ fn wire_transport_adapter_preserves_message_order() {
         }))
         .unwrap();
 
-    let first = right.try_recv_frame().unwrap();
-    let second = right.try_recv_frame().unwrap();
+    let mut first = right.try_recv_frame().unwrap();
+    let mut second = right.try_recv_frame().unwrap();
     let mut decoder = WireStreamDecoder::new(current_wire_features()).unwrap();
-    let first = match decode_frame(&first).unwrap() {
+    let mut first = match decode_frame(&first).unwrap() {
         WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
         other => panic!("expected message frame, got {other:?}"),
     };
-    let second = match decode_frame(&second).unwrap() {
+    let mut second = match decode_frame(&second).unwrap() {
         WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
         other => panic!("expected message frame, got {other:?}"),
     };
@@ -714,7 +714,7 @@ fn wire_transport_adapter_lz4_compresses_payload_when_negotiated() {
         FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4,
         None,
     );
-    let message = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
+    let mut message = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
         revision: Some(7),
         schema: None,
         lens: None,
@@ -722,7 +722,7 @@ fn wire_transport_adapter_lz4_compresses_payload_when_negotiated() {
     });
 
     sender.send(message.clone()).unwrap();
-    let raw = sender
+    let mut raw = sender
         .into_inner()
         .outbound
         .borrow()
@@ -756,13 +756,13 @@ fn wire_transport_adapter_zstd_stream_preserves_message_order() {
         FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD,
         None,
     );
-    let first = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
+    let mut first = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
         revision: Some(7),
         schema: None,
         lens: None,
         applied: true,
     });
-    let second = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
+    let mut second = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
         revision: Some(8),
         schema: None,
         lens: None,

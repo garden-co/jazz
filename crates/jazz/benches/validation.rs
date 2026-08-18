@@ -244,7 +244,7 @@ impl ValidationBench {
             .unwrap_or_else(|| self.rng.usize(self.rows.len()))
     }
 
-    fn print_json(&self, elapsed: Duration) {
+    fn print_json(&mut self, elapsed: Duration) {
         let mut fields = phase_fields("exclusive_validation_throughput", elapsed.as_micros());
         fields.insert("seed".to_owned(), serde_json::json!(self.config.seed));
         fields.insert("clients".to_owned(), serde_json::json!(self.config.clients));
@@ -310,7 +310,7 @@ impl ValidationBench {
             "predicate_read_count".to_owned(),
             serde_json::json!(self.metrics.predicate_reads),
         );
-        insert_node_metrics(&mut fields, "core", &self.core);
+        insert_node_metrics(&mut fields, "core", &mut self.core);
         emit_json_line("validation", fields);
     }
 }

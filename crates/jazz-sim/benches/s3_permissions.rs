@@ -436,7 +436,7 @@ struct EdgeRoute {
 }
 
 struct DbClient {
-    db: Db<RocksDbStorage>,
+    db: Db,
     _dir: tempfile::TempDir,
     server_to_client_bytes: Rc<Cell<u64>>,
     server_to_client_floor_bytes: Rc<Cell<u64>>,
@@ -878,9 +878,7 @@ fn grant_phase_db(
     drive_db_round_trip(core, client);
     let watch_rows = visible_rows_db_client(client);
     let prepared = client.db.prepare_query(&Query::from(RESOURCES)).unwrap();
-    let read_rows = client
-        .db
-        .read(&prepared)
+    let read_rows = block_on(client.db.read(&prepared))
         .unwrap()
         .into_iter()
         .map(|row| row.row_uuid())
@@ -924,7 +922,7 @@ fn revoke_phase_db(
             break;
         }
         core.tick().unwrap();
-        client.db.tick().unwrap();
+        jazz::db::block_on(client.db.tick()).unwrap();
         drain_db_subscription(client);
         after = visible_rows_db_client(client);
     }
@@ -1837,9 +1835,9 @@ fn hydrate_db(core: &CoreDb, client: &mut DbClient, query: &Query) -> HydrateSum
     let start = Instant::now();
     let prepared = client.db.prepare_query(query).unwrap();
     let mut watch = block_on(client.db.subscribe(&prepared, ReadOpts::default())).unwrap();
-    client.db.tick().unwrap();
+    jazz::db::block_on(client.db.tick()).unwrap();
     core.tick().unwrap();
-    client.db.tick().unwrap();
+    jazz::db::block_on(client.db.tick()).unwrap();
     let opened = block_on(watch.next_event()).expect("db subscription opens");
     apply_db_subscription_event(&mut client.visible_rows, opened);
     while let Some(event) = watch.try_next_event() {
@@ -1860,7 +1858,7 @@ fn hydrate_db(core: &CoreDb, client: &mut DbClient, query: &Query) -> HydrateSum
 fn drive_db_round_trip(core: &CoreDb, client: &mut DbClient) {
     for _ in 0..3 {
         core.tick().unwrap();
-        client.db.tick().unwrap();
+        jazz::db::block_on(client.db.tick()).unwrap();
         drain_db_subscription(client);
     }
 }
@@ -2684,7 +2682,7 @@ fn open_db(
     schema: JazzSchema,
     author: AuthorId,
     seed: u64,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();

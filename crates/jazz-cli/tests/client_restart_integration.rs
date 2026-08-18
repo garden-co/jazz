@@ -168,8 +168,8 @@ impl ServerProcess {
     }
 
     fn process_output_summary(&mut self) -> String {
-        let stdout = take_pipe_text(&mut self.process.stdout);
-        let stderr = take_pipe_text(&mut self.process.stderr);
+        let stdout = take_pipe_text(&self.process.stdout);
+        let stderr = take_pipe_text(&self.process.stderr);
         if stdout.is_empty() && stderr.is_empty() {
             return String::new();
         }
@@ -373,7 +373,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     ))
     .await
     .expect("connect client");
-    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+    wait_for_edge_query_ready(&mut client, Duration::from_secs(30)).await;
 
     let (_, _, batch_id) = client
         .insert(
@@ -396,7 +396,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         .expect("wait for create before restart");
 
     let _ = wait_for_todos_count(
-        &client,
+        &mut client,
         1,
         Duration::from_secs(20),
         Some(DurabilityTier::EdgeServer),
@@ -410,7 +410,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         ServerProcess::start(restart_port, server_data.path(), &jwks_server.endpoint()).await;
 
     let rows_after_restart = wait_for_todos_count(
-        &client,
+        &mut client,
         1,
         Duration::from_secs(25),
         Some(DurabilityTier::EdgeServer),
@@ -443,7 +443,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         .expect("wait for create after restart");
 
     let rows_after_create = wait_for_todos_count(
-        &client,
+        &mut client,
         2,
         Duration::from_secs(25),
         Some(DurabilityTier::EdgeServer),

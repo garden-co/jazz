@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts};
+use jazz::db::BlockingResultFutureExt;
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
@@ -20,7 +21,7 @@ fn schema() -> JazzSchema {
     ])
 }
 
-fn open_db(identity: AuthorId) -> Db<MemoryStorage> {
+fn open_db(identity: AuthorId) -> Db {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -41,7 +42,7 @@ fn open_db(identity: AuthorId) -> Db<MemoryStorage> {
 fn row_provenance_preserves_created_fields_and_advances_updated_at() {
     let alice = author(0xa1);
     let row = RowUuid::from_bytes([0x33; 16]);
-    let db = open_db(alice);
+    let mut db = open_db(alice);
 
     db.insert_with_id_at_ms(
         "todos",
@@ -100,7 +101,7 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
 fn deletion_advances_updated_provenance_without_replacing_creation_provenance() {
     let alice = author(0xa1);
     let row = RowUuid::from_bytes([0x44; 16]);
-    let db = open_db(alice);
+    let mut db = open_db(alice);
 
     db.insert_with_id_at_ms(
         "todos",
@@ -141,30 +142,26 @@ fn deletion_advances_updated_provenance_without_replacing_creation_provenance() 
 /// alice ──open(batch)──► empty update(absent row) ✗
 #[test]
 fn empty_batched_update_still_validates_handle_and_target() {
-    let db = open_db(author(0xa1));
+    let mut db = open_db(author(0xa1));
     let row = RowUuid::from_bytes([0x55; 16]);
 
     let abandoned = OpenBatchId::new();
-    db.begin_mergeable(abandoned).expect("open batch");
-    db.abandon_transaction_handle(abandoned)
-        .expect("abandon batch");
+    db.begin_mergeable_with_id(abandoned).expect("open batch");
+    db.abandon_mergeable(abandoned).expect("abandon batch");
     let stale_error = db
-        .mergeable_tx_ref(abandoned)
-        .update("todos", row, BTreeMap::new())
+        .mergeable_update(abandoned, "todos", row, BTreeMap::new())
         .expect_err("stale batch handle must be rejected");
     assert!(stale_error.message.contains("open transaction"));
 
     let open = OpenBatchId::new();
-    db.begin_mergeable(open).expect("open batch");
+    db.begin_mergeable_with_id(open).expect("open batch");
     let absent_error = db
-        .mergeable_tx_ref(open)
-        .update("todos", row, BTreeMap::new())
+        .mergeable_update(open, "todos", row, BTreeMap::new())
         .expect_err("absent target must be rejected");
     assert!(
         absent_error.message.contains("must carry content cells"),
         "unexpected absent-target error: {}",
         absent_error.message
     );
-    db.abandon_transaction_handle(open)
-        .expect("abandon checked batch");
+    db.abandon_mergeable(open).expect("abandon checked batch");
 }

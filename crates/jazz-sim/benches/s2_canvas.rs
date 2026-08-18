@@ -1769,31 +1769,28 @@ fn run_historical_loads(
 fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
     let schema = schema();
     let canvas = canvas_id();
-    let (_dir, db) = open_db(node(70), participant_author(0), schema.clone());
+    let (_dir, mut db) = open_db(node(70), participant_author(0), schema.clone());
 
-    let canvas_write = db
-        .insert_with_id(CANVASES, canvas, canvas_cells())
-        .expect("db canvas insert");
+    let canvas_write =
+        block_on(db.insert_with_id(CANVASES, canvas, canvas_cells())).expect("db canvas insert");
     block_on(canvas_write.wait(DurabilityTier::Local)).expect("db canvas local wait");
     for idx in 0..(config.active + config.passive) {
-        let invite = db
-            .insert_with_id(
-                INVITES,
-                row(10_000 + idx),
-                BTreeMap::from([
-                    ("canvas".to_owned(), Value::Uuid(canvas.0)),
-                    ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
-                ]),
-            )
-            .expect("db invite insert");
+        let invite = block_on(db.insert_with_id(
+            INVITES,
+            row(10_000 + idx),
+            BTreeMap::from([
+                ("canvas".to_owned(), Value::Uuid(canvas.0)),
+                ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
+            ]),
+        ))
+        .expect("db invite insert");
         block_on(invite.wait(DurabilityTier::Local)).expect("db invite local wait");
     }
 
     let mut shape_rows = Vec::with_capacity(config.shapes);
     let mut expected = BTreeMap::new();
     for idx in 0..config.shapes {
-        let write = db
-            .insert(SHAPES, shape_cells(canvas, idx, idx as f64, idx as f64))
+        let write = block_on(db.insert(SHAPES, shape_cells(canvas, idx, idx as f64, idx as f64)))
             .expect("db shape insert");
         let row_uuid = write.row_uuid();
         block_on(write.wait(DurabilityTier::Local)).expect("db shape local wait");
@@ -1848,7 +1845,7 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
                 ("y".to_owned(), Value::F64(y)),
             ]);
             let start = Instant::now();
-            let write = db.update(SHAPES, row_uuid, patch).expect("db shape update");
+            let write = block_on(db.update(SHAPES, row_uuid, patch)).expect("db shape update");
             block_on(write.wait(DurabilityTier::Local)).expect("db update local wait");
             write_latencies.push(start.elapsed().as_micros() as u64);
             expected.insert(row_uuid, (x.to_bits(), y.to_bits()));
@@ -1873,7 +1870,7 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
         }
     }
 
-    assert_eq!(db_shape_state(&db, &schema, &query), expected);
+    assert_eq!(db_shape_state(&mut db, &schema, &query), expected);
 
     DbSurfaceSummary {
         fixture_rows: 1 + config.active + config.passive + config.shapes,
@@ -2317,11 +2314,7 @@ fn open_node(
     (dir, node)
 }
 
-fn open_db(
-    node_uuid: NodeUuid,
-    author: AuthorId,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+fn open_db(node_uuid: NodeUuid, author: AuthorId, schema: JazzSchema) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2374,12 +2367,15 @@ fn db_canvas_query(canvas: RowUuid) -> Query {
 }
 
 fn db_shape_state(
-    db: &Db<RocksDbStorage>,
+    db: &mut Db,
     schema: &JazzSchema,
     query: &Query,
 ) -> BTreeMap<RowUuid, (u64, u64)> {
     let prepared = db.prepare_query(query).expect("db prepare read shapes");
-    db_rows_state(schema, db.read(&prepared).expect("db read shapes"))
+    db_rows_state(
+        schema,
+        block_on(db.read(&prepared)).expect("db read shapes"),
+    )
 }
 
 fn apply_db_subscription_event(

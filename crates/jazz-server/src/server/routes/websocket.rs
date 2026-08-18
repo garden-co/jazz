@@ -1721,7 +1721,7 @@ mod tests {
     }
 
     struct TestClient {
-        db: Db<CoreMemoryStorage>,
+        db: Db,
         transport: TestWireTransport,
         todos_table: TableSchema,
     }
@@ -1764,7 +1764,7 @@ mod tests {
             }
         }
 
-        fn insert_todo(&self, title: &str) -> jazz::ids::RowUuid {
+        async fn insert_todo(&mut self, title: &str) -> jazz::ids::RowUuid {
             self.db
                 .insert(
                     "todos",
@@ -1773,11 +1773,12 @@ mod tests {
                         ("done".to_owned(), CoreValue::Bool(false)),
                     ]),
                 )
+                .await
                 .expect("insert client row")
                 .row_uuid()
         }
 
-        fn write_todo_tx_id(&self, title: &str) -> TxId {
+        async fn write_todo_tx_id(&mut self, title: &str) -> TxId {
             self.db
                 .insert(
                     "todos",
@@ -1786,11 +1787,12 @@ mod tests {
                         ("done".to_owned(), CoreValue::Bool(false)),
                     ]),
                 )
+                .await
                 .expect("insert client row")
                 .mergeable_tx_id()
         }
 
-        fn insert_private_doc(&self, title: &str, owner: AuthorId) -> jazz::ids::RowUuid {
+        async fn insert_private_doc(&mut self, title: &str, owner: AuthorId) -> jazz::ids::RowUuid {
             let owner = uuid::Uuid::from_bytes(*owner.as_bytes()).to_string();
             self.db
                 .insert(
@@ -1800,18 +1802,19 @@ mod tests {
                         ("owner".to_owned(), CoreValue::String(owner)),
                     ]),
                 )
+                .await
                 .expect("insert client doc")
                 .row_uuid()
         }
 
-        fn tick_take(&self) -> Vec<Vec<u8>> {
-            self.db.tick().expect("tick client db");
+        async fn tick_take(&mut self) -> Vec<Vec<u8>> {
+            self.db.tick().await.expect("tick client db");
             self.transport.take_outbound()
         }
 
-        fn receive_tick_take(&self, frames: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        async fn receive_tick_take(&mut self, frames: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
             self.transport.push_inbound(frames);
-            self.tick_take()
+            self.tick_take().await
         }
 
         fn attach_todos_query(&self) -> (PreparedQuery, QueryAttachment) {
@@ -1858,7 +1861,7 @@ mod tests {
             self.db.detach_query(attachment);
         }
 
-        async fn edge_todo_titles(&self, query: &PreparedQuery) -> Vec<String> {
+        async fn edge_todo_titles(&mut self, query: &PreparedQuery) -> Vec<String> {
             self.db
                 .all(
                     query,
@@ -1877,7 +1880,7 @@ mod tests {
                 .collect()
         }
 
-        async fn edge_titles(&self, query: &PreparedQuery, table: &TableSchema) -> Vec<String> {
+        async fn edge_titles(&mut self, query: &PreparedQuery, table: &TableSchema) -> Vec<String> {
             self.db
                 .all(
                     query,
@@ -1938,7 +1941,7 @@ mod tests {
     }
 
     async fn pump_core_websocket_transport_once(
-        client: &TestClient,
+        client: &mut TestClient,
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
@@ -1947,13 +1950,13 @@ mod tests {
     }
 
     async fn pump_core_websocket_transport_once_with_first_receive(
-        client: &TestClient,
+        client: &mut TestClient,
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
         receive_after_client_send: bool,
     ) -> (usize, usize) {
-        let mut outbound = client.tick_take();
+        let mut outbound = client.tick_take().await;
         let mut sent = 0;
         let mut received = 0;
         let mut rounds = 0;
@@ -1973,10 +1976,10 @@ mod tests {
                 Vec::new()
             };
             if inbound.is_empty() {
-                outbound = client.tick_take();
+                outbound = client.tick_take().await;
             } else {
                 received += inbound.len();
-                outbound = client.receive_tick_take(inbound);
+                outbound = client.receive_tick_take(inbound).await;
             }
         }
         // A server response may miss the short receive window immediately
@@ -1990,7 +1993,7 @@ mod tests {
     }
 
     async fn receive_core_websocket_transport_push_once(
-        client: &TestClient,
+        client: &mut TestClient,
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
@@ -2000,7 +2003,7 @@ mod tests {
             return 0;
         }
         let mut received = inbound.len();
-        let mut outbound = client.receive_tick_take(inbound);
+        let mut outbound = client.receive_tick_take(inbound).await;
         let mut rounds = 0;
         while !outbound.is_empty() {
             rounds += 1;
@@ -2013,10 +2016,10 @@ mod tests {
                 .expect("send client push follow-up frames");
             let inbound = try_receive_ws_encoded_frames(ws).await;
             if inbound.is_empty() {
-                outbound = client.tick_take();
+                outbound = client.tick_take().await;
             } else {
                 received += inbound.len();
-                outbound = client.receive_tick_take(inbound);
+                outbound = client.receive_tick_take(inbound).await;
             }
         }
         received
@@ -2028,13 +2031,13 @@ mod tests {
     /// setup traffic as an operation response makes ordering tests test the
     /// handshake race rather than the stated route boundary.
     async fn settle_ws_todos_query(
-        client: &TestClient,
+        client: &mut TestClient,
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> (PreparedQuery, QueryAttachment) {
         let (query, attachment) = client.attach_todos_query();
-        let initial_outbound = client.tick_take();
+        let initial_outbound = client.tick_take().await;
         assert!(
             !initial_outbound.is_empty(),
             "query setup must send its initial wire frames"
@@ -2086,12 +2089,12 @@ mod tests {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let schema = ws_public_schema_convert();
-        let client_a = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
-        let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
+        let mut client_a = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
+        let mut client_b = TestClient::new(schema, 0xb2, 0xb200).await;
         let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
         let mut ws_b = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
         let (client_b_todos, client_b_todos_attachment) = client_b.attach_todos_query();
-        let _inserted = client_a.insert_todo("route sync");
+        let _inserted = client_a.insert_todo("route sync").await;
 
         let mut frames_sent_to_server = 0;
         let mut frames_received_from_server = 0;
@@ -2099,10 +2102,12 @@ mod tests {
         let mut titles = Vec::new();
         let start = tokio::time::Instant::now();
         while start.elapsed() < WS_PUMP_DEADLINE {
-            let (sent, received) = pump_core_websocket_transport_once(&client_a, &mut ws_a).await;
+            let (sent, received) =
+                pump_core_websocket_transport_once(&mut client_a, &mut ws_a).await;
             frames_sent_to_server += sent;
             frames_received_from_server += received;
-            let (sent, received) = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
+            let (sent, received) =
+                pump_core_websocket_transport_once(&mut client_b, &mut ws_b).await;
             frames_sent_to_server += sent;
             frames_received_from_server += received;
             titles = client_b.edge_todo_titles(&client_b_todos).await;
@@ -2137,18 +2142,20 @@ mod tests {
     async fn ws_flushes_early_global_fate_before_later_batch_frames() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let client = TestClient::new(ws_public_schema_convert(), 0xa1, 0xa100).await;
+        let mut client = TestClient::new(ws_public_schema_convert(), 0xa1, 0xa100).await;
         let mut ws = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
 
-        let (_, setup_attachment) = settle_ws_todos_query(&client, &mut ws).await;
+        let (_, setup_attachment) = settle_ws_todos_query(&mut client, &mut ws).await;
         client.detach_query(setup_attachment);
 
-        let early_tx = client.write_todo_tx_id("early fate");
+        let early_tx = client.write_todo_tx_id("early fate").await;
         let mut final_tx = early_tx;
         for index in 0..32 {
-            final_tx = client.write_todo_tx_id(&format!("later fate {index}"));
+            final_tx = client
+                .write_todo_tx_id(&format!("later fate {index}"))
+                .await;
         }
-        let outbound = client.tick_take();
+        let outbound = client.tick_take().await;
         assert!(outbound.len() > 1, "import must contain later input frames");
         ws.send(WsMessage::Binary(ws_frame_batch(&outbound).into()))
             .await
@@ -2193,7 +2200,7 @@ mod tests {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let schema = ws_public_schema_convert();
-        let client_b = TestClient::new(schema.clone(), 0xb2, 0xb200).await;
+        let mut client_b = TestClient::new(schema.clone(), 0xb2, 0xb200).await;
         let mut ws_b = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
         let (client_b_todos, client_b_todos_attachment) = client_b.attach_todos_query();
 
@@ -2201,7 +2208,7 @@ mod tests {
         while !client_b.edge_attachment_is_covered(&client_b_todos_attachment)
             && start.elapsed() < WS_PUMP_DEADLINE
         {
-            let _ = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
+            let _ = pump_core_websocket_transport_once(&mut client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
@@ -2212,9 +2219,9 @@ mod tests {
             client_b.edge_todo_titles(&client_b_todos).await.is_empty(),
             "reader should settle the initial covered result as empty"
         );
-        let client_a = TestClient::new(schema, 0xa1, 0xa100).await;
+        let mut client_a = TestClient::new(schema, 0xa1, 0xa100).await;
         let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
-        let _inserted = client_a.insert_todo("after empty coverage");
+        let _inserted = client_a.insert_todo("after empty coverage").await;
 
         let start = tokio::time::Instant::now();
         let mut writer_sent = 0;
@@ -2222,10 +2229,10 @@ mod tests {
         while client_b.edge_todo_titles(&client_b_todos).await.is_empty()
             && start.elapsed() < WS_PUMP_DEADLINE
         {
-            let (sent, _) = pump_core_websocket_transport_once(&client_a, &mut ws_a).await;
+            let (sent, _) = pump_core_websocket_transport_once(&mut client_a, &mut ws_a).await;
             writer_sent += sent;
             reader_received_push +=
-                receive_core_websocket_transport_push_once(&client_b, &mut ws_b).await;
+                receive_core_websocket_transport_push_once(&mut client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
@@ -2251,15 +2258,16 @@ mod tests {
     async fn ws_idle_pump_drains_response_after_missed_first_receive() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let client = TestClient::new(ws_public_schema_convert(), 0xb2, 0xb200).await;
+        let mut client = TestClient::new(ws_public_schema_convert(), 0xb2, 0xb200).await;
         let mut ws = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
 
-        let (_, setup_attachment) = settle_ws_todos_query(&client, &mut ws).await;
+        let (_, setup_attachment) = settle_ws_todos_query(&mut client, &mut ws).await;
         client.detach_query(setup_attachment);
         let (_todos, attachment) = client.attach_todos_query();
 
         let (sent, received) =
-            pump_core_websocket_transport_once_with_first_receive(&client, &mut ws, false).await;
+            pump_core_websocket_transport_once_with_first_receive(&mut client, &mut ws, false)
+                .await;
         assert!(
             sent > 0,
             "the query registration must reach the websocket route"
@@ -2274,7 +2282,7 @@ mod tests {
             "the queued response must not be applied before the idle pump reads it"
         );
 
-        let (sent, received) = pump_core_websocket_transport_once(&client, &mut ws).await;
+        let (sent, received) = pump_core_websocket_transport_once(&mut client, &mut ws).await;
         assert_eq!(sent, 0, "the second pump must have no new client work");
         assert!(
             received > 0,
@@ -2306,14 +2314,14 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let alice = AuthorId::from_bytes([0xa1; 16]);
         let bob = AuthorId::from_bytes([0xb2; 16]);
-        let client_a = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
+        let mut client_a = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
         let mut ws_a = open_negotiated_ws_session(addr, &state, alice).await;
-        let _inserted = client_a.insert_private_doc("alice private", alice);
+        let _inserted = client_a.insert_private_doc("alice private", alice).await;
 
         let start = tokio::time::Instant::now();
         let mut writer_sent = 0;
         while writer_sent == 0 && start.elapsed() < WS_PUMP_DEADLINE {
-            let (sent, _) = pump_core_websocket_transport_once(&client_a, &mut ws_a).await;
+            let (sent, _) = pump_core_websocket_transport_once(&mut client_a, &mut ws_a).await;
             writer_sent += sent;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -2323,7 +2331,7 @@ mod tests {
         );
 
         let docs_table = ws_private_docs_table_schema();
-        let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
+        let mut client_b = TestClient::new(schema, 0xb2, 0xb200).await;
         let mut ws_b = open_negotiated_ws_session(addr, &state, bob).await;
         let (client_b_docs, client_b_docs_attachment) = client_b.attach_table_query("docs");
 
@@ -2331,7 +2339,7 @@ mod tests {
         while !client_b.edge_attachment_is_covered(&client_b_docs_attachment)
             && start.elapsed() < WS_PUMP_DEADLINE
         {
-            let _ = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
+            let _ = pump_core_websocket_transport_once(&mut client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 

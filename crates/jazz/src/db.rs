@@ -36,11 +36,13 @@ use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
 #[cfg(feature = "testing")]
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
+#[cfg(any(test, feature = "testing"))]
+use crate::node::QueryReadProfile;
 use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
-    QueryReadProfile, RelationEdge, RelationSnapshot, RowProvenance, ViewUpdateParts,
+    RelationEdge, RelationSnapshot, RowProvenance, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
@@ -73,6 +75,55 @@ use crate::tools::OpenBatchId;
 use crate::tools::{BatchId, ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
+
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub trait BlockingResultFutureExt<T, E>:
+    std::future::Future<Output = Result<T, E>> + Sized
+where
+    E: std::fmt::Debug,
+{
+    fn unwrap(self) -> T {
+        block_on(self).unwrap()
+    }
+
+    fn expect(self, message: &str) -> T {
+        block_on(self).expect(message)
+    }
+
+    fn unwrap_err(self) -> E
+    where
+        T: std::fmt::Debug,
+    {
+        block_on(self).unwrap_err()
+    }
+
+    fn expect_err(self, message: &str) -> E
+    where
+        T: std::fmt::Debug,
+    {
+        block_on(self).expect_err(message)
+    }
+
+    fn is_err(self) -> bool {
+        block_on(self).is_err()
+    }
+
+    fn unwrap_or_else<F>(self, operation: F) -> T
+    where
+        F: FnOnce(E) -> T,
+    {
+        block_on(self).unwrap_or_else(operation)
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl<F, T, E> BlockingResultFutureExt<T, E> for F
+where
+    F: std::future::Future<Output = Result<T, E>> + Sized,
+    E: std::fmt::Debug,
+{
+}
 
 mod wire_transport;
 #[cfg(test)]
@@ -245,21 +296,6 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
             Poll::Pending => std::thread::yield_now(),
         }
     }
-}
-
-/// Thread-affine high-level database handle.
-pub struct Db<S>
-where
-    S: OrderedKvStorage,
-{
-    schema: JazzSchema,
-    schema_version_id: SchemaVersionId,
-    schema_view_is_fixed: bool,
-    schema_views: Rc<RefCell<BTreeMap<SchemaViewId, JazzSchema>>>,
-    identity: DbIdentity,
-    node: Rc<Node<S>>,
-    row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
-    next_now_ms: Rc<Cell<u64>>,
 }
 
 /// Process-local, content-addressed identity for an exact typed schema view.
@@ -928,7 +964,7 @@ impl Drop for PermissionAdviceFuture {
 mod catalogue;
 mod lifecycle;
 #[doc(hidden)]
-pub use lifecycle::{DemandDrivenDb, DemandDrivenDbOpen, DemandDrivenView, DemandDrivenViewDb};
+pub use lifecycle::{Db, DbOpen, DbSchemaView, DbView};
 mod mutations;
 mod reads;
 mod subscriptions;
@@ -1123,7 +1159,7 @@ pub mod doctest_support {
     }
 
     /// Open a fresh Db over in-memory storage.
-    pub async fn open_todos_db() -> Result<Db<MemoryStorage>, Error> {
+    pub async fn open_todos_db() -> Result<Db, Error> {
         let schema = schema();
         let cfs = schema.column_families();
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1420,443 +1456,6 @@ macro_rules! row {
         )+
         cells
     }};
-}
-
-/// CRUD operations for an open mergeable transaction.
-///
-/// [`MergeableTx`] and [`MergeableTxRef`] implement this trait, so mergeable
-/// CRUD has one definition regardless of who owns the transaction lifetime.
-/// Import this trait to call its methods.
-pub trait MergeableTxOps<S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    /// The database that owns the open transaction.
-    fn db(&self) -> &Db<S>;
-
-    /// The id of the already-open transaction.
-    fn tx_id(&self) -> OpenBatchId;
-
-    /// Stage an insert with a generated row id.
-    fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
-        let row = self.db().row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id(table, row, cells)?;
-        Ok(row)
-    }
-
-    /// Stage an insert with a caller-supplied row id.
-    fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        self.insert_with_id_at_ms_option(table, row, cells, None)
-    }
-
-    /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
-    fn insert_with_id_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.insert_with_id_at_ms_option(table, row, cells, Some(now_ms))
-    }
-
-    /// Stage an update; omitted fields keep the transaction-local value.
-    fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
-        self.update_at_ms_option(table, row, patch, None)
-    }
-
-    /// Stage an update with an explicit millisecond provenance time.
-    fn update_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.update_at_ms_option(table, row, patch, Some(now_ms))
-    }
-
-    /// Stage a soft delete.
-    fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
-        self.delete_at_ms_option(table, row, None)
-    }
-
-    /// Stage a soft delete with explicit millisecond provenance time.
-    fn delete_at_ms(&self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
-        self.delete_at_ms_option(table, row, Some(now_ms))
-    }
-
-    /// Stage a restore, applying defaults for omitted columns.
-    fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        self.restore_at_ms_option(table, row, cells, None)
-    }
-
-    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
-    fn restore_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.restore_at_ms_option(table, row, cells, Some(now_ms))
-    }
-
-    /// Read one row with this transaction's pending writes overlaid.
-    fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
-        self.db()
-            .node
-            .node
-            .borrow_mut()
-            .tx_read_in_schema(self.tx_id(), self.db().schema_version_id, table, row)
-            .map_err(Into::into)
-    }
-
-    /// Read a prepared query with this transaction's pending writes overlaid.
-    fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.all_prepared_with_opts(prepared, ReadOpts::default())
-    }
-
-    /// Read a prepared query with transaction-local writes and explicit read semantics.
-    fn all_prepared_with_opts(
-        &self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.db().transaction_all(self.tx_id(), prepared, opts)
-    }
-
-    /// Read a prepared query inside this transaction as `author`.
-    fn all_prepared_for_identity(
-        &self,
-        prepared: &PreparedQuery,
-        author: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
-    }
-
-    /// Read a prepared query as `author` with explicit read semantics.
-    fn all_prepared_for_identity_with_opts(
-        &self,
-        prepared: &PreparedQuery,
-        author: AuthorId,
-        opts: ReadOpts,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.db()
-            .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
-    }
-
-    /// Stage an insert with an optional explicit provenance time.
-    fn insert_with_id_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_insert(self.tx_id(), table, row, cells, now_ms)
-    }
-
-    /// Stage an update with an optional explicit provenance time.
-    fn update_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_update(self.tx_id(), table, row, patch, now_ms)
-    }
-
-    /// Stage a deletion with an optional explicit provenance time.
-    fn delete_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_delete(self.tx_id(), table, row, now_ms)
-    }
-
-    /// Stage a restore with an optional explicit provenance time.
-    fn restore_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_restore(self.tx_id(), table, row, cells, now_ms)
-    }
-}
-
-/// Owning, Rust-facing handle for a group of mergeable writes.
-///
-/// This handle owns the transaction lifetime and abandons an uncommitted
-/// transaction on drop. Use [`MergeableTxRef`] when a caller retains an
-/// [`OpenBatchId`] between calls and must not close the transaction on return.
-pub struct MergeableTx<'a, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    db: &'a Db<S>,
-    tx_id: OpenBatchId,
-    /// Set once the transaction has been committed, so `Drop` does not then
-    /// abandon it. Without this, `commit` consumed `self` and `Drop` still ran
-    /// `abandon_transaction_handle` on an already-committed transaction — benign
-    /// only because `abandon_tx` tolerates an unknown id, and silent because the
-    /// result was discarded.
-    committed: bool,
-}
-
-impl<S> MergeableTx<'_, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    /// Commit all staged writes as one mergeable transaction.
-    ///
-    /// Once the commit succeeds, dropping this handle does not abandon the
-    /// already-committed transaction. If it fails, dropping the handle attempts
-    /// to abandon any transaction that remains open.
-    pub fn commit(mut self) -> Result<TxId, Error> {
-        let result = self.db.commit_mergeable_handle(self.tx_id);
-        if result.is_ok() {
-            self.committed = true;
-        }
-        result
-    }
-}
-
-impl<S> MergeableTxOps<S> for MergeableTx<'_, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    fn db(&self) -> &Db<S> {
-        self.db
-    }
-
-    fn tx_id(&self) -> OpenBatchId {
-        self.tx_id
-    }
-}
-
-/// Non-owning operations handle for an already-open mergeable transaction.
-///
-/// Construct this with [`Db::mergeable_tx_ref`] when another layer owns the
-/// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
-pub struct MergeableTxRef<'a, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    db: &'a Db<S>,
-    tx_id: OpenBatchId,
-}
-
-impl<S> MergeableTxOps<S> for MergeableTxRef<'_, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    fn db(&self) -> &Db<S> {
-        self.db
-    }
-
-    fn tx_id(&self) -> OpenBatchId {
-        self.tx_id
-    }
-}
-
-impl<S> Drop for MergeableTx<'_, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        let _ = self.db.abandon_transaction_handle(self.tx_id);
-    }
-}
-
-/// CRUD and read operations for an open exclusive transaction.
-///
-/// [`ExclusiveTx`] and [`ExclusiveTxRef`] implement this trait, so exclusive
-/// operations have one definition regardless of who owns the transaction
-/// lifetime. Import this trait to call its methods.
-pub trait ExclusiveTxOps<S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    /// The database that owns the open transaction.
-    fn db(&self) -> &Db<S>;
-
-    /// The id of the already-open transaction.
-    fn tx_id(&self) -> OpenBatchId;
-
-    /// Read one row inside the exclusive transaction.
-    fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
-        self.db().exclusive_read(self.tx_id(), table, row)
-    }
-
-    /// Read all current rows in a table inside the exclusive transaction.
-    fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
-        self.db()
-            .node
-            .node
-            .borrow_mut()
-            .tx_current_rows(self.tx_id(), table)
-            .map_err(Into::into)
-    }
-
-    /// Read a prepared query inside the exclusive transaction.
-    fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.all_prepared_with_opts(prepared, ReadOpts::default())
-    }
-
-    /// Read a prepared query with transaction-local writes and explicit read semantics.
-    fn all_prepared_with_opts(
-        &self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.db().transaction_all(self.tx_id(), prepared, opts)
-    }
-
-    /// Read a prepared query inside the exclusive transaction as `author`.
-    fn all_prepared_for_identity(
-        &self,
-        prepared: &PreparedQuery,
-        author: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
-    }
-
-    /// Read a prepared query as `author` with explicit read semantics.
-    fn all_prepared_for_identity_with_opts(
-        &self,
-        prepared: &PreparedQuery,
-        author: AuthorId,
-        opts: ReadOpts,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.db()
-            .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
-    }
-
-    /// Stage an insert with a generated row id.
-    fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
-        let row = self.db().row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id(table, row, cells)?;
-        Ok(row)
-    }
-
-    /// Stage an insert with a caller-supplied row id.
-    fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        self.db()
-            .stage_exclusive_insert(self.tx_id(), table, row, cells)
-    }
-
-    /// Stage an update; omitted fields keep the transaction-local value.
-    fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
-        let mut cells = self.read(table, row)?.unwrap_or_default();
-        cells.extend(patch);
-        self.insert_with_id(table, row, cells)
-    }
-
-    /// Stage a soft delete.
-    fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
-        self.db().stage_exclusive_delete(self.tx_id(), table, row)
-    }
-
-    /// Stage a restore, applying defaults for omitted columns.
-    fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        self.db()
-            .stage_exclusive_restore(self.tx_id(), table, row, cells)
-    }
-}
-
-/// Owning, Rust-facing handle for an exclusive transaction over a stable snapshot.
-///
-/// This handle owns the transaction lifetime and abandons an uncommitted
-/// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
-/// [`OpenBatchId`] between calls and must not close the transaction on return.
-pub struct ExclusiveTx<'a, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    db: &'a Db<S>,
-    tx_id: OpenBatchId,
-    committed: bool,
-}
-
-impl<S> ExclusiveTx<'_, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    /// Commit the exclusive transaction.
-    ///
-    /// Once the commit succeeds, dropping this handle does not abandon the
-    /// already-committed transaction. If it fails, dropping the handle attempts
-    /// to abandon any transaction that remains open.
-    pub fn commit(mut self) -> Result<TxId, Error> {
-        let result = self.db.commit_exclusive_handle(self.tx_id);
-        if result.is_ok() {
-            self.committed = true;
-        }
-        result
-    }
-}
-
-impl<S> ExclusiveTxOps<S> for ExclusiveTx<'_, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    fn db(&self) -> &Db<S> {
-        self.db
-    }
-
-    fn tx_id(&self) -> OpenBatchId {
-        self.tx_id
-    }
-}
-
-impl<S> Drop for ExclusiveTx<'_, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        let _ = self.db.abandon_exclusive_handle(self.tx_id);
-    }
-}
-
-/// Non-owning operations handle for an already-open exclusive transaction.
-///
-/// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
-/// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
-pub struct ExclusiveTxRef<'a, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    db: &'a Db<S>,
-    tx_id: OpenBatchId,
-}
-
-impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    fn db(&self) -> &Db<S> {
-        self.db
-    }
-
-    fn tx_id(&self) -> OpenBatchId {
-        self.tx_id
-    }
 }
 
 /// Handle for an applied local write.

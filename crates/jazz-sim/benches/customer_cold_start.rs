@@ -613,12 +613,12 @@ struct SubscriptionTimeline {
 
 struct DbNode {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<RocksDbStorage>,
+    db: Db,
 }
 
 struct DbClient {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<RocksDbStorage>,
+    db: Db,
 }
 
 struct OpenSubscription {
@@ -1430,8 +1430,8 @@ fn run_warm(
 fn run_connect_and_subscribe(
     label: &str,
     seeded: &Seeded,
-    relay: DbNode,
-    client: DbClient,
+    mut relay: DbNode,
+    mut client: DbClient,
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
@@ -1529,7 +1529,7 @@ fn run_connect_and_subscribe(
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let relay_tick_start = Instant::now();
-        relay.db.tick().unwrap();
+        jazz::db::block_on(relay.db.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.relay_tick_ns += relay_tick_start.elapsed().as_nanos() as u64;
@@ -1547,7 +1547,7 @@ fn run_connect_and_subscribe(
         let client_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let client_tick_start = Instant::now();
-        client.db.tick().unwrap();
+        jazz::db::block_on(client.db.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.client_tick_ns += client_tick_start.elapsed().as_nanos() as u64;
@@ -1582,7 +1582,7 @@ fn run_connect_and_subscribe(
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let relay_tick_start = Instant::now();
-        relay.db.tick().unwrap();
+        jazz::db::block_on(relay.db.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.relay_tick_ns += relay_tick_start.elapsed().as_nanos() as u64;
@@ -1628,9 +1628,7 @@ fn run_connect_and_subscribe(
         .map(|sub| sub.rows.len())
         .sum::<usize>();
     if label == "warm_prime" {
-        relay
-            .db
-            .flush_for_test()
+        block_on(relay.db.flush_for_test())
             .expect("warm-prime relay state should flush before reopen");
     }
     let expected_rows = expected.values().sum::<usize>();

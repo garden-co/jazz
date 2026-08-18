@@ -7,7 +7,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::{Stream, StreamExt};
 use jazz::db::{
-    block_on, ConnectionSessionContext, DbConfig, DbIdentity, DemandDrivenDb, DemandDrivenView,
+    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, DbSchemaView,
     InitialSyncFlushCadence, LocalUpdates, MutationErrorCallback, PeerConnection, PermissionAdvice,
     PreparedQuery, Propagation, QueryAttachment, ReadOpts, RowCells, SeededRowIdSource,
     SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
@@ -256,12 +256,12 @@ pub struct WasmDb {
     owns_runtime: bool,
 }
 
-type WasmOwner = Rc<RefCell<Option<DemandDrivenDb>>>;
+type WasmOwner = Rc<RefCell<Option<Db>>>;
 
 #[derive(Clone)]
 struct WasmDbOpen {
     owner: WasmOwner,
-    view: DemandDrivenView,
+    view: DbSchemaView,
 }
 
 enum WasmDbInner {
@@ -363,12 +363,12 @@ impl WireTransport for WasmWireTransport {
     }
 }
 
-fn wasm_owner(owner: &WasmOwner) -> Result<RefMut<'_, DemandDrivenDb>, JsValue> {
+fn wasm_owner(owner: &WasmOwner) -> Result<RefMut<'_, Db>, JsValue> {
     RefMut::filter_map(owner.borrow_mut(), Option::as_mut)
         .map_err(|_| JsValue::from_str("database is closed"))
 }
 
-fn wasm_owner_ref(owner: &WasmOwner) -> Result<Ref<'_, DemandDrivenDb>, JsValue> {
+fn wasm_owner_ref(owner: &WasmOwner) -> Result<Ref<'_, Db>, JsValue> {
     Ref::filter_map(owner.borrow(), Option::as_ref)
         .map_err(|_| JsValue::from_str("database is closed"))
 }
@@ -785,15 +785,11 @@ impl WasmDbInner {
     }
 
     fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
-        with_wasm_db!(self, |db| db
-            .query_attachment_is_covered(attachment)
-            .unwrap_or(false))
+        with_wasm_db!(self, |db| db.query_attachment_is_covered(attachment))
     }
 
     fn detach_query(&self, attachment: QueryAttachment) {
-        with_wasm_db!(self, |db| db
-            .detach_query(attachment)
-            .expect("query attachment belongs to this view"))
+        with_wasm_db!(self, |db| db.detach_query(attachment))
     }
 
     fn set_tick_scheduler(&self, callback: js_sys::Function) {
@@ -2172,7 +2168,7 @@ fn open_db<S>(
     schema: JazzSchema,
     storage: S,
     config: WasmOpenDbConfig,
-) -> Result<DemandDrivenDb, jazz::db::Error>
+) -> Result<Db, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -2182,18 +2178,18 @@ where
     }
     let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
-        let db = block_on(DemandDrivenDb::open_history_complete_immediate(db_config))?;
+        let db = block_on(Db::open_history_complete(db_config))?;
         configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
         Ok(db)
     } else {
-        let db = block_on(DemandDrivenDb::open_immediate(db_config))?;
+        let db = block_on(Db::open(db_config))?;
         configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
         Ok(db)
     }
 }
 
 fn configure_initial_sync_flush_cadence(
-    db: &DemandDrivenDb,
+    db: &Db,
     every: Option<u32>,
 ) -> Result<(), jazz::db::Error> {
     let Some(every) = every else {
@@ -2241,7 +2237,7 @@ fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorId, JsValue> {
 }
 
 fn set_identity_claims(
-    db: &mut jazz::db::DemandDrivenViewDb<'_>,
+    db: &mut jazz::db::DbView<'_>,
     author: AuthorId,
 ) -> Result<(), jazz::db::Error> {
     let subject = author.0.to_string();
@@ -2744,7 +2740,7 @@ mod dynamic_schema_view_tests {
         .with_write_policy(Policy::public())]);
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let owner = block_on(DemandDrivenDb::open_immediate(DbConfig::new(
+        let owner = block_on(Db::open(DbConfig::new(
             schema.clone(),
             MemoryStorage::new(&refs),
             DbIdentity {

@@ -4,8 +4,8 @@ use super::*;
 
 #[test]
 fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
-    let schema = relation_schema();
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let mut schema = relation_schema();
+    let mut db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
         "users",
         row(0xa1),
@@ -19,7 +19,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     )
     .unwrap();
 
-    let query = Query::from("users")
+    let mut query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
         .array_subquery(ArraySubquery::new(
             "todosViaOwner",
@@ -27,14 +27,14 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
             "owner_id",
             "id",
         ));
-    let prepared_query = prepared(&db, &query);
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let opened = block_on(subscription.next_raw()).unwrap();
+    let mut opened = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta { .. } = &opened else {
         panic!("expected terminal reset")
     };
-    let snapshot = snapshot_from_event(opened);
+    let mut snapshot = snapshot_from_event(opened);
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
         Vec::<String>::new(),
@@ -87,7 +87,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xb1).0))]),
     )
     .unwrap();
-    let removed_child = block_on(subscription.next_raw()).unwrap();
+    let mut removed_child = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         removed_child,
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -100,7 +100,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xa1).0))]),
     )
     .unwrap();
-    let restored_child = block_on(subscription.next_raw()).unwrap();
+    let mut restored_child = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         restored_child,
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -110,8 +110,8 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
 
 #[test]
 fn structured_subscription_splices_in_terminal_root_order_after_insert() {
-    let schema = relation_schema();
-    let db = open_db(0xc4, AuthorId::from_bytes([0xc4; 16]), &schema);
+    let mut schema = relation_schema();
+    let mut db = open_db(0xc4, AuthorId::from_bytes([0xc4; 16]), &schema);
     db.insert_with_id(
         "users",
         row(0xa1),
@@ -119,7 +119,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     )
     .unwrap();
 
-    let query = Query::from("users")
+    let mut query = Query::from("users")
         .order_by("name", OrderDirection::Asc)
         .array_subquery(ArraySubquery::new(
             "todosViaOwner",
@@ -127,10 +127,10 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
             "owner_id",
             "id",
         ));
-    let prepared_query = prepared(&db, &query);
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let initial = block_on(subscription.next_raw()).unwrap();
-    let snapshot = snapshot_from_event(initial);
+    let mut initial = block_on(subscription.next_raw()).unwrap();
+    let mut snapshot = snapshot_from_event(initial);
     assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
 
     db.insert_with_id(
@@ -140,7 +140,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     )
     .unwrap();
     db.tick().unwrap();
-    let reordered = block_on(subscription.next_raw()).unwrap();
+    let mut reordered = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -166,7 +166,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
         "unexpected root operations: {terminal_operations:?}"
     );
 
-    let binding_view_key = BindingViewKey::new(
+    let mut binding_view_key = BindingViewKey::new(
         prepared_query.shape().shape_id(),
         prepared_query.binding().binding_id(),
         RegisterShapeOptions::default().read_view_key(),
@@ -180,7 +180,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
             GlobalSeq(0),
         );
     assert_eq!(db.refresh_subscriptions().unwrap(), 1);
-    let reset = block_on(subscription.next_raw()).unwrap();
+    let mut reset = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         reset,
         SubscriptionEvent::Delta {
@@ -197,7 +197,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     )
     .unwrap();
     db.tick().unwrap();
-    let updated = block_on(subscription.next_raw()).unwrap();
+    let mut updated = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -229,7 +229,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
 
     db.delete("users", row(0xa1)).unwrap();
     db.tick().unwrap();
-    let removed = block_on(subscription.next_raw()).unwrap();
+    let mut removed = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta { reset, .. } = &removed else {
         panic!("expected removal splice")
     };
@@ -250,34 +250,35 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
 
 #[test]
 fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_shot() {
-    let schema = membership_scoped_relation_schema();
-    let reader = AuthorId::from_bytes([0xb2; 16]);
+    let mut schema = membership_scoped_relation_schema();
+    let mut reader = AuthorId::from_bytes([0xb2; 16]);
     let normal_claims =
         BTreeMap::from([("user_id".to_owned(), Value::String(reader.0.to_string()))]);
-    let invite_claims = BTreeMap::from([
+    let mut invite_claims = BTreeMap::from([
         ("user_id".to_owned(), Value::String(reader.0.to_string())),
         (
             "join_code".to_owned(),
             Value::String("invite-code".to_owned()),
         ),
     ]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client = open_db(0xc4, reader, &schema);
-    let invite_client = open_db(0xc5, reader, &schema);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut client = open_db(0xc4, reader, &schema);
+    let mut invite_client = open_db(0xc5, reader, &schema);
     client.set_identity_claims(reader, normal_claims.clone());
     invite_client.set_identity_claims(reader, invite_claims.clone());
     // The normal connection remains live while a separately scoped invite
     // connection writes its membership. This is the production handoff.
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber =
+        server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
     let (invite_transport, server_invite_transport) = duplex();
-    let _invite_upstream = invite_client.connect_upstream(invite_transport);
+    let mut _invite_upstream = invite_client.connect_upstream(invite_transport);
     let _invite_subscriber =
         server.accept_subscriber_with_claims(server_invite_transport, reader, invite_claims);
-    let chat = row(0xc1);
-    let sender = row(0xa1);
-    let message = row(0xb1);
+    let mut chat = row(0xc1);
+    let mut sender = row(0xa1);
+    let mut message = row(0xb1);
     server
         .insert_with_id(
             "chats",
@@ -331,11 +332,11 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
         )
         .unwrap();
 
-    let invite_chat_query = prepared(
-        &invite_client,
+    let mut invite_chat_query = prepared(
+        &mut invite_client,
         &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
     );
-    let invite_attachment = invite_client
+    let mut invite_attachment = invite_client
         .attach_query_with_opts(&invite_chat_query, edge_subscribe_opts())
         .unwrap();
     invite_client.tick().unwrap();
@@ -354,11 +355,11 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     // The ordinary session has the same authenticated identity, but not the
     // invite claim. Its view must remain private until the separate invite
     // session commits membership.
-    let normal_chat_query = prepared(
-        &client,
+    let mut normal_chat_query = prepared(
+        &mut client,
         &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
     );
-    let normal_chat_attachment = client
+    let mut normal_chat_attachment = client
         .attach_query_with_opts(&normal_chat_query, edge_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
@@ -373,7 +374,7 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     );
     client.detach_query(normal_chat_attachment);
 
-    let accepted_membership = invite_client
+    let mut accepted_membership = invite_client
         .insert_with_id(
             "chat_members",
             row(0xc2),
@@ -391,11 +392,11 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     block_on(accepted_membership.wait(DurabilityTier::Global))
         .expect("the invite connection's membership write must settle");
 
-    let member_query = prepared(
-        &client,
+    let mut member_query = prepared(
+        &mut client,
         &Query::from("chat_members").filter(eq(col("chat_id"), lit(chat.0))),
     );
-    let member_attachment = client
+    let mut member_attachment = client
         .attach_query_with_opts(&member_query, edge_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
@@ -414,11 +415,11 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let plain_message_query = prepared(
-        &client,
+    let mut plain_message_query = prepared(
+        &mut client,
         &Query::from("messages").filter(eq(col("chat_id"), lit(chat.0))),
     );
-    let plain_attachment = client
+    let mut plain_attachment = client
         .attach_query_with_opts(&plain_message_query, edge_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
@@ -437,13 +438,13 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let query = Query::from("messages")
+    let mut query = Query::from("messages")
         .filter(eq(col("chat_id"), lit(chat.0)))
         .array_subquery(ArraySubquery::new("sender", "profiles", "id", "sender_id"))
         .order_by("created_at", OrderDirection::Desc)
         .limit(21);
-    let prepared_query = prepared(&client, &query);
-    let attachment = client
+    let mut prepared_query = prepared(&mut client, &query);
+    let mut attachment = client
         .attach_query_with_opts(&prepared_query, edge_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
@@ -470,7 +471,7 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let mut snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert!(
         snapshot
             .rows
@@ -481,8 +482,8 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
 
 #[test]
 fn flat_subscription_hydrates_in_declared_root_order() {
-    let schema = relation_schema();
-    let db = open_db(0xd4, AuthorId::from_bytes([0xd4; 16]), &schema);
+    let mut schema = relation_schema();
+    let mut db = open_db(0xd4, AuthorId::from_bytes([0xd4; 16]), &schema);
     db.insert_with_id(
         "users",
         row(0xa1),
@@ -496,18 +497,18 @@ fn flat_subscription_hydrates_in_declared_root_order() {
     )
     .unwrap();
 
-    let query = Query::from("users").order_by("name", OrderDirection::Desc);
-    let prepared_query = prepared(&db, &query);
+    let mut query = Query::from("users").order_by("name", OrderDirection::Desc);
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
 
     assert_eq!(row_ids(&initial.rows), vec![row(0xa1), row(0xb1)]);
 }
 
 #[test]
 fn flat_subscription_hydrates_in_default_row_id_order() {
-    let schema = relation_schema();
-    let db = open_db(0xd7, AuthorId::from_bytes([0xd7; 16]), &schema);
+    let mut schema = relation_schema();
+    let mut db = open_db(0xd7, AuthorId::from_bytes([0xd7; 16]), &schema);
     for id in [0xb1, 0xa1] {
         db.insert_with_id(
             "users",
@@ -517,21 +518,21 @@ fn flat_subscription_hydrates_in_default_row_id_order() {
         .unwrap();
     }
 
-    let prepared_query = prepared(&db, &Query::from("users"));
+    let mut prepared_query = prepared(&mut db, &Query::from("users"));
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
 
     assert_eq!(row_ids(&initial.rows), vec![row(0xa1), row(0xb1)]);
 }
 
 #[test]
 fn flat_subscription_inserts_at_declared_root_position() {
-    let schema = relation_schema();
-    let db = open_db(0xd5, AuthorId::from_bytes([0xd5; 16]), &schema);
-    let query = Query::from("users").order_by("name", OrderDirection::Desc);
-    let prepared_query = prepared(&db, &query);
+    let mut schema = relation_schema();
+    let mut db = open_db(0xd5, AuthorId::from_bytes([0xd5; 16]), &schema);
+    let mut query = Query::from("users").order_by("name", OrderDirection::Desc);
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let _initial = block_on(subscription.next_raw()).unwrap();
+    let mut _initial = block_on(subscription.next_raw()).unwrap();
 
     for (id, name) in [(0xa1, "zulu"), (0xb1, "zzzz")] {
         db.insert_with_id(
@@ -541,7 +542,7 @@ fn flat_subscription_inserts_at_declared_root_position() {
         )
         .unwrap();
         db.tick().unwrap();
-        let event = block_on(subscription.next_raw()).unwrap();
+        let mut event = block_on(subscription.next_raw()).unwrap();
         if id == 0xb1 {
             assert!(
                 matches!(
@@ -568,7 +569,7 @@ fn flat_subscription_inserts_at_declared_root_position() {
     )
     .unwrap();
     db.tick().unwrap();
-    let event = block_on(subscription.next_raw()).unwrap();
+    let mut event = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         event,
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -581,7 +582,7 @@ fn flat_subscription_inserts_at_declared_root_position() {
 
 #[test]
 fn flat_subscription_updates_with_nullable_sort_payload() {
-    let schema = JazzSchema::new([TableSchema::new(
+    let mut schema = JazzSchema::new([TableSchema::new(
         "users",
         [
             ColumnSchema::new("name", ColumnType::String),
@@ -590,7 +591,7 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
     )
     .with_read_policy(Policy::public())
     .with_write_policy(Policy::public())]);
-    let db = open_db(0xd6, AuthorId::from_bytes([0xd6; 16]), &schema);
+    let mut db = open_db(0xd6, AuthorId::from_bytes([0xd6; 16]), &schema);
     db.insert_with_id(
         "users",
         row(0xa1),
@@ -603,10 +604,10 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
         ]),
     )
     .unwrap();
-    let query = Query::from("users").order_by("rank", OrderDirection::Asc);
-    let prepared_query = prepared(&db, &query);
+    let mut query = Query::from("users").order_by("rank", OrderDirection::Asc);
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let _initial = block_on(subscription.next_raw()).unwrap();
+    let mut _initial = block_on(subscription.next_raw()).unwrap();
 
     db.update(
         "users",
@@ -638,8 +639,8 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
 
 #[test]
 fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
-    let schema = relation_schema();
-    let db = open_db(0xd8, AuthorId::from_bytes([0xd8; 16]), &schema);
+    let mut schema = relation_schema();
+    let mut db = open_db(0xd8, AuthorId::from_bytes([0xd8; 16]), &schema);
     for (id, name) in [(0xa1, "a"), (0xb1, "b"), (0xc1, "c"), (0xd1, "d")] {
         db.insert_with_id(
             "users",
@@ -648,18 +649,18 @@ fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
         )
         .unwrap();
     }
-    let query = Query::from("users")
+    let mut query = Query::from("users")
         .order_by("name", OrderDirection::Asc)
         .offset(1)
         .limit(2);
-    let prepared_query = prepared(&db, &query);
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&initial.rows), vec![row(0xb1), row(0xc1)]);
 
     db.delete("users", row(0xa1)).unwrap();
     db.tick().unwrap();
-    let event = block_on(subscription.next_raw()).unwrap();
+    let mut event = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         event,
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -670,8 +671,8 @@ fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
 
 #[test]
 fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
-    let schema = relation_schema();
-    let db = open_db(0xc2, AuthorId::from_bytes([0xc2; 16]), &schema);
+    let mut schema = relation_schema();
+    let mut db = open_db(0xc2, AuthorId::from_bytes([0xc2; 16]), &schema);
     db.insert_with_id(
         "todos",
         row(0x21),
@@ -681,12 +682,12 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         ]),
     )
     .unwrap();
-    let query = Query::from("todos")
+    let mut query = Query::from("todos")
         .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
-    let prepared_query = prepared(&db, &query);
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
         Vec::<String>::new()
@@ -723,7 +724,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     else {
         panic!("child update must emit a terminal delta");
     };
-    let child_operations = terminal_operations
+    let mut child_operations = terminal_operations
         .iter()
         .filter(|operation| !operation.path.is_empty())
         .collect::<Vec<_>>();
@@ -785,8 +786,8 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
 
 #[test]
 fn array_subquery_subscription_updates_child_order_limit_boundary() {
-    let schema = relation_schema();
-    let db = open_db(0xc3, AuthorId::from_bytes([0xc3; 16]), &schema);
+    let mut schema = relation_schema();
+    let mut db = open_db(0xc3, AuthorId::from_bytes([0xc3; 16]), &schema);
     db.insert_with_id(
         "todos",
         row(0x31),
@@ -796,16 +797,16 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         ]),
     )
     .unwrap();
-    let query = Query::from("todos").array_subquery(
+    let mut query = Query::from("todos").array_subquery(
         ArraySubquery::new("comments", "comments", "todo_id", "id")
             .order_by("body", OrderDirection::Asc)
             .offset(1)
             .limit(1),
     );
-    let prepared_query = prepared(&db, &query);
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
         Vec::<String>::new()
@@ -840,7 +841,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    let expect_inserted_child = |event: SubscriptionEvent, expected: RowUuid| match event {
+    let mut expect_inserted_child = |event: SubscriptionEvent, expected: RowUuid| match event {
         SubscriptionEvent::Delta {
             terminal_operations,
             ..
@@ -883,11 +884,11 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
 
 #[test]
 fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
-    let schema = policy_relation_schema();
-    let member = AuthorId::from_bytes([0xa1; 16]);
-    let other = AuthorId::from_bytes([0xb1; 16]);
-    let spy = AuthorId::from_bytes([0xc1; 16]);
-    let db = open_db(0xc4, AuthorId::SYSTEM, &schema);
+    let mut schema = policy_relation_schema();
+    let mut member = AuthorId::from_bytes([0xa1; 16]);
+    let mut other = AuthorId::from_bytes([0xb1; 16]);
+    let mut spy = AuthorId::from_bytes([0xc1; 16]);
+    let mut db = open_db(0xc4, AuthorId::SYSTEM, &schema);
     db.insert_with_id(
         "todos",
         row(0x41),
@@ -909,11 +910,11 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         )
         .unwrap();
     }
-    let query = Query::from("todos")
+    let mut query = Query::from("todos")
         .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
-    let prepared_query = prepared(&db, &query);
+    let mut prepared_query = prepared(&mut db, &query);
 
-    let admin = block_on(db.all_relation_snapshot_for_identity(
+    let mut admin = block_on(db.all_relation_snapshot_for_identity(
         &prepared_query,
         ReadOpts::default(),
         AuthorId::SYSTEM,
@@ -924,7 +925,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         vec!["member-visible".to_owned(), "other-visible".to_owned()]
     );
 
-    let member_snapshot = block_on(db.all_relation_snapshot_for_identity(
+    let mut member_snapshot = block_on(db.all_relation_snapshot_for_identity(
         &prepared_query,
         ReadOpts::default(),
         member,
@@ -946,8 +947,8 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
 
 #[test]
 fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
-    let schema = relation_schema();
-    let db = open_db(0xc5, AuthorId::from_bytes([0xc5; 16]), &schema);
+    let mut schema = relation_schema();
+    let mut db = open_db(0xc5, AuthorId::from_bytes([0xc5; 16]), &schema);
     db.insert_with_id(
         "todos",
         row(0x51),
@@ -968,15 +969,15 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
         )
         .unwrap();
     }
-    let query = Query::from("todos").array_subquery(
+    let mut query = Query::from("todos").array_subquery(
         ArraySubquery::new("comments", "comments", "todo_id", "id")
             .order_by("body", OrderDirection::Asc),
     );
-    let prepared_query = prepared(&db, &query);
+    let mut prepared_query = prepared(&mut db, &query);
     let one_shot =
         block_on(db.all_relation_snapshot(&prepared_query, ReadOpts::default())).unwrap();
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let maintained = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut maintained = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
 
     assert_eq!(
         terminal_nested_text_values(&maintained, row(0x51), "comments", "body"),
@@ -986,20 +987,20 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
 
 #[test]
 fn array_subquery_subscription_projects_late_root_and_existing_forward_target() {
-    let schema = relation_schema();
-    let db = open_db(0xc7, AuthorId::from_bytes([0xc7; 16]), &schema);
+    let mut schema = relation_schema();
+    let mut db = open_db(0xc7, AuthorId::from_bytes([0xc7; 16]), &schema);
     db.insert_with_id(
         "users",
         row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
     )
     .unwrap();
-    let query = Query::from("todos")
+    let mut query = Query::from("todos")
         .select(["title"])
         .array_subquery(ArraySubquery::new("owner", "users", "id", "owner_id").select(["name"]));
-    let prepared_query = prepared(&db, &query);
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert!(opened.rows.is_empty());
 
     db.insert_with_id(
@@ -1023,20 +1024,20 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
 
 #[test]
 fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forward_target() {
-    let schema = issue_schema();
-    let db = open_db(0xc8, AuthorId::from_bytes([0xc8; 16]), &schema);
+    let mut schema = issue_schema();
+    let mut db = open_db(0xc8, AuthorId::from_bytes([0xc8; 16]), &schema);
     db.insert_with_id(
         "projects",
         row(0xa2),
         BTreeMap::from([("name".to_owned(), Value::String("project".to_owned()))]),
     )
     .unwrap();
-    let query = Query::from("issues").select(["title"]).array_subquery(
+    let mut query = Query::from("issues").select(["title"]).array_subquery(
         ArraySubquery::new("project", "projects", "id", "project").select(["name"]),
     );
-    let prepared_query = prepared(&db, &query);
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert!(opened.rows.is_empty());
 
     db.insert_with_id(
@@ -1065,22 +1066,23 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
 
 #[test]
 fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
-    let schema = relation_schema();
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client_author = AuthorId::from_bytes([0xc6; 16]);
-    let client = open_db(0xc6, client_author, &schema);
+    let mut schema = relation_schema();
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut client_author = AuthorId::from_bytes([0xc6; 16]);
+    let mut client = open_db(0xc6, client_author, &schema);
     let (client_transport, server_transport) = byte_duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let query = Query::from("users").array_subquery(ArraySubquery::new(
+    let mut query = Query::from("users").array_subquery(ArraySubquery::new(
         "todosViaOwner",
         "todos",
         "owner_id",
         "id",
     ));
-    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut subscription =
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
+    let mut opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert!(opened.rows.is_empty());
 
     server
@@ -1107,7 +1109,7 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
         server.server.tick().unwrap();
         client.tick().unwrap();
         if let Some(event) = subscription.try_next_event() {
-            let snapshot = snapshot_from_event(event);
+            let mut snapshot = snapshot_from_event(event);
             if terminal_nested_text_values(&snapshot, row(0xa6), "todosViaOwner", "title")
                 == vec!["remote child".to_owned()]
             {
@@ -1167,9 +1169,9 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
 
 #[test]
 fn ordered_suffix_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows() {
-    let schema = schema();
-    let db = open_db(0xd1, AuthorId::SYSTEM, &schema);
-    let root = row(0xd2);
+    let mut schema = schema();
+    let mut db = open_db(0xd1, AuthorId::SYSTEM, &schema);
+    let mut root = row(0xd2);
     db.insert_with_id(
         "todos",
         root,
@@ -1180,31 +1182,31 @@ fn ordered_suffix_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows(
         ]),
     )
     .unwrap();
-    let source_row = prepared_one(&db, &Query::from("todos")).expect("inserted source row");
-    let left = OutputOccurrenceId::with_union_arms(
+    let mut source_row = prepared_one(&mut db, &Query::from("todos")).expect("inserted source row");
+    let mut left = OutputOccurrenceId::with_union_arms(
         ObjectId::from_uuid(root.0),
         [ObjectId::from_uuid(row(0xd4).0)],
         [(0, "left".to_owned())],
     )
     .expect("typed union occurrence");
-    let right = OutputOccurrenceId::with_union_arms(
+    let mut right = OutputOccurrenceId::with_union_arms(
         ObjectId::from_uuid(root.0),
         [ObjectId::from_uuid(row(0xd4).0)],
         [(0, "right".to_owned())],
     )
     .expect("distinct typed union occurrence");
-    let previous = RelationSnapshot {
+    let mut previous = RelationSnapshot {
         root_count: 2,
         rows: vec![source_row.clone(), source_row.clone()],
         edges: Vec::new(),
     };
-    let current = RelationSnapshot {
+    let mut current = RelationSnapshot {
         root_count: 1,
         rows: vec![source_row],
         edges: Vec::new(),
     };
 
-    let event = subscription_terminal_delta_event(
+    let mut event = subscription_terminal_delta_event(
         DurabilityTier::Edge,
         true,
         &previous,

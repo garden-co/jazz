@@ -407,7 +407,7 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     let mut edge_peer = PeerState::new();
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
     let inbound = Rc::new(RefCell::new(VecDeque::new()));
-    let (dir, db) = open_db(node(70), schema.clone());
+    let (dir, mut db) = open_db(node(70), schema.clone());
     let _upstream = db.connect_upstream(Box::new(QueueTransport {
         outbound: Rc::clone(&outbound),
         inbound: Rc::clone(&inbound),
@@ -415,16 +415,15 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     let mut edge_acceptance = Histogram::new(3).unwrap();
     let mut contents = vec![Vec::<u8>::new(); config.streams];
     for stream in 0..config.streams {
-        let stream_write = db
-            .insert_with_id(
-                STREAMS,
-                stream_row(stream),
-                cells([("name", Value::String(format!("stream-{stream}")))]),
-            )
-            .expect("db stream insert");
+        let stream_write = block_on(db.insert_with_id(
+            STREAMS,
+            stream_row(stream),
+            cells([("name", Value::String(format!("stream-{stream}")))]),
+        ))
+        .expect("db stream insert");
         block_on(stream_write.wait(DurabilityTier::Local)).expect("db stream local wait");
         drain_db_route(
-            &db,
+            &mut db,
             &outbound,
             &inbound,
             &mut edge,
@@ -432,19 +431,18 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
             &mut core,
             &mut edge_acceptance,
         );
-        let doc_write = db
-            .insert_with_id(
-                STREAM_DOCS,
-                stream_doc_row(stream),
-                cells([
-                    ("stream", Value::Uuid(stream_row(stream).0)),
-                    ("content", Value::Bytes(Vec::new())),
-                ]),
-            )
-            .expect("db stream doc insert");
+        let doc_write = block_on(db.insert_with_id(
+            STREAM_DOCS,
+            stream_doc_row(stream),
+            cells([
+                ("stream", Value::Uuid(stream_row(stream).0)),
+                ("content", Value::Bytes(Vec::new())),
+            ]),
+        ))
+        .expect("db stream doc insert");
         block_on(doc_write.wait(DurabilityTier::Local)).expect("db stream doc local wait");
         drain_db_route(
-            &db,
+            &mut db,
             &outbound,
             &inbound,
             &mut edge,
@@ -490,20 +488,19 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
             let content = contents[stream].clone();
             let before = Instant::now();
             let update_start = Instant::now();
-            let write = db
-                .update(
-                    STREAM_DOCS,
-                    stream_doc_row(stream),
-                    cells([("content", Value::Bytes(content))]),
-                )
-                .expect("db stream doc update");
+            let write = block_on(db.update(
+                STREAM_DOCS,
+                stream_doc_row(stream),
+                cells([("content", Value::Bytes(content))]),
+            ))
+            .expect("db stream doc update");
             update_latencies.push(update_start.elapsed().as_micros() as u64);
             let wait_start = Instant::now();
             block_on(write.wait(DurabilityTier::Local)).expect("db stream doc local wait");
             wait_latencies.push(wait_start.elapsed().as_micros() as u64);
             let drain_start = Instant::now();
             drain_db_route(
-                &db,
+                &mut db,
                 &outbound,
                 &inbound,
                 &mut edge,
@@ -527,7 +524,10 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
         }
     }
     assert_eq!(
-        db_stream_docs(&schema, db.read(&prepared).expect("db read stream docs")),
+        db_stream_docs(
+            &schema,
+            block_on(db.read(&prepared)).expect("db read stream docs"),
+        ),
         contents
     );
 
@@ -560,7 +560,7 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let schema = schema();
     let (_server_dir, server_state) = open_node(node(180), schema.clone());
     let server = Node::new(server_state);
-    let (_client_dir, client) = open_db(node(181), schema.clone());
+    let (_client_dir, mut client) = open_db(node(181), schema.clone());
     let streams = config.streams.max(16);
     let mut content = Vec::new();
     let mut global_seq = 1_u64;
@@ -582,12 +582,12 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let mut watch =
         block_on(client.subscribe(&prepared, ReadOpts::default())).expect("db subscribe");
 
-    client.tick().expect("client fresh subscribe tick");
+    jazz::db::block_on(client.tick()).expect("client fresh subscribe tick");
     subscriber
         .borrow_mut()
         .serve_current_rows(STREAM_DOCS)
         .expect("serve fresh rows");
-    client.tick().expect("client fresh apply tick");
+    jazz::db::block_on(client.tick()).expect("client fresh apply tick");
     let mut rows = Vec::new();
     drain_subscription_events(&mut watch, &mut rows);
     assert_eq!(rows.len(), streams);
@@ -600,9 +600,7 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     // resumable peer state. A cursor captured before this acknowledgement has
     // no acknowledged view frontier to resume from.
     server.tick().expect("server fresh acknowledgement tick");
-    client
-        .tick()
-        .expect("client fresh acknowledgement apply tick");
+    jazz::db::block_on(client.tick()).expect("client fresh acknowledgement apply tick");
 
     let cursor = subscriber
         .borrow_mut()
@@ -636,13 +634,13 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let _resumed_upstream = client.connect_upstream(client_transport);
     let resumed = server.accept_subscriber_with_resume(server_transport, AuthorId::SYSTEM, cursor);
 
-    client.tick().expect("client resumed subscribe tick");
+    jazz::db::block_on(client.tick()).expect("client resumed subscribe tick");
     resumed
         .borrow_mut()
         .serve_current_rows(STREAM_DOCS)
         .expect("serve resumed stream rows");
     server.tick().expect("server resumed tick");
-    client.tick().expect("client resumed apply tick");
+    jazz::db::block_on(client.tick()).expect("client resumed apply tick");
 
     let resume_bytes = resumed
         .borrow()
@@ -668,7 +666,7 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
 }
 
 fn drain_db_route(
-    db: &Db<RocksDbStorage>,
+    db: &mut Db,
     outbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
     edge: &mut NodeState<RocksDbStorage>,
@@ -676,7 +674,7 @@ fn drain_db_route(
     core: &mut NodeState<RocksDbStorage>,
     edge_acceptance: &mut Histogram<u64>,
 ) {
-    db.tick().unwrap();
+    jazz::db::block_on(db.tick()).unwrap();
     while let Some(unit) = outbound.borrow_mut().pop_front() {
         let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
             continue;
@@ -691,7 +689,7 @@ fn drain_db_route(
         for update in core.apply_sync_message(unit).unwrap() {
             edge.apply_sync_message(update.clone()).unwrap();
             inbound.borrow_mut().push_back(update);
-            db.tick().unwrap();
+            jazz::db::block_on(db.tick()).unwrap();
         }
     }
 }
@@ -1094,7 +1092,7 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<Roc
     (dir, node)
 }
 
-fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db<RocksDbStorage>) {
+fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();

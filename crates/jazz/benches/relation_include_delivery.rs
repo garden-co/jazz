@@ -1,3 +1,4 @@
+use jazz::db::BlockingResultFutureExt;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -276,7 +277,7 @@ fn relation_schema() -> JazzSchema {
     ])
 }
 
-fn open_db(scale: usize, sample: usize) -> Db<MemoryStorage> {
+fn open_db(scale: usize, sample: usize) -> Db {
     let schema = relation_schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -301,8 +302,8 @@ fn relation_query() -> Query {
 }
 
 fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
-    let db = open_db(scale, sample);
-    let parent = seed_relation_fixture(&db, scale);
+    let mut db = open_db(scale, sample);
+    let parent = seed_relation_fixture(&mut db, scale);
     let prepared = db.prepare_query(&relation_query()).expect("prepare query");
     let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).expect("subscribe");
     expect_initial_snapshot(
@@ -338,7 +339,7 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
     }
 }
 
-fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
+fn seed_relation_fixture(db: &mut Db, child_rows: usize) -> RowUuid {
     let parent = row(1);
     db.insert_with_id(
         "parents",

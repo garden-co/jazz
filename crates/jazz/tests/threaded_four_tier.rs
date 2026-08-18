@@ -196,7 +196,7 @@ fn core_thread(
     }
     ThreadResult {
         node: core,
-        downstream_peer: Some(peer_summary(&peer)),
+        downstream_peer: Some(peer_summary(&mut peer)),
     }
 }
 
@@ -442,20 +442,20 @@ fn threaded_four_tier_converges_with_fifo_links() {
     let mut edge_result = edge_handle.join().unwrap();
     let mut core_result = core_handle.join().unwrap();
 
-    let core_global = global_rows(&mut core_result.node);
-    let edge_global = global_rows(&mut edge_result.node);
-    let worker_global = global_rows(&mut worker_result.node);
-    let ui_global = global_rows(&mut ui_result.node);
+    let core_global = global_rows(&core_result.node);
+    let edge_global = global_rows(&edge_result.node);
+    let worker_global = global_rows(&worker_result.node);
+    let ui_global = global_rows(&ui_result.node);
     assert_eq!(edge_global, core_global);
     assert_eq!(worker_global, core_global);
     assert_eq!(ui_global, core_global);
 
-    assert_eq!(local_rows(&mut core_result.node), core_global);
-    assert_eq!(local_rows(&mut edge_result.node), core_global);
-    assert_eq!(local_rows(&mut worker_result.node), core_global);
-    assert_eq!(local_rows(&mut ui_result.node), core_global);
+    assert_eq!(local_rows(&core_result.node), core_global);
+    assert_eq!(local_rows(&edge_result.node), core_global);
+    assert_eq!(local_rows(&worker_result.node), core_global);
+    assert_eq!(local_rows(&ui_result.node), core_global);
 
-    let ui_policy_rows = subscription_rows(&mut ui_result.node);
+    let ui_policy_rows = subscription_rows(&ui_result.node);
     assert!(!ui_policy_rows.is_empty());
     assert!(
         ui_policy_rows

@@ -78,8 +78,8 @@ impl WireTransport for ByteDuplexTransport {
 
 pub(super) fn byte_duplex_raw() -> (ByteDuplexTransport, ByteDuplexTransport) {
     use std::collections::VecDeque;
-    let left = Rc::new(RefCell::new(VecDeque::new()));
-    let right = Rc::new(RefCell::new(VecDeque::new()));
+    let mut left = Rc::new(RefCell::new(VecDeque::new()));
+    let mut right = Rc::new(RefCell::new(VecDeque::new()));
     (
         ByteDuplexTransport {
             outbound: Rc::clone(&left),
@@ -121,15 +121,15 @@ pub(super) fn byte_duplex_uncompressed() -> (Box<dyn Transport>, Box<dyn Transpo
 }
 
 pub(super) fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.keep();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut dir = tempfile::tempdir().unwrap();
+    let mut path = dir.keep();
+    let mut cfs = schema.column_families();
+    let mut refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     RocksDbStorage::open(&path, &refs).unwrap()
 }
 
-pub(super) fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<RocksDbStorage> {
-    let storage = rocks_storage(schema);
+pub(super) fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db {
+    let mut storage = rocks_storage(schema);
     block_on(Db::open(DbConfig {
         schema: schema.clone(),
         storage,
@@ -175,8 +175,8 @@ impl Transport for DuplexTransport {
 
 pub(super) fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
     use std::collections::VecDeque;
-    let left = Rc::new(RefCell::new(VecDeque::new()));
-    let right = Rc::new(RefCell::new(VecDeque::new()));
+    let mut left = Rc::new(RefCell::new(VecDeque::new()));
+    let mut right = Rc::new(RefCell::new(VecDeque::new()));
     (
         Box::new(DuplexTransport {
             outbound: Rc::clone(&left),
@@ -200,8 +200,8 @@ pub(super) fn duplex_with_server_outbound_tap() -> (
     Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
 ) {
     use std::collections::VecDeque;
-    let client_to_server = Rc::new(RefCell::new(VecDeque::new()));
-    let server_to_client = Rc::new(RefCell::new(VecDeque::new()));
+    let mut client_to_server = Rc::new(RefCell::new(VecDeque::new()));
+    let mut server_to_client = Rc::new(RefCell::new(VecDeque::new()));
     (
         Box::new(DuplexTransport {
             outbound: Rc::clone(&client_to_server),
@@ -225,8 +225,8 @@ pub(super) fn duplex_with_client_outbound_tap() -> (
     Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
 ) {
     use std::collections::VecDeque;
-    let client_to_server = Rc::new(RefCell::new(VecDeque::new()));
-    let server_to_client = Rc::new(RefCell::new(VecDeque::new()));
+    let mut client_to_server = Rc::new(RefCell::new(VecDeque::new()));
+    let mut server_to_client = Rc::new(RefCell::new(VecDeque::new()));
     (
         Box::new(DuplexTransport {
             outbound: Rc::clone(&client_to_server),
@@ -252,10 +252,10 @@ pub(super) fn duplex_with_admitted_session_context(
     server_epoch: u64,
 ) -> (Box<dyn Transport>, Box<dyn Transport>) {
     use std::collections::VecDeque;
-    let left = Rc::new(RefCell::new(VecDeque::new()));
-    let right = Rc::new(RefCell::new(VecDeque::new()));
-    let features = crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS;
-    let client = ConnectionSessionContext {
+    let mut left = Rc::new(RefCell::new(VecDeque::new()));
+    let mut right = Rc::new(RefCell::new(VecDeque::new()));
+    let mut features = crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS;
+    let mut client = ConnectionSessionContext {
         local: crate::wire::WireAuthorityEndpoint {
             node: client_node,
             epoch: client_epoch,
@@ -267,7 +267,7 @@ pub(super) fn duplex_with_admitted_session_context(
         link_identity: identity,
         negotiated_features: features,
     };
-    let server = ConnectionSessionContext {
+    let mut server = ConnectionSessionContext {
         local: client.remote,
         remote: client.local,
         link_identity: identity,
@@ -288,7 +288,7 @@ pub(super) fn duplex_with_admitted_session_context(
 }
 
 pub(super) fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::noop();
+    let mut waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     let mut future = pin!(future);
     loop {
@@ -330,7 +330,7 @@ pub(super) fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: S
             }
 
             for row in updated {
-                let row = row.row;
+                let mut row = row.row;
                 if let Some(position) = snapshot.rows.iter().position(|current| {
                     current.table() == row.table() && current.row_uuid() == row.row_uuid()
                 }) {
@@ -339,7 +339,7 @@ pub(super) fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: S
             }
 
             for row in added {
-                let row = row.row;
+                let mut row = row.row;
                 if let Some(position) =
                     snapshot
                         .rows
@@ -369,35 +369,34 @@ pub(super) fn opened_rows(event: SubscriptionEvent) -> Vec<CurrentRow> {
     snapshot.rows
 }
 
-pub(super) fn pending_upstream_subscribe_count<S>(db: &Db<S>) -> usize
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    db.node
-        .upstream_subscriptions
-        .borrow()
-        .iter()
-        .filter(|command| matches!(command, PendingUpstreamCommand::Subscribe(_)))
-        .count()
+pub(super) trait TestCoverageDb {
+    fn pending_upstream_count(&self, subscribe: bool) -> usize;
 }
 
-pub(super) fn pending_upstream_unsubscribe_count<S>(db: &Db<S>) -> usize
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    db.node
-        .upstream_subscriptions
-        .borrow()
-        .iter()
-        .filter(|command| matches!(command, PendingUpstreamCommand::Unsubscribe(_)))
-        .count()
+impl TestCoverageDb for Db {
+    fn pending_upstream_count(&self, subscribe: bool) -> usize {
+        self.node
+            .upstream_subscriptions
+            .borrow()
+            .iter()
+            .filter(|command| matches!(command, PendingUpstreamCommand::Subscribe(_)) == subscribe)
+            .count()
+    }
+}
+
+pub(super) fn pending_upstream_subscribe_count(db: &impl TestCoverageDb) -> usize {
+    db.pending_upstream_count(true)
+}
+
+pub(super) fn pending_upstream_unsubscribe_count(db: &impl TestCoverageDb) -> usize {
+    db.pending_upstream_count(false)
 }
 
 pub(super) fn decode_wire_message_payload(
     decoder: &mut WireStreamDecoder,
     envelope: &crate::wire::WireEnvelope,
 ) -> SyncMessage {
-    let payload = decoder
+    let mut payload = decoder
         .decode_message(&envelope.payload, envelope.features)
         .unwrap();
     decode_sync_message(&payload).unwrap()
@@ -436,14 +435,14 @@ pub(super) fn terminal_nested_text_values(
     relation: &str,
     column: &str,
 ) -> Vec<String> {
-    let row = snapshot
+    let mut row = snapshot
         .rows
         .iter()
         .take(snapshot.root_count)
         .find(|row| row.row_uuid() == root)
         .expect("terminal root row");
     let (descriptor, raw) = row.encoded_record();
-    let record = groove::records::BorrowedRecord::new(raw, descriptor);
+    let mut record = groove::records::BorrowedRecord::new(raw, descriptor);
     let Value::Array(children) = record.get(relation).expect("nested terminal field") else {
         panic!("nested terminal field must be an array")
     };
@@ -467,14 +466,14 @@ pub(super) fn terminal_nested_values(
     relation: &str,
     column: &str,
 ) -> Vec<Value> {
-    let row = snapshot
+    let mut row = snapshot
         .rows
         .iter()
         .take(snapshot.root_count)
         .find(|row| row.row_uuid() == root)
         .expect("terminal root row");
     let (descriptor, raw) = row.encoded_record();
-    let record = groove::records::BorrowedRecord::new(raw, descriptor);
+    let mut record = groove::records::BorrowedRecord::new(raw, descriptor);
     let Value::Array(children) = record.get(relation).expect("nested terminal field") else {
         panic!("nested terminal field must be an array")
     };
@@ -597,47 +596,82 @@ pub(super) fn expect_error<T>(result: Result<T, Error>) -> Error {
     }
 }
 
-pub(super) fn prepared<S>(db: &Db<S>, query: &Query) -> PreparedQuery
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    db.prepare_query(query).unwrap()
+pub(super) trait TestReadDb {
+    fn test_prepare(&mut self, query: &Query) -> Result<PreparedQuery, Error>;
+    fn test_read(&mut self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error>;
+    fn test_one(&mut self, prepared: &PreparedQuery) -> Result<Option<CurrentRow>, Error>;
+    fn test_all(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error>;
+    fn test_subscribe(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error>;
 }
 
-pub(super) fn prepared_read<S>(db: &Db<S>, query: &Query) -> Vec<CurrentRow>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    let prepared = prepared(db, query);
-    db.read(&prepared).unwrap()
+impl TestReadDb for Db {
+    fn test_prepare(&mut self, query: &Query) -> Result<PreparedQuery, Error> {
+        self.prepare_query(query)
+    }
+
+    fn test_read(&mut self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        block_on(self.read(prepared))
+    }
+
+    fn test_one(&mut self, prepared: &PreparedQuery) -> Result<Option<CurrentRow>, Error> {
+        block_on(self.one(prepared))
+    }
+
+    fn test_all(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        block_on(self.all(prepared, opts))
+    }
+
+    fn test_subscribe(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error> {
+        block_on(self.subscribe(prepared, opts))
+    }
 }
 
-pub(super) fn prepared_one<S>(db: &Db<S>, query: &Query) -> Option<CurrentRow>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    let prepared = prepared(db, query);
-    db.one(&prepared).unwrap()
+pub(super) fn prepared(db: &mut impl TestReadDb, query: &Query) -> PreparedQuery {
+    db.test_prepare(query).unwrap()
 }
 
-pub(super) fn prepared_all<S>(db: &Db<S>, query: &Query, opts: ReadOpts) -> Vec<CurrentRow>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    let prepared = prepared(db, query);
-    block_on(db.all(&prepared, opts)).unwrap()
+pub(super) fn prepared_read(db: &mut impl TestReadDb, query: &Query) -> Vec<CurrentRow> {
+    let mut prepared = prepared(db, query);
+    db.test_read(&prepared).unwrap()
 }
 
-pub(super) fn prepared_subscribe<S>(
-    db: &Db<S>,
+pub(super) fn prepared_one(db: &mut impl TestReadDb, query: &Query) -> Option<CurrentRow> {
+    let mut prepared = prepared(db, query);
+    db.test_one(&prepared).unwrap()
+}
+
+pub(super) fn prepared_all(
+    db: &mut impl TestReadDb,
     query: &Query,
     opts: ReadOpts,
-) -> Result<SubscriptionStream, Error>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    let prepared = prepared(db, query);
-    block_on(db.subscribe(&prepared, opts))
+) -> Vec<CurrentRow> {
+    let mut prepared = prepared(db, query);
+    db.test_all(&prepared, opts).unwrap()
+}
+
+pub(super) fn prepared_subscribe(
+    db: &mut impl TestReadDb,
+    query: &Query,
+    opts: ReadOpts,
+) -> Result<SubscriptionStream, Error> {
+    let mut prepared = prepared(db, query);
+    db.test_subscribe(&prepared, opts)
 }
 
 #[derive(Default)]
@@ -671,7 +705,7 @@ pub(super) fn schema() -> JazzSchema {
 }
 
 pub(super) fn payload_enum_query_schema() -> JazzSchema {
-    let event = ColumnType::Enum(Box::new(
+    let mut event = ColumnType::Enum(Box::new(
         EnumSchema::new(
             "event",
             [
@@ -827,7 +861,7 @@ pub(super) fn owner_uuid_session_write_schema() -> JazzSchema {
 }
 
 pub(super) fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
-    let resource_policy = Policy::shape(
+    let mut resource_policy = Policy::shape(
         Query::from("res_a")
             .reachable_via_with_access_filters(
                 "res_a_access_edges",
@@ -909,7 +943,7 @@ pub(super) fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
 }
 
 pub(super) fn customer_resource_policy_minimal_schema() -> JazzSchema {
-    let resource_policy = Policy::shape(
+    let mut resource_policy = Policy::shape(
         Query::from("res_i")
             .reachable_via_with_access_filters(
                 "res_i_access_edges",
@@ -979,7 +1013,7 @@ pub(super) fn customer_resource_policy_minimal_schema() -> JazzSchema {
 }
 
 pub(super) fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
-    let res_i_policy = Policy::shape(
+    let mut res_i_policy = Policy::shape(
         Query::from("res_i")
             .reachable_via_with_access_filters(
                 "res_i_access_edges",
@@ -994,7 +1028,7 @@ pub(super) fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
             )
             .seeded_by("group_access_edges", "user_id", "sub", "group_id"),
     );
-    let res_j_policy = Policy::shape(
+    let mut res_j_policy = Policy::shape(
         Query::from("res_j")
             .reachable_via_with_access_filters(
                 "res_j_access_edges",
@@ -1083,7 +1117,7 @@ pub(super) fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
 }
 
 pub(super) fn same_table_seeded_resource_policy_schema() -> JazzSchema {
-    let resource_policy = Policy::shape(
+    let mut resource_policy = Policy::shape(
         Query::from("resources")
             .reachable_via_with_access_filters(
                 "resource_access",
@@ -1143,7 +1177,7 @@ pub(super) fn same_table_seeded_resource_policy_schema() -> JazzSchema {
 }
 
 pub(super) fn same_table_string_seeded_resource_policy_schema() -> JazzSchema {
-    let resource_policy = Policy::shape(
+    let mut resource_policy = Policy::shape(
         Query::from("resources")
             .reachable_via_with_access_filters(
                 "resource_access",
@@ -1203,7 +1237,7 @@ pub(super) fn same_table_string_seeded_resource_policy_schema() -> JazzSchema {
 }
 
 pub(super) fn customer_inherited_child_policy_schema() -> JazzSchema {
-    let resource_policy = Query::from("res_i")
+    let mut resource_policy = Query::from("res_i")
         .reachable_via_with_access_filters(
             "res_i_access_edges",
             "resource",
@@ -1297,8 +1331,8 @@ pub(super) fn customer_inherited_child_policy_schema() -> JazzSchema {
 }
 
 pub(super) fn inherited_insert_policy_schema() -> JazzSchema {
-    let parent_update_using = Query::from("parents").filter(eq(col("owner"), claim("sub")));
-    let parent_update_check = Query::from("parents").filter(eq(col("locked"), lit(false)));
+    let mut parent_update_using = Query::from("parents").filter(eq(col("owner"), claim("sub")));
+    let mut parent_update_check = Query::from("parents").filter(eq(col("locked"), lit(false)));
     JazzSchema::new([
         TableSchema::new(
             "parents",
@@ -1567,8 +1601,8 @@ pub(super) fn row(byte: u8) -> RowUuid {
 }
 
 pub(super) fn relation_snapshot_row(table: &str, row_uuid: RowUuid) -> CurrentRow {
-    let descriptor = RecordDescriptor::new([("row_uuid".to_owned(), ValueType::Uuid)]);
-    let raw = descriptor
+    let mut descriptor = RecordDescriptor::new([("row_uuid".to_owned(), ValueType::Uuid)]);
+    let mut raw = descriptor
         .create(&[groove::records::Value::Uuid(row_uuid.0)])
         .expect("encode relation snapshot row");
     CurrentRow::new(table, OwnedRecord::new(raw, descriptor))
@@ -1658,8 +1692,8 @@ pub(super) struct CoreDb {
 }
 
 pub(super) fn open_core(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> CoreDb {
-    let storage = rocks_storage(schema);
-    let node = NodeState::new_history_complete(
+    let mut storage = rocks_storage(schema);
+    let mut node = NodeState::new_history_complete(
         NodeUuid::from_bytes([node_byte; 16]),
         schema.clone(),
         storage,
@@ -1680,7 +1714,7 @@ impl CoreDb {
     }
 
     pub(super) fn next_now_ms(&self) -> u64 {
-        let next = self.next_now_ms.get();
+        let mut next = self.next_now_ms.get();
         self.next_now_ms.set(next + 1);
         next
     }
@@ -1690,8 +1724,8 @@ impl CoreDb {
     }
 
     pub(super) fn read(&self, query: &Query) -> Result<Vec<CurrentRow>, Error> {
-        let shape = query.validate(&self.schema)?;
-        let binding = shape.bind(BTreeMap::new())?;
+        let mut shape = query.validate(&self.schema)?;
+        let mut binding = shape.bind(BTreeMap::new())?;
         self.server
             .node()
             .borrow_mut()
@@ -1704,8 +1738,8 @@ impl CoreDb {
     }
 
     pub(super) fn at(&self, position: GlobalSeq, query: &Query) -> Result<Vec<CurrentRow>, Error> {
-        let shape = query.validate(&self.schema)?;
-        let binding = shape.bind(BTreeMap::new())?;
+        let mut shape = query.validate(&self.schema)?;
+        let mut binding = shape.bind(BTreeMap::new())?;
         self.server
             .node()
             .borrow_mut()
@@ -1719,7 +1753,7 @@ impl CoreDb {
         table: &str,
         cells: RowCells,
     ) -> Result<WriteHandle<RocksDbStorage>, Error> {
-        let row = self.id_source.borrow_mut().next_row_id();
+        let mut row = self.id_source.borrow_mut().next_row_id();
         self.insert_with_id(table, row, cells)
     }
 
@@ -1729,8 +1763,8 @@ impl CoreDb {
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<RocksDbStorage>, Error> {
-        let node = self.server.node();
-        let tx_id = node.borrow_mut().commit_mergeable(
+        let mut node = self.server.node();
+        let mut tx_id = node.borrow_mut().commit_mergeable(
             MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(self.author)
                 .cells(cells),
@@ -1751,9 +1785,9 @@ impl CoreDb {
         table: &str,
         cells: RowCells,
     ) -> Result<WriteHandle<RocksDbStorage>, Error> {
-        let row = self.id_source.borrow_mut().next_row_id();
-        let node = self.server.node();
-        let tx_id = node.borrow_mut().commit_mergeable(
+        let mut row = self.id_source.borrow_mut().next_row_id();
+        let mut node = self.server.node();
+        let mut tx_id = node.borrow_mut().commit_mergeable(
             MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(made_by)
                 .permission_subject(self.author)
@@ -1785,7 +1819,7 @@ impl CoreDb {
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<RocksDbStorage>, Error> {
-        let table_schema = self
+        let mut table_schema = self
             .schema
             .tables
             .iter()
@@ -1807,7 +1841,7 @@ impl CoreDb {
             parent = self.server.node().borrow_mut().current_row_tx_id(&existing);
         }
         cells.extend(patch);
-        let node = self.server.node();
+        let mut node = self.server.node();
         let mut commit = MergeableCommit::new(table, row, self.next_now_ms())
             .made_by(made_by)
             .permission_subject(self.author)
@@ -1815,7 +1849,7 @@ impl CoreDb {
         if let Some(parent) = parent {
             commit = commit.parents(vec![parent]);
         }
-        let tx_id = node.borrow_mut().commit_mergeable(commit)?;
+        let mut tx_id = node.borrow_mut().commit_mergeable(commit)?;
         node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
         self.server.mark_subscriber_connections_dirty();
         Ok(WriteHandle {
@@ -1869,7 +1903,7 @@ impl CoreDb {
     }
 
     pub(super) fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
-        let tx_id = OpenBatchId::new();
+        let mut tx_id = OpenBatchId::new();
         self.server.node().borrow_mut().open_exclusive(tx_id)?;
         Ok(CoreExclusiveTx {
             core: self,
@@ -1958,7 +1992,7 @@ impl CoreExclusiveTx<'_> {
     }
 
     pub(super) fn commit(self) -> Result<TxId, Error> {
-        let node = self.core.server.node();
+        let mut node = self.core.server.node();
         if self.has_reads.get() && node.borrow().open_exclusive_snapshot_moved(self.tx_id)? {
             node.borrow_mut().abandon_tx(self.tx_id)?;
             return Err(write_rejected(RejectionReason::ExclusiveConflict));
@@ -1974,7 +2008,7 @@ impl CoreExclusiveTx<'_> {
                 "commit_exclusive must yield a CommitUnit",
             ));
         };
-        let fate = node
+        let mut fate = node
             .borrow_mut()
             .finalize_local_exclusive_commit(tx, versions)?;
         if let Fate::Rejected(reason) = fate {
@@ -1988,7 +2022,7 @@ impl CoreExclusiveTx<'_> {
 /// Commit a row on an authority node and confirm it reached Global, so the
 /// serving path ships it.
 pub(super) fn seed(db: &CoreDb, table: &str, cells: RowCells) -> RowUuid {
-    let write = db.insert(table, cells).unwrap();
+    let mut write = db.insert(table, cells).unwrap();
     block_on(write.wait(DurabilityTier::Global)).unwrap();
     write.row_uuid()
 }

@@ -2,9 +2,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use jazz::block_on;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, Error, MergeableTxOps, Node, ReadOpts, RowCells, SeededRowIdSource,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, Error, Node, ReadOpts, RowCells, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
@@ -39,7 +37,7 @@ fn title_patch(title: &str) -> RowCells {
     BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))])
 }
 
-fn open_db() -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
+fn open_db() -> Result<Db, Box<dyn std::error::Error>> {
     let schema = JazzSchema::new([todo_table()]);
     let column_families = schema.column_families();
     let column_family_refs = column_families
@@ -198,11 +196,13 @@ fn write_rejected(reason: RejectionReason) -> RejectionReason {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = open_db()?;
-    let mergeable = db.mergeable_tx()?;
-    let first = mergeable.insert("todos", todo_cells("write examples", false))?;
-    let second = mergeable.insert("todos", todo_cells("run examples", true))?;
-    let mergeable_tx = mergeable.commit()?;
+    let mut db = open_db()?;
+    let batch = block_on(db.begin_mergeable())?;
+    let first = RowUuid::from_bytes([0x31; 16]);
+    let second = RowUuid::from_bytes([0x32; 16]);
+    block_on(db.mergeable_insert(batch, "todos", first, todo_cells("write examples", false)))?;
+    block_on(db.mergeable_insert(batch, "todos", second, todo_cells("run examples", true)))?;
+    let mergeable_tx = block_on(db.commit_mergeable(batch))?;
 
     let todos = db.prepare_query(&db.table("todos"))?;
     let rows = block_on(db.all(&todos, ReadOpts::default()))?;

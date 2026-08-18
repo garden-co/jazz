@@ -1,6 +1,6 @@
 //! core update throughput benchmark for permissioned operations.
 //!
-//! Measures updates/second through `jazz::db::Db<MemoryStorage>` so this
+//! Measures updates/second through `jazz::db::Db` so this
 //! exercises the core replacement path instead of the legacy
 //! RuntimeCore/SchemaManager/SyncManager layers. The single-row case cycles
 //! through owned documents; the batch case applies 100 core updates per
@@ -8,6 +8,7 @@
 
 #![allow(clippy::single_element_loop)]
 
+use jazz::db::BlockingResultFutureExt;
 use std::collections::BTreeMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -19,7 +20,7 @@ use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
-type CoreDb = Db<MemoryStorage>;
+type CoreDb = Db;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 
@@ -102,7 +103,7 @@ struct Fixture {
     owned_folders: Vec<RowUuid>,
 }
 
-fn seed_fixture(db: &CoreDb, count: usize) -> Fixture {
+fn seed_fixture(db: &mut CoreDb, count: usize) -> Fixture {
     let folder_count = 32usize.min(count.max(1));
     let owned_folders = (0..folder_count)
         .map(|index| {
@@ -140,8 +141,8 @@ fn update_own_documents(c: &mut Criterion) {
     for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
-            let db = open_core_db(1);
-            let data = seed_fixture(&db, scale);
+            let mut db = open_core_db(1);
+            let data = seed_fixture(&mut db, scale);
             let mut doc_idx = 0usize;
             let mut update_counter = 0u64;
 
@@ -181,8 +182,8 @@ fn update_batch(c: &mut Criterion) {
             BenchmarkId::new("documents_x100", scale),
             &scale,
             |b, &scale| {
-                let db = open_core_db(2);
-                let data = seed_fixture(&db, scale);
+                let mut db = open_core_db(2);
+                let data = seed_fixture(&mut db, scale);
                 let doc_ids = data
                     .owned_documents
                     .iter()

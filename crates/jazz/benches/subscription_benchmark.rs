@@ -10,12 +10,12 @@
 //! - Cold start: time to receive initial result set
 //! - Filtered subscription: time to notify a subscribed filtered query
 
+use jazz::db::BlockingResultFutureExt;
 use std::collections::BTreeMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, SeededRowIdSource, SubscriptionEvent,
-    block_on,
+    Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -25,7 +25,7 @@ use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
-type CoreDb = Db<MemoryStorage>;
+type CoreDb = Db;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
@@ -101,7 +101,7 @@ fn filtered_cells(index: usize) -> BTreeMap<String, Value> {
     cells
 }
 
-fn seed_documents(db: &CoreDb, count: usize) {
+fn seed_documents(db: &mut CoreDb, count: usize) {
     for index in 0..count {
         let write = db
             .insert("documents", cells(index))
@@ -110,7 +110,7 @@ fn seed_documents(db: &CoreDb, count: usize) {
     }
 }
 
-fn seed_filtered_documents(db: &CoreDb, count: usize) {
+fn seed_filtered_documents(db: &mut CoreDb, count: usize) {
     for index in 0..count {
         let write = db
             .insert("documents", filtered_cells(index))
@@ -119,17 +119,17 @@ fn seed_filtered_documents(db: &CoreDb, count: usize) {
     }
 }
 
-fn all_documents_query(db: &CoreDb) -> jazz::db::PreparedQuery {
+fn all_documents_query(db: &mut CoreDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents"))
         .expect("prepare documents query")
 }
 
-fn author_filter_query(db: &CoreDb) -> jazz::db::PreparedQuery {
+fn author_filter_query(db: &mut CoreDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents").filter(eq(col("author"), lit(AUTHOR.0))))
         .expect("prepare author-filtered documents query")
 }
 
-fn narrow_filter_query(db: &CoreDb) -> jazz::db::PreparedQuery {
+fn narrow_filter_query(db: &mut CoreDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents").filter(all_of([
         eq(col("author"), lit(AUTHOR.0)),
         eq(col("folder"), lit(row_uuid(0).0)),
@@ -165,9 +165,9 @@ fn single_subscription_latency(c: &mut Criterion) {
         let scale = 1_000usize;
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
-            let db = open_db(1);
-            seed_documents(&db, scale);
-            let query = all_documents_query(&db);
+            let mut db = open_db(1);
+            seed_documents(&mut db, scale);
+            let query = all_documents_query(&mut db);
             let mut subscription =
                 block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
             assert_eq!(read_opened_len(block_on(subscription.next_event())), scale);
@@ -196,9 +196,9 @@ fn fanout_latency(c: &mut Criterion) {
             BenchmarkId::new("subscriptions_x100", scale),
             &scale,
             |b, &scale| {
-                let db = open_db(2);
-                seed_documents(&db, scale);
-                let query = all_documents_query(&db);
+                let mut db = open_db(2);
+                seed_documents(&mut db, scale);
+                let query = all_documents_query(&mut db);
                 let mut subscriptions = (0..FANOUT_SUBSCRIPTIONS)
                     .map(|_| {
                         let mut subscription =
@@ -237,9 +237,9 @@ fn cold_start_latency(c: &mut Criterion) {
             BenchmarkId::new("initial_load", scale),
             &scale,
             |b, &scale| {
-                let db = open_db(3);
-                seed_documents(&db, scale);
-                let query = all_documents_query(&db);
+                let mut db = open_db(3);
+                seed_documents(&mut db, scale);
+                let query = all_documents_query(&mut db);
 
                 b.iter(|| {
                     let mut subscription =
@@ -264,9 +264,9 @@ fn filtered_subscription_latency(c: &mut Criterion) {
             BenchmarkId::new("author_filter", scale),
             &scale,
             |b, &scale| {
-                let db = open_db(4);
-                seed_filtered_documents(&db, scale);
-                let query = author_filter_query(&db);
+                let mut db = open_db(4);
+                seed_filtered_documents(&mut db, scale);
+                let query = author_filter_query(&mut db);
                 let mut subscription =
                     block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
                 assert_eq!(
@@ -299,9 +299,9 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
             BenchmarkId::new("documents_x100", scale),
             &scale,
             |b, &scale| {
-                let db = open_db(5);
-                seed_filtered_documents(&db, scale);
-                let query = narrow_filter_query(&db);
+                let mut db = open_db(5);
+                seed_filtered_documents(&mut db, scale);
+                let query = narrow_filter_query(&mut db);
                 let mut subscription =
                     block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
                 let initial_len = read_opened_len(block_on(subscription.next_event()));
@@ -309,14 +309,15 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
 
                 b.iter(|| {
                     let tx = db
-                        .mergeable_tx()
+                        .begin_mergeable()
                         .expect("core batch transaction should open");
                     for _ in 0..batch_size {
                         next += 2;
-                        tx.insert("documents", filtered_cells(next))
+                        db.mergeable_insert(tx, "documents", row_uuid(next), filtered_cells(next))
                             .expect("core batch insert should stage");
                     }
-                    tx.commit().expect("core batch insert should commit");
+                    db.commit_mergeable(tx)
+                        .expect("core batch insert should commit");
                     assert_eq!(
                         read_added_len(block_on(subscription.next_event())),
                         batch_size

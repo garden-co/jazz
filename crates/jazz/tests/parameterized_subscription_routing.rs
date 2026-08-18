@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::block_on;
+use jazz::db::BlockingResultFutureExt;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, PreparedQuery, Propagation, ReadOpts,
     SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
@@ -25,7 +26,7 @@ fn schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
-fn open_db() -> Db<MemoryStorage> {
+fn open_db() -> Db {
     let schema = schema();
     let column_families = schema.column_families();
     let column_family_refs = column_families
@@ -53,7 +54,7 @@ fn row(seed: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
-fn insert_document(db: &Db<MemoryStorage>, document: RowUuid, team: RowUuid, updated_at: u64) {
+fn insert_document(db: &mut Db, document: RowUuid, team: RowUuid, updated_at: u64) {
     db.insert_with_id(
         "documents",
         document,
@@ -152,12 +153,7 @@ fn apply_pending_events(
     applied
 }
 
-fn assert_ordered_rows(
-    db: &Db<MemoryStorage>,
-    prepared: &PreparedQuery,
-    expected: &[RowUuid],
-    label: &str,
-) {
+fn assert_ordered_rows(db: &mut Db, prepared: &PreparedQuery, expected: &[RowUuid], label: &str) {
     let actual = block_on(db.all(prepared, local_read_opts()))
         .unwrap_or_else(|error| panic!("{label} one-shot read failed: {error}"))
         .into_iter()
@@ -176,7 +172,7 @@ fn assert_ordered_rows(
 /// Binding and mutation deltas must never make either window global.
 #[test]
 fn parameterized_top_by_is_partitioned_per_active_binding() {
-    let db = open_db();
+    let mut db = open_db();
     let team_a = row(1);
     let team_b = row(2);
 
@@ -188,7 +184,7 @@ fn parameterized_top_by_is_partitioned_per_active_binding() {
         (row(202), team_b, 21),
         (row(203), team_b, 22),
     ] {
-        insert_document(&db, document, team, updated_at);
+        insert_document(&mut db, document, team, updated_at);
     }
 
     let query = Query::from("documents")
@@ -230,10 +226,20 @@ fn parameterized_top_by_is_partitioned_per_active_binding() {
 
     assert_eq!(rows_a, BTreeSet::from([row(102), row(103)]));
     assert_eq!(rows_b, BTreeSet::from([row(202), row(203)]));
-    assert_ordered_rows(&db, &prepared_a, &[row(103), row(102)], "team A initial");
-    assert_ordered_rows(&db, &prepared_b, &[row(203), row(202)], "team B initial");
+    assert_ordered_rows(
+        &mut db,
+        &prepared_a,
+        &[row(103), row(102)],
+        "team A initial",
+    );
+    assert_ordered_rows(
+        &mut db,
+        &prepared_b,
+        &[row(203), row(202)],
+        "team B initial",
+    );
 
-    insert_document(&db, row(104), team_a, 30);
+    insert_document(&mut db, row(104), team_a, 30);
     let team_a_delta = apply_pending_events("team A mutation", &mut stream_a, &mut rows_a);
     assert_eq!(
         team_a_delta,
@@ -255,19 +261,19 @@ fn parameterized_top_by_is_partitioned_per_active_binding() {
         "team A insert must not notify the team B subscription"
     );
     assert_ordered_rows(
-        &db,
+        &mut db,
         &prepared_a,
         &[row(104), row(103)],
         "team A after team A insert",
     );
     assert_ordered_rows(
-        &db,
+        &mut db,
         &prepared_b,
         &[row(203), row(202)],
         "team B after team A insert",
     );
 
-    insert_document(&db, row(204), team_b, 31);
+    insert_document(&mut db, row(204), team_b, 31);
     let team_b_delta = apply_pending_events("team B mutation", &mut stream_b, &mut rows_b);
     assert_eq!(
         team_b_delta,
@@ -289,13 +295,13 @@ fn parameterized_top_by_is_partitioned_per_active_binding() {
         "team B insert must not notify the team A subscription"
     );
     assert_ordered_rows(
-        &db,
+        &mut db,
         &prepared_a,
         &[row(104), row(103)],
         "team A after team B insert",
     );
     assert_ordered_rows(
-        &db,
+        &mut db,
         &prepared_b,
         &[row(204), row(203)],
         "team B after team B insert",

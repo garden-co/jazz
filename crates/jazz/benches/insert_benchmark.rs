@@ -1,6 +1,6 @@
 //! Insert throughput benchmark for permissioned core operations.
 //!
-//! Measures inserts/second with public `jazz::db::Db<MemoryStorage>` APIs.
+//! Measures inserts/second with public `jazz::db::Db` APIs.
 //!
 //! Variants:
 //! - Insert into an owned folder (direct owner write policy)
@@ -9,19 +9,20 @@
 
 #![allow(clippy::single_element_loop)]
 
+use jazz::db::BlockingResultFutureExt;
 use std::collections::BTreeMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::{DemandLoadedStorage, MemoryStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, claim, col, eq};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
@@ -146,12 +147,12 @@ struct BenchmarkData {
     team_folders: Vec<RowUuid>,
 }
 
-fn wait_local(write: jazz::db::WriteHandle<MemoryStorage>) -> RowUuid {
+fn wait_local(write: jazz::db::WriteHandle<DemandLoadedStorage>) -> RowUuid {
     block_on(write.wait(DurabilityTier::Local)).expect("write should be local");
     write.row_uuid()
 }
 
-fn seed_data(db: &BenchDb, scale: usize) -> BenchmarkData {
+fn seed_data(db: &mut BenchDb, scale: usize) -> BenchmarkData {
     let num_folders = (scale / 10).max(100);
     let owned_folder_count = (num_folders / 10).max(1);
     let team_folder_count = (num_folders / 10).max(1);
@@ -224,8 +225,8 @@ fn insert_own_folder(c: &mut Criterion) {
     for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
-            let db = open_db(1);
-            let data = seed_data(&db, scale);
+            let mut db = open_db(1);
+            let data = seed_data(&mut db, scale);
             let folder = data.owned_folders[0];
             let mut doc_counter = 0u64;
 
@@ -257,8 +258,8 @@ fn insert_team_folder(c: &mut Criterion) {
     for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
-            let db = open_db(2);
-            let data = seed_data(&db, scale);
+            let mut db = open_db(2);
+            let data = seed_data(&mut db, scale);
             let folder = data.team_folders[0];
             let mut doc_counter = 0u64;
 
@@ -294,8 +295,8 @@ fn insert_batch(c: &mut Criterion) {
             BenchmarkId::new("documents_x100", scale),
             &scale,
             |b, &scale| {
-                let db = open_db(3);
-                let data = seed_data(&db, scale);
+                let mut db = open_db(3);
+                let data = seed_data(&mut db, scale);
                 let folders = data
                     .owned_folders
                     .iter()

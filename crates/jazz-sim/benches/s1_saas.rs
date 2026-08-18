@@ -217,7 +217,7 @@ pub fn db_surface_smoke() {
     let schema = schema();
     let fixture = build_fixture(&config);
     let plan = representative_plan(&fixture);
-    let (_dir, db) = open_db(node(70), AuthorId(plan.user.0), schema.clone());
+    let (_dir, mut db) = open_db(node(70), AuthorId(plan.user.0), schema.clone());
     let mut oracle = DbS1Oracle::default();
 
     let query1 = db_query1(&plan);
@@ -234,9 +234,9 @@ pub fn db_surface_smoke() {
     assert!(subscription2_rows.is_empty());
 
     for commit in &fixture.commits {
-        let handle = db
-            .insert_with_id(&commit.table, commit.row_uuid, commit.cells.clone())
-            .expect("db fixture insert");
+        let handle =
+            block_on(db.insert_with_id(&commit.table, commit.row_uuid, commit.cells.clone()))
+                .expect("db fixture insert");
         block_on(handle.wait(DurabilityTier::Local)).expect("fixture insert local wait");
         oracle.apply_insert(commit);
     }
@@ -250,14 +250,14 @@ pub fn db_surface_smoke() {
         "at least one subscription should observe fixture population"
     );
     assert_db_query_matches_oracle(
-        &db,
+        &mut db,
         &schema,
         &query1,
         oracle.query1(&plan),
         "q1 after cold load",
     );
     assert_db_query_matches_oracle(
-        &db,
+        &mut db,
         &schema,
         &query2,
         oracle.query2(&plan),
@@ -279,9 +279,7 @@ pub fn db_surface_smoke() {
             Value::String("db-surface-state-transition".to_owned()),
         ),
     ]);
-    let handle = db
-        .update(ISSUES, edited_issue, patch.clone())
-        .expect("db issue update");
+    let handle = block_on(db.update(ISSUES, edited_issue, patch.clone())).expect("db issue update");
     block_on(handle.wait(DurabilityTier::Local)).expect("issue update local wait");
     oracle.apply_patch(ISSUES, edited_issue, patch);
 
@@ -290,14 +288,14 @@ pub fn db_surface_smoke() {
         &mut subscription1_rows
     ));
     assert_db_query_matches_oracle(
-        &db,
+        &mut db,
         &schema,
         &query1,
         oracle.query1(&plan),
         "q1 after update",
     );
     assert_db_query_matches_oracle(
-        &db,
+        &mut db,
         &schema,
         &query2,
         oracle.query2(&plan),
@@ -305,7 +303,7 @@ pub fn db_surface_smoke() {
     );
     assert_eq!(subscription1_rows, oracle.query1(&plan));
 
-    let _ = db.one(&prepared_query1).expect("db one q1");
+    let _ = block_on(db.one(&prepared_query1)).expect("db one q1");
 }
 
 #[derive(Clone, Debug)]
@@ -2178,11 +2176,7 @@ fn open_node(
     (temp_dir, node)
 }
 
-fn open_db(
-    node_uuid: NodeUuid,
-    author: AuthorId,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+fn open_db(node_uuid: NodeUuid, author: AuthorId, schema: JazzSchema) -> (tempfile::TempDir, Db) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2314,7 +2308,7 @@ fn cell_uuid_from_cells(cells: &RowCells, column: &str) -> Option<RowUuid> {
 }
 
 fn assert_db_query_matches_oracle(
-    db: &Db<RocksDbStorage>,
+    db: &mut Db,
     schema: &JazzSchema,
     query: &Query,
     oracle: BTreeSet<(String, RowUuid)>,
@@ -2322,7 +2316,7 @@ fn assert_db_query_matches_oracle(
 ) {
     let prepared = db.prepare_query(query).expect("db prepare query");
     assert_eq!(
-        row_set(db.read(&prepared).expect("db read")),
+        row_set(block_on(db.read(&prepared)).expect("db read")),
         oracle,
         "{label} read mismatch"
     );
@@ -2337,7 +2331,7 @@ fn assert_db_query_matches_oracle(
         .find(|table| table.name == ISSUES)
         .expect("issues table");
     assert!(
-        db.read(&prepared)
+        block_on(db.read(&prepared))
             .expect("db read output table check")
             .iter()
             .all(|row| row.table() == issues.name)

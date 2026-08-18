@@ -4,16 +4,16 @@ use super::*;
 
 #[test]
 fn maintained_subscription_emits_created_by_scoped_insert_after_empty_seed() {
-    let schema = created_by_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let db = open_db(0xa1, alice, &schema);
-    let query = Query::from("todos");
-    let prepared = prepared(&db, &query);
+    let mut schema = created_by_read_schema();
+    let mut alice = AuthorId::from_bytes([0xa1; 16]);
+    let mut db = open_db(0xa1, alice, &schema);
+    let mut query = Query::from("todos");
+    let mut prepared = prepared(&mut db, &query);
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
 
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
-    let write = db
+    let mut write = db
         .insert(
             "todos",
             BTreeMap::from([
@@ -27,7 +27,7 @@ fn maintained_subscription_emits_created_by_scoped_insert_after_empty_seed() {
         .unwrap();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
 
-    let one_shot = prepared_all(&db, &query, ReadOpts::default());
+    let mut one_shot = prepared_all(&mut db, &query, ReadOpts::default());
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
 
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -38,15 +38,15 @@ fn maintained_subscription_emits_created_by_scoped_insert_after_empty_seed() {
 
 #[test]
 fn prepared_one_shot_releases_local_groove_subscription_immediately() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let query = Query::from("todos").filter(eq(col("title"), param("title")));
-    let prepared = db
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut query = Query::from("todos").filter(eq(col("title"), param("title")));
+    let mut prepared = db
         .prepare_query_bound(
             &query,
             BTreeMap::from([("title".to_owned(), Value::String("missing".to_owned()))]),
         )
         .unwrap();
-    let baseline = db.runtime_stats_for_test().active_subscriptions;
+    let mut baseline = db.runtime_stats_for_test().active_subscriptions;
 
     for _ in 0..4 {
         assert!(
@@ -64,16 +64,16 @@ fn prepared_one_shot_releases_local_groove_subscription_immediately() {
 
 #[test]
 fn dropping_local_stream_releases_groove_subscription_without_a_write() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let query = Query::from("todos").filter(eq(col("title"), param("title")));
-    let prepared = db
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut query = Query::from("todos").filter(eq(col("title"), param("title")));
+    let mut prepared = db
         .prepare_query_bound(
             &query,
             BTreeMap::from([("title".to_owned(), Value::String("missing".to_owned()))]),
         )
         .unwrap();
-    let baseline = db.runtime_stats_for_test().active_subscriptions;
-    let opts = ReadOpts {
+    let mut baseline = db.runtime_stats_for_test().active_subscriptions;
+    let mut opts = ReadOpts {
         propagation: Propagation::LocalOnly,
         ..ReadOpts::default()
     };
@@ -95,16 +95,16 @@ fn dropping_local_stream_releases_groove_subscription_without_a_write() {
 
 #[test]
 fn dropping_one_local_stream_preserves_a_sibling_on_the_same_binding() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let query = Query::from("todos").filter(eq(col("title"), param("title")));
-    let prepared = db
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut query = Query::from("todos").filter(eq(col("title"), param("title")));
+    let mut prepared = db
         .prepare_query_bound(
             &query,
             BTreeMap::from([("title".to_owned(), Value::String("match".to_owned()))]),
         )
         .unwrap();
-    let baseline = db.runtime_stats_for_test().active_subscriptions;
-    let opts = ReadOpts {
+    let mut baseline = db.runtime_stats_for_test().active_subscriptions;
+    let mut opts = ReadOpts {
         propagation: Propagation::LocalOnly,
         ..ReadOpts::default()
     };
@@ -123,7 +123,7 @@ fn dropping_one_local_stream_preserves_a_sibling_on_the_same_binding() {
         baseline + 1
     );
 
-    let write = db
+    let mut write = db
         .insert("todos", doctest_support::todo_cells("match", false))
         .unwrap();
     let (added, updated, removed) = delta_rows(block_on(survivor.next_raw()).unwrap());
@@ -134,17 +134,17 @@ fn dropping_one_local_stream_preserves_a_sibling_on_the_same_binding() {
 
 #[test]
 fn maintained_subscription_emits_created_by_scoped_insert_for_explicit_identity() {
-    let schema = created_by_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let db = open_db(0xa1, alice, &schema);
-    let query = Query::from("todos");
-    let prepared = prepared(&db, &query);
+    let mut schema = created_by_read_schema();
+    let mut alice = AuthorId::from_bytes([0xa1; 16]);
+    let mut db = open_db(0xa1, alice, &schema);
+    let mut query = Query::from("todos");
+    let mut prepared = prepared(&mut db, &query);
     let mut subscription =
         block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
 
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
-    let write = db
+    let mut write = db
         .insert(
             "todos",
             BTreeMap::from([
@@ -158,7 +158,8 @@ fn maintained_subscription_emits_created_by_scoped_insert_for_explicit_identity(
         .unwrap();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
 
-    let one_shot = block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
+    let mut one_shot =
+        block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
 
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -169,15 +170,15 @@ fn maintained_subscription_emits_created_by_scoped_insert_for_explicit_identity(
 
 #[test]
 fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_seed() {
-    let schema = created_by_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client = open_db(0xa1, alice, &schema);
+    let mut schema = created_by_read_schema();
+    let mut alice = AuthorId::from_bytes([0xa1; 16]);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut client = open_db(0xa1, alice, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, alice);
-    let query = Query::from("todos");
-    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, alice);
+    let mut query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&mut client, &query, ReadOpts::default()).unwrap();
 
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     client.tick().unwrap();
@@ -192,7 +193,7 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
         );
     }
 
-    let write = client
+    let mut write = client
         .insert(
             "todos",
             BTreeMap::from([
@@ -206,7 +207,7 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
         .unwrap();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
 
-    let one_shot = prepared_all(&client, &query, ReadOpts::default());
+    let mut one_shot = prepared_all(&mut client, &query, ReadOpts::default());
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
 
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -217,17 +218,17 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
 
 #[test]
 fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
-    let schema = created_by_read_schema_for_claim("user_id");
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client = open_db(0xa1, alice, &schema);
-    let claims = BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]);
+    let mut schema = created_by_read_schema_for_claim("user_id");
+    let mut alice = AuthorId::from_bytes([0xa1; 16]);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut client = open_db(0xa1, alice, &schema);
+    let mut claims = BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]);
     client.set_identity_claims(alice, claims.clone());
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims);
-    let query = Query::from("todos");
-    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims);
+    let mut query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&mut client, &query, ReadOpts::default()).unwrap();
 
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     client.tick().unwrap();
@@ -237,7 +238,7 @@ fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
         assert!(opened_rows(event).is_empty());
     }
 
-    let write = client
+    let mut write = client
         .insert(
             "todos",
             doctest_support::todo_cells("created by alice", false),
@@ -245,7 +246,7 @@ fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
         .unwrap();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
 
-    let one_shot = prepared_all(&client, &query, ReadOpts::default());
+    let mut one_shot = prepared_all(&mut client, &query, ReadOpts::default());
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![write.row_uuid()]);
@@ -293,7 +294,7 @@ fn group_access_test_cells(group: RowUuid, user: AuthorId) -> RowCells {
 }
 
 fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
-    let resource_policy = Policy::shape(
+    let mut resource_policy = Policy::shape(
         Query::from("docs")
             .reachable_via_with_access_filters(
                 "doc_access_edges",
@@ -308,7 +309,7 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
             )
             .seeded_by("teams", "identity_key", "sub", "id"),
     );
-    let access_branch = PolicyBranch::single_alternative_from_query(
+    let mut access_branch = PolicyBranch::single_alternative_from_query(
         Query::from("doc_access_edges")
             .reachable_via(
                 "doc_access_edges",
@@ -325,7 +326,7 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
     let mut access_query = Query::from("doc_access_edges");
     access_query.filters = vec![Predicate::Any(Vec::new())];
     access_query.policy_branches = vec![access_branch];
-    let access_policy = Policy::shape(access_query);
+    let mut access_policy = Policy::shape(access_query);
 
     JazzSchema::new([
         TableSchema::new(
@@ -368,13 +369,13 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
 
 #[test]
 fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
-    let role = uuid::Uuid::parse_str("0cae56e7-0f54-421c-ba8b-54fcbfec8dd2").unwrap();
-    let schema = uuid_string_grant_role_schema(role);
-    let server = open_core(0x6d, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x6e; 16]);
-    let member_team = row(0x61);
-    let resource_team = row(0x62);
-    let doc = row(0x63);
+    let mut role = uuid::Uuid::parse_str("0cae56e7-0f54-421c-ba8b-54fcbfec8dd2").unwrap();
+    let mut schema = uuid_string_grant_role_schema(role);
+    let mut server = open_core(0x6d, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x6e; 16]);
+    let mut member_team = row(0x61);
+    let mut resource_team = row(0x62);
+    let mut doc = row(0x63);
 
     server
         .insert_with_id(
@@ -430,7 +431,7 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
         vec![doc]
     );
 
-    let db = block_on(Db::open_history_complete(DbConfig {
+    let mut db = block_on(Db::open_history_complete(DbConfig {
         schema: schema.clone(),
         storage: rocks_storage(&schema),
         identity: DbIdentity {
@@ -483,8 +484,8 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
         db.seed_settled_mergeable_for_bootstrap(table, row_id, AuthorId::SYSTEM, cells)
             .unwrap();
     }
-    let prepared = db.prepare_query(&Query::from("docs")).unwrap();
-    let one_shot = block_on(db.all_for_identity(
+    let mut prepared = db.prepare_query(&Query::from("docs")).unwrap();
+    let mut one_shot = block_on(db.all_for_identity(
         &prepared,
         ReadOpts {
             tier: DurabilityTier::Global,
@@ -495,8 +496,8 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
     .unwrap();
     assert_eq!(row_ids(&one_shot), vec![doc]);
 
-    let access = db.prepare_query(&Query::from("doc_access_edges")).unwrap();
-    let access_rows = block_on(db.all_for_identity(
+    let mut access = db.prepare_query(&Query::from("doc_access_edges")).unwrap();
+    let mut access_rows = block_on(db.all_for_identity(
         &access,
         ReadOpts {
             tier: DurabilityTier::Global,
@@ -510,11 +511,11 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
 
 #[test]
 fn customer_resource_access_edge_policy_requires_group_access_seed() {
-    let schema = customer_resource_policy_minimal_schema();
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x11; 16]);
-    let group = row(0x22);
-    let resource = row(0xd1);
+    let mut schema = customer_resource_policy_minimal_schema();
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x11; 16]);
+    let mut group = row(0x22);
+    let mut resource = row(0xd1);
 
     server
         .insert_with_id(
@@ -551,10 +552,10 @@ fn customer_resource_access_edge_policy_requires_group_access_seed() {
 
 #[test]
 fn seeded_membership_resource_policy_allows_direct_and_transitive_groups() {
-    let schema = customer_resource_policy_minimal_schema();
-    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x12; 16]);
-    let other = AuthorId::from_bytes([0x13; 16]);
+    let mut schema = customer_resource_policy_minimal_schema();
+    let mut server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x12; 16]);
+    let mut other = AuthorId::from_bytes([0x13; 16]);
     let (direct, transitive, hidden) =
         seed_seeded_membership_resource_fixture(&server, member, other);
 
@@ -579,23 +580,23 @@ fn seeded_membership_resource_policy_allows_direct_and_transitive_groups() {
 
 #[test]
 fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leaking() {
-    let schema = customer_resource_policy_minimal_schema();
-    let db = open_db(0x69, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x12; 16]);
-    let other = AuthorId::from_bytes([0x13; 16]);
-    let spy = AuthorId::from_bytes([0x99; 16]);
+    let mut schema = customer_resource_policy_minimal_schema();
+    let mut db = open_db(0x69, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x12; 16]);
+    let mut other = AuthorId::from_bytes([0x13; 16]);
+    let mut spy = AuthorId::from_bytes([0x99; 16]);
     db.insert_with_id(
         "org",
         row(0x01),
         BTreeMap::from([("label".to_owned(), Value::String("org".to_owned()))]),
     )
     .unwrap();
-    let direct_group = row(0x31);
-    let transitive_group = row(0x32);
-    let hidden_group = row(0x33);
-    let direct = row(0xd1);
-    let transitive = row(0xd2);
-    let hidden = row(0xd3);
+    let mut direct_group = row(0x31);
+    let mut transitive_group = row(0x32);
+    let mut hidden_group = row(0x33);
+    let mut direct = row(0xd1);
+    let mut transitive = row(0xd2);
+    let mut hidden = row(0xd3);
     for (group, name) in [
         (direct_group, "direct"),
         (transitive_group, "transitive"),
@@ -641,8 +642,8 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
         )
         .unwrap();
     }
-    let prepared = db.prepare_query(&Query::from("res_i")).unwrap();
-    let opts = ReadOpts::default();
+    let mut prepared = db.prepare_query(&Query::from("res_i")).unwrap();
+    let mut opts = ReadOpts::default();
 
     db.node.node.borrow().reset_storage_read_metrics();
     let mut member_subscription =
@@ -653,7 +654,7 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
         )),
         vec![direct, transitive]
     );
-    let member_reads = db.node.node.borrow().take_storage_read_metrics();
+    let mut member_reads = db.node.node.borrow().take_storage_read_metrics();
     assert!(
         member_reads.total.reads > 0,
         "first identity should hydrate the shared seeded fragments"
@@ -668,12 +669,12 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
         )),
         vec![hidden]
     );
-    let other_reads = db.node.node.borrow().take_storage_read_metrics();
+    let mut other_reads = db.node.node.borrow().take_storage_read_metrics();
 
     db.node.node.borrow().reset_storage_read_metrics();
     let mut spy_subscription = block_on(db.subscribe_for_identity(&prepared, opts, spy)).unwrap();
     assert!(opened_rows(block_on(spy_subscription.next_raw()).unwrap()).is_empty());
-    let spy_reads = db.node.node.borrow().take_storage_read_metrics();
+    let mut spy_reads = db.node.node.borrow().take_storage_read_metrics();
 
     assert!(
         other_reads.total.reads < member_reads.total.reads,
@@ -691,17 +692,17 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
 
 #[test]
 fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes() {
-    let schema = customer_two_resource_policy_minimal_schema();
-    let db = open_db(0x6a, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x12; 16]);
+    let mut schema = customer_two_resource_policy_minimal_schema();
+    let mut db = open_db(0x6a, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x12; 16]);
     db.insert_with_id(
         "org",
         row(0x01),
         BTreeMap::from([("label".to_owned(), Value::String("org".to_owned()))]),
     )
     .unwrap();
-    let direct_group = row(0x31);
-    let transitive_group = row(0x32);
+    let mut direct_group = row(0x31);
+    let mut transitive_group = row(0x32);
     for (group, name) in [(direct_group, "direct"), (transitive_group, "transitive")] {
         db.insert_with_id("group", group, team_cells(name)).unwrap();
     }
@@ -718,10 +719,10 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
     )
     .unwrap();
 
-    let res_i_direct = row(0xd1);
-    let res_i_transitive = row(0xd2);
-    let res_j_direct = row(0xe1);
-    let res_j_transitive = row(0xe2);
+    let mut res_i_direct = row(0xd1);
+    let mut res_i_transitive = row(0xd2);
+    let mut res_j_direct = row(0xe1);
+    let mut res_j_transitive = row(0xe2);
     for (table, resource, title) in [
         ("res_i", res_i_direct, "i-direct"),
         ("res_i", res_i_transitive, "i-transitive"),
@@ -755,9 +756,9 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
         .unwrap();
     }
 
-    let res_i = db.prepare_query(&Query::from("res_i")).unwrap();
-    let res_j = db.prepare_query(&Query::from("res_j")).unwrap();
-    let opts = ReadOpts::default();
+    let mut res_i = db.prepare_query(&Query::from("res_i")).unwrap();
+    let mut res_j = db.prepare_query(&Query::from("res_j")).unwrap();
+    let mut opts = ReadOpts::default();
 
     db.node.node.borrow().reset_storage_read_metrics();
     let mut first = block_on(db.subscribe_for_identity(&res_i, opts.clone(), member)).unwrap();
@@ -765,7 +766,7 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
         row_ids(&opened_rows(block_on(first.next_raw()).unwrap())),
         vec![res_i_direct, res_i_transitive]
     );
-    let first_reads = db.node.node.borrow().take_storage_read_metrics();
+    let mut first_reads = db.node.node.borrow().take_storage_read_metrics();
 
     db.node.node.borrow().reset_storage_read_metrics();
     let mut second = block_on(db.subscribe_for_identity(&res_j, opts, member)).unwrap();
@@ -773,7 +774,7 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
         row_ids(&opened_rows(block_on(second.next_raw()).unwrap())),
         vec![res_j_direct, res_j_transitive]
     );
-    let second_reads = db.node.node.borrow().take_storage_read_metrics();
+    let mut second_reads = db.node.node.borrow().take_storage_read_metrics();
 
     assert!(
         second_reads.total.reads < first_reads.total.reads,
@@ -785,12 +786,12 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
 
 #[test]
 fn seeded_membership_grant_and_revoke_propagate_incrementally() {
-    let schema = customer_resource_policy_minimal_schema();
-    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x14; 16]);
-    let group = row(0x41);
-    let resource = row(0xd4);
-    let access = row(0xb4);
+    let mut schema = customer_resource_policy_minimal_schema();
+    let mut server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x14; 16]);
+    let mut group = row(0x41);
+    let mut resource = row(0xd4);
+    let mut access = row(0xb4);
 
     seed_customer_resource_base(&server);
     server
@@ -807,12 +808,12 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
         )
         .unwrap();
 
-    let client = open_db(0x61, member, &schema);
+    let mut client = open_db(0x61, member, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, member);
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
-        prepared_subscribe(&client, &Query::from("res_i"), ReadOpts::default()).unwrap();
+        prepared_subscribe(&mut client, &Query::from("res_i"), ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
@@ -871,10 +872,10 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
 
 #[test]
 fn same_table_seeded_membership_allows_direct_and_transitive_groups() {
-    let schema = same_table_seeded_resource_policy_schema();
-    let server = open_core(0x66, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x21; 16]);
-    let other = AuthorId::from_bytes([0x22; 16]);
+    let mut schema = same_table_seeded_resource_policy_schema();
+    let mut server = open_core(0x66, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x21; 16]);
+    let mut other = AuthorId::from_bytes([0x22; 16]);
     let (direct, transitive, hidden) =
         seed_same_table_seeded_resource_fixture(&server, member, other);
 
@@ -899,10 +900,10 @@ fn same_table_seeded_membership_allows_direct_and_transitive_groups() {
 
 #[test]
 fn same_table_string_seeded_membership_allows_direct_and_transitive_groups() {
-    let schema = same_table_string_seeded_resource_policy_schema();
-    let server = open_core(0x86, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x21; 16]);
-    let other = AuthorId::from_bytes([0x22; 16]);
+    let mut schema = same_table_string_seeded_resource_policy_schema();
+    let mut server = open_core(0x86, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x21; 16]);
+    let mut other = AuthorId::from_bytes([0x22; 16]);
     let (direct, transitive, hidden) =
         seed_same_table_string_seeded_resource_fixture(&server, member, other);
 
@@ -927,13 +928,13 @@ fn same_table_string_seeded_membership_allows_direct_and_transitive_groups() {
 
 #[test]
 fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
-    let schema = same_table_seeded_resource_policy_schema();
-    let server = open_core(0x67, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x23; 16]);
-    let other = AuthorId::from_bytes([0x24; 16]);
-    let direct_group = row(0x71);
-    let transitive_group = row(0x72);
-    let resource = row(0xe7);
+    let mut schema = same_table_seeded_resource_policy_schema();
+    let mut server = open_core(0x67, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x23; 16]);
+    let mut other = AuthorId::from_bytes([0x24; 16]);
+    let mut direct_group = row(0x71);
+    let mut transitive_group = row(0x72);
+    let mut resource = row(0xe7);
 
     for (group, identity, label) in [
         (direct_group, other, "direct"),
@@ -961,12 +962,12 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
         )
         .unwrap();
 
-    let client = open_db(0x68, member, &schema);
+    let mut client = open_db(0x68, member, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, member);
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
-        prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
+        prepared_subscribe(&mut client, &Query::from("resources"), ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
@@ -1010,7 +1011,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     assert!(removed.is_empty());
 
     let mut late_subscription =
-        prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
+        prepared_subscribe(&mut client, &Query::from("resources"), ReadOpts::default()).unwrap();
     assert_eq!(
         row_ids(&opened_rows(
             late_subscription
@@ -1062,10 +1063,10 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
 
 #[test]
 fn inherited_child_policy_allows_two_and_three_level_chains_per_identity() {
-    let schema = customer_inherited_child_policy_schema();
-    let server = open_core(0x62, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x15; 16]);
-    let other = AuthorId::from_bytes([0x16; 16]);
+    let mut schema = customer_inherited_child_policy_schema();
+    let mut server = open_core(0x62, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x15; 16]);
+    let mut other = AuthorId::from_bytes([0x16; 16]);
     let (member_child, member_grandchild, other_child, other_grandchild) =
         seed_inherited_child_fixture(&server, member, other);
 
@@ -1085,7 +1086,7 @@ fn inherited_child_policy_allows_two_and_three_level_chains_per_identity() {
         served_subscription_rows_for_author(&schema, &server, other, "res_i_grandchild"),
         vec![other_grandchild]
     );
-    let spy = AuthorId::from_bytes([0x99; 16]);
+    let mut spy = AuthorId::from_bytes([0x99; 16]);
     assert!(served_subscription_rows_for_author(&schema, &server, spy, "res_i_child").is_empty());
     assert!(
         served_subscription_rows_for_author(&schema, &server, spy, "res_i_grandchild").is_empty()
@@ -1094,19 +1095,23 @@ fn inherited_child_policy_allows_two_and_three_level_chains_per_identity() {
 
 #[test]
 fn inherited_child_policy_parent_revocation_propagates_incrementally() {
-    let schema = customer_inherited_child_policy_schema();
-    let server = open_core(0x63, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x17; 16]);
-    let other = AuthorId::from_bytes([0x18; 16]);
+    let mut schema = customer_inherited_child_policy_schema();
+    let mut server = open_core(0x63, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x17; 16]);
+    let mut other = AuthorId::from_bytes([0x18; 16]);
     let (child, _grandchild, _other_child, _other_grandchild) =
         seed_inherited_child_fixture(&server, member, other);
 
-    let client = open_db(0x64, member, &schema);
+    let mut client = open_db(0x64, member, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, member);
-    let mut subscription =
-        prepared_subscribe(&client, &Query::from("res_i_child"), ReadOpts::default()).unwrap();
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, member);
+    let mut subscription = prepared_subscribe(
+        &mut client,
+        &Query::from("res_i_child"),
+        ReadOpts::default(),
+    )
+    .unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
@@ -1141,13 +1146,13 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
 
 #[test]
 fn inherited_child_policy_composes_with_local_predicates() {
-    let schema = customer_inherited_child_policy_schema();
-    let server = open_core(0x65, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x19; 16]);
-    let other = AuthorId::from_bytes([0x1a; 16]);
+    let mut schema = customer_inherited_child_policy_schema();
+    let mut server = open_core(0x65, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x19; 16]);
+    let mut other = AuthorId::from_bytes([0x1a; 16]);
     let (open_child, _grandchild, _other_child, _other_grandchild) =
         seed_inherited_child_fixture(&server, member, other);
-    let closed_child = row(0xee);
+    let mut closed_child = row(0xee);
     server
         .insert_with_id(
             "res_i_child",
@@ -1164,12 +1169,12 @@ fn inherited_child_policy_composes_with_local_predicates() {
 
 #[test]
 fn inherited_child_insert_uses_parent_update_where_old_only() {
-    let schema = inherited_insert_policy_schema();
-    let member = AuthorId::from_bytes([0x21; 16]);
-    let other = AuthorId::from_bytes([0x22; 16]);
-    let server = open_core(0x65, AuthorId::SYSTEM, &schema);
-    let member_db = open_db(0x66, member, &schema);
-    let parent = row(0xf1);
+    let mut schema = inherited_insert_policy_schema();
+    let mut member = AuthorId::from_bytes([0x21; 16]);
+    let mut other = AuthorId::from_bytes([0x22; 16]);
+    let mut server = open_core(0x65, AuthorId::SYSTEM, &schema);
+    let mut member_db = open_db(0x66, member, &schema);
+    let mut parent = row(0xf1);
     server
         .insert_with_id(
             "parents",
@@ -1182,9 +1187,9 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
         .unwrap();
 
     let (member_transport, server_member_transport) = duplex();
-    let _member_upstream = member_db.connect_upstream(member_transport);
-    let _member_subscriber = server.accept_subscriber(server_member_transport, member);
-    let allowed = member_db
+    let mut _member_upstream = member_db.connect_upstream(member_transport);
+    let mut _member_subscriber = server.accept_subscriber(server_member_transport, member);
+    let mut allowed = member_db
         .insert_with_id("children", row(0xf2), child_insert_cells(parent, "allowed"))
         .unwrap();
     member_db.tick().unwrap();
@@ -1195,24 +1200,24 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
         allowed.mergeable_tx_id()
     );
     assert_eq!(
-        prepared_read(&member_db, &Query::from("children"))[0].row_uuid(),
+        prepared_read(&mut member_db, &Query::from("children"))[0].row_uuid(),
         allowed.row_uuid()
     );
 
-    let other_db = open_db(0x67, other, &schema);
+    let mut other_db = open_db(0x67, other, &schema);
     let (other_transport, server_other_transport) = duplex();
-    let _other_upstream = other_db.connect_upstream(other_transport);
-    let _other_subscriber = server.accept_subscriber(server_other_transport, other);
-    let denied = other_db
+    let mut _other_upstream = other_db.connect_upstream(other_transport);
+    let mut _other_subscriber = server.accept_subscriber(server_other_transport, other);
+    let mut denied = other_db
         .insert_with_id("children", row(0xf3), child_insert_cells(parent, "denied"))
         .unwrap();
-    assert_authority_rejects_staged_write(&other_db, &server, &denied);
-    let other_rows = prepared_read(&other_db, &Query::from("children"));
+    assert_authority_rejects_staged_write(&mut other_db, &server, &denied);
+    let mut other_rows = prepared_read(&mut other_db, &Query::from("children"));
     assert!(
         other_rows.is_empty(),
         "the rejected child must roll back locally"
     );
-    let rows = server.read(&Query::from("children")).unwrap();
+    let mut rows = server.read(&Query::from("children")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), allowed.row_uuid());
 }
@@ -1233,12 +1238,12 @@ fn seed_seeded_membership_resource_fixture(
     other: AuthorId,
 ) -> (RowUuid, RowUuid, RowUuid) {
     seed_customer_resource_base(server);
-    let direct_group = row(0x31);
-    let transitive_group = row(0x32);
-    let hidden_group = row(0x33);
-    let direct = row(0xd1);
-    let transitive = row(0xd2);
-    let hidden = row(0xd3);
+    let mut direct_group = row(0x31);
+    let mut transitive_group = row(0x32);
+    let mut hidden_group = row(0x33);
+    let mut direct = row(0xd1);
+    let mut transitive = row(0xd2);
+    let mut hidden = row(0xd3);
 
     for (group, name) in [
         (direct_group, "direct"),
@@ -1300,12 +1305,12 @@ fn seed_same_table_seeded_resource_fixture(
     member: AuthorId,
     other: AuthorId,
 ) -> (RowUuid, RowUuid, RowUuid) {
-    let direct_group = row(0x61);
-    let transitive_group = row(0x62);
-    let hidden_group = row(0x63);
-    let direct = row(0xf1);
-    let transitive = row(0xf2);
-    let hidden = row(0xf3);
+    let mut direct_group = row(0x61);
+    let mut transitive_group = row(0x62);
+    let mut hidden_group = row(0x63);
+    let mut direct = row(0xf1);
+    let mut transitive = row(0xf2);
+    let mut hidden = row(0xf3);
 
     for (group, identity, label) in [
         (direct_group, member, "direct"),
@@ -1357,12 +1362,12 @@ fn seed_same_table_string_seeded_resource_fixture(
     member: AuthorId,
     other: AuthorId,
 ) -> (RowUuid, RowUuid, RowUuid) {
-    let direct_group = row(0x61);
-    let transitive_group = row(0x62);
-    let hidden_group = row(0x63);
-    let direct = row(0xf1);
-    let transitive = row(0xf2);
-    let hidden = row(0xf3);
+    let mut direct_group = row(0x61);
+    let mut transitive_group = row(0x62);
+    let mut hidden_group = row(0x63);
+    let mut direct = row(0xf1);
+    let mut transitive = row(0xf2);
+    let mut hidden = row(0xf3);
 
     for (group, identity, label) in [
         (direct_group, member.0.to_string(), "direct"),
@@ -1415,14 +1420,14 @@ fn seed_inherited_child_fixture(
     other: AuthorId,
 ) -> (RowUuid, RowUuid, RowUuid, RowUuid) {
     seed_customer_resource_base(server);
-    let member_group = row(0xd1);
-    let other_group = row(0xd2);
-    let member_resource = row(0xdd);
-    let other_resource = row(0xde);
-    let member_child = row(0xe1);
-    let other_child = row(0xe2);
-    let member_grandchild = row(0xe3);
-    let other_grandchild = row(0xe4);
+    let mut member_group = row(0xd1);
+    let mut other_group = row(0xd2);
+    let mut member_resource = row(0xdd);
+    let mut other_resource = row(0xde);
+    let mut member_child = row(0xe1);
+    let mut other_child = row(0xe2);
+    let mut member_grandchild = row(0xe3);
+    let mut other_grandchild = row(0xe4);
 
     for (group, label) in [(member_group, "member"), (other_group, "other")] {
         server
@@ -1582,12 +1587,12 @@ fn child_insert_cells(parent: RowUuid, label: &str) -> RowCells {
 }
 
 fn seed_recursive_reachable_read_fixture(server: &CoreDb, member: AuthorId) -> (RowUuid, RowUuid) {
-    let direct_doc = row(0xd1);
-    let inherited_doc = row(0xd2);
-    let hidden_doc = row(0xd3);
-    let member_team = RowUuid(member.0);
-    let parent_team = row(0xa1);
-    let hidden_team = row(0xa2);
+    let mut direct_doc = row(0xd1);
+    let mut inherited_doc = row(0xd2);
+    let mut hidden_doc = row(0xd3);
+    let mut member_team = RowUuid(member.0);
+    let mut parent_team = row(0xa1);
+    let mut hidden_team = row(0xa2);
 
     for (team, name) in [
         (member_team, "member"),
@@ -1638,8 +1643,8 @@ fn seed_recursive_reachable_read_fixture(server: &CoreDb, member: AuthorId) -> (
         )
         .unwrap();
     for i in 0..42 {
-        let member = if i == 0 { member_team } else { parent_team };
-        let target = parent_team;
+        let mut member = if i == 0 { member_team } else { parent_team };
+        let mut target = parent_team;
         server
             .insert_with_id(
                 "group_entry",
@@ -1658,12 +1663,12 @@ fn served_subscription_rows_for_author(
     author: AuthorId,
     table: &str,
 ) -> Vec<RowUuid> {
-    let client = open_db(author.0.as_bytes()[0], author, schema);
+    let mut client = open_db(author.0.as_bytes()[0], author, schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, author);
-    let query = Query::from(table);
-    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, author);
+    let mut query = Query::from(table);
+    let mut subscription = prepared_subscribe(&mut client, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     let mut rows = BTreeSet::new();
 
@@ -1701,14 +1706,15 @@ fn served_many_subscription_rows_for_author(
     author: AuthorId,
     tables: &[&str],
 ) -> BTreeMap<String, Vec<RowUuid>> {
-    let client = open_db(author.0.as_bytes()[0].wrapping_add(0x40), author, schema);
+    let mut client = open_db(author.0.as_bytes()[0].wrapping_add(0x40), author, schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, author);
     let mut subscriptions = Vec::new();
     for table in tables {
-        let query = Query::from(*table);
-        let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+        let mut query = Query::from(*table);
+        let mut subscription =
+            prepared_subscribe(&mut client, &query, ReadOpts::default()).unwrap();
         assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
         subscriptions.push(((*table).to_owned(), subscription));
     }
@@ -1733,17 +1739,17 @@ fn served_group_entry_rows_via_relay(
     server: &CoreDb,
     author: AuthorId,
 ) -> (Vec<RowUuid>, usize, usize) {
-    let relay = open_db(0x71, AuthorId::SYSTEM, schema);
-    let client = open_db(0x72, author, schema);
+    let mut relay = open_db(0x71, AuthorId::SYSTEM, schema);
+    let mut client = open_db(0x72, author, schema);
     let (relay_transport, core_transport) = duplex();
-    let _relay_upstream = relay.connect_upstream(relay_transport);
-    let _core_subscriber = server.accept_subscriber(core_transport, AuthorId::SYSTEM);
+    let mut _relay_upstream = relay.connect_upstream(relay_transport);
+    let mut _core_subscriber = server.accept_subscriber(core_transport, AuthorId::SYSTEM);
     let (client_transport, relay_sub_transport) = duplex();
-    let _client_upstream = client.connect_upstream(client_transport);
-    let _relay_subscriber = relay.accept_subscriber(relay_sub_transport, author);
+    let mut _client_upstream = client.connect_upstream(client_transport);
+    let mut _relay_subscriber = relay.accept_subscriber(relay_sub_transport, author);
 
-    let query = Query::from("group_entry");
-    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+    let mut query = Query::from("group_entry");
+    let mut subscription = prepared_subscribe(&mut client, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     let mut rows = BTreeSet::new();
     for _ in 0..20 {
@@ -1771,12 +1777,12 @@ fn served_group_entry_rows_via_relay(
             }
         }
     }
-    let client_query = client.prepare_query(&Query::from("group_entry")).unwrap();
-    let client_one_shot = block_on(client.all(&client_query, ReadOpts::default()))
+    let mut client_query = client.prepare_query(&Query::from("group_entry")).unwrap();
+    let mut client_one_shot = block_on(client.all(&client_query, ReadOpts::default()))
         .unwrap()
         .len();
-    let relay_query = relay.prepare_query(&Query::from("group_entry")).unwrap();
-    let relay_one_shot = block_on(relay.all(&relay_query, ReadOpts::default()))
+    let mut relay_query = relay.prepare_query(&Query::from("group_entry")).unwrap();
+    let mut relay_one_shot = block_on(relay.all(&relay_query, ReadOpts::default()))
         .unwrap()
         .len();
     (rows.into_iter().collect(), client_one_shot, relay_one_shot)
@@ -1784,11 +1790,11 @@ fn served_group_entry_rows_via_relay(
 
 #[test]
 fn db_surface_recursive_reachable_claim_policy_subscription_routes_per_identity() {
-    let schema = benchmark_shaped_recursive_reachable_read_schema();
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x11; 16]);
-    let admin = AuthorId::SYSTEM;
-    let spy = AuthorId::from_bytes([0x33; 16]);
+    let mut schema = benchmark_shaped_recursive_reachable_read_schema();
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut member = AuthorId::from_bytes([0x11; 16]);
+    let mut admin = AuthorId::SYSTEM;
+    let mut spy = AuthorId::from_bytes([0x33; 16]);
     let (direct_doc, inherited_doc) = seed_recursive_reachable_read_fixture(&server, member);
 
     assert_eq!(
@@ -1804,7 +1810,7 @@ fn db_surface_recursive_reachable_claim_policy_subscription_routes_per_identity(
         served_subscription_rows_for_author(&schema, &server, member, "group_entry"),
         (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>()
     );
-    let rows = served_many_subscription_rows_for_author(
+    let mut rows = served_many_subscription_rows_for_author(
         &schema,
         &server,
         member,

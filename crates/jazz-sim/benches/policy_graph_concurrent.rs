@@ -46,27 +46,27 @@ fn main() {
         config.fixture.dir.display()
     );
     let schema = policy_graph_schema_fixture(&config.fixture);
-    let seeded = seed_core(&schema, &config);
+    let mut seeded = seed_core(&schema, &config);
     let manifest = member_seed_manifest(&config.fixture);
     let expected = manifest.expected_counts();
     if config.visibility_report {
-        emit_visibility_report(&seeded, &expected, config.identity);
+        emit_visibility_report(&mut seeded, &expected, config.identity);
         return;
     }
-    assert_core_visibility(&seeded, &expected, config.identity);
+    assert_core_visibility(&mut seeded, &expected, config.identity);
 
     if config.runs_phase("cold") {
-        let summary = run_cold(&schema, &seeded, &expected, &config);
+        let summary = run_cold(&schema, &mut seeded, &expected, &config);
         emit_summary(&config, &session_id, "cold", &summary);
     }
     if config.runs_phase("warm") {
-        let summary = run_warm(&schema, &seeded, &expected, &config);
+        let summary = run_warm(&schema, &mut seeded, &expected, &config);
         emit_summary(&config, &session_id, "warm", &summary);
     }
 }
 
 fn assert_core_visibility(
-    seeded: &Seeded,
+    seeded: &mut Seeded,
     expected: &BTreeMap<String, usize>,
     identity: BenchIdentity,
 ) {
@@ -117,7 +117,7 @@ fn assert_core_visibility(
 }
 
 fn emit_visibility_report(
-    seeded: &Seeded,
+    seeded: &mut Seeded,
     expected: &BTreeMap<String, usize>,
     identity: BenchIdentity,
 ) {
@@ -170,7 +170,7 @@ fn emit_visibility_report(
     );
 }
 
-fn t105_access_debug(seeded: &Seeded, member: AuthorId) -> String {
+fn t105_access_debug(seeded: &mut Seeded, member: AuthorId) -> String {
     let t1_member = visible_count(seeded, "t1", member);
     let t188_member = visible_count(seeded, "t188", member);
     let t190_member = visible_count(seeded, "t190", member);
@@ -222,11 +222,11 @@ fn t105_access_debug(seeded: &Seeded, member: AuthorId) -> String {
     )
 }
 
-fn visible_count(seeded: &Seeded, table: &str, author: AuthorId) -> usize {
+fn visible_count(seeded: &mut Seeded, table: &str, author: AuthorId) -> usize {
     visible_rows(seeded, table, author).len()
 }
 
-fn visible_rows(seeded: &Seeded, table: &str, author: AuthorId) -> Vec<CurrentRow> {
+fn visible_rows(seeded: &mut Seeded, table: &str, author: AuthorId) -> Vec<CurrentRow> {
     let prepared = seeded
         .core
         .prepare_query(&Query::from(table))
@@ -428,7 +428,7 @@ impl BenchIdentity {
 
 struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
-    core: Db<RocksDbStorage>,
+    core: Db,
     schema: JazzSchema,
     member: AuthorId,
     claims: BTreeMap<String, Value>,
@@ -445,7 +445,7 @@ impl Seeded {
 
 struct DbNode {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<RocksDbStorage>,
+    db: Db,
 }
 
 struct OpenSubscription {
@@ -609,7 +609,9 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
             .expect("member seed row dump member_row uuid"),
     );
     let claims = dump.identity.claims;
-    core_db.set_identity_claims(member, claims.clone());
+    core_db
+        .set_identity_claims(member, claims.clone())
+        .expect("install member claims on core");
     Seeded {
         _core_dir: Rc::new(core_dir),
         core: core_db,
@@ -869,7 +871,7 @@ fn json_f64(value: &JsonValue) -> f64 {
 
 fn run_cold(
     schema: &JazzSchema,
-    seeded: &Seeded,
+    seeded: &mut Seeded,
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
@@ -888,7 +890,7 @@ fn run_cold(
 
 fn run_warm(
     schema: &JazzSchema,
-    seeded: &Seeded,
+    seeded: &mut Seeded,
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
@@ -925,9 +927,9 @@ fn run_warm(
 }
 
 fn run_connect_and_subscribe(
-    seeded: &Seeded,
+    seeded: &mut Seeded,
     relay_node: Option<DbNode>,
-    client: DbNode,
+    mut client: DbNode,
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
@@ -936,7 +938,7 @@ fn run_connect_and_subscribe(
     let _core_sub;
     let _client_upstream;
     let _relay_sub;
-    let active_relay;
+    let mut active_relay;
     let client_counters;
     match relay_node {
         Some(relay_node) => {
@@ -958,7 +960,8 @@ fn run_connect_and_subscribe(
             ));
             relay_node
                 .db
-                .set_identity_claims(config.identity.author(seeded), seeded.claims.clone());
+                .set_identity_claims(config.identity.author(seeded), seeded.claims.clone())
+                .expect("install member claims on relay");
             active_relay = Some(relay_node);
             client_counters = counters;
         }
@@ -982,7 +985,8 @@ fn run_connect_and_subscribe(
     }
     client
         .db
-        .set_identity_claims(config.identity.author(seeded), seeded.claims.clone());
+        .set_identity_claims(config.identity.author(seeded), seeded.claims.clone())
+        .expect("install member claims on client");
     let connect_ms = start.elapsed().as_millis();
 
     let subscribe_start = Instant::now();
@@ -1029,19 +1033,19 @@ fn run_connect_and_subscribe(
         }
 
         let server_start = Instant::now();
-        let core_tick = seeded.core.tick_stats().expect("core tick");
+        let core_tick = jazz::db::block_on(seeded.core.tick()).expect("core tick");
         server_open_bundle_ms += server_start.elapsed().as_millis();
         accumulate_tick_stats(core_tick);
-        if let Some(relay) = &active_relay {
+        if let Some(relay) = &mut active_relay {
             let relay_start = Instant::now();
-            let relay_tick = relay.db.tick_stats().expect("relay tick");
+            let relay_tick = jazz::db::block_on(relay.db.tick()).expect("relay tick");
             server_open_bundle_ms += relay_start.elapsed().as_millis();
             accumulate_tick_stats(relay_tick);
         }
 
         let _queued_to_client = client_counters.right_inbound.borrow().len();
         let client_start = Instant::now();
-        let client_tick = client.db.tick_stats().expect("client tick");
+        let client_tick = jazz::db::block_on(client.db.tick()).expect("client tick");
         drain_subscriptions(start, &mut subscriptions);
         client_apply_tick_ms += client_start.elapsed().as_millis();
         accumulate_tick_stats(client_tick);
@@ -1376,7 +1380,7 @@ fn open_history_complete_db_at(
     schema: JazzSchema,
     node_uuid: NodeUuid,
     author: AuthorId,
-) -> Db<RocksDbStorage> {
+) -> Db {
     open_db_at(path, schema, node_uuid, author, true)
 }
 
@@ -1397,7 +1401,7 @@ fn open_db_at(
     node_uuid: NodeUuid,
     author: AuthorId,
     history_complete: bool,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let storage = open_storage_at(path, &schema);
     let config = DbConfig {
         schema,

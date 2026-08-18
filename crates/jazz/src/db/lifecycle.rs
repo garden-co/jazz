@@ -10,7 +10,7 @@ use crate::node::{DemandDrivenNode, DemandDrivenNodeOpen};
 /// async storage. The resulting owner keeps the familiar synchronous `Db` facade
 /// and its durable runtime together.
 #[doc(hidden)]
-pub struct DemandDrivenDbOpen {
+pub struct DbOpen {
     opening: Option<DemandDrivenNodeOpen>,
     runtime: Option<DemandDrivenNode>,
     schema: JazzSchema,
@@ -20,18 +20,31 @@ pub struct DemandDrivenDbOpen {
 
 /// High-level database facade plus the async owner of its resident node.
 #[doc(hidden)]
-pub struct DemandDrivenDb {
-    database: Db<groove::storage::DemandLoadedStorage>,
+pub struct Db {
+    pub(super) schema: JazzSchema,
+    pub(super) schema_version_id: SchemaVersionId,
+    pub(super) schema_views: Rc<RefCell<BTreeMap<SchemaViewId, JazzSchema>>>,
+    pub(super) identity: DbIdentity,
+    pub(super) node: Rc<Node<groove::storage::DemandLoadedStorage>>,
+    pub(super) row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
+    pub(super) next_now_ms: Rc<Cell<u64>>,
     runtime: DemandDrivenNode,
 }
 
-/// Immutable typed-schema selection for one [`DemandDrivenDb`] owner.
+/// Immutable typed-schema selection for one [`Db`] owner.
 ///
 /// This token carries no node, storage, scheduler, or mutable state. Bindings
 /// may clone it freely and must route operations back through the unique owner.
 #[derive(Clone, Debug)]
-pub struct DemandDrivenView {
+pub struct DbSchemaView {
     schema_view_id: SchemaViewId,
+}
+
+impl DbSchemaView {
+    /// Canonical identity of this registered typed schema selection.
+    pub fn schema_view_id(&self) -> SchemaViewId {
+        self.schema_view_id
+    }
 }
 
 /// A short-lived typed view borrowed from the unique async database owner.
@@ -39,9 +52,10 @@ pub struct DemandDrivenView {
 /// It owns no storage or runtime. Dropping it merely releases the mutable
 /// borrow so another schema view can operate on the same resident node.
 #[doc(hidden)]
-pub struct DemandDrivenViewDb<'a> {
-    database: Db<groove::storage::DemandLoadedStorage>,
-    runtime: &'a mut DemandDrivenNode,
+pub struct DbView<'a> {
+    owner: &'a mut Db,
+    schema: JazzSchema,
+    schema_version_id: SchemaVersionId,
 }
 
 /// Acquire every cold canonical witness required by the current local
@@ -51,22 +65,26 @@ pub struct DemandDrivenViewDb<'a> {
 /// synchronous, while an async backend never leaks `NotResident` through
 /// subscription publication.
 async fn refresh_demand_driven_subscriptions(
-    database: &Db<groove::storage::DemandLoadedStorage>,
+    owner_node: &Node<groove::storage::DemandLoadedStorage>,
     runtime: &mut DemandDrivenNode,
 ) -> Result<usize, Error> {
     runtime.publish_query_runtime_updates()?;
     std::future::poll_fn(|context| {
         runtime
-            .poll_acquire_resident(context, |node| {
-                database.node.prepare_subscription_refresh_inputs(node)
+            .poll_acquire_resident(context, |state| {
+                owner_node.prepare_subscription_refresh_inputs(state)
             })
             .map_err(Error::from)
     })
     .await?;
-    database.refresh_subscriptions()
+    let refreshed = owner_node.refresh_subscriptions()?;
+    if refreshed > 0 {
+        owner_node.mark_subscriber_connections_dirty();
+    }
+    Ok(refreshed)
 }
 
-impl DemandDrivenDbOpen {
+impl DbOpen {
     #[doc(hidden)]
     pub fn new(
         schema: JazzSchema,
@@ -134,7 +152,7 @@ impl DemandDrivenDbOpen {
     }
 
     #[doc(hidden)]
-    pub fn poll(&mut self, context: &mut Context<'_>) -> Poll<Result<DemandDrivenDb, Error>> {
+    pub fn poll(&mut self, context: &mut Context<'_>) -> Poll<Result<Db, Error>> {
         if self.runtime.is_none() {
             let runtime: DemandDrivenNode = match self
                 .opening
@@ -171,32 +189,136 @@ impl DemandDrivenDbOpen {
             SchemaViewId::for_schema(&self.schema),
             self.schema.clone(),
         )])));
-        let database = Db {
+        let node = Rc::new(node);
+        let row_id_source = Rc::new(RefCell::new(
+            self.id_source
+                .take()
+                .unwrap_or_else(|| Box::<ProductionRowIdSource>::default()),
+        ));
+        Poll::Ready(Ok(Db {
             schema: self.schema.clone(),
             schema_version_id,
-            schema_view_is_fixed: false,
             schema_views,
             identity: self.identity,
-            node: Rc::new(node),
-            row_id_source: Rc::new(RefCell::new(
-                self.id_source
-                    .take()
-                    .unwrap_or_else(|| Box::<ProductionRowIdSource>::default()),
-            )),
+            node,
+            row_id_source,
             next_now_ms: Rc::new(Cell::new(1)),
-        };
-        Poll::Ready(Ok(DemandDrivenDb { database, runtime }))
+            runtime,
+        }))
     }
 }
 
-impl DemandDrivenDb {
+impl Db {
+    pub(crate) fn next_now_ms(&self) -> u64 {
+        let now = self.next_now_ms.get();
+        self.next_now_ms.set(now.saturating_add(1));
+        now
+    }
+
+    fn finalize_local_commit(&self, tx_id: TxId) -> Result<DurabilityTier, Error> {
+        self.node.queue_pending_upload(tx_id, None);
+        Ok(self.node.node.borrow().authored_commit_durability())
+    }
+
+    fn abandon_open_transaction(&self, tx_id: OpenBatchId) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .abandon_tx(tx_id)
+            .map_err(Into::into)
+    }
+
+    pub(super) fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
+        self.schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))
+    }
+
+    pub(super) fn apply_insert_defaults(
+        &self,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<RowCells, Error> {
+        mutations::apply_insert_defaults_loaded(&self.schema, table, cells)
+    }
+
+    fn check_catalogue_admin(&self) -> Result<(), Error> {
+        if self.identity.author == AuthorId::SYSTEM {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorCode::Protocol,
+                "catalogue updates require a serving Node",
+            ))
+        }
+    }
+
+    fn prepare_insert_commit(
+        &self,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<(RowUuid, MergeableCommit), Error> {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        let cells = self.apply_insert_defaults(table, cells)?;
+        Ok((
+            row,
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(self.identity.author)
+                .cells(cells),
+        ))
+    }
+
+    fn acquire_insert_target(
+        node: &Node<groove::storage::DemandLoadedStorage>,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), MutationPrepareError> {
+        let (content_parent, deletion_parent) = {
+            let mut node = node.node.borrow_mut();
+            let _empty_history = node
+                .row_history(table, row)
+                .map_err(MutationPrepareError::Node)?;
+            (
+                node.local_content_winner_tx_id(table, row)
+                    .map_err(MutationPrepareError::Node)?,
+                node.local_deletion_winner_tx_id(table, row)
+                    .map_err(MutationPrepareError::Node)?,
+            )
+        };
+        if deletion_parent.is_some() {
+            return Err(MutationPrepareError::Api(row_already_deleted(row)));
+        }
+        if content_parent.is_some() {
+            return Err(MutationPrepareError::Api(Error::new(
+                ErrorCode::WriteRejected,
+                format!("encoding error: object already exists: {}", row.0),
+            )));
+        }
+        Ok(())
+    }
+
+    fn default_view_db(&mut self) -> Result<DbView<'_>, Error> {
+        Ok(DbView {
+            schema: self.schema.clone(),
+            schema_version_id: self.schema_version_id,
+            owner: self,
+        })
+    }
+
     async fn refresh_subscriptions_prepared(&mut self) -> Result<usize, Error> {
-        refresh_demand_driven_subscriptions(&self.database, &mut self.runtime).await
+        refresh_demand_driven_subscriptions(&self.node, &mut self.runtime).await
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) async fn refresh_subscriptions(&mut self) -> Result<usize, Error> {
+        self.refresh_subscriptions_prepared().await
     }
 
     /// Open an ordinary database over a storage backend that completes the
     /// ordered asynchronous contract immediately.
-    pub async fn open_immediate<S>(config: DbConfig<S>) -> Result<Self, Error>
+    pub async fn open<S>(config: DbConfig<S>) -> Result<Self, Error>
     where
         S: OrderedKvStorage + ReopenableStorage + 'static,
     {
@@ -206,7 +328,7 @@ impl DemandDrivenDb {
             identity,
             id_source,
         } = config;
-        let mut opening = DemandDrivenDbOpen::new(
+        let mut opening = DbOpen::new(
             schema,
             identity,
             Box::new(groove::storage::async_ordered::ImmediateStorage::new(
@@ -219,7 +341,7 @@ impl DemandDrivenDb {
 
     /// Open a history-complete authority over an immediately completing
     /// ordered backend.
-    pub async fn open_history_complete_immediate<S>(config: DbConfig<S>) -> Result<Self, Error>
+    pub async fn open_history_complete<S>(config: DbConfig<S>) -> Result<Self, Error>
     where
         S: OrderedKvStorage + ReopenableStorage + 'static,
     {
@@ -229,7 +351,7 @@ impl DemandDrivenDb {
             identity,
             id_source,
         } = config;
-        let mut opening = DemandDrivenDbOpen::new_history_complete(
+        let mut opening = DbOpen::new_history_complete(
             schema,
             identity,
             Box::new(groove::storage::async_ordered::ImmediateStorage::new(
@@ -243,9 +365,7 @@ impl DemandDrivenDb {
     /// Open a blank dynamic-edge catalogue over an immediately completing
     /// ordered backend. The store remains unavailable to application sessions
     /// until an authenticated authority snapshot is adopted.
-    pub async fn open_catalogue_uninitialized_immediate<S>(
-        config: DbConfig<S>,
-    ) -> Result<Self, Error>
+    pub async fn open_catalogue_uninitialized<S>(config: DbConfig<S>) -> Result<Self, Error>
     where
         S: OrderedKvStorage + ReopenableStorage + 'static,
     {
@@ -255,7 +375,7 @@ impl DemandDrivenDb {
             id_source,
             ..
         } = config;
-        let mut opening = DemandDrivenDbOpen::new_catalogue_uninitialized(
+        let mut opening = DbOpen::new_catalogue_uninitialized(
             identity,
             Box::new(groove::storage::async_ordered::ImmediateStorage::new(
                 storage,
@@ -267,19 +387,382 @@ impl DemandDrivenDb {
 
     /// Start a logical query without touching durable storage.
     pub fn table(&self, table: impl Into<String>) -> Query {
-        self.database.table(table)
+        Query::from(table)
     }
 
     /// Compile a logical query. Durable source acquisition happens when the
     /// resulting query is read or subscribed, not while its shape is built.
     pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
-        self.database.prepare_query(query)
+        self.prepare_query_bound(query, BTreeMap::new())
+    }
+
+    pub fn prepare_query_bound(
+        &self,
+        query: &Query,
+        params: BTreeMap<String, Value>,
+    ) -> Result<PreparedQuery, Error> {
+        let node = self.node.node.borrow();
+        let current = node.current_write_schema().map_err(Error::from)?;
+        let schema = if current.schema == self.schema_version_id {
+            self.schema.clone()
+        } else {
+            node.catalogue_schemas()
+                .get(&current.schema)
+                .map(|schema| schema.schema.clone())
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Schema,
+                        format!(
+                            "current write schema {:?} is missing from catalogue",
+                            current.schema
+                        ),
+                    )
+                })?
+        };
+        drop(node);
+        reads::prepare_query_bound_loaded(&self.node, &schema, current.schema, query, params)
+    }
+
+    fn prepare_query_for_schema(
+        &self,
+        query: &Query,
+        schema: &JazzSchema,
+        schema_version: SchemaVersionId,
+    ) -> Result<PreparedQuery, Error> {
+        reads::prepare_query_loaded(&self.node, schema, schema_version, query)
+    }
+
+    /// Read the default typed view with the default local query options.
+    pub async fn read(&mut self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.all(prepared, ReadOpts::default()).await
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn read_profiled(
+        &mut self,
+        prepared: &PreparedQuery,
+    ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
+        let node = Rc::clone(&self.node);
+        std::future::poll_fn(|context| {
+            self.runtime.poll_resident_operation(context, || {
+                let mut state = node.node.borrow_mut();
+                let token = state.groove_runtime_token();
+                state.query_rows_local_preview_profiled(
+                    &prepared.shape,
+                    &prepared.binding,
+                    prepared.plan_for_tier(DurabilityTier::Local, token),
+                )
+            })
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Read at most one row from the default typed view.
+    pub async fn one(&mut self, prepared: &PreparedQuery) -> Result<Option<CurrentRow>, Error> {
+        let mut rows = self.read(prepared).await?;
+        if rows.len() > 1 {
+            return Err(Error::new(
+                ErrorCode::Query,
+                format!("expected at most one row, got {}", rows.len()),
+            ));
+        }
+        Ok(rows.pop())
+    }
+
+    /// Run a one-shot query as an explicit terminated-session identity.
+    pub async fn all_for_identity(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.default_view_db()?
+            .all_for_identity(prepared, opts, author)
+            .await
+    }
+
+    /// Insert one caller-selected row through the default typed view.
+    pub async fn insert_with_id(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        self.default_view_db()?
+            .insert_with_id(table, row, cells, None, None)
+            .await
+    }
+
+    pub async fn insert_with_id_at_ms(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        self.default_view_db()?
+            .insert_with_id(table, row, cells, None, Some(now_ms))
+            .await
+    }
+
+    pub async fn all_relation_snapshot(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.relation_snapshot(prepared, opts).await
+    }
+
+    pub async fn insert_with_id_for_identity(
+        &mut self,
+        author: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        self.default_view_db()?
+            .insert_with_id(table, row, cells, Some(author), None)
+            .await
+    }
+
+    pub async fn insert_for_identity(
+        &mut self,
+        author: AuthorId,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        self.default_view_db()?
+            .insert_with_id(table, row, cells, Some(author), None)
+            .await
+    }
+
+    pub async fn upsert_for_identity(
+        &mut self,
+        author: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        self.default_view_db()?
+            .upsert(table, row, cells, Some(author), None)
+            .await
+    }
+
+    pub async fn update_for_identity(
+        &mut self,
+        author: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        self.default_view_db()?
+            .update(table, row, cells, Some(author), None)
+            .await
+    }
+
+    pub async fn delete_for_identity(
+        &mut self,
+        author: AuthorId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        self.default_view_db()?
+            .delete(table, row, Some(author), None)
+            .await
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn update_at_ms(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        self.default_view_db()?
+            .update(table, row, cells, None, Some(now_ms))
+            .await
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn delete_at_ms(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        now_ms: u64,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        self.default_view_db()?
+            .delete(table, row, None, Some(now_ms))
+            .await
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn tick_stats(&self) -> Result<DbTickStats, Error> {
+        self.node.tick().map_err(Into::into)
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn reset_storage_read_metrics_for_test(&self) {
+        self.node.node.borrow().reset_storage_read_metrics();
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn take_storage_read_metrics_for_test(&self) -> groove::db::StorageReadMetrics {
+        self.node.node.borrow().take_storage_read_metrics()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn active_groove_subscriptions_for_test(&self) -> usize {
+        self.runtime_stats_for_test().active_subscriptions
+    }
+
+    pub fn set_identity_claims(
+        &self,
+        author: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<(), Error> {
+        let changed = {
+            let mut node = self.node.node.borrow_mut();
+            let previous_revision = node.session_claim_revision(author);
+            node.set_session_claims(author, claims);
+            node.session_claim_revision(author) != previous_revision
+        };
+        if changed {
+            self.node.schedule_tick(TickUrgency::Deferred);
+        }
+        Ok(())
+    }
+
+    pub fn can_insert(&self, _table: &str, _cells: RowCells) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
+    }
+
+    pub fn can_read(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
+    }
+
+    pub fn can_update(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
+    }
+
+    pub fn can_delete(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
+    }
+
+    pub fn attach_query_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<QueryAttachment, Error> {
+        self.node
+            .attach_query_with_opts(prepared, opts, self.identity.author)
+    }
+
+    pub fn attach_query_with_opts_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<QueryAttachment, Error> {
+        self.node.attach_query_with_opts(prepared, opts, author)
+    }
+
+    pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
+        self.node.query_attachment_is_covered(attachment)
+    }
+
+    pub fn detach_query(&self, attachment: QueryAttachment) {
+        self.node.detach_query(attachment);
+    }
+
+    #[cfg(feature = "testing")]
+    pub async fn flush_for_test(&mut self) -> Result<(), Error> {
+        self.runtime.publish_query_runtime_updates()?;
+        std::future::poll_fn(|context| self.runtime.poll_persistence(context))
+            .await
+            .map_err(Error::from)?;
+        Ok(self.node.node.borrow_mut().flush_query_runtime()?)
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
+        Ok(self.node.node.borrow().encoded_storage_bytes_for_test()?)
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn sync_metrics_for_test(&self) -> crate::node::SyncMetrics {
+        self.node.node.borrow().sync_metrics().clone()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
+        self.node.node.borrow().runtime_stats_for_test()
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn maintained_subscription_size_receipts_for_test(
+        &self,
+    ) -> Vec<MaintainedSubscriptionSizeReceipt> {
+        self.node
+            .subscriptions
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter_map(|state| {
+                let state = state.borrow();
+                let SubscriptionKind::Prepared {
+                    shape,
+                    binding,
+                    maintained_subscription,
+                } = &state.kind;
+                let maintained_subscription = maintained_subscription.as_ref()?;
+                let snapshot = &state.snapshot;
+                Some(MaintainedSubscriptionSizeReceipt {
+                    name: shape.query().table.clone(),
+                    shape_id: shape.shape_id().0,
+                    binding_id: binding.binding_id().0,
+                    rows: snapshot.rows.len(),
+                    root_rows: snapshot.root_count,
+                    relation_edges: snapshot.edges.len(),
+                    footprint: DbMaintainedSubscriptionFootprint::from_local(
+                        maintained_subscription.footprint(),
+                    ),
+                    snapshot_bytes: encode_relation_snapshot_for_size(snapshot)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or_default(),
+                    reset_frame_bytes: encode_subscription_reset_frame_for_size(snapshot)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or_default(),
+                    validation_tuple_estimate_bytes: validation_tuple_estimate_bytes(
+                        shape,
+                        binding,
+                        state.author,
+                        state.read_tier,
+                        &state.read_view,
+                    ),
+                })
+            })
+            .collect()
     }
 
     /// Return the typed view selected when this owner opened.
-    pub fn default_view(&self) -> DemandDrivenView {
-        DemandDrivenView {
-            schema_view_id: self.database.schema_view_id(),
+    pub fn default_view(&self) -> DbSchemaView {
+        DbSchemaView {
+            schema_view_id: SchemaViewId::for_schema(&self.schema),
+        }
+    }
+
+    /// Recover an already-registered typed schema selection by identity.
+    pub fn schema_view(&self, schema_view_id: SchemaViewId) -> Result<DbSchemaView, Error> {
+        if self.schema_views.borrow().contains_key(&schema_view_id) {
+            Ok(DbSchemaView { schema_view_id })
+        } else {
+            Err(Error::new(
+                ErrorCode::Schema,
+                format!("schema view {schema_view_id:?} is not registered"),
+            ))
         }
     }
 
@@ -289,46 +772,167 @@ impl DemandDrivenDb {
     pub async fn register_schema_view(
         &mut self,
         schema: JazzSchema,
-    ) -> Result<DemandDrivenView, Error> {
-        let registered = self.database.register_schema_view(schema)?;
-        let schema_view_id = registered.schema_view_id();
+    ) -> Result<DbSchemaView, Error> {
+        self.register_schema_view_resident(schema.clone())?;
+        let schema_view_id = SchemaViewId::for_schema(&schema);
         std::future::poll_fn(|context| self.runtime.poll_persistence(context))
             .await
             .map_err(Error::from)?;
-        Ok(DemandDrivenView { schema_view_id })
+        Ok(DbSchemaView { schema_view_id })
     }
 
-    fn facade_for_view(
-        &self,
-        view: &DemandDrivenView,
-    ) -> Result<Db<groove::storage::DemandLoadedStorage>, Error> {
-        self.database.schema_view(view.schema_view_id)
+    fn schema_for_view(&self, view: &DbSchemaView) -> Result<JazzSchema, Error> {
+        let registered = self
+            .schema_views
+            .borrow()
+            .get(&view.schema_view_id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Schema,
+                    format!("schema view {:?} is not registered", view.schema_view_id),
+                )
+            })?;
+        let version = registered.version_id();
+        let node = self.node.node.borrow();
+        let admitted = node
+            .catalogue_schemas()
+            .get(&version)
+            .ok_or_else(|| Error::new(ErrorCode::Schema, "registered schema is missing"))?;
+        Ok(schema_with_authoritative_runtime_metadata(
+            registered,
+            &admitted.schema,
+        ))
+    }
+
+    fn register_schema_view_resident(&mut self, schema: JazzSchema) -> Result<(), Error> {
+        let schema_version_id = schema.version_id();
+        let schema_view_id = SchemaViewId::for_schema(&schema);
+        self.admit_local_schema_view_if_needed(&schema)?;
+        {
+            let node = self.node.node.borrow();
+            let admitted = node
+                .catalogue_schemas()
+                .get(&schema_version_id)
+                .ok_or_else(|| Error::new(ErrorCode::Schema, "registered schema is missing"))?;
+            if !schema_policy_metadata_matches(&admitted.schema, &schema) {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "schema view policy metadata conflicts with its admitted structural schema",
+                ));
+            }
+            if !schema_index_metadata_matches(&admitted.schema, &schema) {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "schema view index metadata conflicts with its admitted structural schema",
+                ));
+            }
+        }
+        let mut views = self.schema_views.borrow_mut();
+        if let Some(existing) = views.get(&schema_view_id) {
+            if existing != &schema {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    format!("schema view id collision for {schema_view_id:?}"),
+                ));
+            }
+        } else {
+            views.insert(schema_view_id, schema.clone());
+        }
+        drop(views);
+        self.schema_version_id = schema_version_id;
+        self.schema = schema;
+        Ok(())
+    }
+
+    fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
+        let empty_schema = JazzSchema::new([]);
+        let empty_id = empty_schema.version_id();
+        let target_id = schema.version_id();
+        let (source, catalogue_seq, bootstrap_current) = {
+            let node = self.node.node.borrow();
+            if node.catalogue_schemas().contains_key(&target_id) {
+                return Ok(());
+            }
+            let current = node.current_write_schema().map_err(Error::from)?;
+            let source = node
+                .catalogue_schemas()
+                .get(&current.schema)
+                .map(|version| version.schema.clone())
+                .ok_or_else(|| Error::new(ErrorCode::Schema, "current schema view is missing"))?;
+            (
+                source,
+                node.active_catalogue_seq().saturating_add(1),
+                current.schema == empty_id && node.catalogue_schemas().len() == 1,
+            )
+        };
+        let (lens, new_tables, dropped_tables) = direct_schema_view_lens(&source, schema)?;
+        let publication = SchemaLineagePublication::new(
+            SchemaVersion::new(schema.clone()),
+            lens,
+            new_tables,
+            dropped_tables,
+        );
+        let mut node = self.node.node.borrow_mut();
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq,
+            publication: Box::new(publication),
+        })?;
+        if bootstrap_current {
+            node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+                author: AuthorId::SYSTEM,
+                pointer: CurrentWriteSchema {
+                    revision: 1,
+                    schema: target_id,
+                },
+            })?;
+        }
+        Ok(())
     }
 
     /// Borrow an operational typed view from this owner. The facade cannot
     /// outlive the owner borrow and therefore cannot become a second owner.
-    pub fn view<'a>(
-        &'a mut self,
-        view: &DemandDrivenView,
-    ) -> Result<DemandDrivenViewDb<'a>, Error> {
-        let database = self.facade_for_view(view)?;
-        Ok(DemandDrivenViewDb {
-            database,
-            runtime: &mut self.runtime,
+    pub fn view<'a>(&'a mut self, view: &DbSchemaView) -> Result<DbView<'a>, Error> {
+        let schema = self.schema_for_view(view)?;
+        Ok(DbView {
+            schema_version_id: schema.version_id(),
+            schema,
+            owner: self,
         })
     }
 
     /// Compile a query against an explicit typed view of this owner.
     pub fn prepare_query_in_view(
         &self,
-        view: &DemandDrivenView,
+        view: &DbSchemaView,
         query: &Query,
     ) -> Result<PreparedQuery, Error> {
-        self.facade_for_view(view)?.prepare_query(query)
+        let schema = self.schema_for_view(view)?;
+        self.prepare_query_for_schema(query, &schema, schema.version_id())
     }
 
     pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {
-        self.database.write_state(tx_id)
+        let Some((fate, _, durability)) = self.node.node.borrow_mut().transaction_state(tx_id)
+        else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "transaction is not known locally",
+            ));
+        };
+        Ok(WriteState { fate, durability })
+    }
+
+    pub fn row_provenance(&self, row: &CurrentRow) -> Result<Option<RowProvenance>, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .row_provenance(row)
+            .map_err(Into::into)
+    }
+
+    pub fn next_write_state_change(&self, tx_id: TxId) -> WriteStateChange {
+        self.node.register_write_state_waiter(tx_id)
     }
 
     pub fn wait_for_transaction_with(
@@ -337,46 +941,97 @@ impl DemandDrivenDb {
         tier: DurabilityTier,
         callback: impl FnOnce(Result<TxId, Error>) + 'static,
     ) {
-        self.database
-            .wait_for_transaction_with(tx_id, tier, callback);
+        self.node
+            .wait_for_transaction_with(tx_id, tier, Box::new(callback));
+    }
+
+    /// Wait until an observed transaction reaches the requested durability.
+    pub async fn wait_for_transaction(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        loop {
+            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
+                return outcome;
+            }
+            let state_change = self.node.register_write_state_waiter(tx_id);
+            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
+                drop(state_change);
+                return outcome;
+            }
+            state_change.await;
+        }
+    }
+
+    /// Historical reads require a serving authority rather than a partial local owner.
+    pub async fn at(
+        &mut self,
+        _seq: GlobalSeq,
+        _prepared: &PreparedQuery,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        Err(Error::new(
+            ErrorCode::HistoricalReadRequiresServer,
+            "historical read requires server evaluation",
+        ))
+    }
+
+    /// Attribute a local insert only to the authenticated local identity.
+    pub async fn insert_attributed(
+        &mut self,
+        made_by: AuthorId,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        if made_by != self.identity.author {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "client writes cannot attribute provenance to another identity",
+            ));
+        }
+        self.insert(table, cells).await
     }
 
     pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
-        self.database.set_tick_scheduler(scheduler);
+        self.node.set_scheduler(scheduler);
     }
 
     pub fn on_mutation_error(&self, callback: MutationErrorCallback) {
-        self.database.on_mutation_error(callback);
+        self.node.set_mutation_error_callback(Some(callback));
     }
 
     pub fn request_permission_advice(
         &self,
         action: PermissionAdviceAction,
     ) -> PermissionAdviceFuture {
-        self.database.request_permission_advice(action)
+        self.node.request_permission_advice(action)
     }
 
     pub fn cancel_permission_advice_request(&self, request_id: PermissionAdviceRequestId) {
-        self.database.cancel_permission_advice_request(request_id);
+        self.node.cancel_permission_advice_request(request_id);
     }
 
     pub fn set_non_durable_client(&self) {
-        self.database.set_non_durable_client();
+        self.node.set_non_durable_client();
     }
 
     pub fn set_upstream_durability_floor(&self, tier: DurabilityTier) {
-        self.database.set_upstream_durability_floor(tier);
+        self.node.set_upstream_durability_floor(tier);
     }
 
     pub fn set_initial_sync_flush_cadence(
         &self,
         cadence: InitialSyncFlushCadence,
     ) -> Result<(), Error> {
-        self.database.set_initial_sync_flush_cadence(cadence)
+        Ok(self
+            .node
+            .node
+            .borrow_mut()
+            .set_initial_sync_flush_cadence(cadence.writes())?)
     }
 
     pub fn abandon_transaction(&mut self, tx_id: OpenBatchId) -> Result<(), Error> {
-        self.database.abandon_transaction_handle(tx_id)
+        self.abandon_open_transaction(tx_id)
     }
 
     #[cfg(any(feature = "runtime", test))]
@@ -394,24 +1049,30 @@ impl DemandDrivenDb {
 
     #[cfg(any(feature = "runtime", test))]
     pub fn trusted_catalogue_snapshot(&self) -> Result<crate::protocol::CatalogueSnapshot, Error> {
-        self.database.trusted_catalogue_snapshot()
+        Ok(self.node.node.borrow().catalogue_snapshot()?)
     }
 
     #[cfg(any(feature = "runtime", test))]
     pub fn trusted_current_catalogue_schema(&self) -> Result<JazzSchema, Error> {
-        self.database.trusted_current_catalogue_schema()
+        let node = self.node.node.borrow();
+        let pointer = node.current_write_schema()?;
+        node.catalogue_schemas()
+            .get(&pointer.schema)
+            .map(|schema| schema.schema.clone())
+            .ok_or_else(|| Error::new(ErrorCode::Schema, "active catalogue schema is missing"))
     }
 
     #[cfg(any(feature = "runtime", test))]
     pub fn catalogue_bootstrap_is_ready(&self) -> bool {
-        self.database.catalogue_bootstrap_is_ready()
+        self.node.node.borrow().catalogue_bootstrap_state()
+            == crate::node::CatalogueBootstrapState::Ready
     }
 
     async fn apply_trusted_catalogue_message(
         &mut self,
         message: SyncMessage,
     ) -> Result<Vec<SyncMessage>, Error> {
-        self.database.check_catalogue_admin()?;
+        self.check_catalogue_admin()?;
         std::future::poll_fn(|context| {
             self.runtime
                 .poll_apply_trusted_catalogue_message(context, &message)
@@ -425,7 +1086,7 @@ impl DemandDrivenDb {
         schema: SchemaVersion,
     ) -> Result<Vec<SyncMessage>, Error> {
         self.apply_trusted_catalogue_message(SyncMessage::PublishSchema {
-            author: self.database.identity.author,
+            author: self.identity.author,
             schema: Box::new(schema),
         })
         .await
@@ -433,7 +1094,7 @@ impl DemandDrivenDb {
 
     pub async fn publish_lens(&mut self, lens: MigrationLens) -> Result<Vec<SyncMessage>, Error> {
         self.apply_trusted_catalogue_message(SyncMessage::PublishLens {
-            author: self.database.identity.author,
+            author: self.identity.author,
             lens,
         })
         .await
@@ -445,7 +1106,7 @@ impl DemandDrivenDb {
         publication: SchemaLineagePublication,
     ) -> Result<Vec<SyncMessage>, Error> {
         self.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-            author: self.database.identity.author,
+            author: self.identity.author,
             catalogue_seq,
             publication: Box::new(publication),
         })
@@ -457,7 +1118,7 @@ impl DemandDrivenDb {
         pointer: CurrentWriteSchema,
     ) -> Result<Vec<SyncMessage>, Error> {
         self.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-            author: self.database.identity.author,
+            author: self.identity.author,
             pointer,
         })
         .await
@@ -472,23 +1133,19 @@ impl DemandDrivenDb {
         made_by: AuthorId,
         cells: RowCells,
     ) -> Result<TxId, Error> {
-        let cells = self.database.apply_insert_defaults(table, cells)?;
-        let commit = MergeableCommit::new(table, row, self.database.next_now_ms())
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let commit = MergeableCommit::new(table, row, self.next_now_ms())
             .made_by(made_by)
             .cells(cells);
-        let schema = self.database.schema_version_id;
+        let schema = self.schema_version_id;
         let tx_id = std::future::poll_fn(|context| {
             self.runtime
                 .poll_mergeable_commit_in_schema(context, schema, &commit)
         })
         .await
         .map_err(Error::from)?;
-        let SyncMessage::CommitUnit { tx, versions } = self
-            .database
-            .node
-            .node
-            .borrow_mut()
-            .commit_unit_for(tx_id)?
+        let SyncMessage::CommitUnit { tx, versions } =
+            self.node.node.borrow_mut().commit_unit_for(tx_id)?
         else {
             unreachable!("mergeable commit unit has one canonical wire shape")
         };
@@ -504,38 +1161,52 @@ impl DemandDrivenDb {
         .await
         .map_err(Error::from)?;
         self.refresh_subscriptions_prepared().await?;
-        self.database.node.mark_subscriber_connections_dirty();
+        self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
 
     /// Attach an authority-admitted typed schema to this owner.
     pub fn select_schema_view(&mut self, schema: JazzSchema) -> Result<(), Error> {
-        self.database = self.database.register_schema_view(schema)?;
+        self.register_schema_view_resident(schema)?;
         Ok(())
     }
 
     pub fn set_edge_cache_budget(&self, budget: Option<crate::node::EdgeCacheBudget>) {
-        self.database.set_edge_cache_budget(budget);
+        self.node.set_edge_cache_budget(budget);
     }
 
     pub fn current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
-        self.database.current_write_schema()
+        self.node
+            .node
+            .borrow()
+            .current_write_schema()
+            .map_err(Into::into)
     }
 
     pub fn catalogue_schema(&self, schema: SchemaVersionId) -> Option<JazzSchema> {
-        self.database.catalogue_schema(schema)
+        self.node
+            .node
+            .borrow()
+            .catalogue_schemas()
+            .get(&schema)
+            .map(|schema| schema.schema.clone())
     }
 
     pub fn active_catalogue_seq(&self) -> u64 {
-        self.database.active_catalogue_seq()
+        self.node.node.borrow().active_catalogue_seq()
     }
 
     pub fn catalogue_lens(&self, lens: MigrationLensId) -> Option<MigrationLens> {
-        self.database.catalogue_lens(lens)
+        self.node
+            .node
+            .borrow()
+            .catalogue_lenses()
+            .get(&lens)
+            .cloned()
     }
 
     pub fn set_permissions_ready(&self, ready: bool) -> Result<(), Error> {
-        self.database.set_permissions_ready(ready)
+        self.node.set_permissions_ready(ready)
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -543,7 +1214,10 @@ impl DemandDrivenDb {
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
     ) {
-        self.database.set_catalogue_activation_failpoint(failpoint);
+        self.node
+            .node
+            .borrow_mut()
+            .set_catalogue_activation_failpoint(failpoint);
     }
 
     pub async fn seed_branch_mergeable_for_bootstrap(
@@ -554,21 +1228,14 @@ impl DemandDrivenDb {
         made_by: AuthorId,
         cells: RowCells,
     ) -> Result<TxId, Error> {
-        if self
-            .database
-            .node
-            .node
-            .borrow()
-            .branch_record(branch)
-            .is_none()
-        {
+        if self.node.node.borrow().branch_record(branch).is_none() {
             self.create_branch_with_id(branch).await?;
         }
-        let cells = self.database.apply_insert_defaults(table, cells)?;
-        let commit = MergeableCommit::new(table, row, self.database.next_now_ms())
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let commit = MergeableCommit::new(table, row, self.next_now_ms())
             .made_by(made_by)
             .cells(cells);
-        let schema = self.database.schema_version_id;
+        let schema = self.schema_version_id;
         let tx_id = std::future::poll_fn(|context| {
             self.runtime.poll_mergeable_many_on_branch_in_schema(
                 context,
@@ -579,12 +1246,8 @@ impl DemandDrivenDb {
         })
         .await
         .map_err(Error::from)?;
-        let SyncMessage::CommitUnit { tx, versions } = self
-            .database
-            .node
-            .node
-            .borrow_mut()
-            .commit_unit_for(tx_id)?
+        let SyncMessage::CommitUnit { tx, versions } =
+            self.node.node.borrow_mut().commit_unit_for(tx_id)?
         else {
             unreachable!("branch mergeable commit has one canonical wire shape")
         };
@@ -600,7 +1263,7 @@ impl DemandDrivenDb {
         .await
         .map_err(Error::from)?;
         self.refresh_subscriptions_prepared().await?;
-        self.database.node.mark_subscriber_connections_dirty();
+        self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
 
@@ -608,19 +1271,14 @@ impl DemandDrivenDb {
         std::future::poll_fn(|context| self.poll_tick(context)).await
     }
 
-    #[cfg(test)]
-    pub(crate) fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
-        self.database.runtime_stats_for_test()
-    }
-
     /// Exercise only the synchronous resident peer phase. External durable
     /// frames must remain staged for the asynchronous owner around this phase.
     #[cfg(test)]
     pub(crate) fn resident_peer_tick_for_test(&self) -> Result<DbTickStats, Error> {
-        for connection in self.database.node.connections.borrow().iter() {
+        for connection in self.node.connections.borrow().iter() {
             connection.borrow_mut().stage_available_inbound();
         }
-        self.database.node.tick()
+        self.node.tick()
     }
 
     #[doc(hidden)]
@@ -637,7 +1295,7 @@ impl DemandDrivenDb {
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
-        let connection = self.database.connect_upstream(transport);
+        let connection = self.node.connect_upstream(transport);
         connection.borrow_mut().enable_external_durable_ingress();
         connection
     }
@@ -649,7 +1307,7 @@ impl DemandDrivenDb {
         transport: Box<dyn Transport>,
         identity: AuthorId,
     ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
-        let connection = self.database.accept_subscriber(transport, identity);
+        let connection = self.node.accept_subscriber(transport, identity);
         connection.borrow_mut().enable_external_durable_ingress();
         connection
     }
@@ -661,7 +1319,7 @@ impl DemandDrivenDb {
         claims: BTreeMap<String, Value>,
     ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
         let connection = self
-            .database
+            .node
             .accept_subscriber_with_claims(transport, identity, claims);
         connection.borrow_mut().enable_external_durable_ingress();
         connection
@@ -675,7 +1333,7 @@ impl DemandDrivenDb {
         trust: CommitUnitTrust,
     ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
         let connection = self
-            .database
+            .node
             .accept_subscriber_with_claims_and_trust(transport, identity, claims, trust);
         connection.borrow_mut().enable_external_durable_ingress();
         connection
@@ -688,7 +1346,7 @@ impl DemandDrivenDb {
         claims: BTreeMap<String, Value>,
     ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
         let connection = self
-            .database
+            .node
             .accept_edge_subscriber_with_claims(transport, identity, claims);
         connection.borrow_mut().enable_external_durable_ingress();
         connection
@@ -701,7 +1359,7 @@ impl DemandDrivenDb {
         claims: BTreeMap<String, Value>,
     ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
         let connection = self
-            .database
+            .node
             .accept_edge_authority_subscriber_with_claims(transport, identity, claims);
         connection.borrow_mut().enable_external_durable_ingress();
         connection
@@ -714,7 +1372,7 @@ impl DemandDrivenDb {
         cursor: ResumeCursor,
     ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
         let connection = self
-            .database
+            .node
             .accept_subscriber_with_resume(transport, identity, cursor);
         connection.borrow_mut().enable_external_durable_ingress();
         connection
@@ -724,7 +1382,7 @@ impl DemandDrivenDb {
         &self,
         connection: &Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>>,
     ) -> bool {
-        self.database.detach_connection(connection)
+        self.node.detach_connection(connection)
     }
 
     /// Drive peer work without replaying a frame across an asynchronous
@@ -732,7 +1390,7 @@ impl DemandDrivenDb {
     /// boundary at a time; ordinary connection-control traffic continues
     /// through the resident peer tick.
     pub fn poll_tick(&mut self, context: &mut Context<'_>) -> Poll<Result<DbTickStats, Error>> {
-        let connections = self.database.node.connections.borrow().clone();
+        let connections = self.node.connections.borrow().clone();
         for connection in &connections {
             connection.borrow_mut().stage_available_inbound();
             match self.runtime.poll_acquire_resident(context, |node| {
@@ -854,7 +1512,7 @@ impl DemandDrivenDb {
                     .iter()
                     .any(|connection| connection.borrow().has_externally_applied_inbound())
                 {
-                    self.database.node.mark_subscriber_connections_dirty();
+                    self.node.mark_subscriber_connections_dirty();
                 }
                 context.waker().wake_by_ref();
                 return Poll::Pending;
@@ -879,7 +1537,7 @@ impl DemandDrivenDb {
                     .iter()
                     .any(|connection| connection.borrow().has_externally_applied_inbound())
                 {
-                    self.database.node.mark_subscriber_connections_dirty();
+                    self.node.mark_subscriber_connections_dirty();
                 }
                 context.waker().wake_by_ref();
                 return Poll::Pending;
@@ -1002,7 +1660,7 @@ impl DemandDrivenDb {
             // state. Publish that invalidation before acquiring subscriber
             // outputs; the synchronous resident peer tick runs after
             // acquisition and is therefore too late to arm this owner poll.
-            self.database.node.mark_subscriber_connections_dirty();
+            self.node.mark_subscriber_connections_dirty();
         }
 
         if let Err(error) = self.runtime.publish_query_runtime_updates() {
@@ -1010,7 +1668,7 @@ impl DemandDrivenDb {
         }
 
         match self.runtime.poll_acquire_resident(context, |node| {
-            self.database.node.prepare_subscription_refresh_inputs(node)
+            self.node.prepare_subscription_refresh_inputs(node)
         }) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
@@ -1036,7 +1694,7 @@ impl DemandDrivenDb {
             .iter()
             .map(|connection| connection.borrow_mut().park_staged_inbound_tail())
             .collect::<Vec<_>>();
-        let tick_result = self.database.node.tick();
+        let tick_result = self.node.tick();
         for (connection, tail) in connections.iter().zip(parked_tails) {
             connection.borrow_mut().restore_staged_inbound_tail(tail);
         }
@@ -1064,11 +1722,11 @@ impl DemandDrivenDb {
     /// flush and close the ordered backend. Consuming the owner makes this
     /// lifecycle transition unambiguously terminal.
     pub async fn close(mut self) -> Result<(), Error> {
-        let database = &self.database;
+        let node = Rc::clone(&self.node);
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.node.node.borrow_mut().close(),
+                || node.node.borrow_mut().close(),
                 crate::node::missing_node_open_input,
             )
         })
@@ -1091,7 +1749,7 @@ impl DemandDrivenDb {
         &mut self,
         branch: crate::ids::BranchId,
     ) -> Result<(), Error> {
-        let author = self.database.identity.author;
+        let author = self.identity.author;
         std::future::poll_fn(|context| self.runtime.poll_create_branch(context, branch, author))
             .await
             .map(|_| ())
@@ -1107,8 +1765,8 @@ impl DemandDrivenDb {
         table: &str,
         cells: RowCells,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let (row_uuid, commit) = self.database.prepare_insert_commit(table, cells)?;
-        let schema = self.database.schema_version_id;
+        let (row_uuid, commit) = self.prepare_insert_commit(table, cells)?;
+        let schema = self.schema_version_id;
         let tx_id = std::future::poll_fn(|context| {
             self.runtime.poll_mergeable_many_on_branch_in_schema(
                 context,
@@ -1118,10 +1776,10 @@ impl DemandDrivenDb {
             )
         })
         .await?;
-        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
-            node: Rc::downgrade(&self.database.node.node),
+            node: Rc::downgrade(&self.node.node),
             row_uuid,
             tx_id,
             local_tier,
@@ -1132,7 +1790,7 @@ impl DemandDrivenDb {
     pub(crate) fn resident_node_for_test(
         &self,
     ) -> Rc<RefCell<crate::node::NodeState<groove::storage::DemandLoadedStorage>>> {
-        Rc::clone(&self.database.node.node)
+        Rc::clone(&self.node.node)
     }
 
     /// Poll a high-level one-shot read through query-driven durable loading.
@@ -1150,11 +1808,11 @@ impl DemandDrivenDb {
         if let Err(error) = ensure_supported_read_view(&opts) {
             return Poll::Ready(Err(error));
         }
-        let database = &self.database;
-        let author = database.identity.author;
+        let node = Rc::clone(&self.node);
+        let author = self.identity.author;
         match self.runtime.poll_resident_operation(context, || {
             if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
-                database.node.node.borrow_mut().acquire_branch_read_inputs(
+                node.node.borrow_mut().acquire_branch_read_inputs(
                     &prepared.shape,
                     &prepared.binding,
                     crate::ids::BranchId(*branch),
@@ -1162,7 +1820,8 @@ impl DemandDrivenDb {
                     false,
                 )?;
             }
-            database.all_resident(
+            reads::all_loaded(
+                &node,
                 &prepared,
                 &opts,
                 author,
@@ -1187,7 +1846,7 @@ impl DemandDrivenDb {
     /// Run a one-shot read through an explicit typed view of this owner.
     pub async fn all_in_view(
         &mut self,
-        view: &DemandDrivenView,
+        view: &DbSchemaView,
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -1211,11 +1870,11 @@ impl DemandDrivenDb {
                 "relation snapshots do not support include_deleted yet",
             )));
         }
-        let database = &self.database;
-        let author = database.identity.author;
+        let node = Rc::clone(&self.node);
+        let author = self.identity.author;
         match self.runtime.poll_resident_operation(context, || {
             if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
-                database.node.node.borrow_mut().acquire_branch_read_inputs(
+                node.node.borrow_mut().acquire_branch_read_inputs(
                     &prepared.shape,
                     &prepared.binding,
                     crate::ids::BranchId(*branch),
@@ -1223,7 +1882,8 @@ impl DemandDrivenDb {
                     false,
                 )?;
             }
-            database.relation_snapshot_resident(
+            reads::relation_snapshot_loaded(
+                &node,
                 prepared,
                 &opts,
                 author,
@@ -1249,7 +1909,7 @@ impl DemandDrivenDb {
     /// Read a structured snapshot through an explicit typed view.
     pub async fn relation_snapshot_in_view(
         &mut self,
-        view: &DemandDrivenView,
+        view: &DbSchemaView,
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
@@ -1267,10 +1927,19 @@ impl DemandDrivenDb {
         materialize_result_tree(prepared.shape.query(), snapshot)
     }
 
+    /// Materialize the canonical public result tree for a one-shot query.
+    pub async fn all_result_tree(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<ResultTree, Error> {
+        self.result_tree(prepared, opts).await
+    }
+
     /// Materialize a public result tree through an explicit typed view.
     pub async fn result_tree_in_view(
         &mut self,
-        view: &DemandDrivenView,
+        view: &DbSchemaView,
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
@@ -1288,12 +1957,12 @@ impl DemandDrivenDb {
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Poll<Result<SubscriptionStream, Error>> {
-        let database = &self.database;
-        let author = database.identity.author;
+        let author = self.identity.author;
+        let node = Rc::clone(&self.node);
         match self.runtime.poll_operation(
             context,
             || {
-                database.open_subscription_resident(
+                node.open_subscription_resident(
                     prepared,
                     opts.clone(),
                     author,
@@ -1317,10 +1986,69 @@ impl DemandDrivenDb {
         std::future::poll_fn(|context| self.poll_subscribe(context, prepared, opts.clone())).await
     }
 
+    /// Open a trusted-serving subscription as an explicit identity.
+    pub async fn subscribe_for_identity(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<SubscriptionStream, Error> {
+        let node = Rc::clone(&self.node);
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    node.open_subscription_resident(
+                        prepared,
+                        opts.clone(),
+                        author,
+                        QueryAuthorizationMode::TrustedServing,
+                    )
+                },
+                SubscriptionOpenError::missing_input,
+            )
+        })
+        .await
+        .map_err(SubscriptionOpenError::into_api)
+    }
+
+    /// Open a maintained subscription for an output-changing relation query.
+    pub async fn subscribe_relation_query(
+        &mut self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error> {
+        let prepared = self.prepare_query(&relation_query_to_query(query)?)?;
+        self.subscribe(&prepared, opts).await
+    }
+
+    /// Materialize an output-changing relation query through the default view.
+    pub async fn all_relation_query(
+        &mut self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.default_view_db()?
+            .all_relation_query(query, opts, None)
+            .await
+    }
+
+    /// Materialize a relation snapshot as an explicit serving identity.
+    pub async fn all_relation_snapshot_for_identity(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<RelationSnapshot, Error> {
+        self.default_view_db()?
+            .relation_snapshot_for_identity(prepared, opts, author)
+            .await
+    }
+
     /// Open a subscription through an explicit typed view.
     pub async fn subscribe_in_view(
         &mut self,
-        view: &DemandDrivenView,
+        view: &DbSchemaView,
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
@@ -1336,28 +2064,29 @@ impl DemandDrivenDb {
         table: &str,
         cells: RowCells,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let (row_uuid, commit) = self.database.prepare_insert_commit(table, cells)?;
-        let database = &self.database;
+        let (row_uuid, commit) = self.prepare_insert_commit(table, cells)?;
+        self.table_schema(table)?;
+        let node = Rc::clone(&self.node);
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.acquire_insert_target_for_owner(table, row_uuid),
+                || Self::acquire_insert_target(&node, table, row_uuid),
                 MutationPrepareError::missing_input,
             )
         })
         .await
         .map_err(MutationPrepareError::into_api)?;
-        let schema = self.database.schema_version_id;
+        let schema = self.schema_version_id;
         let tx_id = std::future::poll_fn(|context| {
             self.runtime
                 .poll_mergeable_commit_in_schema(context, schema, &commit)
         })
         .await
         .map_err(Error::from)?;
-        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
-            node: Rc::downgrade(&self.database.node.node),
+            node: Rc::downgrade(&self.node.node),
             row_uuid,
             tx_id,
             local_tier,
@@ -1374,36 +2103,48 @@ impl DemandDrivenDb {
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let schema = self.schema.clone();
+        let node = Rc::clone(&self.node);
+        let identity = self.identity;
         if patch.is_empty() {
-            let database = &self.database;
             let (tx_id, local_tier) = std::future::poll_fn(|context| {
                 self.runtime.poll_operation(
                     context,
-                    || database.prepare_noop_update_for_owner(table, row, database.identity.author),
+                    || {
+                        mutations::prepare_noop_update_loaded(
+                            &schema,
+                            &node,
+                            table,
+                            row,
+                            identity.author,
+                        )
+                    },
                     MutationPrepareError::missing_input,
                 )
             })
             .await
             .map_err(MutationPrepareError::into_api)?;
             return Ok(WriteHandle {
-                node: Rc::downgrade(&self.database.node.node),
+                node: Rc::downgrade(&self.node.node),
                 row_uuid: row,
                 tx_id,
                 local_tier,
             });
         }
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
         let prepared = std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
                 || {
-                    database.prepare_update_commit_for_owner(
+                    mutations::prepare_update_loaded(
+                        &schema,
+                        &node,
+                        identity,
                         table,
                         row,
                         patch.clone(),
                         now_ms,
-                        database.identity.author,
+                        identity.author,
                     )
                 },
                 MutationPrepareError::missing_input,
@@ -1411,17 +2152,17 @@ impl DemandDrivenDb {
         })
         .await
         .map_err(MutationPrepareError::into_api)?;
-        let schema = self.database.schema_version_id;
+        let schema = self.schema_version_id;
         let tx_id = std::future::poll_fn(|context| {
             self.runtime
                 .poll_mergeable_commit_in_schema(context, schema, &prepared)
         })
         .await
         .map_err(Error::from)?;
-        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
-            node: Rc::downgrade(&self.database.node.node),
+            node: Rc::downgrade(&self.node.node),
             row_uuid: row,
             tx_id,
             local_tier,
@@ -1437,28 +2178,30 @@ impl DemandDrivenDb {
         table: &str,
         row: RowUuid,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
+        let schema = self.schema.clone();
+        let node = Rc::clone(&self.node);
+        let identity = self.identity;
         let prepared = std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.prepare_delete_commit_for_owner(table, row, now_ms),
+                || mutations::prepare_delete_loaded(&schema, &node, identity, table, row, now_ms),
                 MutationPrepareError::missing_input,
             )
         })
         .await
         .map_err(MutationPrepareError::into_api)?;
-        let schema = self.database.schema_version_id;
+        let schema = self.schema_version_id;
         let tx_id = std::future::poll_fn(|context| {
             self.runtime
                 .poll_mergeable_commit_in_schema(context, schema, &prepared)
         })
         .await
         .map_err(Error::from)?;
-        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
-            node: Rc::downgrade(&self.database.node.node),
+            node: Rc::downgrade(&self.node.node),
             row_uuid: row,
             tx_id,
             local_tier,
@@ -1475,28 +2218,40 @@ impl DemandDrivenDb {
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
+        let schema = self.schema.clone();
+        let node = Rc::clone(&self.node);
+        let identity = self.identity;
         let prepared = std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.prepare_restore_commits_for_owner(table, row, cells.clone(), now_ms),
+                || {
+                    mutations::prepare_restore_loaded(
+                        &schema,
+                        &node,
+                        identity,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
                 MutationPrepareError::missing_input,
             )
         })
         .await
         .map_err(MutationPrepareError::into_api)?;
-        let schema = self.database.schema_version_id;
+        let schema = self.schema_version_id;
         let tx_id = std::future::poll_fn(|context| {
             self.runtime
                 .poll_mergeable_many_in_schema(context, schema, &prepared)
         })
         .await
         .map_err(Error::from)?;
-        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
-            node: Rc::downgrade(&self.database.node.node),
+            node: Rc::downgrade(&self.node.node),
             row_uuid: row,
             tx_id,
             local_tier,
@@ -1513,18 +2268,23 @@ impl DemandDrivenDb {
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
+        let schema = self.schema.clone();
+        let node = Rc::clone(&self.node);
+        let identity = self.identity;
         let prepared = std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
                 || {
-                    database.prepare_upsert_commit_for_owner(
+                    mutations::prepare_upsert_loaded(
+                        &schema,
+                        &node,
+                        identity,
                         table,
                         row,
                         cells.clone(),
                         now_ms,
-                        database.identity.author,
+                        identity.author,
                     )
                 },
                 MutationPrepareError::missing_input,
@@ -1532,17 +2292,17 @@ impl DemandDrivenDb {
         })
         .await
         .map_err(MutationPrepareError::into_api)?;
-        let schema = self.database.schema_version_id;
+        let schema = self.schema_version_id;
         let tx_id = std::future::poll_fn(|context| {
             self.runtime
                 .poll_mergeable_commit_in_schema(context, schema, &prepared)
         })
         .await
         .map_err(Error::from)?;
-        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
-            node: Rc::downgrade(&self.database.node.node),
+            node: Rc::downgrade(&self.node.node),
             row_uuid: row,
             tx_id,
             local_tier,
@@ -1552,21 +2312,29 @@ impl DemandDrivenDb {
     /// Open a staged mergeable transaction owned by this async database.
     pub async fn begin_mergeable(&mut self) -> Result<OpenBatchId, Error> {
         let id = OpenBatchId::new();
-        let database = &self.database;
+        self.begin_mergeable_with_id(id).await?;
+        Ok(id)
+    }
+
+    /// Open a caller-addressed staged mergeable transaction.
+    pub async fn begin_mergeable_with_id(&mut self, id: OpenBatchId) -> Result<(), Error> {
+        let node = Rc::clone(&self.node);
+        let _schema = self.schema.clone();
+        let _schema_version = self.schema_version_id;
+        let identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.begin_mergeable_for_owner(id, database.identity.author),
+                || transactions::begin_mergeable_loaded(&node, id, identity.author),
                 MutationPrepareError::missing_input,
             )
         })
         .await
-        .map_err(MutationPrepareError::into_api)?;
-        Ok(id)
+        .map_err(MutationPrepareError::into_api)
     }
 
     /// Stage an insert in an open mergeable transaction. Staged writes remain
-    /// invisible until [`DemandDrivenDb::commit_mergeable`] publishes them.
+    /// invisible until [`Db::commit_mergeable`] publishes them.
     pub async fn mergeable_insert(
         &mut self,
         tx_id: OpenBatchId,
@@ -1574,13 +2342,19 @@ impl DemandDrivenDb {
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
+        let node = Rc::clone(&self.node);
+        let schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
                 || {
-                    database.stage_mergeable_insert_for_owner(
+                    transactions::stage_mergeable_insert_loaded(
+                        &schema,
+                        &node,
+                        schema_version,
                         tx_id,
                         table,
                         row,
@@ -1602,13 +2376,18 @@ impl DemandDrivenDb {
         row: RowUuid,
         patch: RowCells,
     ) -> Result<(), Error> {
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
+        let node = Rc::clone(&self.node);
+        let _schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
                 || {
-                    database.stage_mergeable_update_for_owner(
+                    transactions::stage_mergeable_update_loaded(
+                        &node,
+                        schema_version,
                         tx_id,
                         table,
                         row,
@@ -1629,12 +2408,24 @@ impl DemandDrivenDb {
         table: &str,
         row: RowUuid,
     ) -> Result<(), Error> {
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
+        let node = Rc::clone(&self.node);
+        let _schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.stage_mergeable_delete_for_owner(tx_id, table, row, now_ms),
+                || {
+                    transactions::stage_mergeable_delete_loaded(
+                        &node,
+                        schema_version,
+                        tx_id,
+                        table,
+                        row,
+                        now_ms,
+                    )
+                },
                 MutationPrepareError::missing_input,
             )
         })
@@ -1649,13 +2440,19 @@ impl DemandDrivenDb {
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
+        let node = Rc::clone(&self.node);
+        let schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
                 || {
-                    database.stage_mergeable_restore_for_owner(
+                    transactions::stage_mergeable_restore_loaded(
+                        &schema,
+                        &node,
+                        schema_version,
                         tx_id,
                         table,
                         row,
@@ -1678,11 +2475,34 @@ impl DemandDrivenDb {
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let database = &self.database;
+        let node = Rc::clone(&self.node);
+        let _schema = self.schema.clone();
+        let _schema_version = self.schema_version_id;
+        let _identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.transaction_all_for_owner(tx_id, prepared, opts.clone()),
+                || transactions::transaction_all_loaded(&node, tx_id, prepared, &opts, None),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    /// Read one row with this open mergeable batch's staged writes overlaid.
+    pub async fn mergeable_read(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<RowCells>, Error> {
+        let node = Rc::clone(&self.node);
+        let schema_version = self.schema_version_id;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || transactions::exclusive_read_loaded(&node, schema_version, tx_id, table, row),
                 MutationPrepareError::missing_input,
             )
         })
@@ -1697,16 +2517,20 @@ impl DemandDrivenDb {
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let database = &self.database;
+        let node = Rc::clone(&self.node);
+        let _schema = self.schema.clone();
+        let _schema_version = self.schema_version_id;
+        let _identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
                 || {
-                    database.transaction_all_for_identity_for_owner(
+                    transactions::transaction_all_loaded(
+                        &node,
                         tx_id,
                         prepared,
-                        author,
-                        opts.clone(),
+                        &opts,
+                        Some(author),
                     )
                 },
                 MutationPrepareError::missing_input,
@@ -1719,13 +2543,12 @@ impl DemandDrivenDb {
     /// Publish every staged write as one resident and durable transaction.
     pub async fn commit_mergeable(&mut self, tx_id: OpenBatchId) -> Result<TxId, Error> {
         let fallback_count = self
-            .database
             .node
             .node
             .borrow()
             .mergeable_open_missing_timestamp_count(tx_id)?;
         let fallback_now_ms = (0..fallback_count)
-            .map(|_| self.database.next_now_ms())
+            .map(|_| self.next_now_ms())
             .collect::<Vec<_>>();
         let committed = std::future::poll_fn(|context| {
             self.runtime
@@ -1733,24 +2556,27 @@ impl DemandDrivenDb {
         })
         .await
         .map_err(Error::from)?;
-        self.database.finalize_local_commit(committed)?;
+        self.finalize_local_commit(committed)?;
         self.refresh_subscriptions_prepared().await?;
         Ok(committed)
     }
 
     /// Abandon a staged transaction without publishing any of its writes.
     pub fn abandon_mergeable(&mut self, tx_id: OpenBatchId) -> Result<(), Error> {
-        self.database.abandon_transaction_handle(tx_id)
+        self.abandon_open_transaction(tx_id)
     }
 
     /// Open a serializable transaction over the current local snapshot.
     pub async fn begin_exclusive(&mut self) -> Result<OpenBatchId, Error> {
         let id = OpenBatchId::new();
-        let database = &self.database;
+        let node = Rc::clone(&self.node);
+        let _schema = self.schema.clone();
+        let _schema_version = self.schema_version_id;
+        let identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.begin_exclusive_for_owner(id, database.identity.author),
+                || transactions::begin_exclusive_loaded(&node, id, identity.author),
                 MutationPrepareError::missing_input,
             )
         })
@@ -1759,17 +2585,34 @@ impl DemandDrivenDb {
         Ok(id)
     }
 
+    pub async fn begin_exclusive_with_id(&mut self, id: OpenBatchId) -> Result<(), Error> {
+        let node = Rc::clone(&self.node);
+        let author = self.identity.author;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || transactions::begin_exclusive_loaded(&node, id, author),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
     pub async fn exclusive_read(
         &mut self,
         tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
-        let database = &self.database;
+        let node = Rc::clone(&self.node);
+        let _schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.exclusive_read_for_owner(tx_id, table, row),
+                || transactions::exclusive_read_loaded(&node, schema_version, tx_id, table, row),
                 MutationPrepareError::missing_input,
             )
         })
@@ -1784,13 +2627,19 @@ impl DemandDrivenDb {
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
+        let node = Rc::clone(&self.node);
+        let schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
                 || {
-                    database.stage_exclusive_insert_for_owner(
+                    transactions::stage_exclusive_insert_loaded(
+                        &schema,
+                        &node,
+                        schema_version,
                         tx_id,
                         table,
                         row,
@@ -1826,12 +2675,24 @@ impl DemandDrivenDb {
         table: &str,
         row: RowUuid,
     ) -> Result<(), Error> {
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
+        let node = Rc::clone(&self.node);
+        let _schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.stage_exclusive_delete_for_owner(tx_id, table, row, now_ms),
+                || {
+                    transactions::stage_exclusive_delete_loaded(
+                        &node,
+                        schema_version,
+                        tx_id,
+                        table,
+                        row,
+                        now_ms,
+                    )
+                },
                 MutationPrepareError::missing_input,
             )
         })
@@ -1846,13 +2707,19 @@ impl DemandDrivenDb {
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
-        let now_ms = self.database.next_now_ms();
-        let database = &self.database;
+        let now_ms = self.next_now_ms();
+        let node = Rc::clone(&self.node);
+        let schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.identity;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
                 || {
-                    database.stage_exclusive_restore_for_owner(
+                    transactions::stage_exclusive_restore_loaded(
+                        &schema,
+                        &node,
+                        schema_version,
                         tx_id,
                         table,
                         row,
@@ -1870,1603 +2737,21 @@ impl DemandDrivenDb {
     /// Revalidate the fixed snapshot, then atomically publish the exclusive
     /// transaction without consuming its handle during cold acquisition.
     pub async fn commit_exclusive(&mut self, tx_id: OpenBatchId) -> Result<TxId, Error> {
-        let now_ms = self.database.next_now_ms();
-        let made_by = self.database.identity.author;
+        let now_ms = self.next_now_ms();
+        let made_by = self.identity.author;
         let (committed, unit) = std::future::poll_fn(|context| {
             self.runtime
                 .poll_exclusive_open(context, tx_id, made_by, now_ms)
         })
         .await
         .map_err(Error::from)?;
-        self.database
-            .finalize_local_exclusive_unit(committed, unit)?;
+        self.node.queue_pending_upload(committed, Some(unit));
         self.refresh_subscriptions_prepared().await?;
         Ok(committed)
     }
 
     pub fn abandon_exclusive(&mut self, tx_id: OpenBatchId) -> Result<(), Error> {
-        self.database.abandon_exclusive_handle(tx_id)
-    }
-}
-
-impl DemandDrivenViewDb<'_> {
-    async fn refresh_subscriptions_prepared(&mut self) -> Result<usize, Error> {
-        refresh_demand_driven_subscriptions(&self.database, self.runtime).await
-    }
-
-    /// Start a logical query in this typed view without loading storage.
-    pub fn table(&self, table: impl Into<String>) -> Query {
-        self.database.table(table)
-    }
-
-    /// Compile a logical query in this typed view.
-    pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
-        self.database.prepare_query(query)
-    }
-
-    pub async fn all_relation_query(
-        &mut self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: Option<AuthorId>,
-    ) -> Result<RelationSnapshot, Error> {
-        ensure_default_read_view(&opts)?;
-        let query = relation_query_to_query(query)?;
-        let prepared = self.prepare_query(&query)?;
-        let rows = match author {
-            Some(author) => self.all_for_identity(&prepared, opts, author).await?,
-            None => self.all(&prepared, opts).await?,
-        };
-        Ok(RelationSnapshot {
-            root_count: rows.len(),
-            rows,
-            edges: Vec::new(),
-        })
-    }
-
-    /// Run a one-shot query, loading only missing physical inputs.
-    pub async fn all(
-        &mut self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let database = &self.database;
-        let author = database.identity.author;
-        std::future::poll_fn(|context| {
-            if let Err(error) = ensure_supported_read_view(&opts) {
-                return Poll::Ready(Err(error));
-            }
-            match self.runtime.poll_resident_operation(context, || {
-                if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
-                    database.node.node.borrow_mut().acquire_branch_read_inputs(
-                        &prepared.shape,
-                        &prepared.binding,
-                        crate::ids::BranchId(*branch),
-                        author,
-                        false,
-                    )?;
-                }
-                database.all_resident(prepared, &opts, author, QueryAuthorizationMode::ClientLocal)
-            }) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
-            }
-        })
-        .await
-    }
-
-    /// Run a one-shot query as an explicit terminated-session identity.
-    pub async fn all_for_identity(
-        &mut self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-        author: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            if let Err(error) = ensure_supported_read_view(&opts) {
-                return Poll::Ready(Err(error));
-            }
-            match self.runtime.poll_resident_operation(context, || {
-                database.all_resident(
-                    prepared,
-                    &opts,
-                    author,
-                    QueryAuthorizationMode::TrustedServing,
-                )
-            }) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
-            }
-        })
-        .await
-    }
-
-    /// Materialize a structured relation snapshot in this typed view.
-    pub async fn relation_snapshot(
-        &mut self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<RelationSnapshot, Error> {
-        let database = &self.database;
-        let author = database.identity.author;
-        std::future::poll_fn(|context| {
-            if let Err(error) = ensure_supported_read_view(&opts) {
-                return Poll::Ready(Err(error));
-            }
-            if opts.include_deleted {
-                return Poll::Ready(Err(Error::new(
-                    ErrorCode::Query,
-                    "relation snapshots do not support include_deleted yet",
-                )));
-            }
-            match self.runtime.poll_resident_operation(context, || {
-                if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
-                    database.node.node.borrow_mut().acquire_branch_read_inputs(
-                        &prepared.shape,
-                        &prepared.binding,
-                        crate::ids::BranchId(*branch),
-                        author,
-                        false,
-                    )?;
-                }
-                database.relation_snapshot_resident(
-                    prepared,
-                    &opts,
-                    author,
-                    QueryAuthorizationMode::ClientLocal,
-                )
-            }) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
-            }
-        })
-        .await
-    }
-
-    pub async fn relation_snapshot_for_identity(
-        &mut self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-        author: AuthorId,
-    ) -> Result<RelationSnapshot, Error> {
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            match self.runtime.poll_resident_operation(context, || {
-                database.relation_snapshot_resident(
-                    prepared,
-                    &opts,
-                    author,
-                    QueryAuthorizationMode::TrustedServing,
-                )
-            }) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
-            }
-        })
-        .await
-    }
-
-    /// Materialize the canonical public result tree in this typed view.
-    pub async fn result_tree(
-        &mut self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<ResultTree, Error> {
-        let snapshot = self.relation_snapshot(prepared, opts).await?;
-        materialize_result_tree(prepared.shape.query(), snapshot)
-    }
-
-    /// Open a maintained subscription in this typed view.
-    pub async fn subscribe(
-        &mut self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<SubscriptionStream, Error> {
-        let database = &self.database;
-        let author = database.identity.author;
-        std::future::poll_fn(|context| {
-            match self.runtime.poll_operation(
-                context,
-                || {
-                    database.open_subscription_resident(
-                        prepared,
-                        opts.clone(),
-                        author,
-                        QueryAuthorizationMode::ClientLocal,
-                    )
-                },
-                SubscriptionOpenError::missing_input,
-            ) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(result) => Poll::Ready(result.map_err(SubscriptionOpenError::into_api)),
-            }
-        })
-        .await
-    }
-
-    pub async fn subscribe_for_identity(
-        &mut self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-        author: AuthorId,
-    ) -> Result<SubscriptionStream, Error> {
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            match self.runtime.poll_operation(
-                context,
-                || {
-                    database.open_subscription_resident(
-                        prepared,
-                        opts.clone(),
-                        author,
-                        QueryAuthorizationMode::TrustedServing,
-                    )
-                },
-                SubscriptionOpenError::missing_input,
-            ) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(result) => Poll::Ready(result.map_err(SubscriptionOpenError::into_api)),
-            }
-        })
-        .await
-    }
-
-    pub async fn subscribe_relation_query(
-        &mut self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: Option<AuthorId>,
-    ) -> Result<SubscriptionStream, Error> {
-        let query = relation_query_to_query(query)?;
-        let prepared = self.prepare_query(&query)?;
-        match author {
-            Some(author) => self.subscribe_for_identity(&prepared, opts, author).await,
-            None => self.subscribe(&prepared, opts).await,
-        }
-    }
-
-    pub fn set_identity_claims(
-        &self,
-        author: AuthorId,
-        claims: BTreeMap<String, Value>,
-    ) -> Result<(), Error> {
-        self.database.set_identity_claims(author, claims);
-        Ok(())
-    }
-
-    pub fn can_insert(&self, table: &str, cells: RowCells) -> Result<PermissionAdvice, Error> {
-        self.database.can_insert(table, cells)
-    }
-
-    pub fn local_current_row(
-        &self,
-        table: &str,
-        row: RowUuid,
-    ) -> Result<Option<CurrentRow>, Error> {
-        self.database.local_current_row(table, row)
-    }
-
-    pub fn attach_query_with_opts(
-        &self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<QueryAttachment, Error> {
-        self.database.attach_query_with_opts(prepared, opts)
-    }
-
-    pub fn attach_query_for_identity_with_opts(
-        &self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-        author: AuthorId,
-    ) -> Result<QueryAttachment, Error> {
-        self.database
-            .attach_query_with_opts_for_identity(prepared, opts, author)
-    }
-
-    pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> Result<bool, Error> {
-        Ok(self.database.query_attachment_is_covered(attachment))
-    }
-
-    pub fn detach_query(&self, attachment: QueryAttachment) -> Result<(), Error> {
-        self.database.detach_query(attachment);
-        Ok(())
-    }
-
-    async fn publish_mergeable(
-        &mut self,
-        commits: &[MergeableCommit],
-        row: RowUuid,
-    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let schema = self.database.schema_version_id;
-        let tx_id = std::future::poll_fn(|context| {
-            self.runtime
-                .poll_mergeable_many_in_schema(context, schema, commits)
-        })
-        .await
-        .map_err(Error::from)?;
-        let local_tier = self.database.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions_prepared().await?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.database.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
-    /// Insert one generated row through this typed view.
-    pub async fn insert(
-        &mut self,
-        table: &str,
-        cells: RowCells,
-    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let row = self.database.row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id(table, row, cells, None, None).await
-    }
-
-    /// Insert one caller-selected row through this typed view.
-    pub async fn insert_with_id(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        made_by: Option<AuthorId>,
-        now_ms: Option<u64>,
-    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let permission_subject = made_by;
-        let author = made_by.unwrap_or(self.database.identity.author);
-        let cells = self.database.apply_insert_defaults(table, cells)?;
-        let mut commit = MergeableCommit::new(
-            table,
-            row,
-            now_ms.unwrap_or_else(|| self.database.next_now_ms()),
-        )
-        .made_by(author)
-        .cells(cells);
-        if let Some(subject) = permission_subject {
-            commit = commit.permission_subject(subject);
-        }
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || database.acquire_insert_target_for_owner(table, row),
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)?;
-        self.publish_mergeable(std::slice::from_ref(&commit), row)
-            .await
-    }
-
-    /// Update one row through this typed view.
-    pub async fn update(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        made_by: Option<AuthorId>,
-        now_ms: Option<u64>,
-    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let permission_subject = made_by;
-        let author = made_by.unwrap_or(self.database.identity.author);
-        if patch.is_empty() {
-            let database = &self.database;
-            let (tx_id, local_tier) = std::future::poll_fn(|context| {
-                self.runtime.poll_operation(
-                    context,
-                    || database.prepare_noop_update_for_owner(table, row, author),
-                    MutationPrepareError::missing_input,
-                )
-            })
-            .await
-            .map_err(MutationPrepareError::into_api)?;
-            return Ok(WriteHandle {
-                node: Rc::downgrade(&self.database.node.node),
-                row_uuid: row,
-                tx_id,
-                local_tier,
-            });
-        }
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let database = &self.database;
-        let mut commit = std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || {
-                    database.prepare_update_commit_for_owner(
-                        table,
-                        row,
-                        patch.clone(),
-                        now_ms,
-                        author,
-                    )
-                },
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)?
-        .made_by(author);
-        if let Some(subject) = permission_subject {
-            commit = commit.permission_subject(subject);
-        }
-        self.publish_mergeable(std::slice::from_ref(&commit), row)
-            .await
-    }
-
-    /// Insert or update one caller-selected row through this typed view.
-    pub async fn upsert(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        made_by: Option<AuthorId>,
-        now_ms: Option<u64>,
-    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let permission_subject = made_by;
-        let author = made_by.unwrap_or(self.database.identity.author);
-        let database = &self.database;
-        let mut commit = std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || {
-                    database.prepare_upsert_commit_for_owner(
-                        table,
-                        row,
-                        cells.clone(),
-                        now_ms,
-                        author,
-                    )
-                },
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)?
-        .made_by(author);
-        if let Some(subject) = permission_subject {
-            commit = commit.permission_subject(subject);
-        }
-        self.publish_mergeable(std::slice::from_ref(&commit), row)
-            .await
-    }
-
-    /// Soft-delete one row through this typed view.
-    pub async fn delete(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        made_by: Option<AuthorId>,
-        now_ms: Option<u64>,
-    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let permission_subject = made_by;
-        let author = made_by.unwrap_or(self.database.identity.author);
-        let database = &self.database;
-        let mut commit = std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || database.prepare_delete_commit_for_owner(table, row, now_ms),
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)?
-        .made_by(author);
-        if let Some(subject) = permission_subject {
-            commit = commit.permission_subject(subject);
-        }
-        self.publish_mergeable(std::slice::from_ref(&commit), row)
-            .await
-    }
-
-    /// Restore one row through this typed view.
-    pub async fn restore(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        made_by: Option<AuthorId>,
-        now_ms: Option<u64>,
-    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let permission_subject = made_by;
-        let author = made_by.unwrap_or(self.database.identity.author);
-        let database = &self.database;
-        let commits = std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || database.prepare_restore_commits_for_owner(table, row, cells.clone(), now_ms),
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)?
-        .into_iter()
-        .map(|commit| {
-            let commit = commit.made_by(author);
-            match permission_subject {
-                Some(subject) => commit.permission_subject(subject),
-                None => commit,
-            }
-        })
-        .collect::<Vec<_>>();
-        self.publish_mergeable(&commits, row).await
-    }
-
-    /// Open a caller-addressed mergeable batch in this typed view.
-    pub async fn begin_mergeable(
-        &mut self,
-        id: OpenBatchId,
-        author: Option<AuthorId>,
-    ) -> Result<(), Error> {
-        let database = &self.database;
-        let author = author.unwrap_or(database.identity.author);
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || database.begin_mergeable_for_owner(id, author),
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    pub async fn mergeable_insert(
-        &mut self,
-        tx_id: OpenBatchId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || {
-                    database.stage_mergeable_insert_for_owner(
-                        tx_id,
-                        table,
-                        row,
-                        cells.clone(),
-                        now_ms,
-                    )
-                },
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    pub async fn mergeable_update(
-        &mut self,
-        tx_id: OpenBatchId,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || {
-                    database.stage_mergeable_update_for_owner(
-                        tx_id,
-                        table,
-                        row,
-                        patch.clone(),
-                        now_ms,
-                    )
-                },
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    pub async fn mergeable_delete(
-        &mut self,
-        tx_id: OpenBatchId,
-        table: &str,
-        row: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || database.stage_mergeable_delete_for_owner(tx_id, table, row, now_ms),
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    pub async fn mergeable_restore(
-        &mut self,
-        tx_id: OpenBatchId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || {
-                    database.stage_mergeable_restore_for_owner(
-                        tx_id,
-                        table,
-                        row,
-                        cells.clone(),
-                        now_ms,
-                    )
-                },
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    pub async fn transaction_all(
-        &mut self,
-        tx_id: OpenBatchId,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || database.transaction_all_for_owner(tx_id, prepared, opts.clone()),
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    pub async fn transaction_all_for_identity(
-        &mut self,
-        tx_id: OpenBatchId,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-        author: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || {
-                    database.transaction_all_for_identity_for_owner(
-                        tx_id,
-                        prepared,
-                        author,
-                        opts.clone(),
-                    )
-                },
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    /// Open a caller-addressed exclusive batch in this typed view.
-    pub async fn begin_exclusive(&mut self, id: OpenBatchId) -> Result<(), Error> {
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || database.begin_exclusive_for_owner(id, database.identity.author),
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    pub async fn exclusive_read(
-        &mut self,
-        tx_id: OpenBatchId,
-        table: &str,
-        row: RowUuid,
-    ) -> Result<Option<RowCells>, Error> {
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || database.exclusive_read_for_owner(tx_id, table, row),
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    pub async fn exclusive_insert(
-        &mut self,
-        tx_id: OpenBatchId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || {
-                    database.stage_exclusive_insert_for_owner(
-                        tx_id,
-                        table,
-                        row,
-                        cells.clone(),
-                        now_ms,
-                    )
-                },
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    pub async fn exclusive_update(
-        &mut self,
-        tx_id: OpenBatchId,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        let mut cells = self
-            .exclusive_read(tx_id, table, row)
-            .await?
-            .unwrap_or_default();
-        cells.extend(patch);
-        self.exclusive_insert(tx_id, table, row, cells, now_ms)
-            .await
-    }
-
-    pub async fn exclusive_delete(
-        &mut self,
-        tx_id: OpenBatchId,
-        table: &str,
-        row: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || database.stage_exclusive_delete_for_owner(tx_id, table, row, now_ms),
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-
-    pub async fn exclusive_restore(
-        &mut self,
-        tx_id: OpenBatchId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let database = &self.database;
-        std::future::poll_fn(|context| {
-            self.runtime.poll_operation(
-                context,
-                || {
-                    database.stage_exclusive_restore_for_owner(
-                        tx_id,
-                        table,
-                        row,
-                        cells.clone(),
-                        now_ms,
-                    )
-                },
-                MutationPrepareError::missing_input,
-            )
-        })
-        .await
-        .map_err(MutationPrepareError::into_api)
-    }
-}
-
-impl<S> Db<S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    /// Open a database over the supplied storage and recover local state.
-    ///
-    /// ```rust
-    /// # use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
-    /// # use jazz::db::doctest_support::{block_on, schema, MemoryStorage};
-    /// # use jazz::ids::{AuthorId, NodeUuid};
-    /// let schema = schema();
-    /// let column_families = schema.column_families();
-    /// let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
-    /// let storage = MemoryStorage::new(&refs);
-    ///
-    /// let db = block_on(Db::open(DbConfig {
-    ///     schema,
-    ///     storage,
-    ///     identity: DbIdentity {
-    ///         node: NodeUuid::from_bytes([1; 16]),
-    ///         author: AuthorId::from_bytes([2; 16]),
-    ///     },
-    ///     id_source: Some(Box::new(SeededRowIdSource::new(1))),
-    /// }))?;
-    ///
-    /// let todos = db.prepare_query(&db.table("todos"))?;
-    /// assert!(db.read(&todos)?.is_empty());
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub async fn open(config: DbConfig<S>) -> Result<Self, Error> {
-        let schema_version_id = config.schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&config.schema),
-            config.schema.clone(),
-        )])));
-        let node = NodeState::new(config.identity.node, config.schema.clone(), config.storage)?;
-        let node = Node::new(node);
-        node.restore_pending_uploads(config.identity)?;
-        Ok(Self {
-            schema: config.schema,
-            schema_version_id,
-            schema_view_is_fixed: false,
-            schema_views,
-            identity: config.identity,
-            node: Rc::new(node),
-            row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            )),
-            next_now_ms: Rc::new(Cell::new(1)),
-        })
-    }
-
-    #[cfg(feature = "testing")]
-    /// Open a database and return internal node-open phase timings for benchmarks.
-    pub async fn open_with_receipt_for_test(
-        config: DbConfig<S>,
-    ) -> Result<(Self, DbOpenReceipt), Error> {
-        let schema_version_id = config.schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&config.schema),
-            config.schema.clone(),
-        )])));
-        let (node, receipt) = NodeState::new_with_open_receipt_for_test(
-            config.identity.node,
-            config.schema.clone(),
-            config.storage,
-            false,
-        )?;
-        let db = Self {
-            schema: config.schema,
-            schema_version_id,
-            schema_view_is_fixed: false,
-            schema_views,
-            identity: config.identity,
-            node: Rc::new(Node::new(node)),
-            row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            )),
-            next_now_ms: Rc::new(Cell::new(1)),
-        };
-        Ok((db, receipt))
-    }
-
-    /// Open a database as a history-complete serving core.
-    ///
-    /// This mode is intended for server shells and tests that own authoritative
-    /// in-memory history rather than a partial client replica.
-    pub async fn open_history_complete(config: DbConfig<S>) -> Result<Self, Error> {
-        let schema_version_id = config.schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&config.schema),
-            config.schema.clone(),
-        )])));
-        let node = NodeState::new_history_complete(
-            config.identity.node,
-            config.schema.clone(),
-            config.storage,
-        )?;
-        Ok(Self {
-            schema: config.schema,
-            schema_version_id,
-            schema_view_is_fixed: false,
-            schema_views,
-            identity: config.identity,
-            node: Rc::new(Node::new(node)),
-            row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            )),
-            next_now_ms: Rc::new(Cell::new(1)),
-        })
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn set_catalogue_activation_failpoint(
-        &self,
-        failpoint: crate::node::CatalogueActivationFailpoint,
-    ) {
-        self.node
-            .node
-            .borrow_mut()
-            .set_catalogue_activation_failpoint(failpoint);
-    }
-
-    /// Produce the authority's complete catalogue for the privileged
-    /// snapshot-only transport exchange.
-    #[cfg(any(feature = "runtime", test))]
-    pub(crate) fn trusted_catalogue_snapshot(
-        &self,
-    ) -> Result<crate::protocol::CatalogueSnapshot, Error> {
-        Ok(self.node.node.borrow().catalogue_snapshot()?)
-    }
-
-    /// Return the active authority-admitted schema, failing closed when this
-    /// dynamic edge still has no bootstrap receipt.
-    #[cfg(any(feature = "runtime", test))]
-    pub(crate) fn trusted_current_catalogue_schema(&self) -> Result<JazzSchema, Error> {
-        let node = self.node.node.borrow();
-        let pointer = node.current_write_schema()?;
-        node.catalogue_schemas()
-            .get(&pointer.schema)
-            .map(|schema| schema.schema.clone())
-            .ok_or_else(|| Error::new(ErrorCode::Schema, "active catalogue schema is missing"))
-    }
-
-    #[cfg(any(feature = "runtime", test))]
-    pub(crate) fn catalogue_bootstrap_is_ready(&self) -> bool {
-        self.node.node.borrow().catalogue_bootstrap_state()
-            == crate::node::CatalogueBootstrapState::Ready
-    }
-
-    /// Register a typed schema view on this database owner.
-    ///
-    /// Registration is process-local and idempotent by the exact typed schema
-    /// content. It does not publish a catalogue entry or select the current
-    /// write schema. The returned handle shares the owner's node, open batches,
-    /// connections, row-id source, and logical clock while validating typed
-    /// operations against this exact schema view.
-    pub fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
-        let schema_version_id = schema.version_id();
-        let schema_view_id = SchemaViewId::for_schema(&schema);
-        self.admit_local_schema_view_if_needed(&schema)?;
-        {
-            let node = self.node.node.borrow();
-            let admitted = node
-                .catalogue_schemas()
-                .get(&schema_version_id)
-                .ok_or_else(|| Error::new(ErrorCode::Schema, "registered schema is missing"))?;
-            if !schema_policy_metadata_matches(&admitted.schema, &schema) {
-                return Err(Error::new(
-                    ErrorCode::Schema,
-                    "schema view policy metadata conflicts with its admitted structural schema",
-                ));
-            }
-            if !schema_index_metadata_matches(&admitted.schema, &schema) {
-                return Err(Error::new(
-                    ErrorCode::Schema,
-                    "schema view index metadata conflicts with its admitted structural schema",
-                ));
-            }
-        }
-        let mut views = self.schema_views.borrow_mut();
-        if let Some(existing) = views.get(&schema_view_id) {
-            if existing != &schema {
-                return Err(Error::new(
-                    ErrorCode::Schema,
-                    format!("schema view id collision for {schema_view_id:?}"),
-                ));
-            }
-        } else {
-            views.insert(schema_view_id, schema.clone());
-        }
-        drop(views);
-        Ok(self.with_registered_schema_view(schema))
-    }
-
-    fn with_registered_schema_view(&self, schema: JazzSchema) -> Self {
-        let schema_version_id = schema.version_id();
-        Self {
-            schema,
-            schema_version_id,
-            schema_view_is_fixed: true,
-            schema_views: Rc::clone(&self.schema_views),
-            identity: self.identity,
-            node: Rc::clone(&self.node),
-            row_id_source: Rc::clone(&self.row_id_source),
-            next_now_ms: Rc::clone(&self.next_now_ms),
-        }
-    }
-
-    /// Attach an already-registered typed schema view to this owner.
-    pub fn schema_view(&self, schema_view_id: SchemaViewId) -> Result<Self, Error> {
-        let registered = self
-            .schema_views
-            .borrow()
-            .get(&schema_view_id)
-            .cloned()
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorCode::Schema,
-                    format!("schema view {schema_view_id:?} is not registered"),
-                )
-            })?;
-        let schema_version_id = registered.version_id();
-        let schema = {
-            let node = self.node.node.borrow();
-            let admitted = node
-                .catalogue_schemas()
-                .get(&schema_version_id)
-                .ok_or_else(|| Error::new(ErrorCode::Schema, "registered schema is missing"))?;
-            schema_with_authoritative_runtime_metadata(registered, &admitted.schema)
-        };
-        Ok(self.with_registered_schema_view(schema))
-    }
-
-    /// Canonical id of this handle's typed schema view.
-    pub fn schema_view_id(&self) -> SchemaViewId {
-        SchemaViewId::for_schema(&self.schema)
-    }
-
-    /// Admit the first application schema into an owner deliberately opened
-    /// with the empty schema. This is the local-first bootstrap equivalent of
-    /// having opened the runtime with that schema originally; later schemas
-    /// still arrive through ordinary catalogue lineage publication.
-    fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
-        let empty_schema = JazzSchema::new([]);
-        let empty_id = empty_schema.version_id();
-        let target_id = schema.version_id();
-        let (source, catalogue_seq, bootstrap_current) = {
-            let node = self.node.node.borrow();
-            if node.catalogue_schemas().contains_key(&target_id) {
-                return Ok(());
-            }
-            let current = node.current_write_schema().map_err(Error::from)?;
-            let source = node
-                .catalogue_schemas()
-                .get(&current.schema)
-                .map(|version| version.schema.clone())
-                .ok_or_else(|| Error::new(ErrorCode::Schema, "current schema view is missing"))?;
-            (
-                source,
-                node.active_catalogue_seq().saturating_add(1),
-                current.schema == empty_id && node.catalogue_schemas().len() == 1,
-            )
-        };
-        let (lens, new_tables, dropped_tables) = direct_schema_view_lens(&source, schema)?;
-        let publication = SchemaLineagePublication::new(
-            SchemaVersion::new(schema.clone()),
-            lens,
-            new_tables,
-            dropped_tables,
-        );
-        let mut node = self.node.node.borrow_mut();
-        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
-            catalogue_seq,
-            publication: Box::new(publication),
-        })?;
-        if bootstrap_current {
-            node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-                author: AuthorId::SYSTEM,
-                pointer: CurrentWriteSchema {
-                    revision: 1,
-                    schema: target_id,
-                },
-            })?;
-        }
-        Ok(())
-    }
-
-    /// Flush node-local maintenance state, write a clean-close marker, and
-    /// close the underlying storage.
-    pub fn close(&self) -> Result<(), Error> {
-        if self.schema_view_is_fixed {
-            return Ok(());
-        }
-        Ok(self.node.node.borrow_mut().close()?)
-    }
-
-    /// Configure this database as the optimistic, non-durable side of a
-    /// browser client/worker pair. This must be called before application
-    /// writes begin.
-    pub fn set_non_durable_client(&self) {
-        self.node.set_non_durable_client();
-    }
-
-    /// Declare the durability guaranteed by this database's immediate
-    /// upstream. Browser main-thread runtimes use `Local` for their persistent
-    /// worker; direct server connections retain the default `Global` floor.
-    pub fn set_upstream_durability_floor(&self, tier: DurabilityTier) {
-        self.node.set_upstream_durability_floor(tier);
-    }
-
-    /// Configure this client database's first-snapshot durability cadence.
-    ///
-    /// Servers do not call this client-only setting and retain their existing
-    /// storage durability behavior.
-    pub fn set_initial_sync_flush_cadence(
-        &self,
-        cadence: InitialSyncFlushCadence,
-    ) -> Result<(), Error> {
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
-            .set_initial_sync_flush_cadence(cadence.writes())?)
-    }
-
-    /// Create a snapshot-base branch immediately in local durable storage.
-    ///
-    /// Branch creation is local-first: no serving node round trip is required.
-    /// The authenticated database identity is recorded as the immutable creator.
-    pub fn create_branch(&self) -> Result<crate::ids::BranchId, Error> {
-        let branch = crate::ids::BranchId(uuid::Uuid::now_v7());
-        self.create_branch_with_id(branch)?;
-        Ok(branch)
-    }
-
-    /// Create a local snapshot-base branch with a caller-supplied stable id.
-    pub fn create_branch_with_id(&self, branch: crate::ids::BranchId) -> Result<(), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .create_branch_as(branch, self.identity.author)?;
-        Ok(())
-    }
-
-    /// Insert a row into a locally-created branch and queue it for ordinary sync.
-    pub fn insert_on_branch(
-        &self,
-        branch: crate::ids::BranchId,
-        table: &str,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        let row = self.row_id_source.borrow_mut().next_row_id();
-        let cells = self.apply_insert_defaults(table, cells)?;
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .commit_mergeable_on_branch_in_schema(
-                branch,
-                self.schema_version_id,
-                MergeableCommit::new(table, row, self.next_now_ms())
-                    .made_by(self.identity.author)
-                    .cells(cells),
-            )?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
-    /// Seed a settled mergeable row for server bootstrap/import flows.
-    ///
-    /// This bypasses the client pending-upload path and immediately finalizes
-    /// the commit in local history. It is intended only for history-complete
-    /// server bootstrap/import state, not for general application writes or
-    /// pending client write semantics.
-    pub fn seed_settled_mergeable_for_bootstrap(
-        &self,
-        table: &str,
-        row: RowUuid,
-        made_by: AuthorId,
-        cells: RowCells,
-    ) -> Result<TxId, Error> {
-        let cells = self.apply_insert_defaults(table, cells)?;
-        let tx_id = self.node.node.borrow_mut().commit_mergeable_in_schema(
-            self.schema_version_id,
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(made_by)
-                .cells(cells),
-        )?;
-        self.node
-            .node
-            .borrow_mut()
-            .finalize_local_mergeable_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        self.node.mark_subscriber_connections_dirty();
-        Ok(tx_id)
-    }
-
-    /// Seed a branch-local mergeable row for history-complete server bootstrap
-    /// or import flows.
-    ///
-    /// The resulting row is evaluated through the ordinary branch read-view
-    /// lowering path; this does not provide an application-facing branch write
-    /// facade.
-    pub fn seed_branch_mergeable_for_bootstrap(
-        &self,
-        branch: crate::ids::BranchId,
-        table: &str,
-        row: RowUuid,
-        made_by: AuthorId,
-        cells: RowCells,
-    ) -> Result<TxId, Error> {
-        let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.node.borrow_mut();
-        if node.branch_record(branch).is_none() {
-            node.create_branch(branch)?;
-        }
-        let tx_id = node.commit_mergeable_on_branch_in_schema(
-            branch,
-            self.schema_version_id,
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(made_by)
-                .cells(cells),
-        )?;
-        node.finalize_local_mergeable_commit(tx_id)?;
-        drop(node);
-        self.refresh_subscriptions()?;
-        self.node.mark_subscriber_connections_dirty();
-        Ok(tx_id)
-    }
-
-    #[cfg(feature = "testing")]
-    /// Test/bench-only authority finalization for a locally committed mergeable
-    /// transaction.
-    ///
-    /// This allows scale fixtures to use the ordinary batched transaction API
-    /// before performing the same self-acceptance step as
-    /// [`Db::seed_settled_mergeable_for_bootstrap`].
-    pub fn finalize_local_mergeable_commit_for_test(&self, tx_id: TxId) -> Result<(), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .finalize_local_mergeable_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        self.node.mark_subscriber_connections_dirty();
-        Ok(())
-    }
-
-    /// Return the locally observed fate and durability for a write transaction.
-    pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {
-        let Some((fate, _, durability)) = self.node.node.borrow_mut().transaction_state(tx_id)
-        else {
-            return Err(Error::new(
-                ErrorCode::NotObserved,
-                "transaction is not known locally",
-            ));
-        };
-        Ok(WriteState { fate, durability })
-    }
-
-    /// Wait until `tx_id` reaches `tier` or is rejected.
-    ///
-    /// An explicit wait consumes a rejection, preventing the same failure from
-    /// subsequently being delivered through [`Db::on_mutation_error`]. The
-    /// check/register/recheck sequence keeps that ownership decision inside
-    /// the database and closes the race with an already-observed rejection.
-    pub async fn wait_for_transaction(
-        &self,
-        tx_id: TxId,
-        tier: DurabilityTier,
-    ) -> Result<TxId, Error> {
-        loop {
-            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
-                return outcome;
-            }
-            let state_change = self.node.register_write_state_waiter(tx_id);
-            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
-                drop(state_change);
-                return outcome;
-            }
-            state_change.await;
-        }
-    }
-
-    /// Callback form of [`Db::wait_for_transaction`] for bindings that cannot
-    /// drive a thread-affine Rust future directly.
-    pub fn wait_for_transaction_with(
-        &self,
-        tx_id: TxId,
-        tier: DurabilityTier,
-        callback: impl FnOnce(Result<TxId, Error>) + 'static,
-    ) {
-        self.node
-            .wait_for_transaction_with(tx_id, tier, Box::new(callback));
-    }
-
-    /// Wait until this database observes another state transition for `tx_id`.
-    ///
-    /// Callers should always check [`Db::write_state`] before and after
-    /// registering this future; this method is a wake primitive, not a predicate.
-    pub fn next_write_state_change(&self, tx_id: TxId) -> WriteStateChange {
-        self.node.register_write_state_waiter(tx_id)
-    }
-
-    /// Register the binding callback for rejected local transactions that no
-    /// active application waiter consumed.
-    pub fn on_mutation_error(&self, callback: MutationErrorCallback) {
-        self.node.set_mutation_error_callback(Some(callback));
-    }
-
-    /// Remove the current mutation-error callback.
-    pub fn clear_mutation_error_callback(&self) {
-        self.node.set_mutation_error_callback(None);
-    }
-
-    /// Attach this `Db` to an upstream peer over a binding-supplied transport.
-    ///
-    /// The returned [`PeerConnection`] carries this Db's subscriptions upstream
-    /// under this Db's own identity and applies the updates that come back.
-    /// An unfated commit unit is interpreted from this receiving Db's role: an
-    /// ordinary Local Db records it as Pending/Local, while the structurally
-    /// separate history-complete path remains the Core authority.
-    /// The binding drives it by calling [`PeerConnection::tick`] (or
-    /// [`Db::tick`]) whenever it has staged inbound bytes or wants to flush.
-    pub fn connect_upstream(
-        &self,
-        transport: Box<dyn Transport>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.node.connect_upstream(transport)
-    }
-
-    /// Install or clear the scheduler used to wake this database's live peer
-    /// connections when local writes, subscription registrations, or transport
-    /// events create sync work.
-    pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
-        self.node.set_scheduler(scheduler);
-    }
-
-    /// Configure automatic edge-cache byte-budget eviction.
-    ///
-    /// `None` disables automatic eviction and preserves the historical manual
-    /// `evict_cold` behavior.
-    pub fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
-        self.node.set_edge_cache_budget(budget);
-    }
-
-    /// Ask the installed scheduler to service pending peer-connection work.
-    pub fn schedule_tick(&self, urgency: TickUrgency) {
-        self.node.schedule_tick(urgency);
-    }
-
-    /// Request a one-shot permission decision from the authenticated upstream
-    /// serving authority. Dropping the returned future cancels local delivery;
-    /// late or replayed responses are ignored by request id.
-    pub fn request_permission_advice(
-        &self,
-        action: PermissionAdviceAction,
-    ) -> PermissionAdviceFuture {
-        self.node.request_permission_advice(action)
-    }
-
-    /// Resolve outstanding permission preflights as `Unknown` and suppress
-    /// requests that have not reached the transport yet.
-    pub fn cancel_permission_advice_request(&self, request_id: PermissionAdviceRequestId) {
-        self.node.cancel_permission_advice_request(request_id);
-    }
-
-    /// Accept a subscriber connection served under `identity`.
-    ///
-    /// The accepting Db owns the ingestion semantics. A Local Db persists
-    /// unfated commits as Pending/Local and forwards them upstream; a
-    /// history-complete Db applies Core authority semantics.
-    pub fn accept_subscriber(
-        &self,
-        transport: Box<dyn Transport>,
-        identity: AuthorId,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.node.accept_subscriber(transport, identity)
-    }
-
-    /// Accept a subscriber connection served under `identity` with auth claims.
-    pub fn accept_subscriber_with_claims(
-        &self,
-        transport: Box<dyn Transport>,
-        identity: AuthorId,
-        claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.node
-            .accept_subscriber_with_claims(transport, identity, claims)
-    }
-
-    /// Accept a subscriber connection with explicit auth claims and upload trust mode.
-    pub fn accept_subscriber_with_claims_and_trust(
-        &self,
-        transport: Box<dyn Transport>,
-        identity: AuthorId,
-        claims: BTreeMap<String, Value>,
-        trust: CommitUnitTrust,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.node
-            .accept_subscriber_with_claims_and_trust(transport, identity, claims, trust)
-    }
-
-    /// Accept an edge-terminated subscriber with session claims.
-    pub fn accept_edge_subscriber_with_claims(
-        &self,
-        transport: Box<dyn Transport>,
-        identity: AuthorId,
-        claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.node
-            .accept_edge_subscriber_with_claims(transport, identity, claims)
-    }
-
-    /// Accept a subscriber whose host shell is wired as an edge fate authority.
-    pub fn accept_edge_authority_subscriber_with_claims(
-        &self,
-        transport: Box<dyn Transport>,
-        identity: AuthorId,
-        claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.node
-            .accept_edge_authority_subscriber_with_claims(transport, identity, claims)
-    }
-
-    /// Accept a reconnecting subscriber, resuming from a previous cursor.
-    pub fn accept_subscriber_with_resume(
-        &self,
-        transport: Box<dyn Transport>,
-        identity: AuthorId,
-        cursor: ResumeCursor,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.node
-            .accept_subscriber_with_resume(transport, identity, cursor)
-    }
-
-    /// Detach a previously attached peer connection from this database.
-    pub fn detach_connection(&self, connection: &Rc<RefCell<PeerConnection<S>>>) -> bool {
-        self.node.detach_connection(connection)
-    }
-
-    /// Service every connection once (a convenience over
-    /// [`PeerConnection::tick`] for the common single-upstream client).
-    pub fn tick(&self) -> Result<(), Error> {
-        self.node.tick().map(|_| ())
-    }
-
-    /// Service every connection once and return binding-observable wake counts.
-    pub fn tick_stats(&self) -> Result<DbTickStats, Error> {
-        self.node.tick()
-    }
-
-    pub(super) fn refresh_subscriptions(&self) -> Result<usize, Error> {
-        let refreshed = self.node.refresh_subscriptions()?;
-        if refreshed > 0 {
-            self.node.mark_subscriber_connections_dirty();
-        }
-        Ok(refreshed)
-    }
-
-    #[cfg(feature = "testing")]
-    /// Test/bench-only history-class byte estimate. This is intentionally the
-    /// cheap physical-class counter, not a logical table-prefix scan.
-    pub fn history_class_bytes_for_test(&self) -> Result<Option<u64>, Error> {
-        Ok(self.node.node.borrow().history_class_bytes_for_test()?)
-    }
-
-    #[cfg(feature = "testing")]
-    /// Test/bench-only encoded storage byte estimate across Jazz physical
-    /// classes.
-    pub fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
-        Ok(self.node.node.borrow().encoded_storage_bytes_for_test()?)
-    }
-
-    #[cfg(feature = "testing")]
-    /// Test/bench-only durability boundary for harnesses that reopen the same
-    /// storage path immediately after a synthetic lifecycle transition.
-    pub fn flush_for_test(&self) -> Result<(), Error> {
-        Ok(self.node.node.borrow_mut().flush_query_runtime()?)
-    }
-
-    #[cfg(feature = "testing")]
-    /// Test/bench-only reset for logical storage-read attribution.
-    pub fn reset_storage_read_metrics_for_test(&self) {
-        self.node.node.borrow().reset_storage_read_metrics();
-    }
-
-    #[cfg(feature = "testing")]
-    /// Test/bench-only drain for logical storage-read attribution.
-    pub fn take_storage_read_metrics_for_test(&self) -> groove::db::StorageReadMetrics {
-        self.node.node.borrow().take_storage_read_metrics()
-    }
-
-    #[cfg(feature = "testing")]
-    /// Test/bench-only snapshot of sync-path counters.
-    pub fn sync_metrics_for_test(&self) -> crate::node::SyncMetrics {
-        self.node.node.borrow().sync_metrics().clone()
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    /// Test/bench-only runtime diagnostics used by performance receipts.
-    pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
-        self.node.node.borrow().runtime_stats_for_test()
-    }
-
-    #[cfg(feature = "testing")]
-    /// Test/bench-only maintained subscription sizing diagnostics used by
-    /// warm-cache performance receipts.
-    pub fn maintained_subscription_size_receipts_for_test(
-        &self,
-    ) -> Vec<MaintainedSubscriptionSizeReceipt> {
-        self.node
-            .subscriptions
-            .borrow()
-            .iter()
-            .filter_map(Weak::upgrade)
-            .filter_map(|state| {
-                let state = state.borrow();
-                let SubscriptionKind::Prepared {
-                    shape,
-                    binding,
-                    maintained_subscription,
-                } = &state.kind;
-                let maintained_subscription = maintained_subscription.as_ref()?;
-                let snapshot = &state.snapshot;
-                let snapshot_bytes = encode_relation_snapshot_for_size(snapshot)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or_default();
-                let reset_frame_bytes = encode_subscription_reset_frame_for_size(
-                    state.read_tier,
-                    state.settled,
-                    snapshot,
-                )
-                .map(|bytes| bytes.len())
-                .unwrap_or_default();
-                Some(MaintainedSubscriptionSizeReceipt {
-                    name: shape.query().table.clone(),
-                    shape_id: shape.shape_id().0,
-                    binding_id: binding.binding_id().0,
-                    rows: snapshot.rows.len(),
-                    root_rows: snapshot.root_count,
-                    relation_edges: snapshot.edges.len(),
-                    footprint: DbMaintainedSubscriptionFootprint::from_local(
-                        maintained_subscription.footprint(),
-                    ),
-                    snapshot_bytes,
-                    reset_frame_bytes,
-                    validation_tuple_estimate_bytes: validation_tuple_estimate_bytes(
-                        shape,
-                        binding,
-                        state.author,
-                        state.read_tier,
-                        &state.read_view,
-                    ),
-                })
-            })
-            .collect()
+        self.abandon_open_transaction(tx_id)
     }
 }
 
@@ -3493,8 +2778,6 @@ fn schema_index_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool 
         })
 }
 
-/// Combine one registered typed shape with the authority-admitted metadata
-/// that may change without changing its structural schema version.
 fn schema_with_authoritative_runtime_metadata(
     mut registered: JazzSchema,
     admitted: &JazzSchema,
@@ -3518,27 +2801,16 @@ fn schema_with_authoritative_runtime_metadata(
 
 #[cfg(feature = "testing")]
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// Test/bench-only sizing receipt for one active maintained subscription.
 pub struct MaintainedSubscriptionSizeReceipt {
-    /// Debug label for the subscription, currently the root query table.
     pub name: String,
-    /// Stable query shape id.
     pub shape_id: uuid::Uuid,
-    /// Stable binding id.
     pub binding_id: uuid::Uuid,
-    /// Materialized snapshot row count, including related rows.
     pub rows: usize,
-    /// Materialized root row count.
     pub root_rows: usize,
-    /// Materialized relation/include edge count.
     pub relation_edges: usize,
-    /// Approximate maintained-view and local control-state footprint.
     pub footprint: DbMaintainedSubscriptionFootprint,
-    /// Postcard bytes for the materialized relation snapshot shape used by native runtimes.
     pub snapshot_bytes: usize,
-    /// Postcard bytes for the native reset delta row payload.
     pub reset_frame_bytes: usize,
-    /// Estimated validation tuple bytes for a future warm-cache key.
     pub validation_tuple_estimate_bytes: usize,
 }
 
@@ -3548,23 +2820,23 @@ pub struct MaintainedSubscriptionSizeReceipt {
 pub struct DbMaintainedSubscriptionFootprint {
     /// Active result-current rows in the maintained index.
     pub result_rows: usize,
-    /// Result weight map entries, including non-positive transient entries.
+    /// Result weight map entries, including transient non-positive entries.
     pub result_weights: usize,
-    /// Result payload map entries retained for projected/synthetic output.
+    /// Projected or synthetic result payload entries.
     pub result_payloads: usize,
-    /// Active readable version identities retained by full record identity.
+    /// Active readable version identities.
     pub version_identities: usize,
     /// Entries reachable through the version-by-transaction index.
     pub version_tx_entries: usize,
-    /// Active replacement winner entries across content and deletion maps.
+    /// Active replacement winner entries.
     pub replacement_entries: usize,
-    /// Approximate heap bytes retained by result_weights.
+    /// Approximate heap bytes retained by result weights.
     pub result_weights_bytes: usize,
-    /// Approximate heap bytes retained by result_payloads.
+    /// Approximate heap bytes retained by result payloads.
     pub result_payloads_bytes: usize,
-    /// Approximate heap bytes retained by WeightedVersionIndex.
+    /// Approximate heap bytes retained by version indexes.
     pub versions_bytes: usize,
-    /// Approximate heap bytes retained by ReplacementIndex.
+    /// Approximate heap bytes retained by replacement indexes.
     pub replacements_bytes: usize,
     /// Approximate heap bytes retained by maintained-view indexes.
     pub maintained_heap_bytes: usize,
@@ -3572,7 +2844,7 @@ pub struct DbMaintainedSubscriptionFootprint {
     pub terminal_schemas: usize,
     /// Approximate heap bytes retained by terminal schemas.
     pub terminal_schemas_bytes: usize,
-    /// Table schema count retained by the local subscription.
+    /// Table schema count retained by the subscription.
     pub tables: usize,
     /// Local result-set member count.
     pub result_set: usize,
@@ -3580,13 +2852,13 @@ pub struct DbMaintainedSubscriptionFootprint {
     pub local_result_payloads: usize,
     /// Local program fact count.
     pub program_facts: usize,
-    /// Groove delta batches staged while their durable witnesses are acquired.
+    /// Groove delta batches awaiting durable witnesses.
     pub pending_delta_batches: usize,
-    /// Approximate heap bytes retained by staged Groove delta batches.
+    /// Approximate heap bytes retained by pending delta batches.
     pub pending_delta_bytes: usize,
-    /// Approximate heap bytes retained by local subscription control state.
+    /// Approximate heap bytes retained by local control state.
     pub control_state_bytes: usize,
-    /// Approximate maintained plus local control-state heap bytes.
+    /// Maintained plus local control-state heap bytes.
     pub total_heap_bytes: usize,
 }
 
@@ -3630,8 +2902,6 @@ struct SizeRelationSnapshot<'a> {
 #[derive(serde::Serialize)]
 struct SizeSubscriptionDelta<'a> {
     added: Vec<SizeRowBatch<'a>>,
-    updated: Vec<SizeRowBatch<'a>>,
-    removed: Vec<SizeRemovedRow>,
 }
 
 #[cfg(feature = "testing")]
@@ -3651,13 +2921,6 @@ struct SizeRow<'a> {
 }
 
 #[cfg(feature = "testing")]
-#[derive(serde::Serialize)]
-struct SizeRemovedRow {
-    table: String,
-    row_id: RowUuid,
-}
-
-#[cfg(feature = "testing")]
 fn encode_relation_snapshot_for_size(
     snapshot: &RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
@@ -3669,14 +2932,10 @@ fn encode_relation_snapshot_for_size(
 
 #[cfg(feature = "testing")]
 fn encode_subscription_reset_frame_for_size(
-    _tier: DurabilityTier,
-    _settled: bool,
     snapshot: &RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&SizeSubscriptionDelta {
         added: size_row_batches(&snapshot.rows),
-        updated: Vec::new(),
-        removed: Vec::new(),
     })
 }
 
@@ -3687,25 +2946,24 @@ fn size_row_batches(rows: &[CurrentRow]) -> Vec<SizeRowBatch<'_>> {
         let (descriptor, raw) = row.encoded_record();
         match batches.last_mut() {
             Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
-                batch.rows.push(size_row(row, raw));
+                batch.rows.push(SizeRow {
+                    row_id: row.row_uuid(),
+                    deleted: row.is_deleted(),
+                    raw,
+                });
             }
             _ => batches.push(SizeRowBatch {
                 table: row.table(),
                 descriptor: *descriptor,
-                rows: vec![size_row(row, raw)],
+                rows: vec![SizeRow {
+                    row_id: row.row_uuid(),
+                    deleted: row.is_deleted(),
+                    raw,
+                }],
             }),
         }
     }
     batches
-}
-
-#[cfg(feature = "testing")]
-fn size_row<'a>(row: &CurrentRow, raw: &'a [u8]) -> SizeRow<'a> {
-    SizeRow {
-        row_id: row.row_uuid(),
-        deleted: row.is_deleted(),
-        raw,
-    }
 }
 
 #[cfg(feature = "testing")]
@@ -3716,28 +2974,954 @@ fn validation_tuple_estimate_bytes(
     tier: DurabilityTier,
     read_view: &ReadViewSpec,
 ) -> usize {
-    #[derive(serde::Serialize)]
-    struct ValidationTuple<'a> {
-        shape_id: uuid::Uuid,
-        binding_id: uuid::Uuid,
-        schema_version: SchemaVersionId,
-        canonical_query: &'a [u8],
-        canonical_binding: &'a [u8],
-        author: AuthorId,
-        tier: DurabilityTier,
-        read_view: &'a ReadViewSpec,
-    }
-
-    postcard::to_allocvec(&ValidationTuple {
-        shape_id: shape.shape_id().0,
-        binding_id: binding.binding_id().0,
-        schema_version: shape.schema_version(),
-        canonical_query: shape.canonical_bytes(),
-        canonical_binding: binding.canonical_bytes(),
+    postcard::to_allocvec(&(
+        shape.shape_id().0,
+        binding.binding_id().0,
+        shape.schema_version(),
+        shape.canonical_bytes(),
+        binding.canonical_bytes(),
         author,
         tier,
         read_view,
-    })
+    ))
     .map(|bytes| bytes.len())
     .unwrap_or_default()
+}
+
+impl DbView<'_> {
+    fn next_now_ms(&self) -> u64 {
+        self.owner.next_now_ms()
+    }
+
+    async fn refresh_subscriptions_prepared(&mut self) -> Result<usize, Error> {
+        refresh_demand_driven_subscriptions(&self.owner.node, &mut self.owner.runtime).await
+    }
+
+    /// Start a logical query in this typed view without loading storage.
+    pub fn table(&self, table: impl Into<String>) -> Query {
+        Query::from(table)
+    }
+
+    /// Compile a logical query in this typed view.
+    pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
+        self.owner
+            .prepare_query_for_schema(query, &self.schema, self.schema_version_id)
+    }
+
+    pub async fn all_relation_query(
+        &mut self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+        author: Option<AuthorId>,
+    ) -> Result<RelationSnapshot, Error> {
+        ensure_default_read_view(&opts)?;
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        let rows = match author {
+            Some(author) => self.all_for_identity(&prepared, opts, author).await?,
+            None => self.all(&prepared, opts).await?,
+        };
+        Ok(RelationSnapshot {
+            root_count: rows.len(),
+            rows,
+            edges: Vec::new(),
+        })
+    }
+
+    /// Run a one-shot query, loading only missing physical inputs.
+    pub async fn all(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let _node = Rc::clone(&self.owner.node);
+        let author = self.owner.identity.author;
+        let node = Rc::clone(&self.owner.node);
+        std::future::poll_fn(|context| {
+            if let Err(error) = ensure_supported_read_view(&opts) {
+                return Poll::Ready(Err(error));
+            }
+            match self.owner.runtime.poll_resident_operation(context, || {
+                if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
+                    node.node.borrow_mut().acquire_branch_read_inputs(
+                        &prepared.shape,
+                        &prepared.binding,
+                        crate::ids::BranchId(*branch),
+                        author,
+                        false,
+                    )?;
+                }
+                reads::all_loaded(
+                    &node,
+                    prepared,
+                    &opts,
+                    author,
+                    QueryAuthorizationMode::ClientLocal,
+                )
+            }) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+            }
+        })
+        .await
+    }
+
+    /// Run a one-shot query as an explicit terminated-session identity.
+    pub async fn all_for_identity(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let node = Rc::clone(&self.owner.node);
+        std::future::poll_fn(|context| {
+            if let Err(error) = ensure_supported_read_view(&opts) {
+                return Poll::Ready(Err(error));
+            }
+            match self.owner.runtime.poll_resident_operation(context, || {
+                reads::all_loaded(
+                    &node,
+                    prepared,
+                    &opts,
+                    author,
+                    QueryAuthorizationMode::TrustedServing,
+                )
+            }) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+            }
+        })
+        .await
+    }
+
+    /// Materialize a structured relation snapshot in this typed view.
+    pub async fn relation_snapshot(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        let node = Rc::clone(&self.owner.node);
+        let author = self.owner.identity.author;
+        std::future::poll_fn(|context| {
+            if let Err(error) = ensure_supported_read_view(&opts) {
+                return Poll::Ready(Err(error));
+            }
+            if opts.include_deleted {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::Query,
+                    "relation snapshots do not support include_deleted yet",
+                )));
+            }
+            match self.owner.runtime.poll_resident_operation(context, || {
+                if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
+                    node.node.borrow_mut().acquire_branch_read_inputs(
+                        &prepared.shape,
+                        &prepared.binding,
+                        crate::ids::BranchId(*branch),
+                        author,
+                        false,
+                    )?;
+                }
+                reads::relation_snapshot_loaded(
+                    &node,
+                    prepared,
+                    &opts,
+                    author,
+                    QueryAuthorizationMode::ClientLocal,
+                )
+            }) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+            }
+        })
+        .await
+    }
+
+    pub async fn relation_snapshot_for_identity(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<RelationSnapshot, Error> {
+        let node = Rc::clone(&self.owner.node);
+        std::future::poll_fn(|context| {
+            match self.owner.runtime.poll_resident_operation(context, || {
+                reads::relation_snapshot_loaded(
+                    &node,
+                    prepared,
+                    &opts,
+                    author,
+                    QueryAuthorizationMode::TrustedServing,
+                )
+            }) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+            }
+        })
+        .await
+    }
+
+    /// Materialize the canonical public result tree in this typed view.
+    pub async fn result_tree(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<ResultTree, Error> {
+        let snapshot = self.relation_snapshot(prepared, opts).await?;
+        materialize_result_tree(prepared.shape.query(), snapshot)
+    }
+
+    /// Open a maintained subscription in this typed view.
+    pub async fn subscribe(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error> {
+        let author = self.owner.identity.author;
+        let node = Rc::clone(&self.owner.node);
+        std::future::poll_fn(|context| {
+            match self.owner.runtime.poll_operation(
+                context,
+                || {
+                    node.open_subscription_resident(
+                        prepared,
+                        opts.clone(),
+                        author,
+                        QueryAuthorizationMode::ClientLocal,
+                    )
+                },
+                SubscriptionOpenError::missing_input,
+            ) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(SubscriptionOpenError::into_api)),
+            }
+        })
+        .await
+    }
+
+    pub async fn subscribe_for_identity(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<SubscriptionStream, Error> {
+        let node = Rc::clone(&self.owner.node);
+        std::future::poll_fn(|context| {
+            match self.owner.runtime.poll_operation(
+                context,
+                || {
+                    node.open_subscription_resident(
+                        prepared,
+                        opts.clone(),
+                        author,
+                        QueryAuthorizationMode::TrustedServing,
+                    )
+                },
+                SubscriptionOpenError::missing_input,
+            ) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(SubscriptionOpenError::into_api)),
+            }
+        })
+        .await
+    }
+
+    pub async fn subscribe_relation_query(
+        &mut self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+        author: Option<AuthorId>,
+    ) -> Result<SubscriptionStream, Error> {
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        match author {
+            Some(author) => self.subscribe_for_identity(&prepared, opts, author).await,
+            None => self.subscribe(&prepared, opts).await,
+        }
+    }
+
+    pub fn set_identity_claims(
+        &self,
+        author: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<(), Error> {
+        self.owner.set_identity_claims(author, claims)
+    }
+
+    pub fn can_insert(&self, table: &str, cells: RowCells) -> Result<PermissionAdvice, Error> {
+        self.owner.can_insert(table, cells)
+    }
+
+    pub fn local_current_row(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<CurrentRow>, Error> {
+        self.owner.table_schema(table)?;
+        Ok(self
+            .owner
+            .node
+            .node
+            .borrow_mut()
+            .local_current_row(table, row)?)
+    }
+
+    pub fn attach_query_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<QueryAttachment, Error> {
+        self.owner.attach_query_with_opts(prepared, opts)
+    }
+
+    pub fn attach_query_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<QueryAttachment, Error> {
+        self.owner
+            .attach_query_with_opts_for_identity(prepared, opts, author)
+    }
+
+    pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
+        self.owner.query_attachment_is_covered(attachment)
+    }
+
+    pub fn detach_query(&self, attachment: QueryAttachment) {
+        self.owner.detach_query(attachment)
+    }
+
+    async fn publish_mergeable(
+        &mut self,
+        commits: &[MergeableCommit],
+        row: RowUuid,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let schema = self.schema_version_id;
+        let tx_id = std::future::poll_fn(|context| {
+            self.owner
+                .runtime
+                .poll_mergeable_many_in_schema(context, schema, commits)
+        })
+        .await
+        .map_err(Error::from)?;
+        let local_tier = self.owner.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions_prepared().await?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.owner.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    /// Insert one generated row through this typed view.
+    pub async fn insert(
+        &mut self,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let row = self.owner.row_id_source.borrow_mut().next_row_id();
+        self.insert_with_id(table, row, cells, None, None).await
+    }
+
+    /// Insert one caller-selected row through this typed view.
+    pub async fn insert_with_id(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        made_by: Option<AuthorId>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let permission_subject = made_by;
+        let author = made_by.unwrap_or(self.owner.identity.author);
+        let cells = self.owner.apply_insert_defaults(table, cells)?;
+        let mut commit =
+            MergeableCommit::new(table, row, now_ms.unwrap_or_else(|| self.next_now_ms()))
+                .made_by(author)
+                .cells(cells);
+        if let Some(subject) = permission_subject {
+            commit = commit.permission_subject(subject);
+        }
+        let schema = self.schema.clone();
+        let node = Rc::clone(&self.owner.node);
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || mutations::acquire_insert_target_loaded(&schema, &node, table, row),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?;
+        self.publish_mergeable(std::slice::from_ref(&commit), row)
+            .await
+    }
+
+    /// Update one row through this typed view.
+    pub async fn update(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        made_by: Option<AuthorId>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let permission_subject = made_by;
+        let author = made_by.unwrap_or(self.owner.identity.author);
+        let schema = self.schema.clone();
+        let node = Rc::clone(&self.owner.node);
+        let identity = self.owner.identity;
+        if patch.is_empty() {
+            let (tx_id, local_tier) = std::future::poll_fn(|context| {
+                self.owner.runtime.poll_operation(
+                    context,
+                    || mutations::prepare_noop_update_loaded(&schema, &node, table, row, author),
+                    MutationPrepareError::missing_input,
+                )
+            })
+            .await
+            .map_err(MutationPrepareError::into_api)?;
+            return Ok(WriteHandle {
+                node: Rc::downgrade(&self.owner.node.node),
+                row_uuid: row,
+                tx_id,
+                local_tier,
+            });
+        }
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let mut commit = std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    mutations::prepare_update_loaded(
+                        &schema,
+                        &node,
+                        identity,
+                        table,
+                        row,
+                        patch.clone(),
+                        now_ms,
+                        author,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?
+        .made_by(author);
+        if let Some(subject) = permission_subject {
+            commit = commit.permission_subject(subject);
+        }
+        self.publish_mergeable(std::slice::from_ref(&commit), row)
+            .await
+    }
+
+    /// Insert or update one caller-selected row through this typed view.
+    pub async fn upsert(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        made_by: Option<AuthorId>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let permission_subject = made_by;
+        let author = made_by.unwrap_or(self.owner.identity.author);
+        let schema = self.schema.clone();
+        let node = Rc::clone(&self.owner.node);
+        let identity = self.owner.identity;
+        let mut commit = std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    mutations::prepare_upsert_loaded(
+                        &schema,
+                        &node,
+                        identity,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                        author,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?
+        .made_by(author);
+        if let Some(subject) = permission_subject {
+            commit = commit.permission_subject(subject);
+        }
+        self.publish_mergeable(std::slice::from_ref(&commit), row)
+            .await
+    }
+
+    /// Soft-delete one row through this typed view.
+    pub async fn delete(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        made_by: Option<AuthorId>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let permission_subject = made_by;
+        let author = made_by.unwrap_or(self.owner.identity.author);
+        let schema = self.schema.clone();
+        let node = Rc::clone(&self.owner.node);
+        let identity = self.owner.identity;
+        let mut commit = std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || mutations::prepare_delete_loaded(&schema, &node, identity, table, row, now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?
+        .made_by(author);
+        if let Some(subject) = permission_subject {
+            commit = commit.permission_subject(subject);
+        }
+        self.publish_mergeable(std::slice::from_ref(&commit), row)
+            .await
+    }
+
+    /// Restore one row through this typed view.
+    pub async fn restore(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        made_by: Option<AuthorId>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let permission_subject = made_by;
+        let author = made_by.unwrap_or(self.owner.identity.author);
+        let schema = self.schema.clone();
+        let node = Rc::clone(&self.owner.node);
+        let identity = self.owner.identity;
+        let commits = std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    mutations::prepare_restore_loaded(
+                        &schema,
+                        &node,
+                        identity,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?
+        .into_iter()
+        .map(|commit| {
+            let commit = commit.made_by(author);
+            match permission_subject {
+                Some(subject) => commit.permission_subject(subject),
+                None => commit,
+            }
+        })
+        .collect::<Vec<_>>();
+        self.publish_mergeable(&commits, row).await
+    }
+
+    /// Open a caller-addressed mergeable batch in this typed view.
+    pub async fn begin_mergeable(
+        &mut self,
+        id: OpenBatchId,
+        author: Option<AuthorId>,
+    ) -> Result<(), Error> {
+        let node = Rc::clone(&self.owner.node);
+        let _schema = self.schema.clone();
+        let _schema_version = self.schema_version_id;
+        let identity = self.owner.identity;
+        let author = author.unwrap_or(identity.author);
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || transactions::begin_mergeable_loaded(&node, id, author),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn mergeable_insert(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let node = Rc::clone(&self.owner.node);
+        let schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    transactions::stage_mergeable_insert_loaded(
+                        &schema,
+                        &node,
+                        schema_version,
+                        tx_id,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn mergeable_update(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let node = Rc::clone(&self.owner.node);
+        let _schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    transactions::stage_mergeable_update_loaded(
+                        &node,
+                        schema_version,
+                        tx_id,
+                        table,
+                        row,
+                        patch.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn mergeable_delete(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let node = Rc::clone(&self.owner.node);
+        let _schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    transactions::stage_mergeable_delete_loaded(
+                        &node,
+                        schema_version,
+                        tx_id,
+                        table,
+                        row,
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn mergeable_restore(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let node = Rc::clone(&self.owner.node);
+        let schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    transactions::stage_mergeable_restore_loaded(
+                        &schema,
+                        &node,
+                        schema_version,
+                        tx_id,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn transaction_all(
+        &mut self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let node = Rc::clone(&self.owner.node);
+        let _schema = self.schema.clone();
+        let _schema_version = self.schema_version_id;
+        let _identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || transactions::transaction_all_loaded(&node, tx_id, prepared, &opts, None),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    /// Read one row with this open mergeable batch's staged writes overlaid.
+    pub async fn mergeable_read(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<RowCells>, Error> {
+        let node = Rc::clone(&self.owner.node);
+        let schema_version = self.schema_version_id;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || transactions::exclusive_read_loaded(&node, schema_version, tx_id, table, row),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn transaction_all_for_identity(
+        &mut self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let node = Rc::clone(&self.owner.node);
+        let _schema = self.schema.clone();
+        let _schema_version = self.schema_version_id;
+        let _identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    transactions::transaction_all_loaded(
+                        &node,
+                        tx_id,
+                        prepared,
+                        &opts,
+                        Some(author),
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    /// Open a caller-addressed exclusive batch in this typed view.
+    pub async fn begin_exclusive(&mut self, id: OpenBatchId) -> Result<(), Error> {
+        let node = Rc::clone(&self.owner.node);
+        let _schema = self.schema.clone();
+        let _schema_version = self.schema_version_id;
+        let identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || transactions::begin_exclusive_loaded(&node, id, identity.author),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn exclusive_read(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<RowCells>, Error> {
+        let node = Rc::clone(&self.owner.node);
+        let _schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || transactions::exclusive_read_loaded(&node, schema_version, tx_id, table, row),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn exclusive_insert(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let node = Rc::clone(&self.owner.node);
+        let schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    transactions::stage_exclusive_insert_loaded(
+                        &schema,
+                        &node,
+                        schema_version,
+                        tx_id,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn exclusive_update(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let mut cells = self
+            .exclusive_read(tx_id, table, row)
+            .await?
+            .unwrap_or_default();
+        cells.extend(patch);
+        self.exclusive_insert(tx_id, table, row, cells, now_ms)
+            .await
+    }
+
+    pub async fn exclusive_delete(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let node = Rc::clone(&self.owner.node);
+        let _schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    transactions::stage_exclusive_delete_loaded(
+                        &node,
+                        schema_version,
+                        tx_id,
+                        table,
+                        row,
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn exclusive_restore(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let node = Rc::clone(&self.owner.node);
+        let schema = self.schema.clone();
+        let schema_version = self.schema_version_id;
+        let _identity = self.owner.identity;
+        std::future::poll_fn(|context| {
+            self.owner.runtime.poll_operation(
+                context,
+                || {
+                    transactions::stage_exclusive_restore_loaded(
+                        &schema,
+                        &node,
+                        schema_version,
+                        tx_id,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
 }

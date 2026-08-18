@@ -8,6 +8,7 @@
 //!   --features testing --bench route_subscription_curve --quiet
 //! ```
 
+use jazz::db::BlockingResultFutureExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, Instant};
@@ -32,7 +33,7 @@ const PAGE_SIZE: usize = 100;
 const MAX_ROUTES: usize = 1_000;
 const WRITER: AuthorId = AuthorId::SYSTEM;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 #[derive(Serialize)]
 struct Receipt {
@@ -120,9 +121,9 @@ fn main() {
 }
 
 fn run(routes: usize) -> Receipt {
-    let db = open_db(routes as u64);
+    let mut db = open_db(routes as u64);
     let seed_started = Instant::now();
-    seed_fixture(&db);
+    seed_fixture(&mut db);
     let seed_us = micros(seed_started.elapsed());
     let rss_kib_after_seed = proc_status_kib("VmRSS:");
 
@@ -164,13 +165,13 @@ fn run(routes: usize) -> Receipt {
     }
 
     let hydration_total_us = micros(hydration_started.elapsed());
-    let runtime = runtime_receipt(&db);
-    let retained = retained_receipt(&db);
+    let runtime = runtime_receipt(&mut db);
+    let retained = retained_receipt(&mut db);
     let rss_kib_after_hydration = proc_status_kib("VmRSS:");
 
     let matching_row = document_row(0, HOT_TEAM_DOCUMENTS + 1);
     let matching_started = Instant::now();
-    insert_document(&db, matching_row, 0, HOT_TEAM_DOCUMENTS as u64 + 1);
+    insert_document(&mut db, matching_row, 0, HOT_TEAM_DOCUMENTS as u64 + 1);
     let matching_write_us = micros(matching_started.elapsed());
     let matching_events = drain_events(&mut streams);
     let exact_matching_delta = matching_events.first().is_some_and(|delta| {
@@ -182,12 +183,12 @@ fn run(routes: usize) -> Receipt {
     }) && matching_events.iter().skip(1).all(Delta::is_quiet);
 
     let unrelated_started = Instant::now();
-    insert_document(&db, document_row(MAX_ROUTES, 1), MAX_ROUTES, 1);
+    insert_document(&mut db, document_row(MAX_ROUTES, 1), MAX_ROUTES, 1);
     let unrelated_write_us = micros(unrelated_started.elapsed());
     let unrelated_quiet = drain_events(&mut streams).iter().all(Delta::is_quiet);
 
     let below_boundary_started = Instant::now();
-    insert_document(&db, document_row(0, HOT_TEAM_DOCUMENTS + 2), 0, 0);
+    insert_document(&mut db, document_row(0, HOT_TEAM_DOCUMENTS + 2), 0, 0);
     let below_boundary_write_us = micros(below_boundary_started.elapsed());
     let below_boundary_quiet = drain_events(&mut streams).iter().all(Delta::is_quiet);
 
@@ -335,7 +336,7 @@ fn open_db(seed: u64) -> BenchDb {
     .expect("open route curve db")
 }
 
-fn seed_fixture(db: &BenchDb) {
+fn seed_fixture(db: &mut BenchDb) {
     for ordinal in 0..HOT_TEAM_DOCUMENTS {
         insert_document(db, document_row(0, ordinal), 0, ordinal as u64);
     }
@@ -344,7 +345,7 @@ fn seed_fixture(db: &BenchDb) {
     }
 }
 
-fn insert_document(db: &BenchDb, row: RowUuid, team: usize, updated_at: u64) {
+fn insert_document(db: &mut BenchDb, row: RowUuid, team: usize, updated_at: u64) {
     db.insert_with_id(
         DOCUMENTS,
         row,
@@ -385,7 +386,7 @@ fn local_opts() -> ReadOpts {
     }
 }
 
-fn runtime_receipt(db: &BenchDb) -> RuntimeReceipt {
+fn runtime_receipt(db: &mut BenchDb) -> RuntimeReceipt {
     let stats = db.runtime_stats_for_test();
     RuntimeReceipt {
         graph_nodes: stats.graph_nodes,
@@ -400,7 +401,7 @@ fn runtime_receipt(db: &BenchDb) -> RuntimeReceipt {
     }
 }
 
-fn retained_receipt(db: &BenchDb) -> RetainedReceipt {
+fn retained_receipt(db: &mut BenchDb) -> RetainedReceipt {
     let receipts = db.maintained_subscription_size_receipts_for_test();
     RetainedReceipt {
         subscriptions: receipts.len(),

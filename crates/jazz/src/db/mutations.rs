@@ -2,6 +2,408 @@
 
 use super::*;
 
+impl Db {
+    #[cfg(test)]
+    pub(crate) fn authorize_insert_for_identity(
+        &self,
+        table: &str,
+        cells: RowCells,
+        identity: AuthorId,
+    ) -> Result<PermissionAdvice, Error> {
+        let cells = apply_insert_defaults_loaded(&self.schema, table, cells)?;
+        self.node
+            .node
+            .borrow_mut()
+            .dry_run_mergeable_write_allows_for_view(
+                &self.schema,
+                MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
+                    .made_by(identity)
+                    .permission_subject(identity)
+                    .cells(cells),
+            )
+            .map(|allowed| {
+                if allowed {
+                    PermissionAdvice::Allowed
+                } else {
+                    PermissionAdvice::Denied
+                }
+            })
+            .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authorize_read_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorId,
+    ) -> Result<PermissionAdvice, Error> {
+        self.table_schema(table)?;
+        self.node
+            .node
+            .borrow_mut()
+            .dry_run_read_current_allows(table, row, author)
+            .map(|allowed| {
+                if allowed {
+                    PermissionAdvice::Allowed
+                } else {
+                    PermissionAdvice::Denied
+                }
+            })
+            .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authorize_delete_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorId,
+    ) -> Result<PermissionAdvice, Error> {
+        self.table_schema(table)?;
+        self.node
+            .node
+            .borrow_mut()
+            .dry_run_delete_current_allows(table, row, author)
+            .map(|allowed| {
+                if allowed {
+                    PermissionAdvice::Allowed
+                } else {
+                    PermissionAdvice::Denied
+                }
+            })
+            .map_err(Into::into)
+    }
+}
+
+fn table_schema_loaded<'a>(schema: &'a JazzSchema, table: &str) -> Result<&'a TableSchema, Error> {
+    schema
+        .tables
+        .iter()
+        .find(|candidate| candidate.name == table)
+        .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))
+}
+
+pub(super) fn apply_insert_defaults_loaded(
+    schema: &JazzSchema,
+    table: &str,
+    mut cells: RowCells,
+) -> Result<RowCells, Error> {
+    for column in &table_schema_loaded(schema, table)?.columns {
+        if !cells.contains_key(&column.name) {
+            if let Some(default) = &column.default {
+                cells.insert(
+                    column.name.clone(),
+                    default_cell_for_column_type(&column.column_type, default),
+                );
+            }
+        }
+    }
+    Ok(cells)
+}
+
+pub(super) fn prepare_update_loaded(
+    schema: &JazzSchema,
+    node: &Node<groove::storage::DemandLoadedStorage>,
+    identity: DbIdentity,
+    table: &str,
+    row: RowUuid,
+    patch: RowCells,
+    now_ms: u64,
+    author: AuthorId,
+) -> Result<MergeableCommit, MutationPrepareError> {
+    let table_schema = table_schema_loaded(schema, table)
+        .map_err(MutationPrepareError::Api)?
+        .clone();
+    if node
+        .node
+        .borrow_mut()
+        .local_deletion_winner_tx_id(table, row)
+        .map_err(MutationPrepareError::Node)?
+        .is_some()
+    {
+        return Err(MutationPrepareError::Api(row_already_deleted(row)));
+    }
+    let (cells, parent, authored_columns) = if table_schema
+        .columns
+        .iter()
+        .all(|column| patch.contains_key(&column.name))
+    {
+        let existing = node
+            .node
+            .borrow_mut()
+            .local_current_row(table, row)
+            .map_err(MutationPrepareError::Node)?;
+        let parent = existing
+            .as_ref()
+            .and_then(|row| node.node.borrow_mut().current_row_tx_id(row));
+        let authored_columns = patch.keys().cloned().collect();
+        (patch, parent, authored_columns)
+    } else {
+        let query = Query::from(table).filter(crate::query::eq(
+            crate::query::col("id"),
+            crate::query::lit(Value::Uuid(row.0)),
+        ));
+        let prepared = reads::prepare_query_loaded(node, schema, schema.version_id(), &query)
+            .map_err(MutationPrepareError::Api)?;
+        let existing = node
+            .node
+            .borrow_mut()
+            .query_rows_for_client(
+                &prepared.shape,
+                &prepared.binding,
+                DurabilityTier::Local,
+                author,
+            )
+            .map_err(MutationPrepareError::Node)?
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == row)
+            .ok_or_else(|| {
+                MutationPrepareError::Api(read_for_write_denied("partial UPDATE", table))
+            })?;
+        let mut cells = BTreeMap::new();
+        for column in &table_schema.columns {
+            if let Some(value) = existing.cell(&table_schema, &column.name) {
+                cells.insert(
+                    column.name.clone(),
+                    default_cell_for_column_type(&column.column_type, &value),
+                );
+            }
+        }
+        let parent = node.node.borrow_mut().current_row_tx_id(&existing);
+        let authored_columns = patch.keys().cloned().collect();
+        cells.extend(patch);
+        (cells, parent, authored_columns)
+    };
+    Ok(MergeableCommit::new(table, row, now_ms)
+        .made_by(identity.author)
+        .parents(parent.into_iter().collect())
+        .cells(cells)
+        .authored_columns(authored_columns))
+}
+
+pub(super) fn acquire_insert_target_loaded(
+    schema: &JazzSchema,
+    node: &Node<groove::storage::DemandLoadedStorage>,
+    table: &str,
+    row: RowUuid,
+) -> Result<(), MutationPrepareError> {
+    table_schema_loaded(schema, table).map_err(MutationPrepareError::Api)?;
+    let (content_parent, deletion_parent) = {
+        let mut state = node.node.borrow_mut();
+        let _ = state
+            .row_history(table, row)
+            .map_err(MutationPrepareError::Node)?;
+        (
+            state
+                .local_content_winner_tx_id(table, row)
+                .map_err(MutationPrepareError::Node)?,
+            state
+                .local_deletion_winner_tx_id(table, row)
+                .map_err(MutationPrepareError::Node)?,
+        )
+    };
+    if deletion_parent.is_some() {
+        return Err(MutationPrepareError::Api(row_already_deleted(row)));
+    }
+    if content_parent.is_some() {
+        return Err(MutationPrepareError::Api(Error::new(
+            ErrorCode::WriteRejected,
+            format!("encoding error: object already exists: {}", row.0),
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn prepare_noop_update_loaded(
+    schema: &JazzSchema,
+    node: &Node<groove::storage::DemandLoadedStorage>,
+    table: &str,
+    row: RowUuid,
+    author: AuthorId,
+) -> Result<(TxId, DurabilityTier), MutationPrepareError> {
+    table_schema_loaded(schema, table).map_err(MutationPrepareError::Api)?;
+    if node
+        .node
+        .borrow_mut()
+        .local_deletion_winner_tx_id(table, row)
+        .map_err(MutationPrepareError::Node)?
+        .is_some()
+    {
+        return Err(MutationPrepareError::Api(row_already_deleted(row)));
+    }
+    let query = Query::from(table).filter(crate::query::eq(
+        crate::query::col("id"),
+        crate::query::lit(Value::Uuid(row.0)),
+    ));
+    let prepared = reads::prepare_query_loaded(node, schema, schema.version_id(), &query)
+        .map_err(MutationPrepareError::Api)?;
+    let existing = node
+        .node
+        .borrow_mut()
+        .query_rows_for_client(
+            &prepared.shape,
+            &prepared.binding,
+            DurabilityTier::Local,
+            author,
+        )
+        .map_err(MutationPrepareError::Node)?
+        .into_iter()
+        .find(|candidate| candidate.row_uuid() == row)
+        .ok_or_else(|| MutationPrepareError::Api(read_for_write_denied("partial UPDATE", table)))?;
+    let tx_id = node
+        .node
+        .borrow_mut()
+        .current_row_tx_id(&existing)
+        .ok_or_else(|| {
+            MutationPrepareError::Api(Error::new(
+                ErrorCode::NotObserved,
+                "current row has no transaction",
+            ))
+        })?;
+    let durability = node
+        .node
+        .borrow_mut()
+        .transaction_state(tx_id)
+        .map(|(_, _, durability)| durability)
+        .ok_or_else(|| {
+            MutationPrepareError::Api(Error::new(
+                ErrorCode::NotObserved,
+                "transaction is not known locally",
+            ))
+        })?;
+    Ok((tx_id, durability))
+}
+
+pub(super) fn prepare_delete_loaded(
+    schema: &JazzSchema,
+    node: &Node<groove::storage::DemandLoadedStorage>,
+    identity: DbIdentity,
+    table: &str,
+    row: RowUuid,
+    now_ms: u64,
+) -> Result<MergeableCommit, MutationPrepareError> {
+    table_schema_loaded(schema, table).map_err(MutationPrepareError::Api)?;
+    let (content_parent, deletion_parent) = {
+        let mut state = node.node.borrow_mut();
+        (
+            state
+                .local_content_winner_tx_id(table, row)
+                .map_err(MutationPrepareError::Node)?,
+            state
+                .local_deletion_winner_tx_id(table, row)
+                .map_err(MutationPrepareError::Node)?,
+        )
+    };
+    if deletion_parent.is_some() {
+        return Err(MutationPrepareError::Api(row_already_deleted(row)));
+    }
+    Ok(MergeableCommit::new(table, row, now_ms)
+        .made_by(identity.author)
+        .parents(content_parent.into_iter().collect())
+        .cells(BTreeMap::<String, Value>::new())
+        .deletion(DeletionEvent::Deleted))
+}
+
+pub(super) fn prepare_restore_loaded(
+    schema: &JazzSchema,
+    node: &Node<groove::storage::DemandLoadedStorage>,
+    identity: DbIdentity,
+    table: &str,
+    row: RowUuid,
+    cells: RowCells,
+    now_ms: u64,
+) -> Result<Vec<MergeableCommit>, MutationPrepareError> {
+    let cells =
+        apply_insert_defaults_loaded(schema, table, cells).map_err(MutationPrepareError::Api)?;
+    let (content_parent, deletion_parent) = {
+        let mut state = node.node.borrow_mut();
+        (
+            state
+                .local_content_winner_tx_id(table, row)
+                .map_err(MutationPrepareError::Node)?,
+            state
+                .local_deletion_winner_tx_id(table, row)
+                .map_err(MutationPrepareError::Node)?,
+        )
+    };
+    let deletion_parent = deletion_parent.ok_or_else(|| {
+        MutationPrepareError::Api(Error::new(
+            ErrorCode::WriteRejected,
+            format!("row not deleted: {}", row.0),
+        ))
+    })?;
+    Ok(vec![
+        MergeableCommit::new(table, row, now_ms)
+            .made_by(identity.author)
+            .parents(content_parent.into_iter().collect())
+            .cells(cells),
+        MergeableCommit::new(table, row, now_ms)
+            .made_by(identity.author)
+            .parents(vec![deletion_parent])
+            .cells(BTreeMap::<String, Value>::new())
+            .deletion(DeletionEvent::Restored),
+    ])
+}
+
+pub(super) fn prepare_upsert_loaded(
+    schema: &JazzSchema,
+    node: &Node<groove::storage::DemandLoadedStorage>,
+    identity: DbIdentity,
+    table: &str,
+    row: RowUuid,
+    patch: RowCells,
+    now_ms: u64,
+    author: AuthorId,
+) -> Result<MergeableCommit, MutationPrepareError> {
+    let table_schema = table_schema_loaded(schema, table).map_err(MutationPrepareError::Api)?;
+    if node
+        .node
+        .borrow_mut()
+        .local_deletion_winner_tx_id(table, row)
+        .map_err(MutationPrepareError::Node)?
+        .is_some()
+    {
+        return Err(MutationPrepareError::Api(row_already_deleted(row)));
+    }
+    let query = Query::from(table).filter(crate::query::eq(
+        crate::query::col("id"),
+        crate::query::lit(Value::Uuid(row.0)),
+    ));
+    let prepared = reads::prepare_query_loaded(node, schema, schema.version_id(), &query)
+        .map_err(MutationPrepareError::Api)?;
+    let visible = node
+        .node
+        .borrow_mut()
+        .query_rows_for_client(
+            &prepared.shape,
+            &prepared.binding,
+            DurabilityTier::Local,
+            author,
+        )
+        .map_err(MutationPrepareError::Node)?
+        .into_iter()
+        .find(|candidate| candidate.row_uuid() == row);
+    if visible.is_some() {
+        return prepare_update_loaded(schema, node, identity, table, row, patch, now_ms, author);
+    }
+    let raw_existing = node
+        .node
+        .borrow_mut()
+        .local_current_row(table, row)
+        .map_err(MutationPrepareError::Node)?;
+    if raw_existing.is_some() && author != AuthorId::SYSTEM && table_schema.read_policy.is_some() {
+        return Err(MutationPrepareError::Api(read_for_write_denied(
+            "UPSERT", table,
+        )));
+    }
+    let cells =
+        apply_insert_defaults_loaded(schema, table, patch).map_err(MutationPrepareError::Api)?;
+    Ok(MergeableCommit::new(table, row, now_ms)
+        .made_by(identity.author)
+        .cells(cells))
+}
+
 pub(super) enum MutationPrepareError {
     Node(crate::node::Error),
     Api(Error),
@@ -34,1845 +436,5 @@ impl MutationPrepareError {
             Self::Node(error) => crate::node::missing_node_open_input(error).map_err(Self::Node),
             error => Err(error),
         }
-    }
-}
-
-impl<S> Db<S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    pub(super) fn prepare_insert_commit(
-        &self,
-        table: &str,
-        cells: RowCells,
-    ) -> Result<(RowUuid, MergeableCommit), Error> {
-        let row = self.row_id_source.borrow_mut().next_row_id();
-        let cells = self.apply_insert_defaults(table, cells)?;
-        Ok((
-            row,
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(self.identity.author)
-                .cells(cells),
-        ))
-    }
-
-    pub(super) fn acquire_insert_target_for_owner(
-        &self,
-        table: &str,
-        row: RowUuid,
-    ) -> Result<(), MutationPrepareError> {
-        self.table_schema(table)
-            .map_err(MutationPrepareError::Api)?;
-        let (content_parent, deletion_parent) = {
-            let mut node = self.node.node.borrow_mut();
-            let _empty_history = node
-                .row_history(table, row)
-                .map_err(MutationPrepareError::Node)?;
-            (
-                node.local_content_winner_tx_id(table, row)
-                    .map_err(MutationPrepareError::Node)?,
-                node.local_deletion_winner_tx_id(table, row)
-                    .map_err(MutationPrepareError::Node)?,
-            )
-        };
-        if deletion_parent.is_some() {
-            return Err(MutationPrepareError::Api(row_already_deleted(row)));
-        }
-        if content_parent.is_some() {
-            return Err(MutationPrepareError::Api(Error::new(
-                ErrorCode::WriteRejected,
-                format!("encoding error: object already exists: {}", row.0),
-            )));
-        }
-        Ok(())
-    }
-
-    pub(super) fn prepare_update_commit_for_owner(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: u64,
-        author: AuthorId,
-    ) -> Result<MergeableCommit, MutationPrepareError> {
-        let table_schema = self
-            .table_schema(table)
-            .map_err(MutationPrepareError::Api)?
-            .clone();
-        if self
-            .node
-            .node
-            .borrow_mut()
-            .local_deletion_winner_tx_id(table, row)
-            .map_err(MutationPrepareError::Node)?
-            .is_some()
-        {
-            return Err(MutationPrepareError::Api(row_already_deleted(row)));
-        }
-        let (cells, parent, authored_columns) = if table_schema
-            .columns
-            .iter()
-            .all(|column| patch.contains_key(&column.name))
-        {
-            let existing = self
-                .node
-                .node
-                .borrow_mut()
-                .local_current_row(table, row)
-                .map_err(MutationPrepareError::Node)?;
-            let parent = existing
-                .as_ref()
-                .and_then(|row| self.node.node.borrow_mut().current_row_tx_id(row));
-            let authored_columns = patch.keys().cloned().collect();
-            (patch, parent, authored_columns)
-        } else {
-            let query = Query::from(table).filter(crate::query::eq(
-                crate::query::col("id"),
-                crate::query::lit(Value::Uuid(row.0)),
-            ));
-            let prepared = self
-                .prepare_query(&query)
-                .map_err(MutationPrepareError::Api)?;
-            let existing = self
-                .node
-                .node
-                .borrow_mut()
-                .query_rows_for_client(
-                    &prepared.shape,
-                    &prepared.binding,
-                    DurabilityTier::Local,
-                    author,
-                )
-                .map_err(MutationPrepareError::Node)?
-                .into_iter()
-                .find(|candidate| candidate.row_uuid() == row)
-                .ok_or_else(|| {
-                    MutationPrepareError::Api(read_for_write_denied("partial UPDATE", table))
-                })?;
-            let mut cells = BTreeMap::new();
-            for column in &table_schema.columns {
-                if let Some(value) = existing.cell(&table_schema, &column.name) {
-                    cells.insert(
-                        column.name.clone(),
-                        default_cell_for_column_type(&column.column_type, &value),
-                    );
-                }
-            }
-            let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
-            let authored_columns = patch.keys().cloned().collect();
-            cells.extend(patch);
-            (cells, parent, authored_columns)
-        };
-        Ok(MergeableCommit::new(table, row, now_ms)
-            .made_by(self.identity.author)
-            .parents(parent.into_iter().collect())
-            .cells(cells)
-            .authored_columns(authored_columns))
-    }
-
-    pub(super) fn prepare_noop_update_for_owner(
-        &self,
-        table: &str,
-        row: RowUuid,
-        author: AuthorId,
-    ) -> Result<(TxId, DurabilityTier), MutationPrepareError> {
-        self.table_schema(table)
-            .map_err(MutationPrepareError::Api)?;
-        if self
-            .node
-            .node
-            .borrow_mut()
-            .local_deletion_winner_tx_id(table, row)
-            .map_err(MutationPrepareError::Node)?
-            .is_some()
-        {
-            return Err(MutationPrepareError::Api(row_already_deleted(row)));
-        }
-        let query = Query::from(table).filter(crate::query::eq(
-            crate::query::col("id"),
-            crate::query::lit(Value::Uuid(row.0)),
-        ));
-        let prepared = self
-            .prepare_query(&query)
-            .map_err(MutationPrepareError::Api)?;
-        let existing = self
-            .node
-            .node
-            .borrow_mut()
-            .query_rows_for_client(
-                &prepared.shape,
-                &prepared.binding,
-                DurabilityTier::Local,
-                author,
-            )
-            .map_err(MutationPrepareError::Node)?
-            .into_iter()
-            .find(|candidate| candidate.row_uuid() == row)
-            .ok_or_else(|| {
-                MutationPrepareError::Api(read_for_write_denied("partial UPDATE", table))
-            })?;
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .current_row_tx_id(&existing)
-            .ok_or_else(|| {
-                MutationPrepareError::Api(Error::new(
-                    ErrorCode::NotObserved,
-                    "current row has no transaction",
-                ))
-            })?;
-        let durability = self
-            .node
-            .node
-            .borrow_mut()
-            .transaction_state(tx_id)
-            .map(|(_, _, durability)| durability)
-            .ok_or_else(|| {
-                MutationPrepareError::Api(Error::new(
-                    ErrorCode::NotObserved,
-                    "transaction is not known locally",
-                ))
-            })?;
-        Ok((tx_id, durability))
-    }
-
-    pub(super) fn prepare_delete_commit_for_owner(
-        &self,
-        table: &str,
-        row: RowUuid,
-        now_ms: u64,
-    ) -> Result<MergeableCommit, MutationPrepareError> {
-        self.table_schema(table)
-            .map_err(MutationPrepareError::Api)?;
-        let (content_parent, deletion_parent) = {
-            let mut node = self.node.node.borrow_mut();
-            (
-                node.local_content_winner_tx_id(table, row)
-                    .map_err(MutationPrepareError::Node)?,
-                node.local_deletion_winner_tx_id(table, row)
-                    .map_err(MutationPrepareError::Node)?,
-            )
-        };
-        if deletion_parent.is_some() {
-            return Err(MutationPrepareError::Api(row_already_deleted(row)));
-        }
-        Ok(MergeableCommit::new(table, row, now_ms)
-            .made_by(self.identity.author)
-            .parents(content_parent.into_iter().collect())
-            .cells(BTreeMap::<String, Value>::new())
-            .deletion(DeletionEvent::Deleted))
-    }
-
-    pub(super) fn prepare_restore_commits_for_owner(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<Vec<MergeableCommit>, MutationPrepareError> {
-        let cells = self
-            .apply_insert_defaults(table, cells)
-            .map_err(MutationPrepareError::Api)?;
-        let (content_parent, deletion_parent) = {
-            let mut node = self.node.node.borrow_mut();
-            (
-                node.local_content_winner_tx_id(table, row)
-                    .map_err(MutationPrepareError::Node)?,
-                node.local_deletion_winner_tx_id(table, row)
-                    .map_err(MutationPrepareError::Node)?,
-            )
-        };
-        let Some(deletion_parent) = deletion_parent else {
-            return Err(MutationPrepareError::Api(Error::new(
-                ErrorCode::WriteRejected,
-                format!("row not deleted: {}", row.0),
-            )));
-        };
-        Ok(vec![
-            MergeableCommit::new(table, row, now_ms)
-                .made_by(self.identity.author)
-                .parents(content_parent.into_iter().collect())
-                .cells(cells),
-            MergeableCommit::new(table, row, now_ms)
-                .made_by(self.identity.author)
-                .parents(vec![deletion_parent])
-                .cells(BTreeMap::<String, Value>::new())
-                .deletion(DeletionEvent::Restored),
-        ])
-    }
-
-    pub(super) fn prepare_upsert_commit_for_owner(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: u64,
-        author: AuthorId,
-    ) -> Result<MergeableCommit, MutationPrepareError> {
-        let table_schema = self
-            .table_schema(table)
-            .map_err(MutationPrepareError::Api)?;
-        if self
-            .node
-            .node
-            .borrow_mut()
-            .local_deletion_winner_tx_id(table, row)
-            .map_err(MutationPrepareError::Node)?
-            .is_some()
-        {
-            return Err(MutationPrepareError::Api(row_already_deleted(row)));
-        }
-        let query = Query::from(table).filter(crate::query::eq(
-            crate::query::col("id"),
-            crate::query::lit(Value::Uuid(row.0)),
-        ));
-        let prepared = self
-            .prepare_query(&query)
-            .map_err(MutationPrepareError::Api)?;
-        let visible = self
-            .node
-            .node
-            .borrow_mut()
-            .query_rows_for_client(
-                &prepared.shape,
-                &prepared.binding,
-                DurabilityTier::Local,
-                author,
-            )
-            .map_err(MutationPrepareError::Node)?
-            .into_iter()
-            .find(|candidate| candidate.row_uuid() == row);
-        if visible.is_some() {
-            return self.prepare_update_commit_for_owner(table, row, patch, now_ms, author);
-        }
-        let raw_existing = self
-            .node
-            .node
-            .borrow_mut()
-            .local_current_row(table, row)
-            .map_err(MutationPrepareError::Node)?;
-        if raw_existing.is_some()
-            && author != AuthorId::SYSTEM
-            && table_schema.read_policy.is_some()
-        {
-            return Err(MutationPrepareError::Api(read_for_write_denied(
-                "UPSERT", table,
-            )));
-        }
-        let cells = self
-            .apply_insert_defaults(table, patch)
-            .map_err(MutationPrepareError::Api)?;
-        Ok(MergeableCommit::new(table, row, now_ms)
-            .made_by(self.identity.author)
-            .cells(cells))
-    }
-
-    /// Insert a row locally, generating a uuidv7-shaped row id.
-    ///
-    /// The generated id is available from [`WriteHandle::row_uuid`].
-    ///
-    /// ```rust
-    /// # use jazz::db::doctest_support::{block_on, open_todos_db};
-    /// # use jazz::tx::DurabilityTier;
-    /// let db = block_on(open_todos_db())?;
-    /// let write = db.insert("todos", jazz::row! { title: "new todo", done: false })?;
-    /// let row = write.row_uuid();
-    /// block_on(write.wait(DurabilityTier::Local))?;
-    ///
-    /// let todos = db.prepare_query(&db.table("todos"))?;
-    /// assert_eq!(db.read(&todos)?.len(), 1);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn insert(&self, table: &str, cells: RowCells) -> Result<WriteHandle<S>, Error> {
-        let row = self.row_id_source.borrow_mut().next_row_id();
-        self.write_mergeable(
-            self.identity.author,
-            None,
-            table,
-            row,
-            cells,
-            Vec::new(),
-            None,
-        )
-    }
-
-    /// Insert a row while attributing provenance to `made_by`.
-    ///
-    /// The Db's authenticated identity remains the write-policy subject. Client
-    /// facades can only write as themselves; trusted-backend attribution is a
-    /// serving-node concern on inbound commit-unit ingestion.
-    pub fn insert_attributed(
-        &self,
-        made_by: AuthorId,
-        table: &str,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        let row = self.row_id_source.borrow_mut().next_row_id();
-        self.write_mergeable_as_session_subject(made_by, table, row, cells, Vec::new(), None)
-    }
-
-    /// Insert a row with a caller-supplied id.
-    ///
-    /// This is a niche path for imports from legacy systems or other cases
-    /// where row identity already exists. New local rows should generally use
-    /// [`Db::insert`] so the database generates the id.
-    pub fn insert_with_id(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_absent(table, row, self.identity.author)?;
-        self.write_mergeable(
-            self.identity.author,
-            None,
-            table,
-            row,
-            cells,
-            Vec::new(),
-            None,
-        )
-    }
-
-    /// Insert a caller-id row while attributing provenance to `made_by`.
-    ///
-    /// See [`Db::insert_attributed`] for the security boundary.
-    pub fn insert_with_id_attributed(
-        &self,
-        made_by: AuthorId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_absent(table, row, self.identity.author)?;
-        self.write_mergeable_as_session_subject(made_by, table, row, cells, Vec::new(), None)
-    }
-
-    /// Insert a row while evaluating write policy as `identity`.
-    pub fn insert_for_identity(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        let row = self.row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id_for_identity(identity, table, row, cells)
-    }
-
-    /// Insert a caller-id row with an explicit millisecond provenance time.
-    pub fn insert_with_id_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_absent(table, row, self.identity.author)?;
-        self.write_mergeable_at_ms(
-            self.identity.author,
-            None,
-            table,
-            row,
-            cells,
-            Vec::new(),
-            None,
-            now_ms,
-        )
-    }
-
-    /// Insert a caller-id row while evaluating write policy as `identity`.
-    ///
-    /// This is a trusted serving-node API for terminated backend/request
-    /// sessions. It records provenance as `identity` and evaluates policy as
-    /// the same identity, without changing the Db's own authority.
-    pub fn insert_with_id_for_identity(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_absent(table, row, identity)?;
-        let cells = self.apply_insert_defaults(table, cells)?;
-        // Client writes are admitted structurally and staged optimistically.
-        // A trusted serving authority evaluates policy and returns the fate.
-        self.write_mergeable(
-            identity,
-            Some(identity),
-            table,
-            row,
-            cells,
-            Vec::new(),
-            None,
-        )
-    }
-
-    /// Insert a caller-id row for `identity` with an explicit millisecond provenance time.
-    pub fn insert_with_id_for_identity_at_ms(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_absent(table, row, identity)?;
-        let cells = self.apply_insert_defaults(table, cells)?;
-        // See `insert_with_id_for_identity`: policy fate belongs to the
-        // trusted serving authority, not this local client admission path.
-        self.write_mergeable_at_ms(
-            identity,
-            Some(identity),
-            table,
-            row,
-            cells,
-            Vec::new(),
-            None,
-            now_ms,
-        )
-    }
-
-    /// Advise whether an insert may be allowed.
-    ///
-    /// A `Db` is ordinarily a client-local replica, whose policy evidence may
-    /// be incomplete. It therefore never turns a local policy evaluation into
-    /// an allow/deny result. Use an explicitly trusted serving authority for a
-    /// final decision.
-    pub fn can_insert(&self, _table: &str, _cells: RowCells) -> Result<PermissionAdvice, Error> {
-        Ok(PermissionAdvice::Unknown)
-    }
-
-    /// Evaluate an insert for a test-only serving-path probe without writing.
-    #[cfg(test)]
-    pub(crate) fn authorize_insert_for_identity(
-        &self,
-        table: &str,
-        cells: RowCells,
-        identity: AuthorId,
-    ) -> Result<PermissionAdvice, Error> {
-        let cells = self.apply_insert_defaults(table, cells)?;
-        self.node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows_for_view(
-                &self.schema,
-                MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
-                    .made_by(identity)
-                    .permission_subject(identity)
-                    .cells(cells),
-            )
-            .map(|allowed| {
-                if allowed {
-                    PermissionAdvice::Allowed
-                } else {
-                    PermissionAdvice::Denied
-                }
-            })
-            .map_err(Into::into)
-    }
-
-    /// Update a row locally; omitted fields keep their current local value.
-    ///
-    /// ```rust
-    /// # use std::collections::BTreeMap;
-    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
-    /// # use jazz::ids::RowUuid;
-    /// # use jazz::groove::records::Value;
-    /// let db = block_on(open_todos_db())?;
-    /// let todo = RowUuid::from_bytes([1; 16]);
-    /// db.insert_with_id("todos", todo, todo_cells("draft", false))?;
-    ///
-    /// db.update(
-    ///     "todos",
-    ///     todo,
-    ///     BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
-    /// )?;
-    /// let todos = db.prepare_query(&db.table("todos"))?;
-    /// assert_eq!(db.read(&todos)?.len(), 1);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn update(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        if patch.is_empty() {
-            return self.no_op_update_handle_for_client(table, row, self.identity.author);
-        }
-        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_with_authored_columns(
-            self.identity.author,
-            None,
-            table,
-            row,
-            cells,
-            parent.into_iter().collect(),
-            None,
-            authored_columns,
-        )
-    }
-
-    /// Update a row with an explicit millisecond provenance time.
-    pub fn update_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        if patch.is_empty() {
-            return self.no_op_update_handle_for_client(table, row, self.identity.author);
-        }
-        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_at_ms_with_authorship(
-            self.identity.author,
-            None,
-            table,
-            row,
-            cells,
-            parent.into_iter().collect(),
-            None,
-            Some(authored_columns),
-            now_ms,
-        )
-    }
-
-    /// Update a row while attributing provenance to `made_by`.
-    ///
-    /// See [`Db::insert_attributed`] for the security boundary.
-    pub fn update_attributed(
-        &self,
-        made_by: AuthorId,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.check_attribution_allowed(made_by)?;
-        if patch.is_empty() {
-            return self.no_op_update_handle_for_client(table, row, self.identity.author);
-        }
-        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_as_session_subject_with_authored_columns(
-            made_by,
-            table,
-            row,
-            cells,
-            parent.into_iter().collect(),
-            None,
-            authored_columns,
-        )
-    }
-
-    /// Update a row while evaluating write policy as `identity`.
-    pub fn update_for_identity(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        if patch.is_empty() {
-            return self.no_op_update_handle_for_identity(table, row, identity);
-        }
-        let (cells, parent, authored_columns) =
-            self.merge_existing_cells_for_identity(table, row, patch, identity)?;
-        let parents = parent.into_iter().collect::<Vec<_>>();
-        self.write_mergeable_with_authored_columns(
-            identity,
-            Some(identity),
-            table,
-            row,
-            cells,
-            parents,
-            None,
-            authored_columns,
-        )
-    }
-
-    /// Update a row for `identity` with an explicit millisecond provenance time.
-    pub fn update_for_identity_at_ms(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        if patch.is_empty() {
-            return self.no_op_update_handle_for_identity(table, row, identity);
-        }
-        let (cells, parent, authored_columns) =
-            self.merge_existing_cells_for_identity(table, row, patch, identity)?;
-        let parents = parent.into_iter().collect::<Vec<_>>();
-        self.write_mergeable_at_ms_with_authorship(
-            identity,
-            Some(identity),
-            table,
-            row,
-            cells,
-            parents,
-            None,
-            Some(authored_columns),
-            now_ms,
-        )
-    }
-
-    /// Upsert a row locally.
-    ///
-    /// This explicit-id path is primarily for importing rows from legacy
-    /// systems. New local rows should generally use [`Db::insert`] and then
-    /// update the returned [`WriteHandle::row_uuid`] when needed.
-    ///
-    /// ```rust
-    /// # use std::collections::BTreeMap;
-    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
-    /// # use jazz::ids::RowUuid;
-    /// # use jazz::groove::records::Value;
-    /// let db = block_on(open_todos_db())?;
-    /// let todo = RowUuid::from_bytes([1; 16]);
-    ///
-    /// db.upsert("todos", todo, todo_cells("created", false))?;
-    /// db.upsert(
-    ///     "todos",
-    ///     todo,
-    ///     BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]),
-    /// )?;
-    /// let todos = db.prepare_query(&db.table("todos"))?;
-    /// assert_eq!(db.one(&todos)?.unwrap().row_uuid(), todo);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn upsert(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents, authored_columns) = if self
-            .upsert_target_for_client_identity(table, row, self.identity.author)?
-            .is_some()
-        {
-            let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
-            (cells, parent.into_iter().collect(), Some(authored_columns))
-        } else {
-            (cells, Vec::new(), None)
-        };
-        self.write_mergeable_at_ms_with_authorship(
-            self.identity.author,
-            None,
-            table,
-            row,
-            cells,
-            parents,
-            None,
-            authored_columns,
-            self.next_now_ms(),
-        )
-    }
-
-    /// Upsert a row with an explicit millisecond provenance time.
-    pub fn upsert_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents, authored_columns) = if self
-            .upsert_target_for_client_identity(table, row, self.identity.author)?
-            .is_some()
-        {
-            let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
-            (cells, parent.into_iter().collect(), Some(authored_columns))
-        } else {
-            (cells, Vec::new(), None)
-        };
-        self.write_mergeable_at_ms_with_authorship(
-            self.identity.author,
-            None,
-            table,
-            row,
-            cells,
-            parents,
-            None,
-            authored_columns,
-            now_ms,
-        )
-    }
-
-    /// Upsert a row while evaluating write policy as `identity`.
-    pub fn upsert_for_identity(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents, authored_columns) = if self
-            .upsert_target_for_trusted_identity(table, row, identity)?
-            .is_some()
-        {
-            let (cells, parent, authored_columns) =
-                self.merge_existing_cells_for_identity(table, row, cells, identity)?;
-            (cells, parent.into_iter().collect(), Some(authored_columns))
-        } else {
-            (cells, Vec::new(), None)
-        };
-        self.write_mergeable_at_ms_with_authorship(
-            identity,
-            Some(identity),
-            table,
-            row,
-            cells,
-            parents,
-            None,
-            authored_columns,
-            self.next_now_ms(),
-        )
-    }
-
-    /// Upsert a row for `identity` with an explicit millisecond provenance time.
-    pub fn upsert_for_identity_at_ms(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents, authored_columns) = if self
-            .upsert_target_for_trusted_identity(table, row, identity)?
-            .is_some()
-        {
-            let (cells, parent, authored_columns) =
-                self.merge_existing_cells_for_identity(table, row, cells, identity)?;
-            (cells, parent.into_iter().collect(), Some(authored_columns))
-        } else {
-            (cells, Vec::new(), None)
-        };
-        self.write_mergeable_at_ms_with_authorship(
-            identity,
-            Some(identity),
-            table,
-            row,
-            cells,
-            parents,
-            None,
-            authored_columns,
-            now_ms,
-        )
-    }
-
-    /// Soft-delete a row locally.
-    ///
-    /// ```rust
-    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
-    /// # use jazz::ids::RowUuid;
-    /// let db = block_on(open_todos_db())?;
-    /// let todo = RowUuid::from_bytes([1; 16]);
-    /// db.insert_with_id("todos", todo, todo_cells("remove me", false))?;
-    ///
-    /// db.delete("todos", todo)?;
-    /// let todos = db.prepare_query(&db.table("todos"))?;
-    /// assert!(db.read(&todos)?.is_empty());
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn delete(&self, table: &str, row: RowUuid) -> Result<WriteHandle<S>, Error> {
-        self.delete_at_ms_option(table, row, None)
-    }
-
-    /// Soft-delete a row with explicit millisecond provenance time.
-    pub fn delete_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.delete_at_ms_option(table, row, Some(now_ms))
-    }
-
-    pub(super) fn delete_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row)?;
-        let (parents, _) = self.row_layer_parents(table, row)?;
-        match now_ms {
-            Some(now_ms) => self.write_mergeable_at_ms(
-                self.identity.author,
-                None,
-                table,
-                row,
-                BTreeMap::new(),
-                parents,
-                Some(DeletionEvent::Deleted),
-                now_ms,
-            ),
-            None => self.write_mergeable(
-                self.identity.author,
-                None,
-                table,
-                row,
-                BTreeMap::new(),
-                parents,
-                Some(DeletionEvent::Deleted),
-            ),
-        }
-    }
-
-    /// Soft-delete a row while attributing provenance to `made_by`.
-    ///
-    /// See [`Db::insert_attributed`] for the security boundary.
-    pub fn delete_attributed(
-        &self,
-        made_by: AuthorId,
-        table: &str,
-        row: RowUuid,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row)?;
-        let (parents, _) = self.row_layer_parents(table, row)?;
-        self.write_mergeable_as_session_subject(
-            made_by,
-            table,
-            row,
-            BTreeMap::new(),
-            parents,
-            Some(DeletionEvent::Deleted),
-        )
-    }
-
-    /// Soft-delete a row while evaluating write policy as `identity`.
-    pub fn delete_for_identity(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.delete_for_identity_at_ms_option(identity, table, row, None)
-    }
-
-    /// Soft-delete a row while evaluating write policy as `identity`, with explicit time.
-    pub fn delete_for_identity_at_ms(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.delete_for_identity_at_ms_option(identity, table, row, Some(now_ms))
-    }
-
-    fn delete_for_identity_at_ms_option(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row)?;
-        let (parents, _) = self.row_layer_parents(table, row)?;
-        match now_ms {
-            Some(now_ms) => self.write_mergeable_at_ms(
-                identity,
-                Some(identity),
-                table,
-                row,
-                BTreeMap::new(),
-                parents,
-                Some(DeletionEvent::Deleted),
-                now_ms,
-            ),
-            None => self.write_mergeable(
-                identity,
-                Some(identity),
-                table,
-                row,
-                BTreeMap::new(),
-                parents,
-                Some(DeletionEvent::Deleted),
-            ),
-        }
-    }
-
-    /// Advise whether a read may be allowed. Client-local replicas return
-    /// `Unknown` rather than using locally available rows as policy evidence.
-    pub fn can_read(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
-        Ok(PermissionAdvice::Unknown)
-    }
-
-    /// Evaluate a read for the serving path without disclosing data.
-    pub(crate) fn authorize_read_for_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        author: AuthorId,
-    ) -> Result<PermissionAdvice, Error> {
-        self.table_schema(table)?;
-        self.node
-            .node
-            .borrow_mut()
-            .dry_run_read_current_allows(table, row, author)
-            .map(|allowed| {
-                if allowed {
-                    PermissionAdvice::Allowed
-                } else {
-                    PermissionAdvice::Denied
-                }
-            })
-            .map_err(Into::into)
-    }
-
-    /// Advise whether an update may be allowed. Client-local replicas return
-    /// `Unknown` rather than using locally available rows as policy evidence.
-    pub fn can_update(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
-        Ok(PermissionAdvice::Unknown)
-    }
-
-    /// Attach process-local auth claims for `identity`.
-    pub fn set_identity_claims(&self, identity: AuthorId, claims: BTreeMap<String, Value>) {
-        let changed = {
-            let mut node = self.node.node.borrow_mut();
-            let previous_revision = node.session_claim_revision(identity);
-            node.set_session_claims(identity, claims);
-            node.session_claim_revision(identity) != previous_revision
-        };
-        if changed {
-            self.node.schedule_tick(TickUrgency::Deferred);
-        }
-    }
-
-    /// Advise whether a delete may be allowed. Client-local replicas return
-    /// `Unknown` rather than using locally available rows as policy evidence.
-    pub fn can_delete(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
-        Ok(PermissionAdvice::Unknown)
-    }
-
-    /// Evaluate a delete for a test-only serving-path probe without writing.
-    #[cfg(test)]
-    pub(crate) fn authorize_delete_for_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        author: AuthorId,
-    ) -> Result<PermissionAdvice, Error> {
-        self.table_schema(table)?;
-        self.node
-            .node
-            .borrow_mut()
-            .dry_run_delete_current_allows(table, row, author)
-            .map(|allowed| {
-                if allowed {
-                    PermissionAdvice::Allowed
-                } else {
-                    PermissionAdvice::Denied
-                }
-            })
-            .map_err(Into::into)
-    }
-
-    /// Restore a row locally, applying defaults for omitted columns.
-    ///
-    /// ```rust
-    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
-    /// # use jazz::ids::RowUuid;
-    /// let db = block_on(open_todos_db())?;
-    /// let todo = RowUuid::from_bytes([1; 16]);
-    /// db.insert_with_id("todos", todo, todo_cells("archived", false))?;
-    /// db.delete("todos", todo)?;
-    ///
-    /// db.restore("todos", todo, todo_cells("restored", false))?;
-    /// let todos = db.prepare_query(&db.table("todos"))?;
-    /// assert_eq!(db.one(&todos)?.unwrap().row_uuid(), todo);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn restore(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        let cells = self.apply_insert_defaults(table, cells)?;
-        self.ensure_row_deleted(table, row, self.identity.author)?;
-        let (content_parents, deletion_parents) = {
-            let mut node = self.node.node.borrow_mut();
-            let content_parents = node
-                .local_content_winner_tx_id(table, row)?
-                .into_iter()
-                .collect::<Vec<_>>();
-            let deletion_parents = node
-                .local_deletion_winner_tx_id(table, row)?
-                .into_iter()
-                .collect::<Vec<_>>();
-            (content_parents, deletion_parents)
-        };
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .commit_mergeable_many_in_schema(
-                self.schema_version_id,
-                vec![
-                    MergeableCommit::new(table, row, self.next_now_ms())
-                        .made_by(self.identity.author)
-                        .parents(content_parents)
-                        .cells(cells),
-                    MergeableCommit::new(table, row, self.next_now_ms())
-                        .made_by(self.identity.author)
-                        .parents(deletion_parents)
-                        .cells(BTreeMap::<String, Value>::new())
-                        .deletion(DeletionEvent::Restored),
-                ],
-            )?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
-    /// Restore a row while evaluating write policy as `identity`.
-    pub fn restore_for_identity(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        let cells = self.apply_insert_defaults(table, cells)?;
-        self.ensure_row_deleted(table, row, identity)?;
-        let (content_parents, deletion_parents) = {
-            let mut node = self.node.node.borrow_mut();
-            let content_parents = node
-                .local_content_winner_tx_id(table, row)?
-                .into_iter()
-                .collect::<Vec<_>>();
-            let deletion_parents = node
-                .local_deletion_winner_tx_id(table, row)?
-                .into_iter()
-                .collect::<Vec<_>>();
-            (content_parents, deletion_parents)
-        };
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .commit_mergeable_many_in_schema(
-                self.schema_version_id,
-                vec![
-                    MergeableCommit::new(table, row, self.next_now_ms())
-                        .made_by(identity)
-                        .permission_subject(identity)
-                        .parents(content_parents)
-                        .cells(cells),
-                    MergeableCommit::new(table, row, self.next_now_ms())
-                        .made_by(identity)
-                        .permission_subject(identity)
-                        .parents(deletion_parents)
-                        .cells(BTreeMap::<String, Value>::new())
-                        .deletion(DeletionEvent::Restored),
-                ],
-            )?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
-    fn write_mergeable_as_session_subject(
-        &self,
-        made_by: AuthorId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        parents: Vec<TxId>,
-        deletion: Option<DeletionEvent>,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.check_attribution_allowed(made_by)?;
-        self.write_mergeable(
-            made_by,
-            Some(self.identity.author),
-            table,
-            row,
-            cells,
-            parents,
-            deletion,
-        )
-    }
-
-    fn write_mergeable_as_session_subject_with_authored_columns(
-        &self,
-        made_by: AuthorId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        parents: Vec<TxId>,
-        deletion: Option<DeletionEvent>,
-        authored_columns: BTreeSet<String>,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.check_attribution_allowed(made_by)?;
-        self.write_mergeable_with_authored_columns(
-            made_by,
-            Some(self.identity.author),
-            table,
-            row,
-            cells,
-            parents,
-            deletion,
-            authored_columns,
-        )
-    }
-
-    /// Restore a row with an explicit millisecond provenance time.
-    pub fn restore_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        let cells = self.apply_insert_defaults(table, cells)?;
-        self.ensure_row_deleted(table, row, self.identity.author)?;
-        let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .commit_mergeable_many_in_schema(
-                self.schema_version_id,
-                vec![
-                    MergeableCommit::new(table, row, now_ms)
-                        .made_by(self.identity.author)
-                        .parents(content_parents)
-                        .cells(cells),
-                    MergeableCommit::new(table, row, now_ms)
-                        .made_by(self.identity.author)
-                        .parents(deletion_parents)
-                        .cells(BTreeMap::<String, Value>::new())
-                        .deletion(DeletionEvent::Restored),
-                ],
-            )?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
-    /// Restore a row for `identity` with an explicit millisecond provenance time.
-    pub fn restore_for_identity_at_ms(
-        &self,
-        identity: AuthorId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        let cells = self.apply_insert_defaults(table, cells)?;
-        self.ensure_row_deleted(table, row, identity)?;
-        let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .commit_mergeable_many_in_schema(
-                self.schema_version_id,
-                vec![
-                    MergeableCommit::new(table, row, now_ms)
-                        .made_by(identity)
-                        .permission_subject(identity)
-                        .parents(content_parents)
-                        .cells(cells),
-                    MergeableCommit::new(table, row, now_ms)
-                        .made_by(identity)
-                        .permission_subject(identity)
-                        .parents(deletion_parents)
-                        .cells(BTreeMap::<String, Value>::new())
-                        .deletion(DeletionEvent::Restored),
-                ],
-            )?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
-    fn write_mergeable(
-        &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        parents: Vec<TxId>,
-        deletion: Option<DeletionEvent>,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.write_mergeable_at_ms(
-            made_by,
-            permission_subject,
-            table,
-            row,
-            cells,
-            parents,
-            deletion,
-            self.next_now_ms(),
-        )
-    }
-
-    fn write_mergeable_at_ms(
-        &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        parents: Vec<TxId>,
-        deletion: Option<DeletionEvent>,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.write_mergeable_at_ms_with_authorship(
-            made_by,
-            permission_subject,
-            table,
-            row,
-            cells,
-            parents,
-            deletion,
-            None,
-            now_ms,
-        )
-    }
-
-    fn write_mergeable_with_authored_columns(
-        &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        parents: Vec<TxId>,
-        deletion: Option<DeletionEvent>,
-        authored_columns: BTreeSet<String>,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.write_mergeable_at_ms_with_authorship(
-            made_by,
-            permission_subject,
-            table,
-            row,
-            cells,
-            parents,
-            deletion,
-            Some(authored_columns),
-            self.next_now_ms(),
-        )
-    }
-
-    fn write_mergeable_at_ms_with_authorship(
-        &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        parents: Vec<TxId>,
-        deletion: Option<DeletionEvent>,
-        authored_columns: Option<BTreeSet<String>>,
-        now_ms: u64,
-    ) -> Result<WriteHandle<S>, Error> {
-        let operation = if deletion == Some(DeletionEvent::Deleted) {
-            "DELETE"
-        } else if parents.is_empty() {
-            "INSERT"
-        } else {
-            "UPDATE"
-        };
-        let cells = if operation == "INSERT" {
-            self.apply_insert_defaults(table, cells)?
-        } else {
-            cells
-        };
-        let mut commit = MergeableCommit::new(table, row, now_ms)
-            .made_by(made_by)
-            .parents(parents)
-            .cells(cells);
-        if let Some(authored_columns) = authored_columns {
-            commit = commit.authored_columns(authored_columns);
-        }
-        if let Some(subject) = permission_subject {
-            commit = commit.permission_subject(subject);
-        }
-        if let Some(deletion) = deletion {
-            commit = commit.deletion(deletion);
-        }
-        // Db is an untrusted client: structurally valid writes are staged and
-        // sent optimistically. A serving authority assigns the policy fate.
-        let prepared = self
-            .node
-            .node
-            .borrow_mut()
-            .prepare_mergeable_commit_in_schema(self.schema_version_id, commit)?;
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .publish_prepared_mergeable_commit(prepared)?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
-    fn check_attribution_allowed(&self, made_by: AuthorId) -> Result<(), Error> {
-        if made_by == self.identity.author {
-            return Ok(());
-        }
-        Err(Error::new(
-            ErrorCode::WriteRejected,
-            "attribution requires a trusted serving node",
-        ))
-    }
-
-    pub(super) fn check_catalogue_admin(&self) -> Result<(), Error> {
-        if self.identity.author == AuthorId::SYSTEM {
-            return Ok(());
-        }
-        Err(Error::new(
-            ErrorCode::Protocol,
-            "catalogue updates require a serving Node",
-        ))
-    }
-
-    /// Finalize a locally-committed exclusive transaction. A `Core` authority
-    /// validates and accepts/rejects it now, using the in-memory commit unit
-    /// (which still carries `base_snapshot` and the read sets); other roles
-    /// queue it for upstream, leaving it Pending/Local.
-    pub(super) fn finalize_local_exclusive_unit(
-        &self,
-        tx_id: TxId,
-        unit: SyncMessage,
-    ) -> Result<DurabilityTier, Error> {
-        self.node.queue_pending_upload(tx_id, Some(unit));
-        Ok(self.node.node.borrow().authored_commit_durability())
-    }
-
-    /// Client writes stay pending at this runtime's authored durability until
-    /// peer durability or fate updates arrive over a connection.
-    pub(super) fn finalize_local_commit(&self, tx_id: TxId) -> Result<DurabilityTier, Error> {
-        self.node.queue_pending_upload(tx_id, None);
-        Ok(self.node.node.borrow().authored_commit_durability())
-    }
-
-    pub(super) fn next_now_ms(&self) -> u64 {
-        let next = self.next_now_ms.get();
-        self.next_now_ms.set(next + 1);
-        next
-    }
-
-    pub(super) fn current_write_schema_for_query(
-        &self,
-    ) -> Result<(JazzSchema, SchemaVersionId), Error> {
-        if self.schema_view_is_fixed {
-            return Ok((self.schema.clone(), self.schema_version_id));
-        }
-        let node = self.node.node.borrow();
-        let current = node.current_write_schema().map_err(Error::from)?;
-        if current.schema == self.schema_version_id {
-            return Ok((self.schema.clone(), self.schema_version_id));
-        }
-        node.catalogue_schemas()
-            .get(&current.schema)
-            .map(|schema| (schema.schema.clone(), current.schema))
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorCode::Schema,
-                    format!(
-                        "current write schema {:?} is missing from catalogue",
-                        current.schema
-                    ),
-                )
-            })
-    }
-
-    pub(super) fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
-        self.schema
-            .tables
-            .iter()
-            .find(|candidate| candidate.name == table)
-            .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))
-    }
-
-    pub(super) fn apply_insert_defaults(
-        &self,
-        table: &str,
-        mut cells: RowCells,
-    ) -> Result<RowCells, Error> {
-        let table_schema = self.table_schema(table)?;
-        for column in &table_schema.columns {
-            if !cells.contains_key(&column.name) {
-                if let Some(default) = &column.default {
-                    cells.insert(
-                        column.name.clone(),
-                        default_cell_for_column_type(&column.column_type, default),
-                    );
-                }
-            }
-        }
-        Ok(cells)
-    }
-
-    fn upsert_target_for_client_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        identity: AuthorId,
-    ) -> Result<Option<CurrentRow>, Error> {
-        let target = self.local_row_for_client_identity(table, row, identity)?;
-        if target.is_some() {
-            return Ok(target);
-        }
-        // A policy-filtered point read cannot by itself distinguish an absent
-        // row from an existing row hidden from this identity. Upsert needs
-        // exactly that distinction: a genuinely absent target follows INSERT
-        // policy and does not require read permission, while merging into an
-        // existing target must not expose or copy hidden cells.
-        if self.local_current_row(table, row)?.is_none() {
-            return Ok(None);
-        }
-        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
-            return Ok(None);
-        }
-        Err(read_for_write_denied("UPSERT", table))
-    }
-
-    fn upsert_target_for_trusted_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        identity: AuthorId,
-    ) -> Result<Option<CurrentRow>, Error> {
-        let target = self.local_row_for_trusted_identity(table, row, identity)?;
-        if target.is_some() {
-            return Ok(target);
-        }
-        // Trusted serving evaluates the identity's real read policy before
-        // merging an existing row. A hidden existing row must not be treated
-        // as an insert target.
-        if self.local_current_row(table, row)?.is_none() {
-            return Ok(None);
-        }
-        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
-            return Ok(None);
-        }
-        Err(read_for_write_denied("UPSERT", table))
-    }
-
-    /// Read one locally-current row by primary key without evaluating a table
-    /// query. This backend-scoped helper is used by import/upsert bridges that
-    /// already operate with database authority and need an O(row) existence
-    /// check before staging a write.
-    pub fn local_current_row(
-        &self,
-        table: &str,
-        row: RowUuid,
-    ) -> Result<Option<CurrentRow>, Error> {
-        self.table_schema(table)?;
-        Ok(self.node.node.borrow_mut().local_current_row(table, row)?)
-    }
-
-    fn ensure_row_absent(
-        &self,
-        table: &str,
-        row: RowUuid,
-        _identity: AuthorId,
-    ) -> Result<(), Error> {
-        self.table_schema(table)?;
-        let (content_parent, deletion_parent) = {
-            let mut node = self.node.node.borrow_mut();
-            (
-                node.local_content_winner_tx_id(table, row)?,
-                node.local_deletion_winner_tx_id(table, row)?,
-            )
-        };
-        if deletion_parent.is_some() {
-            return Err(row_already_deleted(row));
-        }
-        if content_parent.is_some() {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("encoding error: object already exists: {}", row.0),
-            ));
-        }
-        Ok(())
-    }
-
-    fn ensure_row_deleted(
-        &self,
-        table: &str,
-        row: RowUuid,
-        _identity: AuthorId,
-    ) -> Result<(), Error> {
-        self.table_schema(table)?;
-        let deleted = self
-            .node
-            .node
-            .borrow_mut()
-            .local_deletion_winner_tx_id(table, row)?
-            .is_some();
-        if deleted {
-            Ok(())
-        } else {
-            Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("row not deleted: {}", row.0),
-            ))
-        }
-    }
-
-    fn ensure_row_not_deleted(&self, table: &str, row: RowUuid) -> Result<(), Error> {
-        self.table_schema(table)?;
-        let deleted = self
-            .node
-            .node
-            .borrow_mut()
-            .local_deletion_winner_tx_id(table, row)?
-            .is_some();
-        if deleted {
-            Err(row_already_deleted(row))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn row_layer_parents(
-        &self,
-        table: &str,
-        row: RowUuid,
-    ) -> Result<(Vec<TxId>, Vec<TxId>), Error> {
-        let mut node = self.node.node.borrow_mut();
-        let content_parents = node
-            .local_content_winner_tx_id(table, row)?
-            .into_iter()
-            .collect::<Vec<_>>();
-        let deletion_parents = node
-            .local_deletion_winner_tx_id(table, row)?
-            .into_iter()
-            .collect::<Vec<_>>();
-        Ok((content_parents, deletion_parents))
-    }
-
-    fn local_row_for_client_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        identity: AuthorId,
-    ) -> Result<Option<CurrentRow>, Error> {
-        let query = self.prepare_query(&Query::from(table).filter(crate::query::eq(
-            crate::query::col("id"),
-            crate::query::lit(Value::Uuid(row.0)),
-        )))?;
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
-            .query_rows_for_client(
-                &query.shape,
-                &query.binding,
-                DurabilityTier::Local,
-                identity,
-            )?
-            .into_iter()
-            .find(|candidate| candidate.row_uuid() == row))
-    }
-
-    fn local_row_for_trusted_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        identity: AuthorId,
-    ) -> Result<Option<CurrentRow>, Error> {
-        let query = self.prepare_query(&Query::from(table).filter(crate::query::eq(
-            crate::query::col("id"),
-            crate::query::lit(Value::Uuid(row.0)),
-        )))?;
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
-            .query_rows_with_prepared_plan_for_identity(
-                &query.shape,
-                &query.binding,
-                DurabilityTier::Local,
-                None,
-                identity,
-            )?
-            .into_iter()
-            .find(|candidate| candidate.row_uuid() == row))
-    }
-
-    fn no_op_update_handle_for_client(
-        &self,
-        table: &str,
-        row: RowUuid,
-        identity: AuthorId,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row)?;
-        let existing = self
-            .local_row_for_client_identity(table, row, identity)?
-            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .current_row_tx_id(&existing)
-            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
-        let local_tier = self.write_state(tx_id)?.durability;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
-    fn no_op_update_handle_for_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        identity: AuthorId,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row)?;
-        let existing = self
-            .local_row_for_trusted_identity(table, row, identity)?
-            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .current_row_tx_id(&existing)
-            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
-        let local_tier = self.write_state(tx_id)?.durability;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
-    fn merge_existing_cells(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
-        self.merge_existing_cells_for_client_identity(table, row, patch, self.identity.author)
-    }
-
-    fn merge_existing_cells_for_client_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        identity: AuthorId,
-    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
-        let table_schema = self.table_schema(table)?;
-        self.ensure_row_not_deleted(table, row)?;
-        if table_schema
-            .columns
-            .iter()
-            .all(|column| patch.contains_key(&column.name))
-        {
-            // A full-row write does not observe user data. Its causal parent is
-            // storage bookkeeping, so obtain only that parent with system
-            // authority rather than evaluating the writer's read policy.
-            let parent = self
-                .local_current_row(table, row)?
-                .as_ref()
-                .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
-            let authored_columns = patch.keys().cloned().collect();
-            return Ok((patch, parent, authored_columns));
-        }
-        let mut cells = BTreeMap::new();
-        let existing = self
-            .local_row_for_client_identity(table, row, identity)?
-            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
-        for column in &table_schema.columns {
-            if let Some(value) = existing.cell(table_schema, &column.name) {
-                cells.insert(
-                    column.name.clone(),
-                    default_cell_for_column_type(&column.column_type, &value),
-                );
-            }
-        }
-        let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
-        let authored_columns = patch.keys().cloned().collect();
-        cells.extend(patch);
-        Ok((cells, parent, authored_columns))
-    }
-
-    fn merge_existing_cells_for_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        identity: AuthorId,
-    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
-        let table_schema = self.table_schema(table)?;
-        self.ensure_row_not_deleted(table, row)?;
-        if table_schema
-            .columns
-            .iter()
-            .all(|column| patch.contains_key(&column.name))
-        {
-            let parent = self
-                .local_current_row(table, row)?
-                .as_ref()
-                .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
-            let authored_columns = patch.keys().cloned().collect();
-            return Ok((patch, parent, authored_columns));
-        }
-        if self.authorize_read_for_identity(table, row, identity)? != PermissionAdvice::Allowed {
-            return Err(read_for_write_denied("partial UPDATE", table));
-        }
-        let mut cells = BTreeMap::new();
-        let existing = self
-            .local_row_for_trusted_identity(table, row, identity)?
-            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
-        for column in &table_schema.columns {
-            if let Some(value) = existing.cell(table_schema, &column.name) {
-                cells.insert(
-                    column.name.clone(),
-                    default_cell_for_column_type(&column.column_type, &value),
-                );
-            }
-        }
-        let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
-        let authored_columns = patch.keys().cloned().collect();
-        cells.extend(patch);
-        Ok((cells, parent, authored_columns))
     }
 }

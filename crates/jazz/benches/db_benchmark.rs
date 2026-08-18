@@ -5,6 +5,7 @@
 
 #![allow(clippy::single_element_loop)]
 
+use jazz::db::BlockingResultFutureExt;
 use std::collections::BTreeMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -20,7 +21,7 @@ use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
-type DirectDb = Db<MemoryStorage>;
+type DirectDb = Db;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
@@ -168,7 +169,7 @@ fn filtered_cells(index: usize) -> BTreeMap<String, Value> {
     cells
 }
 
-fn seed_documents(db: &DirectDb, count: usize) -> Vec<RowUuid> {
+fn seed_documents(db: &mut DirectDb, count: usize) -> Vec<RowUuid> {
     (0..count)
         .map(|index| {
             let write = db
@@ -180,7 +181,7 @@ fn seed_documents(db: &DirectDb, count: usize) -> Vec<RowUuid> {
         .collect()
 }
 
-fn seed_filtered_documents(db: &DirectDb, count: usize) -> Vec<RowUuid> {
+fn seed_filtered_documents(db: &mut DirectDb, count: usize) -> Vec<RowUuid> {
     (0..count)
         .map(|index| {
             let write = db
@@ -192,7 +193,7 @@ fn seed_filtered_documents(db: &DirectDb, count: usize) -> Vec<RowUuid> {
         .collect()
 }
 
-fn seed_reachable_policy_fixture(db: &DirectDb, count: usize) -> Vec<RowUuid> {
+fn seed_reachable_policy_fixture(db: &mut DirectDb, count: usize) -> Vec<RowUuid> {
     for (row, name) in [(USER_TEAM, "user team"), (PARENT_TEAM, "parent team")] {
         let write = db
             .insert_with_id(
@@ -254,8 +255,8 @@ fn core_insert(c: &mut Criterion) {
             BenchmarkId::new("documents", initial_rows),
             &initial_rows,
             |b, &initial_rows| {
-                let db = open_db(1);
-                seed_documents(&db, initial_rows);
+                let mut db = open_db(1);
+                seed_documents(&mut db, initial_rows);
                 let mut next = initial_rows;
 
                 b.iter(|| {
@@ -282,9 +283,9 @@ fn core_update_and_read(c: &mut Criterion) {
             BenchmarkId::new("documents", row_count),
             &row_count,
             |b, &row_count| {
-                let db = open_db(2);
-                let rows = seed_documents(&db, row_count);
-                let query = all_documents_query(&db);
+                let mut db = open_db(2);
+                let rows = seed_documents(&mut db, row_count);
+                let query = all_documents_query(&mut db);
                 let mut index = 0usize;
 
                 b.iter(|| {
@@ -317,9 +318,9 @@ fn core_filtered_prepared_read(c: &mut Criterion) {
             BenchmarkId::new("documents", row_count),
             &row_count,
             |b, &row_count| {
-                let db = open_db(5);
-                seed_filtered_documents(&db, row_count);
-                let query = filtered_documents_query(&db);
+                let mut db = open_db(5);
+                seed_filtered_documents(&mut db, row_count);
+                let query = filtered_documents_query(&mut db);
 
                 b.iter(|| {
                     db.read(&query)
@@ -342,9 +343,9 @@ fn core_reachable_policy_read(c: &mut Criterion) {
             BenchmarkId::new("documents", row_count),
             &row_count,
             |b, &row_count| {
-                let db = open_db_with_schema(6, reachable_policy_schema());
-                seed_reachable_policy_fixture(&db, row_count);
-                let query = all_documents_query(&db);
+                let mut db = open_db_with_schema(6, reachable_policy_schema());
+                seed_reachable_policy_fixture(&mut db, row_count);
+                let query = all_documents_query(&mut db);
 
                 b.iter(|| {
                     db.read(&query)
@@ -367,9 +368,9 @@ fn core_subscribed_write(c: &mut Criterion) {
             BenchmarkId::new("documents", row_count),
             &row_count,
             |b, &row_count| {
-                let db = open_db(3);
-                seed_documents(&db, row_count);
-                let query = all_documents_query(&db);
+                let mut db = open_db(3);
+                seed_documents(&mut db, row_count);
+                let query = all_documents_query(&mut db);
                 let mut subscription =
                     block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
                 match block_on(subscription.next_event()) {
@@ -407,8 +408,8 @@ fn core_owner_policy_insert(c: &mut Criterion) {
             BenchmarkId::new("documents", initial_rows),
             &initial_rows,
             |b, &initial_rows| {
-                let db = open_db_with_schema(4, owner_write_schema());
-                seed_documents(&db, initial_rows);
+                let mut db = open_db_with_schema(4, owner_write_schema());
+                seed_documents(&mut db, initial_rows);
                 let mut next = initial_rows;
 
                 b.iter(|| {

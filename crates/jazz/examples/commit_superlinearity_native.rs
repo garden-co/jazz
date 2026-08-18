@@ -3,8 +3,7 @@ use std::time::Instant;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, RowCells, SeededRowIdSource,
-    SubscriptionEvent,
+    Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -33,7 +32,7 @@ fn todo_cells(title: String, done: bool) -> RowCells {
     ])
 }
 
-fn open_db(seed: u64) -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
+fn open_db(seed: u64) -> Result<Db, Box<dyn std::error::Error>> {
     let schema = JazzSchema::new([todo_table()]);
     let column_families = schema.column_families();
     let column_family_refs = column_families
@@ -65,7 +64,7 @@ fn event_counts(event: Option<SubscriptionEvent>) -> (usize, usize, usize) {
 }
 
 fn run_case(max_rows: usize, subscribed: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let db = open_db(if subscribed { 0x5100 } else { 0x4100 })?;
+    let mut db = open_db(if subscribed { 0x5100 } else { 0x4100 })?;
     let query = db.prepare_query(&db.table("todos").select(["title", "done"]))?;
     let mut subscription = if subscribed {
         let mut subscription = block_on(db.subscribe(&query, ReadOpts::default()))?;
@@ -80,15 +79,20 @@ fn run_case(max_rows: usize, subscribed: bool) -> Result<(), Box<dyn std::error:
     for batch in 0..(max_rows / BATCH_SIZE) {
         let rows_before = batch * BATCH_SIZE;
         let rows_after = rows_before + BATCH_SIZE;
-        let tx = db.mergeable_tx()?;
+        let tx = block_on(db.begin_mergeable())?;
         let stage_start = Instant::now();
         for row in rows_before..rows_after {
-            tx.insert("todos", todo_cells(format!("todo {row:06}"), false))?;
+            block_on(db.mergeable_insert(
+                tx,
+                "todos",
+                jazz::ids::RowUuid::from_bytes((row as u128).to_be_bytes()),
+                todo_cells(format!("todo {row:06}"), false),
+            ))?;
         }
         let stage_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         let commit_start = Instant::now();
-        let _tx_id = tx.commit()?;
+        let _tx_id = block_on(db.commit_mergeable(tx))?;
         let commit_ms = commit_start.elapsed().as_secs_f64() * 1000.0;
 
         let drain_start = Instant::now();

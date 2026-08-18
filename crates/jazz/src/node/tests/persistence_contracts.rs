@@ -250,7 +250,7 @@ fn demand_driven_subscriber_compilation_suspends_before_consuming_the_wire_frame
         committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new_history_complete(
+    let mut opening = crate::db::DbOpen::new_history_complete(
         node_schema,
         crate::db::DbIdentity {
             node: node(0xb8),
@@ -506,7 +506,7 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
         fail: failed,
         completed: std::rc::Rc::clone(&completed),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new(
+    let mut opening = crate::db::DbOpen::new(
         node_schema,
         crate::db::DbIdentity {
             node: node(0xc9),
@@ -577,7 +577,7 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
         fail: std::rc::Rc::new(std::cell::Cell::new(false)),
         completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
     };
-    let mut reopening = crate::db::DemandDrivenDbOpen::new(
+    let mut reopening = crate::db::DbOpen::new(
         schema(),
         crate::db::DbIdentity {
             node: node(0xc9),
@@ -614,7 +614,7 @@ fn synchronous_memory_publication_never_claims_local_durability() {
     let storage = groove::storage::async_ordered::ImmediateStorage::new(
         MemoryStorage::new(&refs),
     );
-    let mut opening = crate::db::DemandDrivenDbOpen::new(
+    let mut opening = crate::db::DbOpen::new(
         node_schema,
         crate::db::DbIdentity {
             node: node(0xcb),
@@ -682,7 +682,7 @@ fn synchronous_rocks_publication_is_immediate_and_truthfully_local_durable() {
     };
     let open = || {
         let rocks = jazz_storage_rocksdb::RocksDbStorage::open(directory.path(), &refs).unwrap();
-        crate::db::block_on(crate::db::DemandDrivenDb::open_immediate(
+        crate::db::block_on(crate::db::Db::open(
             crate::db::DbConfig::new(node_schema.clone(), rocks, identity),
         ))
     };
@@ -735,7 +735,7 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
         node: node(0xca),
         author: AuthorId::from_bytes([0xca; 16]),
     };
-    let seeded = crate::db::block_on(crate::db::Db::open(crate::db::DbConfig {
+    let mut seeded = crate::db::block_on(crate::db::Db::open(crate::db::DbConfig {
         schema: node_schema.clone(),
         storage: durable.clone(),
         identity,
@@ -753,7 +753,7 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
         committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new(node_schema, identity, Box::new(storage));
+    let mut opening = crate::db::DbOpen::new(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
@@ -988,7 +988,7 @@ fn demand_driven_db_acquires_cold_relation_snapshot() {
         node: node(0xcb),
         author: AuthorId::from_bytes([0xcb; 16]),
     };
-    let seeded = crate::db::block_on(crate::db::Db::open(crate::db::DbConfig {
+    let mut seeded = crate::db::block_on(crate::db::Db::open(crate::db::DbConfig {
         schema: node_schema.clone(),
         storage: durable.clone(),
         identity,
@@ -1006,7 +1006,7 @@ fn demand_driven_db_acquires_cold_relation_snapshot() {
         committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new(node_schema, identity, Box::new(storage));
+    let mut opening = crate::db::DbOpen::new(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
@@ -1043,7 +1043,7 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
         node: node(0xcc),
         author: AuthorId::from_bytes([0xcc; 16]),
     };
-    let seeded = crate::db::block_on(crate::db::Db::open(crate::db::DbConfig {
+    let mut seeded = crate::db::block_on(crate::db::Db::open(crate::db::DbConfig {
         schema: node_schema.clone(),
         storage: durable.clone(),
         identity,
@@ -1074,7 +1074,7 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
         committed_units: std::rc::Rc::clone(&committed_units),
         fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new(node_schema, identity, Box::new(storage));
+    let mut opening = crate::db::DbOpen::new(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
@@ -2345,7 +2345,7 @@ fn demand_driven_peer_tick_retains_view_update_until_durable() {
         node: node(0xcd),
         author: AuthorId::from_bytes([0xcd; 16]),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new(node_schema, identity, Box::new(storage));
+    let mut opening = crate::db::DbOpen::new(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut receiver)) = opening.poll(&mut context) else {
@@ -2431,7 +2431,7 @@ fn demand_driven_peer_tick_retains_relay_frame_across_async_commit() {
         node: node(0xcf),
         author: AuthorId::from_bytes([0xcf; 16]),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new(node_schema, identity, Box::new(storage));
+    let mut opening = crate::db::DbOpen::new(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut relay)) = opening.poll(&mut context) else {
@@ -2530,7 +2530,7 @@ fn routed_peer_fate_reaches_downstream_only_after_durable_commit() {
         node: node(0xd0),
         author: AuthorId::from_bytes([0xd0; 16]),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new(node_schema, identity, Box::new(storage));
+    let mut opening = crate::db::DbOpen::new(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut edge)) = opening.poll(&mut context) else {
@@ -2610,7 +2610,7 @@ fn subscriber_relay_acknowledges_local_durability_only_after_commit() {
         node: node(0xd1),
         author: AuthorId::from_bytes([0xd1; 16]),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new(node_schema, identity, Box::new(storage));
+    let mut opening = crate::db::DbOpen::new(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut relay)) = opening.poll(&mut context) else {
@@ -2679,7 +2679,7 @@ fn edge_subscriber_acknowledges_and_relays_only_after_durable_commit() {
         node: node(0xd2),
         author: AuthorId::from_bytes([0xd2; 16]),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new(node_schema, identity, Box::new(storage));
+    let mut opening = crate::db::DbOpen::new(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut edge)) = opening.poll(&mut context) else {
@@ -2781,7 +2781,7 @@ fn authority_subscriber_releases_terminal_fate_only_after_durable_commit() {
         author: AuthorId::SYSTEM,
     };
     let mut opening =
-        crate::db::DemandDrivenDbOpen::new_history_complete(node_schema, identity, Box::new(storage));
+        crate::db::DbOpen::new_history_complete(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut authority)) = opening.poll(&mut context) else {
@@ -2855,7 +2855,7 @@ fn session_branch_metadata_echo_waits_for_durable_commit() {
         fail: std::rc::Rc::new(std::cell::Cell::new(false)),
         completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
     };
-    let mut opening = crate::db::DemandDrivenDbOpen::new(node_schema, identity, Box::new(storage));
+    let mut opening = crate::db::DbOpen::new(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut relay)) = opening.poll(&mut context) else {
@@ -2916,7 +2916,7 @@ fn incremental_catalogue_ack_waits_for_durable_commit() {
         author: AuthorId::SYSTEM,
     };
     let mut opening =
-        crate::db::DemandDrivenDbOpen::new_history_complete(node_schema, identity, Box::new(storage));
+        crate::db::DbOpen::new_history_complete(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut authority)) = opening.poll(&mut context) else {
@@ -3025,7 +3025,7 @@ fn authority_bootstrap_seed_is_not_settled_before_async_ingest_commits() {
         author: AuthorId::SYSTEM,
     };
     let mut opening =
-        crate::db::DemandDrivenDbOpen::new_history_complete(node_schema, identity, Box::new(storage));
+        crate::db::DbOpen::new_history_complete(node_schema, identity, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut authority)) = opening.poll(&mut context) else {

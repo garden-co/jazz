@@ -1,3 +1,4 @@
+use jazz::db::BlockingResultFutureExt;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -35,7 +36,7 @@ fn included_relation_schema() -> JazzSchema {
     ])
 }
 
-fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemoryStorage> {
+fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -52,7 +53,7 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemoryStorage>
     .expect("open database")
 }
 
-fn open_core(node: u8, schema: &JazzSchema) -> Db<MemoryStorage> {
+fn open_core(node: u8, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -88,11 +89,7 @@ fn assert_truthful_empty_local_opening(event: Option<SubscriptionEvent>) {
     assert!(removed.is_empty());
 }
 
-fn open_persistent_worker(
-    path: &std::path::Path,
-    node: u8,
-    schema: &JazzSchema,
-) -> Db<RocksDbStorage> {
+fn open_persistent_worker(path: &std::path::Path, node: u8, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -125,8 +122,8 @@ fn open_persistent_worker(
 fn non_durable_browser_client_waits_for_worker_local_ack() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa1; 16]);
-    let main_thread = open_db(0x11, alice, &schema);
-    let worker = open_db(0x22, AuthorId::SYSTEM, &schema);
+    let mut main_thread = open_db(0x11, alice, &schema);
+    let mut worker = open_db(0x22, AuthorId::SYSTEM, &schema);
     main_thread.set_non_durable_client();
     main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
@@ -203,8 +200,8 @@ fn non_durable_browser_client_waits_for_worker_local_ack() {
 fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xaa; 16]);
-    let main_thread = open_db(0x1c, alice, &schema);
-    let worker = open_db(0x2c, alice, &schema);
+    let mut main_thread = open_db(0x1c, alice, &schema);
+    let mut worker = open_db(0x2c, alice, &schema);
     main_thread.set_non_durable_client();
     main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
@@ -214,7 +211,7 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
 
     let open_todos = main_thread
         .prepare_query(
-            &main_thread
+            &mut main_thread
                 .table("todos")
                 .filter(eq(col("title"), lit("open")))
                 .order_by("title", OrderDirection::Asc),
@@ -300,9 +297,9 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
 fn worker_relay_forwards_authority_fate_to_browser_client() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa2; 16]);
-    let main_thread = open_db(0x12, alice, &schema);
-    let worker = open_db(0x23, AuthorId::SYSTEM, &schema);
-    let core = open_core(0x34, &schema);
+    let mut main_thread = open_db(0x12, alice, &schema);
+    let mut worker = open_db(0x23, AuthorId::SYSTEM, &schema);
+    let mut core = open_core(0x34, &schema);
     main_thread.set_non_durable_client();
     main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
@@ -430,7 +427,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
 fn browser_client_hydrates_local_subscription_from_worker_relay() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa3; 16]);
-    let worker = open_db(0x24, AuthorId::SYSTEM, &schema);
+    let mut worker = open_db(0x24, AuthorId::SYSTEM, &schema);
     worker
         .insert(
             "todos",
@@ -441,7 +438,7 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
         )
         .expect("seed worker-local todo");
 
-    let main_thread = open_db(0x13, alice, &schema);
+    let mut main_thread = open_db(0x13, alice, &schema);
     main_thread.set_non_durable_client();
     main_thread.set_upstream_durability_floor(DurabilityTier::Local);
     let (main_transport, worker_transport) = duplex();
@@ -485,8 +482,8 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
 fn browser_client_local_only_subscription_stops_at_worker() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa9; 16]);
-    let worker = open_db(0x2a, alice, &schema);
-    let core = open_core(0x3a, &schema);
+    let mut worker = open_db(0x2a, alice, &schema);
+    let mut core = open_core(0x3a, &schema);
     worker
         .insert(
             "todos",
@@ -499,7 +496,7 @@ fn browser_client_local_only_subscription_stops_at_worker() {
     )
     .expect("seed server-only todo");
 
-    let main_thread = open_db(0x1b, alice, &schema);
+    let mut main_thread = open_db(0x1b, alice, &schema);
     main_thread.set_non_durable_client();
     main_thread.set_upstream_durability_floor(DurabilityTier::Local);
     let (main_transport, worker_subscriber_transport) = duplex();
@@ -553,13 +550,13 @@ fn browser_client_local_only_subscription_stops_at_worker() {
 fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa6; 16]);
-    let main_thread = open_db(0x17, alice, &schema);
-    let worker = open_db(0x27, alice, &schema);
-    let core = open_core(0x37, &schema);
+    let mut main_thread = open_db(0x17, alice, &schema);
+    let mut worker = open_db(0x27, alice, &schema);
+    let mut core = open_core(0x37, &schema);
     main_thread.set_non_durable_client();
     main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
-    let seeder = open_db(0x18, alice, &schema);
+    let mut seeder = open_db(0x18, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
     let _seeder_connection = seeder.connect_upstream(seeder_transport);
     let _core_seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
@@ -656,13 +653,13 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
 fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let schema = included_relation_schema();
     let alice = AuthorId::from_bytes([0xb2; 16]);
-    let main_thread = open_db(0x1f, alice, &schema);
-    let worker = open_db(0x2f, alice, &schema);
-    let core = open_core(0x3f, &schema);
+    let mut main_thread = open_db(0x1f, alice, &schema);
+    let mut worker = open_db(0x2f, alice, &schema);
+    let mut core = open_core(0x3f, &schema);
     main_thread.set_non_durable_client();
     main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
-    let seeder = open_db(0x20, alice, &schema);
+    let mut seeder = open_db(0x20, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
     let _seeder_connection = seeder.connect_upstream(seeder_transport);
     let _core_seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
@@ -745,9 +742,9 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
 fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa8; 16]);
-    let main_thread = open_db(0x1a, alice, &schema);
-    let worker = open_db(0x29, alice, &schema);
-    let core = open_core(0x39, &schema);
+    let mut main_thread = open_db(0x1a, alice, &schema);
+    let mut worker = open_db(0x29, alice, &schema);
+    let mut core = open_core(0x39, &schema);
     main_thread.set_non_durable_client();
     main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
@@ -815,8 +812,8 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
 fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa7; 16]);
-    let worker = open_db(0x28, alice, &schema);
-    let core = open_core(0x38, &schema);
+    let mut worker = open_db(0x28, alice, &schema);
+    let mut core = open_core(0x38, &schema);
 
     let (worker_upstream_transport, core_transport) = duplex();
     let worker_upstream = worker.connect_upstream(worker_upstream_transport);
@@ -845,7 +842,7 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
     assert!(worker.detach_connection(&worker_upstream));
     assert!(core.detach_connection(&core_subscriber));
 
-    let first_main = open_db(0x19, alice, &schema);
+    let mut first_main = open_db(0x19, alice, &schema);
     first_main.set_non_durable_client();
     first_main.set_upstream_durability_floor(DurabilityTier::Local);
     let (first_main_transport, first_worker_transport) = duplex();
@@ -882,7 +879,7 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
     assert!(worker.detach_connection(&first_worker_connection));
     drop(first_main);
 
-    let reopened_main = open_db(0x19, alice, &schema);
+    let mut reopened_main = open_db(0x19, alice, &schema);
     reopened_main.set_non_durable_client();
     reopened_main.set_upstream_durability_floor(DurabilityTier::Local);
     let (reopened_main_transport, reopened_worker_transport) = duplex();
@@ -921,9 +918,9 @@ fn worker_relay_forwards_authority_rejection_to_browser_client() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa4; 16]);
     let bob = AuthorId::from_bytes([0xb4; 16]);
-    let main_thread = open_db(0x14, alice, &schema);
-    let worker = open_db(0x25, AuthorId::SYSTEM, &schema);
-    let core = open_core(0x35, &schema);
+    let mut main_thread = open_db(0x14, alice, &schema);
+    let mut worker = open_db(0x25, AuthorId::SYSTEM, &schema);
+    let mut core = open_core(0x35, &schema);
     main_thread.set_non_durable_client();
     main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
@@ -974,10 +971,10 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa5; 16]);
     let storage = tempfile::tempdir().expect("worker temp dir");
-    let first_main = open_db(0x15, alice, &schema);
+    let mut first_main = open_db(0x15, alice, &schema);
     first_main.set_non_durable_client();
     first_main.set_upstream_durability_floor(DurabilityTier::Local);
-    let first_worker = open_persistent_worker(storage.path(), 0x26, &schema);
+    let mut first_worker = open_persistent_worker(storage.path(), 0x26, &schema);
     let (first_main_transport, first_worker_transport) = duplex();
     let first_main_connection = first_main.connect_upstream(first_main_transport);
     let first_worker_connection = first_worker.accept_subscriber(first_worker_transport, alice);
@@ -1000,10 +997,10 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
     drop(first_worker);
     drop(first_main);
 
-    let second_main = open_db(0x15, alice, &schema);
+    let mut second_main = open_db(0x15, alice, &schema);
     second_main.set_non_durable_client();
     second_main.set_upstream_durability_floor(DurabilityTier::Local);
-    let second_worker = open_persistent_worker(storage.path(), 0x26, &schema);
+    let mut second_worker = open_persistent_worker(storage.path(), 0x26, &schema);
     let (second_main_transport, second_worker_transport) = duplex();
     let _second_main_connection = second_main.connect_upstream(second_main_transport);
     let _second_worker_connection = second_worker.accept_subscriber(second_worker_transport, alice);
@@ -1039,10 +1036,10 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
     let bob = AuthorId::from_bytes([0xb9; 16]);
     let storage = tempfile::tempdir().expect("worker temp dir");
 
-    let first_main = open_db(0x1b, alice, &schema);
+    let mut first_main = open_db(0x1b, alice, &schema);
     first_main.set_non_durable_client();
     first_main.set_upstream_durability_floor(DurabilityTier::Local);
-    let first_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
+    let mut first_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
     let (first_main_transport, first_worker_transport) = duplex();
     let first_main_connection = first_main.connect_upstream(first_main_transport);
     let first_worker_connection = first_worker.accept_subscriber(first_worker_transport, alice);
@@ -1065,11 +1062,11 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
     drop(first_worker);
     drop(first_main);
 
-    let reopened_main = open_db(0x1b, alice, &schema);
+    let mut reopened_main = open_db(0x1b, alice, &schema);
     reopened_main.set_non_durable_client();
     reopened_main.set_upstream_durability_floor(DurabilityTier::Local);
-    let reopened_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
-    let core = open_core(0x3a, &schema);
+    let mut reopened_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
+    let mut core = open_core(0x3a, &schema);
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = reopened_main.connect_upstream(main_transport);
     let _worker_subscriber = reopened_worker.accept_subscriber(worker_subscriber_transport, alice);

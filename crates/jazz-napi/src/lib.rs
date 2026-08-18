@@ -42,9 +42,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz::db::{
-    ConnectionSessionContext as CoreConnectionSessionContext, DbConfig as CoreDbConfig,
-    DbIdentity as CoreDbIdentity, DemandDrivenDb as CoreDemandDrivenDb,
-    DemandDrivenView as CoreDemandDrivenView,
+    ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDemandDrivenDb,
+    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, DbSchemaView as CoreDemandDrivenView,
     InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
     MutationErrorCallback as CoreMutationErrorCallback, PeerConnection as CorePeerConnection,
     PreparedQuery as PreparedQueryInner, Propagation as CorePropagation,
@@ -1155,11 +1154,10 @@ impl NapiDb {
     #[napi(js_name = "queryAttachmentIsCovered")]
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> napi::Result<bool> {
         let db = napi_db(&self.inner)?;
-        napi_owner(&db)?
+        Ok(napi_owner(&db)?
             .view(&db.view)
             .map_err(napi_error)?
-            .query_attachment_is_covered(&attachment.inner)
-            .map_err(napi_error)
+            .query_attachment_is_covered(&attachment.inner))
     }
 
     #[napi(js_name = "detachQuery")]
@@ -1168,8 +1166,8 @@ impl NapiDb {
         napi_owner(&db)?
             .view(&db.view)
             .map_err(napi_error)?
-            .detach_query(attachment.inner.clone())
-            .map_err(napi_error)
+            .detach_query(attachment.inner.clone());
+        Ok(())
     }
 
     #[napi]
@@ -1700,13 +1698,11 @@ where
     }
     let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
-        let db = core_block_on(CoreDemandDrivenDb::open_history_complete_immediate(
-            db_config,
-        ))?;
+        let db = core_block_on(CoreDemandDrivenDb::open_history_complete(db_config))?;
         configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
         Ok(db)
     } else {
-        let db = core_block_on(CoreDemandDrivenDb::open_immediate(db_config))?;
+        let db = core_block_on(CoreDemandDrivenDb::open(db_config))?;
         configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
         Ok(db)
     }
@@ -2617,10 +2613,9 @@ mod tests {
         encode_core_subscription_delta, terminal_bytes_to_numbers,
     };
     use jazz::db::{
-        DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
-        DemandDrivenDb as CoreDemandDrivenDb, Propagation as CorePropagation,
-        SubscriptionEvent as CoreSubscriptionEvent, TerminalRootCarrier, TerminalRootLayout,
-        TerminalRootPublicField,
+        Db as CoreDemandDrivenDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
+        Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
+        TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField,
     };
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
@@ -3060,7 +3055,7 @@ mod tests {
         .with_write_policy(Policy::public())]);
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let owner = core_block_on(CoreDemandDrivenDb::open_immediate(CoreDbConfig::new(
+        let owner = core_block_on(CoreDemandDrivenDb::open(CoreDbConfig::new(
             schema.clone(),
             CoreMemoryStorage::new(&refs),
             CoreDbIdentity {

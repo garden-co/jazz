@@ -1,11 +1,12 @@
 //! Small active core realistic benchmark slice.
 //!
-//! This intentionally exercises `jazz::db::Db<MemoryStorage>` directly, without
+//! This intentionally exercises `jazz::db::Db` directly, without
 //! the legacy `RuntimeCore`, `SchemaManager`, or `SyncManager` stack.
 
 #![recursion_limit = "256"]
 #![allow(clippy::single_element_loop, dead_code)]
 
+use jazz::db::BlockingResultFutureExt;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
@@ -36,8 +37,8 @@ use jazz::wire::{
 use jazz_storage_rocksdb::RocksDbStorage;
 use tempfile::TempDir;
 
-type BenchDb = Db<MemoryStorage>;
-type RocksBenchDb = Db<RocksDbStorage>;
+type BenchDb = Db;
+type RocksBenchDb = Db;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const READER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
@@ -297,7 +298,7 @@ fn open_db_with_storage<S>(
     schema: JazzSchema,
     storage: impl FnOnce(&[&str]) -> S,
     context: &str,
-) -> Db<S>
+) -> Db
 where
     S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
@@ -561,10 +562,7 @@ struct Fixture {
     tasks: Vec<RowUuid>,
 }
 
-fn seed_fixture<S>(db: &Db<S>, profile: SmallProfile) -> Fixture
-where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
-{
+fn seed_fixture(db: &mut Db, profile: SmallProfile) -> Fixture {
     let users = (0..profile.users)
         .map(|index| {
             let row = row_uuid(0x11, index);
@@ -654,10 +652,7 @@ where
     }
 }
 
-fn seed_resume_fixture<S>(db: &Db<S>, profile: SmallProfile) -> Fixture
-where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
-{
+fn seed_resume_fixture(db: &mut Db, profile: SmallProfile) -> Fixture {
     let users = (0..profile.users)
         .map(|index| {
             let row = row_uuid(0x41, index);
@@ -713,18 +708,12 @@ where
     }
 }
 
-fn project_board_query<S>(db: &Db<S>, project: RowUuid) -> jazz::db::PreparedQuery
-where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
-{
+fn project_board_query(db: &mut Db, project: RowUuid) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("tasks").filter(eq(col("project"), lit(project.0))))
         .expect("prepare project board query")
 }
 
-fn my_work_query<S>(db: &Db<S>, user: RowUuid) -> jazz::db::PreparedQuery
-where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
-{
+fn my_work_query(db: &mut Db, user: RowUuid) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("tasks").filter(all_of([
         eq(col("assignee"), lit(user.0)),
         eq(col("status"), lit("doing")),
@@ -732,18 +721,12 @@ where
     .expect("prepare my work query")
 }
 
-fn task_comments_query<S>(db: &Db<S>, task: RowUuid) -> jazz::db::PreparedQuery
-where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
-{
+fn task_comments_query(db: &mut Db, task: RowUuid) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("comments").filter(eq(col("task"), lit(task.0))))
         .expect("prepare task comments query")
 }
 
-fn activity_feed_query<S>(db: &Db<S>, project: RowUuid) -> jazz::db::PreparedQuery
-where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
-{
+fn activity_feed_query(db: &mut Db, project: RowUuid) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("activity").filter(eq(col("project"), lit(project.0))))
         .expect("prepare activity feed query")
 }
@@ -818,7 +801,7 @@ fn open_claim_resume_db(seed: u64, author: AuthorId, history_complete: bool) -> 
     open_db_with_schema(seed, author, history_complete, claim_resume_schema())
 }
 
-fn seed_recursive_permissions_fixture(db: &BenchDb) {
+fn seed_recursive_permissions_fixture(db: &mut BenchDb) {
     for (team, name) in [
         (RECURSIVE_READER_TEAM, "reader"),
         (RECURSIVE_PARENT_TEAM, "parent"),
@@ -861,7 +844,7 @@ fn seed_recursive_permissions_fixture(db: &BenchDb) {
     );
 }
 
-fn seed_permission_resume_fixture(db: &BenchDb) {
+fn seed_permission_resume_fixture(db: &mut BenchDb) {
     for (team, name) in [
         (RECURSIVE_READER_TEAM, "reader"),
         (RECURSIVE_PARENT_TEAM, "parent"),
@@ -914,10 +897,7 @@ fn seed_permission_resume_fixture(db: &BenchDb) {
     }
 }
 
-fn recursive_docs_query<S>(db: &Db<S>) -> jazz::db::PreparedQuery
-where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
-{
+fn recursive_docs_query(db: &mut Db) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("docs"))
         .expect("prepare recursive docs query")
 }
@@ -1082,8 +1062,8 @@ fn r1_crud(c: &mut Criterion) {
             BenchmarkId::new("project_board_s", profile.tasks),
             &profile,
             |b, &profile| {
-                let db = open_db(1);
-                let fixture = seed_fixture(&db, profile);
+                let mut db = open_db(1);
+                let fixture = seed_fixture(&mut db, profile);
                 let mut next_task = profile.tasks;
                 let mut update_index = 0usize;
 
@@ -1130,13 +1110,13 @@ fn r2_reads(c: &mut Criterion) {
             BenchmarkId::new("project_board_s", profile.tasks),
             &profile,
             |b, &profile| {
-                let db = open_db(2);
-                let fixture = seed_fixture(&db, profile);
+                let mut db = open_db(2);
+                let fixture = seed_fixture(&mut db, profile);
                 let queries = [
-                    project_board_query(&db, fixture.projects[0]),
-                    my_work_query(&db, fixture.users[0]),
-                    task_comments_query(&db, fixture.tasks[0]),
-                    activity_feed_query(&db, fixture.projects[0]),
+                    project_board_query(&mut db, fixture.projects[0]),
+                    my_work_query(&mut db, fixture.users[0]),
+                    task_comments_query(&mut db, fixture.tasks[0]),
+                    activity_feed_query(&mut db, fixture.projects[0]),
                 ];
                 let mut query_index = 0usize;
 
@@ -1406,7 +1386,7 @@ fn measure_r3_phase_sample(
         open_rocks_db_with_phases(R3_REOPEN_SEED, AUTHOR, path);
 
     let prepare_started = Instant::now();
-    let query = project_board_query(&db, project);
+    let query = project_board_query(&mut db, project);
     let prepare = prepare_started.elapsed();
 
     let read_started = Instant::now();
@@ -1443,7 +1423,7 @@ fn measure_r3_phase_sample(
 }
 
 fn establish_r3_close_mode(path: &Path, close_mode: R3CloseMode) {
-    let db = open_rocks_db_with_author(R3_REOPEN_SEED, AUTHOR, false, path);
+    let mut db = open_rocks_db_with_author(R3_REOPEN_SEED, AUTHOR, false, path);
     if matches!(close_mode, R3CloseMode::Clean) {
         db.close()
             .expect("establish clean-close marker before R3 phase samples");
@@ -1597,8 +1577,8 @@ fn r3_rocksdb_cold_load(c: &mut Criterion) {
         let tempdir = TempDir::new().expect("create tempdir for RocksDB cold-load bench");
         let db_path = tempdir.path().join("realistic_phase1.rocksdb");
         let project = {
-            let db = open_rocks_db_with_author(30, AUTHOR, false, &db_path);
-            let fixture = seed_fixture(&db, profile);
+            let mut db = open_rocks_db_with_author(30, AUTHOR, false, &db_path);
+            let fixture = seed_fixture(&mut db, profile);
             fixture.projects[0]
         };
         let expected_rows = profile.tasks.div_ceil(profile.projects);
@@ -1614,8 +1594,8 @@ fn r3_rocksdb_cold_load(c: &mut Criterion) {
             &profile,
             |b, &_profile| {
                 b.iter(|| {
-                    let db = open_rocks_db_with_author(31, AUTHOR, false, &db_path);
-                    let query = project_board_query(&db, project);
+                    let mut db = open_rocks_db_with_author(31, AUTHOR, false, &db_path);
+                    let query = project_board_query(&mut db, project);
                     let rows = db.read(&query).expect("read cold project board");
                     assert_eq!(
                         rows.len(),
@@ -1640,21 +1620,23 @@ fn r4_hot_task_history(c: &mut Criterion) {
             BenchmarkId::new("project_board_s", profile.tasks),
             &profile,
             |b, &profile| {
-                let db = open_db(4);
-                let fixture = seed_fixture(&db, profile);
+                let mut db = open_db(4);
+                let fixture = seed_fixture(&mut db, profile);
                 let hot_task = fixture.tasks[0];
                 let hot_project = fixture.projects[0];
-                let mut project_board = block_on(
-                    db.subscribe(&project_board_query(&db, hot_project), ReadOpts::default()),
-                )
+                let mut project_board = block_on(db.subscribe(
+                    &project_board_query(&mut db, hot_project),
+                    ReadOpts::default(),
+                ))
                 .expect("subscribe project board");
                 let mut task_comments = block_on(
-                    db.subscribe(&task_comments_query(&db, hot_task), ReadOpts::default()),
+                    db.subscribe(&task_comments_query(&mut db, hot_task), ReadOpts::default()),
                 )
                 .expect("subscribe task comments");
-                let mut activity_feed = block_on(
-                    db.subscribe(&activity_feed_query(&db, hot_project), ReadOpts::default()),
-                )
+                let mut activity_feed = block_on(db.subscribe(
+                    &activity_feed_query(&mut db, hot_project),
+                    ReadOpts::default(),
+                ))
                 .expect("subscribe activity feed");
 
                 black_box(drain_opened(
@@ -1736,9 +1718,9 @@ fn r9_subscribed_write(c: &mut Criterion) {
             BenchmarkId::new("project_board_s", profile.tasks),
             &profile,
             |b, &profile| {
-                let db = open_db(3);
-                let fixture = seed_fixture(&db, profile);
-                let query = project_board_query(&db, fixture.projects[0]);
+                let mut db = open_db(3);
+                let fixture = seed_fixture(&mut db, profile);
+                let query = project_board_query(&mut db, fixture.projects[0]);
                 let mut subscription =
                     block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe board");
                 match block_on(subscription.next_event()) {
@@ -1789,7 +1771,7 @@ fn r10_sync_fanout(c: &mut Criterion) {
             BenchmarkId::new("project_board_s", profile.tasks),
             &profile,
             |b, &profile| {
-                let writer = open_db(10);
+                let mut writer = open_db(10);
                 let server = open_core_db(11);
                 let reader = open_db_with_author(12, READER_AUTHOR, false);
 
@@ -1875,7 +1857,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
             &profile,
             |b, &profile| {
                 b.iter(|| {
-                    let writer = open_db(110);
+                    let mut writer = open_db(110);
                     let server = open_core_db(111);
                     let client = open_db_with_author(112, READER_AUTHOR, false);
                     let fixture = seed_resume_fixture(&writer, profile);
@@ -2005,9 +1987,9 @@ fn r12_recursive_permissions(c: &mut Criterion) {
     group.throughput(Throughput::Elements(2));
 
     group.bench_function("docs_recursive_read_s", |b| {
-        let db = open_recursive_permissions_db(120);
-        seed_recursive_permissions_fixture(&db);
-        let query = recursive_docs_query(&db);
+        let mut db = open_recursive_permissions_db(120);
+        seed_recursive_permissions_fixture(&mut db);
+        let query = recursive_docs_query(&mut db);
         let read_opts = ReadOpts::default();
 
         b.iter(|| {
@@ -2150,7 +2132,7 @@ fn run_permission_filtered_resume(
         assert!(server.detach_connection(&writer_subscriber));
     }
 
-    let server_query = recursive_docs_query(&server);
+    let server_query = recursive_docs_query(&mut server);
     let server_rows =
         block_on(server.all_for_identity(&server_query, ReadOpts::default(), READER_AUTHOR))
             .expect("read disconnected permission state on server");

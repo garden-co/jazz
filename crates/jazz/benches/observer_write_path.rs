@@ -6,6 +6,7 @@
 
 #![allow(clippy::single_element_loop)]
 
+use jazz::db::BlockingResultFutureExt;
 use std::collections::BTreeMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -19,7 +20,7 @@ use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 
@@ -72,7 +73,7 @@ fn document_cells(index: usize) -> BTreeMap<String, Value> {
     ])
 }
 
-fn seed_documents(db: &BenchDb, count: usize) -> Vec<RowUuid> {
+fn seed_documents(db: &mut BenchDb, count: usize) -> Vec<RowUuid> {
     (0..count)
         .map(|index| {
             db.insert("documents", document_cells(index))
@@ -92,7 +93,7 @@ fn content_update(index: usize) -> BTreeMap<String, Value> {
     ])
 }
 
-fn all_documents_query(db: &BenchDb) -> jazz::db::PreparedQuery {
+fn all_documents_query(db: &mut BenchDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents"))
         .expect("prepare documents query")
 }
@@ -107,8 +108,8 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
             BenchmarkId::new("no_observer", scale),
             &scale,
             |b, &scale| {
-                let db = open_db(1);
-                let rows = seed_documents(&db, scale);
+                let mut db = open_db(1);
+                let rows = seed_documents(&mut db, scale);
                 let mut row_index = 0usize;
                 let mut update_index = 0usize;
 
@@ -127,9 +128,9 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
             BenchmarkId::new("observe_all", scale),
             &scale,
             |b, &scale| {
-                let db = open_db(2);
-                let rows = seed_documents(&db, scale);
-                let query = all_documents_query(&db);
+                let mut db = open_db(2);
+                let rows = seed_documents(&mut db, scale);
+                let query = all_documents_query(&mut db);
                 let mut subscription =
                     block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
                 match block_on(subscription.next_event()) {

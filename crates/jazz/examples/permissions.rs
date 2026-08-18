@@ -47,7 +47,7 @@ fn open_db(
     author: AuthorId,
     schema: JazzSchema,
     storage: MemoryStorage,
-) -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
+) -> Result<Db, Box<dyn std::error::Error>> {
     Ok(block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -155,17 +155,13 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
     )
 }
 
-fn sync_client_to_core(
-    client: &Db<MemoryStorage>,
-    core: &CoreDb,
-    identity: AuthorId,
-) -> Result<(), Error> {
+fn sync_client_to_core(client: &mut Db, core: &CoreDb, identity: AuthorId) -> Result<(), Error> {
     let (client_transport, server_transport) = duplex();
     let _upstream = client.connect_upstream(client_transport);
     core.accept_subscriber(server_transport, identity);
-    client.tick()?;
+    block_on(client.tick())?;
     core.tick()?;
-    client.tick()?;
+    block_on(client.tick())?;
     Ok(())
 }
 
@@ -180,8 +176,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let owner = author(0xa1);
     let other = author(0xb2);
 
-    let owner_db = open_db(0xa1, owner, schema.clone(), storage.clone())?;
-    let other_db = open_db(0xb2, other, schema.clone(), storage.clone())?;
+    let mut owner_db = open_db(0xa1, owner, schema.clone(), storage.clone())?;
+    let mut other_db = open_db(0xb2, other, schema.clone(), storage.clone())?;
 
     assert_eq!(
         owner_db.can_insert("todos", todo_cells("owned", false, owner))?,
@@ -192,10 +188,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PermissionAdvice::Unknown,
     );
     let todos = owner_db.prepare_query(&owner_db.table("todos"))?;
-    assert_eq!(owner_db.read(&todos)?.len(), 0);
+    assert_eq!(block_on(owner_db.read(&todos))?.len(), 0);
 
     let row = RowUuid::from_bytes([0x33; 16]);
-    owner_db.insert_with_id("todos", row, todo_cells("private", false, owner))?;
+    block_on(owner_db.insert_with_id("todos", row, todo_cells("private", false, owner)))?;
 
     assert_eq!(owner_db.can_read("todos", row)?, PermissionAdvice::Unknown);
     assert_eq!(
@@ -215,7 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         other_db.can_delete("todos", row)?,
         PermissionAdvice::Unknown
     );
-    assert_eq!(owner_db.read(&todos)?.len(), 1);
+    assert_eq!(block_on(owner_db.read(&todos))?.len(), 1);
     println!("client permission previews remain unknown until a serving authority evaluates them");
 
     let backend = author(0xbe);
@@ -227,11 +223,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         todo_cells("written by core for user", false, attributed_user),
     )?;
 
-    let client_err =
-        match owner_db.insert_attributed(other, "todos", todo_cells("forged", false, other)) {
-            Ok(_) => panic!("clients cannot attribute writes to another user"),
-            Err(err) => err,
-        };
+    let client_err = match block_on(owner_db.insert_attributed(
+        other,
+        "todos",
+        todo_cells("forged", false, other),
+    )) {
+        Ok(_) => panic!("clients cannot attribute writes to another user"),
+        Err(err) => err,
+    };
     assert_eq!(client_err.code, ErrorCode::WriteRejected);
     assert!(client_err.message.contains("attribution"));
     println!(
@@ -240,11 +239,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let forbidden_row = RowUuid::from_bytes([0x44; 16]);
-    let forbidden = other_db.insert_with_id(
+    let forbidden = block_on(other_db.insert_with_id(
         "todos",
         forbidden_row,
         todo_cells("forbidden at authority", false, owner),
-    )?;
+    ))?;
     assert_eq!(
         forbidden.write_state()?,
         WriteState {
@@ -253,7 +252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
 
-    sync_client_to_core(&other_db, &core, other)?;
+    sync_client_to_core(&mut other_db, &core, other)?;
     assert_eq!(
         forbidden.write_state()?,
         WriteState {

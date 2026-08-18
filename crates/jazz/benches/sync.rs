@@ -317,7 +317,7 @@ impl SyncBench {
         );
     }
 
-    fn print_json(&self, elapsed: Duration) {
+    fn print_json(&mut self, elapsed: Duration) {
         let mut fields = phase_fields("four_tier_sync", elapsed.as_micros());
         fields.insert("seed".to_owned(), serde_json::json!(self.config.seed));
         fields.insert("commits".to_owned(), serde_json::json!(self.config.commits));
@@ -401,10 +401,10 @@ impl SyncBench {
             "reject_causality_violation".to_owned(),
             serde_json::json!(self.metrics.rejected.causality_violation),
         );
-        insert_node_metrics(&mut fields, "ui", &self.ui);
-        insert_node_metrics(&mut fields, "worker", &self.worker);
-        insert_node_metrics(&mut fields, "edge", &self.edge);
-        insert_node_metrics(&mut fields, "core", &self.core);
+        insert_node_metrics(&mut fields, "ui", &mut self.ui);
+        insert_node_metrics(&mut fields, "worker", &mut self.worker);
+        insert_node_metrics(&mut fields, "edge", &mut self.edge);
+        insert_node_metrics(&mut fields, "core", &mut self.core);
         emit_json_line("sync", fields);
     }
 }

@@ -6,6 +6,7 @@
 //! core has no public server sync-scope API, so these cases exercise the same
 //! owner-filtered query and initial subscription path through `Db`.
 
+use jazz::db::BlockingResultFutureExt;
 use std::collections::BTreeMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -20,7 +21,7 @@ use jazz::query::Query;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
-type DirectDb = Db<MemoryStorage>;
+type DirectDb = Db;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
@@ -87,7 +88,7 @@ fn item_cells(index: usize, extra_columns: usize) -> BTreeMap<String, Value> {
 }
 
 fn setup(row_count: usize, extra_columns: usize, seed: u64) -> DirectDb {
-    let db = open_db(seed, extra_columns);
+    let mut db = open_db(seed, extra_columns);
 
     for index in 0..row_count {
         let write = db
@@ -104,14 +105,14 @@ fn limited_items_query(db: &DirectDb, limit: usize) -> jazz::db::PreparedQuery {
         .expect("prepare limited items query")
 }
 
-fn read_limit(db: &DirectDb, limit: usize) -> usize {
+fn read_limit(db: &mut DirectDb, limit: usize) -> usize {
     let query = limited_items_query(db, limit);
     db.read(&query)
         .expect("core authorized limit read should succeed")
         .len()
 }
 
-fn subscribe_limit(db: &DirectDb, limit: usize) -> usize {
+fn subscribe_limit(db: &mut DirectDb, limit: usize) -> usize {
     let query = limited_items_query(db, limit);
     let mut subscription =
         block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe to limited items");
@@ -138,7 +139,7 @@ fn initial_authorized_scope(c: &mut Criterion) {
             |b, &row_count| {
                 b.iter_batched(
                     || setup(row_count, 0, row_count as u64),
-                    |db| black_box(read_limit(&db, row_count)),
+                    |mut db| black_box(read_limit(&mut db, row_count)),
                     criterion::BatchSize::SmallInput,
                 );
             },
@@ -159,7 +160,7 @@ fn initial_authorized_scope_with_wide_schema(c: &mut Criterion) {
         |b, &(row_count, extra_columns)| {
             b.iter_batched(
                 || setup(row_count, extra_columns, 20),
-                |db| black_box(read_limit(&db, row_count)),
+                |mut db| black_box(read_limit(&mut db, row_count)),
                 criterion::BatchSize::SmallInput,
             );
         },
@@ -184,9 +185,9 @@ fn many_initial_authorized_scopes_share_schema_context(c: &mut Criterion) {
         |b, &(row_count, extra_columns, subscription_count)| {
             b.iter_batched(
                 || setup(row_count, extra_columns, 30),
-                |db| {
+                |mut db| {
                     let opened_rows = (0..subscription_count)
-                        .map(|_| subscribe_limit(&db, row_count))
+                        .map(|_| subscribe_limit(&mut db, row_count))
                         .sum::<usize>();
                     black_box(opened_rows)
                 },

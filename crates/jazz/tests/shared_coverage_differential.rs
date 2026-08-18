@@ -1,3 +1,4 @@
+use jazz::db::BlockingResultFutureExt;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;
@@ -79,7 +80,7 @@ fn schema() -> JazzSchema {
     }))
 }
 
-fn open_client(seed: u8, author: AuthorId, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_client(seed: u8, author: AuthorId, schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
@@ -96,7 +97,7 @@ fn open_client(seed: u8, author: AuthorId, schema: JazzSchema) -> Db<MemoryStora
     .expect("open client")
 }
 
-fn open_server(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_server(seed: u8, schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(
@@ -130,7 +131,7 @@ fn cells(title: &str, owner: AuthorId) -> BTreeMap<String, Value> {
     ])
 }
 
-fn seed_fixture(server: &Db<MemoryStorage>, visible_owner: AuthorId, hidden_owner: AuthorId) {
+fn seed_fixture(server: &mut Db, visible_owner: AuthorId, hidden_owner: AuthorId) {
     for (idx, table) in TABLES.iter().enumerate() {
         server
             .seed_settled_mergeable_for_bootstrap(
@@ -237,8 +238,8 @@ fn drain_events(
 }
 
 fn drive(
-    server: &Db<MemoryStorage>,
-    client: &Db<MemoryStorage>,
+    server: &mut Db,
+    client: &mut Db,
     streams: &mut BTreeMap<&'static str, jazz::db::SubscriptionStream>,
     table_schemas: &BTreeMap<&'static str, TableSchema>,
     traces: &mut BTreeMap<&'static str, Vec<EventTrace>>,
@@ -253,7 +254,7 @@ fn drive(
 }
 
 fn final_rows(
-    client: &Db<MemoryStorage>,
+    client: &mut Db,
     table_schemas: &BTreeMap<&'static str, TableSchema>,
 ) -> BTreeMap<&'static str, Vec<RowSummary>> {
     TABLES
@@ -290,9 +291,9 @@ fn run_scenario(mode: CoverageMode) -> ScenarioReceipt {
         .collect::<BTreeMap<_, _>>();
     let visible_owner = AuthorId::from_bytes([0xa1; 16]);
     let hidden_owner = AuthorId::from_bytes([0xb2; 16]);
-    let server = open_server(0x5e, schema.clone());
-    let client = open_client(0xc1, visible_owner, schema);
-    seed_fixture(&server, visible_owner, hidden_owner);
+    let mut server = open_server(0x5e, schema.clone());
+    let mut client = open_client(0xc1, visible_owner, schema);
+    seed_fixture(&mut server, visible_owner, hidden_owner);
 
     let (client_transport, server_transport) = duplex();
     let _upstream = client.connect_upstream(client_transport);
@@ -315,7 +316,13 @@ fn run_scenario(mode: CoverageMode) -> ScenarioReceipt {
     // A remote subscription has no autonomous executor: endpoint ticks carry
     // its registration and reset.  Waiting for `next_event` before driving the
     // endpoints spins forever because no endpoint can produce that event yet.
-    drive(&server, &client, &mut streams, &table_schemas, &mut traces);
+    drive(
+        &mut server,
+        &mut client,
+        &mut streams,
+        &table_schemas,
+        &mut traces,
+    );
 
     server
         .update(
@@ -345,11 +352,17 @@ fn run_scenario(mode: CoverageMode) -> ScenarioReceipt {
         .delete("delta_items", row(103))
         .expect("delete visible row");
 
-    drive(&server, &client, &mut streams, &table_schemas, &mut traces);
+    drive(
+        &mut server,
+        &mut client,
+        &mut streams,
+        &table_schemas,
+        &mut traces,
+    );
 
     ScenarioReceipt {
         traces,
-        final_rows: final_rows(&client, &table_schemas),
+        final_rows: final_rows(&mut client, &table_schemas),
     }
 }
 

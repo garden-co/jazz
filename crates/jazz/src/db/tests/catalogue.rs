@@ -3,9 +3,9 @@
 use super::*;
 
 pub(super) fn assert_authority_rejects_staged_write(
-    client: &Db<RocksDbStorage>,
+    client: &mut Db,
     server: &CoreDb,
-    write: &WriteHandle<RocksDbStorage>,
+    write: &WriteHandle<groove::storage::DemandLoadedStorage>,
 ) {
     assert_eq!(
         write.write_state().unwrap(),
@@ -32,22 +32,22 @@ pub(super) fn assert_authority_rejects_staged_write(
         },
         "only the authority may reject a staged write for policy authorization"
     );
-    let error = block_on(write.wait(DurabilityTier::Global)).unwrap_err();
+    let mut error = block_on(write.wait(DurabilityTier::Global)).unwrap_err();
     assert_eq!(error.code, ErrorCode::WriteRejected);
 }
 
 #[test]
 fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
-    let base = owner_write_schema();
-    let evolved = evolved_owner_write_schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
-    let db = open_db(0x5d, author, &base);
+    let mut base = owner_write_schema();
+    let mut evolved = evolved_owner_write_schema();
+    let mut author = AuthorId::from_bytes([0xa1; 16]);
+    let mut db = open_db(0x5d, author, &base);
     db.insert("todos", cells("before evolution", false, author))
         .unwrap();
 
-    let query = Query::from("todos");
+    let mut query = Query::from("todos");
     let mut subscription = prepared_subscribe(
-        &db,
+        &mut db,
         &query,
         ReadOpts {
             tier: DurabilityTier::Local,
@@ -63,8 +63,8 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
         1
     );
 
-    let schema_version = SchemaVersion::new(evolved);
-    let lens = MigrationLens::new(
+    let mut schema_version = SchemaVersion::new(evolved);
+    let mut lens = MigrationLens::new(
         base.version_id(),
         schema_version.id,
         vec![TableLens {
@@ -103,7 +103,7 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
         .unwrap();
 
     db.refresh_subscriptions().unwrap();
-    let reset = subscription
+    let mut reset = subscription
         .try_next_event()
         .expect("descriptor widening must rebuild the live subscription");
     assert!(matches!(
@@ -129,7 +129,7 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
 
 #[test]
 fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
-    let schema = |statuses: &[&str], with_body: bool| {
+    let mut schema = |statuses: &[&str], with_body: bool| {
         let mut columns = vec![
             ColumnSchema::new("title", ColumnType::String),
             ColumnSchema::new(
@@ -145,12 +145,12 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
         }
         JazzSchema::new([TableSchema::new("items", columns)])
     };
-    let base = schema(&["open"], false);
-    let middle = SchemaVersion::new(schema(&["open", "archived"], false));
-    let latest = SchemaVersion::new(schema(&["open", "archived"], true));
-    let author = AuthorId::from_bytes([0xa2; 16]);
-    let db = open_db(0x5c, author, &base);
-    let _before = db
+    let mut base = schema(&["open"], false);
+    let mut middle = SchemaVersion::new(schema(&["open", "archived"], false));
+    let mut latest = SchemaVersion::new(schema(&["open", "archived"], true));
+    let mut author = AuthorId::from_bytes([0xa2; 16]);
+    let mut db = open_db(0x5c, author, &base);
+    let mut _before = db
         .insert(
             "items",
             BTreeMap::from([
@@ -159,9 +159,9 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
             ]),
         )
         .unwrap();
-    let query = Query::from("items");
+    let mut query = Query::from("items");
     let mut subscription = prepared_subscribe(
-        &db,
+        &mut db,
         &query,
         ReadOpts {
             tier: DurabilityTier::Local,
@@ -177,7 +177,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
         1
     );
 
-    let enum_lens = MigrationLens::new(
+    let mut enum_lens = MigrationLens::new(
         base.version_id(),
         middle.id,
         vec![TableLens {
@@ -220,7 +220,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
         "enum registry growth alone refreshes the raw target in place"
     );
 
-    let column_lens = MigrationLens::new(
+    let mut column_lens = MigrationLens::new(
         middle.id,
         latest.id,
         vec![TableLens {
@@ -287,9 +287,9 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
 
 #[test]
 fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
-    let structural = JazzSchema::new([TableSchema::new(
+    let mut alice = AuthorId::from_bytes([0xa1; 16]);
+    let mut bob = AuthorId::from_bytes([0xb2; 16]);
+    let mut structural = JazzSchema::new([TableSchema::new(
         "todos",
         [
             ColumnSchema::new("title", ColumnType::String),
@@ -299,7 +299,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     )
     .with_read_policy(Policy::public())
     .with_write_policy(Policy::public())]);
-    let v2_table = TableSchema::new(
+    let mut v2_table = TableSchema::new(
         "todos",
         [
             ColumnSchema::new("title", ColumnType::String),
@@ -309,15 +309,15 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         ],
     )
     .with_write_policy(Policy::public());
-    let owner_head = JazzSchema::new([v2_table
+    let mut owner_head = JazzSchema::new([v2_table
         .clone()
         .with_read_policy(Policy::owner_only("todos", "owner"))]);
     let editor_head =
         JazzSchema::new([v2_table.with_read_policy(Policy::owner_only("todos", "editor"))]);
-    let owner_payload = SchemaVersion::new(owner_head.clone());
+    let mut owner_payload = SchemaVersion::new(owner_head.clone());
     assert_eq!(owner_payload.id, editor_head.version_id());
 
-    let db = open_db(0xa0, AuthorId::SYSTEM, &structural);
+    let mut db = open_db(0xa0, AuthorId::SYSTEM, &structural);
     db.publish_schema_with_lens(
         1,
         SchemaLineagePublication::new(
@@ -344,7 +344,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         schema: owner_payload.id,
     })
     .unwrap();
-    let first = row(0xa1);
+    let mut first = row(0xa1);
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
         first,
@@ -358,7 +358,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     )
     .unwrap();
 
-    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    let mut prepared = db.prepare_query(&Query::from("todos")).unwrap();
     let mut subscription = block_on(db.subscribe_for_identity(
         &prepared,
         ReadOpts {
@@ -387,7 +387,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     )
     .unwrap();
 
-    let event = subscription
+    let mut event = subscription
         .try_next_event()
         .expect("permissions-head change must refresh the live subscription");
     let SubscriptionEvent::Delta {
@@ -409,14 +409,14 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
 
 #[test]
 fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
-    let base = owner_write_schema();
-    let evolved = evolved_owner_write_schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &base);
-    let client = open_db(0xc1, owner, &base);
-    let schema_version = SchemaVersion::new(evolved.clone());
+    let mut base = owner_write_schema();
+    let mut evolved = evolved_owner_write_schema();
+    let mut owner = AuthorId::from_bytes([0xa1; 16]);
+    let mut core = open_core(0x5e, AuthorId::SYSTEM, &base);
+    let mut client = open_db(0xc1, owner, &base);
+    let mut schema_version = SchemaVersion::new(evolved.clone());
 
-    let lens = MigrationLens::new(
+    let mut lens = MigrationLens::new(
         base.version_id(),
         schema_version.id,
         vec![TableLens {
@@ -428,7 +428,7 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
             }],
         }],
     );
-    let lens_ack = core
+    let mut lens_ack = core
         .publish_schema_with_lens(
             1,
             SchemaLineagePublication::new(
@@ -447,22 +447,22 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
                 && ack.applied
     ));
 
-    let pointer = CurrentWriteSchema {
+    let mut pointer = CurrentWriteSchema {
         revision: 2,
         schema: schema_version.id,
     };
-    let pointer_ack = core.set_current_write_schema(pointer).unwrap();
+    let mut pointer_ack = core.set_current_write_schema(pointer).unwrap();
     assert!(matches!(
         pointer_ack.as_slice(),
         [SyncMessage::CatalogueAck(ack)] if ack.revision == Some(2) && ack.schema == Some(schema_version.id) && ack.applied
     ));
 
-    let row = seed(&core, "todos", cells("under evolved schema", false, owner));
-    let rows = core.read(&Query::from("todos")).unwrap();
+    let mut row = seed(&core, "todos", cells("under evolved schema", false, owner));
+    let mut rows = core.read(&Query::from("todos")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), row);
 
-    let unauthorized = client.publish_schema(schema_version).unwrap_err();
+    let mut unauthorized = client.publish_schema(schema_version).unwrap_err();
     assert_eq!(unauthorized.code, ErrorCode::Protocol);
     assert!(
         unauthorized

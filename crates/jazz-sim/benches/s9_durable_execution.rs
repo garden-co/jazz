@@ -9,7 +9,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use hdrhistogram::Histogram;
-use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
+use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -33,14 +33,14 @@ const EVENTS: &str = "events";
 
 struct WorkerHarness {
     _dir: TempDir,
-    db: Db<RocksDbStorage>,
+    db: Db,
     _edge_dir: TempDir,
     edge: NodeState<RocksDbStorage>,
     edge_peer: PeerState,
     client_peer: PeerState,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    _upstream: Rc<RefCell<jazz::db::PeerConnection<RocksDbStorage>>>,
+    _upstream: Rc<RefCell<jazz::db::PeerConnection<jazz::groove::storage::DemandLoadedStorage>>>,
 }
 
 struct QueueTransport {
@@ -550,9 +550,10 @@ fn apply_transition(
     steps_per_instance: usize,
     now_ms: u64,
 ) -> Result<bool, jazz::db::Error> {
-    let tx = client.db.exclusive_tx()?;
+    let tx = jazz::db::block_on(client.db.begin_exclusive())?;
     let row = instance_row(instance);
-    let cells = tx.read(INSTANCES, row)?.expect("instance");
+    let cells =
+        jazz::db::block_on(client.db.exclusive_read(tx, INSTANCES, row))?.expect("instance");
     let workflow = uuid_cell(&cells, "workflow");
     let current_step = u64_cell(&cells, "currentStep");
     let next_step = current_step + 1;
@@ -561,7 +562,8 @@ fn apply_transition(
     } else {
         "running"
     };
-    tx.insert_with_id(
+    jazz::db::block_on(client.db.exclusive_insert(
+        tx,
         INSTANCES,
         row,
         cells_map([
@@ -570,9 +572,9 @@ fn apply_transition(
             ("currentStep", Value::U64(next_step)),
             ("wakeAt", Value::U64(0)),
         ]),
-    )?;
-    let _tx_id = tx.commit()?;
-    client.db.tick()?;
+    ))?;
+    let _tx_id = jazz::db::block_on(client.db.commit_exclusive(tx))?;
+    jazz::db::block_on(client.db.tick())?;
     let unit = client
         .outbound
         .borrow_mut()
@@ -596,7 +598,7 @@ fn apply_transition(
         }
         client.edge.apply_sync_message(update.clone()).unwrap();
         client.inbound.borrow_mut().push_back(update);
-        client.db.tick()?;
+        jazz::db::block_on(client.db.tick())?;
     }
     if matches!(
         rejection,
@@ -1018,7 +1020,7 @@ fn sync_worker_tables(
             .current_rows_update(&mut worker.edge, table)
             .unwrap();
         worker.inbound.borrow_mut().push_back(update);
-        worker.db.tick().unwrap();
+        jazz::db::block_on(worker.db.tick()).unwrap();
     }
 }
 
@@ -1112,11 +1114,7 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<Roc
     (dir, node)
 }
 
-fn open_db(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-    author: AuthorId,
-) -> (TempDir, Db<RocksDbStorage>) {
+fn open_db(node_uuid: NodeUuid, schema: JazzSchema, author: AuthorId) -> (TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();

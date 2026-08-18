@@ -1,3 +1,4 @@
+use jazz::db::BlockingResultFutureExt;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -24,7 +25,7 @@ fn schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
-fn open_client(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_client(seed: u8, schema: JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -44,7 +45,7 @@ fn open_client(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
     .expect("open client")
 }
 
-fn open_server(schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_server(schema: JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -82,8 +83,8 @@ fn row(seed: u64) -> RowUuid {
 
 fn measure_unrelated_coverage_group_refresh(group_count: usize) -> Duration {
     let schema = schema();
-    let server = open_server(schema.clone());
-    let client = open_client(0xc1, schema);
+    let mut server = open_server(schema.clone());
+    let mut client = open_client(0xc1, schema);
     let (client_transport, server_transport) = duplex();
     let _upstream = client.connect_upstream(client_transport);
     let _subscriber = server.accept_subscriber(server_transport, AuthorId::from_bytes([0xc1; 16]));

@@ -16,13 +16,13 @@
 
 mod support;
 
+use jazz::db::BlockingResultFutureExt;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
-    SeededRowIdSource, block_on,
+    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource, block_on,
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
@@ -195,16 +195,15 @@ impl RungReceipt {
 fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
     let temp = tempfile::tempdir().expect("create selective-hydration RocksDB directory");
     let schema = schema();
-    let (db, _, _) = open_db(temp.path(), schema.clone());
+    let (mut db, _, _) = open_db(temp.path(), schema.clone());
 
     let seed_started = Instant::now();
-    seed_rows(&db, config, table_rows);
+    seed_rows(&mut db, config, table_rows);
     let seed_us = seed_started.elapsed().as_micros();
     db.close()
         .expect("close seeded selective-hydration database");
-    drop(db);
 
-    let (db, storage_open_us_after_seed, db_open_us_after_seed) = open_db(temp.path(), schema);
+    let (mut db, storage_open_us_after_seed, db_open_us_after_seed) = open_db(temp.path(), schema);
     let open_metrics = db.take_storage_read_metrics_for_test();
     let query = Query::from(TABLE)
         .filter(eq(col("team"), param("team")))
@@ -284,7 +283,7 @@ fn schema() -> JazzSchema {
     .with_indexed_column("team")])
 }
 
-fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) {
+fn open_db(path: &Path, schema: JazzSchema) -> (Db, u128, u128) {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -310,11 +309,11 @@ fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) 
     (db, storage_open_us, db_open_us)
 }
 
-fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
+fn seed_rows(db: &mut Db, config: ConfigRef, table_rows: usize) {
     for batch_start in (0..table_rows).step_by(config.batch_rows) {
         let batch_end = table_rows.min(batch_start + config.batch_rows);
         let tx = db
-            .mergeable_tx()
+            .begin_mergeable()
             .expect("open selective-hydration seed transaction");
         for index in batch_start..batch_end {
             let (row, team, updated_at) = if index < config.target_rows {
@@ -322,7 +321,8 @@ fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
             } else {
                 (filler_row(index), filler_team(), index)
             };
-            tx.insert_with_id(
+            db.mergeable_insert(
+                tx,
                 TABLE,
                 row,
                 BTreeMap::from([
@@ -337,9 +337,8 @@ fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
             )
             .expect("stage selective-hydration seed row");
         }
-        let tx_id = tx.commit().expect("commit selective-hydration seed batch");
-        db.finalize_local_mergeable_commit_for_test(tx_id)
-            .expect("settle selective-hydration seed batch");
+        db.commit_mergeable(tx)
+            .expect("commit selective-hydration seed batch");
     }
 }
 

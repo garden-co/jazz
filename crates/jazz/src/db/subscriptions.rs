@@ -37,139 +37,29 @@ impl SubscriptionOpenError {
     }
 }
 
-impl<S> Db<S>
+impl<S> Node<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    /// Subscribe to a query and return a stream of materialized subscription events.
-    ///
-    /// ```rust
-    /// # use jazz::db::{LocalUpdates, Propagation, ReadOpts, SubscriptionEvent};
-    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
-    /// # use jazz::tx::DurabilityTier;
-    /// let db = block_on(open_todos_db())?;
-    /// let query = db.prepare_query(&db.table("todos"))?;
-    /// let mut subscription = block_on(db.subscribe(
-    ///     &query,
-    ///     ReadOpts {
-    ///         tier: DurabilityTier::Local,
-    ///         local_updates: LocalUpdates::Immediate,
-    ///         propagation: Propagation::LocalOnly,
-    ///         include_deleted: false,
-    ///         ..ReadOpts::default()
-    ///     },
-    /// ))?;
-    /// let opened = block_on(subscription.next_event()).unwrap();
-    /// let SubscriptionEvent::Delta { reset, added, .. } = opened else {
-    ///     panic!("expected reset delta");
-    /// };
-    /// assert!(reset);
-    /// assert!(added.is_empty());
-    ///
-    /// db.insert("todos", todo_cells("notify subscribers", false))?;
-    /// let changed = block_on(subscription.next_event()).unwrap();
-    /// let SubscriptionEvent::Delta { added, updated, removed, .. } = changed else {
-    ///     panic!("expected subscription delta");
-    /// };
-    /// assert_eq!(added.len(), 1);
-    /// assert!(updated.is_empty());
-    /// assert!(removed.is_empty());
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub async fn subscribe(
-        &self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription_resident(
-            prepared,
-            opts,
-            self.identity.author,
-            QueryAuthorizationMode::ClientLocal,
-        )
-        .map_err(SubscriptionOpenError::into_api)
-    }
-
-    /// Subscribe to a query evaluated as `author`.
-    pub async fn subscribe_for_identity(
-        &self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-        author: AuthorId,
-    ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription_resident(
-            prepared,
-            opts,
-            author,
-            QueryAuthorizationMode::TrustedServing,
-        )
-        .map_err(SubscriptionOpenError::into_api)
-    }
-
-    /// Subscribe to an output-changing relation query.
-    pub async fn subscribe_relation_query(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-    ) -> Result<SubscriptionStream, Error> {
-        self.open_relation_subscription(
-            query,
-            opts,
-            self.identity.author,
-            QueryAuthorizationMode::ClientLocal,
-        )
-        .await
-    }
-
-    /// Subscribe to an output-changing relation query evaluated as `author`.
-    pub async fn subscribe_relation_query_for_identity(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: AuthorId,
-    ) -> Result<SubscriptionStream, Error> {
-        self.open_relation_subscription(query, opts, author, QueryAuthorizationMode::TrustedServing)
-            .await
-    }
-
     /// Attach a one-shot usage-site query coverage request.
     ///
     /// Bindings call this before an edge/global one-shot read, drive
     /// [`Db::tick`] until [`Db::query_attachment_is_covered`] is true, read, then
     /// call [`Db::detach_query`].
-    pub fn attach_query_with_opts(
-        &self,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<QueryAttachment, Error> {
-        ensure_supported_read_view(&opts)?;
-        let upstream_opts = self.node.upstream_register_shape_options(
-            effective_read_tier(&opts),
-            opts.read_view.clone(),
-            opts.propagation == Propagation::Full,
-        );
-        self.attach_or_refresh_query_coverage(
-            &prepared.shape,
-            &prepared.binding,
-            upstream_opts,
-            self.identity.author,
-        )
-    }
-
     /// Attach a one-shot usage-site query coverage request evaluated as `author`.
-    pub fn attach_query_with_opts_for_identity(
+    pub(super) fn attach_query_with_opts(
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        let upstream_opts = self.node.upstream_register_shape_options(
+        let upstream_opts = self.upstream_register_shape_options(
             effective_read_tier(&opts),
             opts.read_view.clone(),
             opts.propagation == Propagation::Full,
         );
-        let (shape, binding, _) = self.node.node.borrow_mut().prepare_query_binding_for_link(
+        let (shape, binding, _) = self.node.borrow_mut().prepare_query_binding_for_link(
             &prepared.shape,
             &prepared.binding,
             upstream_opts.tier,
@@ -193,29 +83,24 @@ where
         );
         let required_after = self
             .node
-            .node
             .borrow()
             .applied_view_update_generation(binding_view);
         let coverage = coverage_key(shape, binding, upstream_opts.clone());
         if self
-            .node
             .upstream_coverage_refcounts
             .borrow()
             .contains_key(&coverage)
             && let Some(subscription) = self
-                .node
                 .latest_coverage_subscriptions
                 .borrow()
                 .get(&coverage)
                 .copied()
             && !self
-                .node
                 .query_coverage_registrations
                 .borrow()
                 .contains_key(&subscription)
         {
             *self
-                .node
                 .upstream_coverage_refcounts
                 .borrow_mut()
                 .entry(coverage.clone())
@@ -228,14 +113,13 @@ where
                 identity,
             };
             self.register_query_coverage(coverage.clone(), pending_subscription.clone(), false);
-            let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
+            let mut refreshes = self.coverage_refresh_generations.borrow_mut();
             if refreshes.get(&coverage).copied() != Some(required_after) {
                 refreshes.insert(coverage.clone(), required_after);
-                self.node
-                    .upstream_subscriptions
+                self.upstream_subscriptions
                     .borrow_mut()
                     .push(PendingUpstreamCommand::Subscribe(pending_subscription));
-                self.node.schedule_tick(TickUrgency::Immediate);
+                self.schedule_tick(TickUrgency::Immediate);
             }
             return Ok(QueryAttachment {
                 subscriptions: vec![subscription],
@@ -252,7 +136,6 @@ where
             identity,
         )?;
         *self
-            .node
             .upstream_coverage_refcounts
             .borrow_mut()
             .entry(coverage.clone())
@@ -283,7 +166,7 @@ where
         subscription: PendingUpstreamSubscription,
         owns_subscription: bool,
     ) {
-        let mut registrations = self.node.query_coverage_registrations.borrow_mut();
+        let mut registrations = self.query_coverage_registrations.borrow_mut();
         registrations
             .entry(subscription.subscription)
             .and_modify(|registration| registration.ref_count += 1)
@@ -302,9 +185,8 @@ where
         opts: RegisterShapeOptions,
         identity: AuthorId,
     ) -> Result<SubscriptionKey, Error> {
-        let subscription = self.node.next_subscription_key(shape, opts.read_view_key());
-        self.node
-            .upstream_subscriptions
+        let subscription = self.next_subscription_key(shape, opts.read_view_key());
+        self.upstream_subscriptions
             .borrow_mut()
             .push(PendingUpstreamCommand::Subscribe(
                 PendingUpstreamSubscription {
@@ -315,24 +197,18 @@ where
                     identity,
                 },
             ));
-        self.node
-            .latest_coverage_subscriptions
+        self.latest_coverage_subscriptions
             .borrow_mut()
             .insert(coverage_key(shape, binding, opts), subscription);
-        self.node.schedule_tick(TickUrgency::Immediate);
+        self.schedule_tick(TickUrgency::Immediate);
         Ok(subscription)
-    }
-
-    /// Attach a one-shot usage-site query coverage request at the default tier.
-    pub fn attach_query(&self, prepared: &PreparedQuery) -> Result<QueryAttachment, Error> {
-        self.attach_query_with_opts(prepared, ReadOpts::default())
     }
 
     /// Return whether each usage-site attachment has observed a newer logical
     /// server receipt than the one it captured during registration.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
-        let node = self.node.node.borrow();
-        let active_receipts = self.node.active_authority_view_receipts.borrow();
+        let node = self.node.borrow();
+        let active_receipts = self.active_authority_view_receipts.borrow();
         let covered = attachment
             .required_after
             .iter()
@@ -347,7 +223,7 @@ where
         drop(node);
         drop(active_receipts);
         if covered {
-            let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
+            let mut refreshes = self.coverage_refresh_generations.borrow_mut();
             for (coverage, generation) in &attachment.refreshes {
                 if refreshes.get(coverage).copied() == Some(*generation) {
                     refreshes.remove(coverage);
@@ -360,7 +236,7 @@ where
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
         let mut removed_subscriptions = Vec::new();
-        let mut registrations = self.node.query_coverage_registrations.borrow_mut();
+        let mut registrations = self.query_coverage_registrations.borrow_mut();
         for subscription in attachment.registrations {
             let Some(registration) = registrations.get_mut(&subscription) else {
                 continue;
@@ -372,7 +248,7 @@ where
             if last_registration {
                 registrations.remove(&subscription);
             }
-            let mut coverage_refcounts = self.node.upstream_coverage_refcounts.borrow_mut();
+            let mut coverage_refcounts = self.upstream_coverage_refcounts.borrow_mut();
             let Some(count) = coverage_refcounts.get_mut(&coverage) else {
                 continue;
             };
@@ -380,13 +256,11 @@ where
             let last_coverage_pin = *count == 0;
             if last_coverage_pin {
                 coverage_refcounts.remove(&coverage);
-                self.node
-                    .awaiting_initial_authority_coverage
+                self.awaiting_initial_authority_coverage
                     .borrow_mut()
                     .remove(&coverage);
             }
             let has_live_stream_owner = self
-                .node
                 .upstream_subscription_owners
                 .borrow()
                 .get(&subscription)
@@ -399,15 +273,14 @@ where
         }
         drop(registrations);
         for (subscription, coverage) in removed_subscriptions {
-            self.node.node.borrow_mut().apply_unsubscribe(subscription);
+            self.node.borrow_mut().apply_unsubscribe(subscription);
             let replacement = self
-                .node
                 .query_coverage_registrations
                 .borrow()
                 .values()
                 .find(|registration| registration.coverage == coverage)
                 .map(|registration| registration.subscription.subscription);
-            let mut latest = self.node.latest_coverage_subscriptions.borrow_mut();
+            let mut latest = self.latest_coverage_subscriptions.borrow_mut();
             if latest.get(&coverage) == Some(&subscription) {
                 if let Some(replacement) = replacement {
                     latest.insert(coverage.clone(), replacement);
@@ -416,12 +289,11 @@ where
                 }
             }
             drop(latest);
-            self.node
-                .upstream_subscriptions
+            self.upstream_subscriptions
                 .borrow_mut()
                 .push(PendingUpstreamCommand::Unsubscribe(subscription));
         }
-        self.node.schedule_tick(TickUrgency::Immediate);
+        self.schedule_tick(TickUrgency::Immediate);
     }
 
     pub(super) fn open_subscription_resident(
@@ -440,7 +312,6 @@ where
             && let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source
         {
             self.node
-                .node
                 .borrow_mut()
                 .acquire_branch_read_inputs(
                     &prepared.shape,
@@ -455,12 +326,12 @@ where
         // A non-durable browser client must still ask its durable worker for a
         // local-only view. The wire flag stops that request at the worker.
         let propagates_upstream = remote_propagate_upstream
-            || self.node.node.borrow().upstream_durability_floor() == DurabilityTier::Local;
+            || self.node.borrow().upstream_durability_floor() == DurabilityTier::Local;
         // Acquire both the local and possible remote-tier programs before the
         // first real Groove subscription is retained. This keeps every later
         // façade-side registration in the non-suspending publish phase.
         if propagates_upstream {
-            let upstream_opts = self.node.upstream_register_shape_options(
+            let upstream_opts = self.upstream_register_shape_options(
                 read_tier,
                 opts.read_view.clone(),
                 remote_propagate_upstream,
@@ -469,7 +340,6 @@ where
                 (prepared.shape.clone(), prepared.binding.clone())
             } else {
                 let (shape, binding, _) = self
-                    .node
                     .node
                     .borrow_mut()
                     .prepare_query_binding_for_link_in_authorization_mode(
@@ -483,7 +353,6 @@ where
                 (shape, binding)
             };
             self.node
-                .node
                 .borrow_mut()
                 .ensure_peer_maintained_subscription_view_supported(
                     &shape,
@@ -496,7 +365,6 @@ where
                 .map_err(SubscriptionOpenError::Node)?;
         }
         self.node
-            .node
             .borrow_mut()
             .ensure_peer_maintained_subscription_view_supported(
                 &prepared.shape,
@@ -509,7 +377,6 @@ where
             .map_err(SubscriptionOpenError::Node)?;
         let (local_shape, local_binding, _local_plan) = self
             .node
-            .node
             .borrow_mut()
             .prepare_query_binding_for_link_in_authorization_mode(
                 &prepared.shape,
@@ -520,7 +387,6 @@ where
             )
             .map_err(SubscriptionOpenError::Node)?;
         let (subscription, snapshot) = self
-            .node
             .node
             .borrow_mut()
             .open_maintained_view_subscription_in_authorization_mode(
@@ -535,7 +401,7 @@ where
             .map_err(SubscriptionOpenError::Node)?;
         let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
-        let local_node = Rc::clone(&self.node.node);
+        let local_node = Rc::clone(&self.node);
         let local_runtime_token = local_node.borrow().groove_runtime_token();
         let local_subscription_cleanup = Rc::new(Cell::new(Some((
             local_runtime_token,
@@ -564,7 +430,7 @@ where
         let mut upstream_subscription_handles = Vec::new();
         let mut suppress_provisional_opening = false;
         if propagates_upstream {
-            let upstream_opts = self.node.upstream_register_shape_options(
+            let upstream_opts = self.upstream_register_shape_options(
                 effective_read_tier(&opts),
                 opts.read_view.clone(),
                 remote_propagate_upstream,
@@ -573,7 +439,6 @@ where
                 (state_shape.clone(), state_binding.clone())
             } else {
                 let (shape, binding, _) = self
-                    .node
                     .node
                     .borrow_mut()
                     .prepare_query_binding_for_link_in_authorization_mode(
@@ -627,7 +492,6 @@ where
             };
             if let Some(maintained) = maintained_subscription.as_mut() {
                 self.node
-                    .node
                     .borrow()
                     .seed_local_maintained_authoritative_result_membership(
                         maintained,
@@ -636,8 +500,8 @@ where
             }
         }
         let settled = subscription_is_settled(
-            &self.node.node.borrow(),
-            &self.node.active_authority_view_receipts,
+            &self.node.borrow(),
+            &self.active_authority_view_receipts,
             &state_shape,
             &state_binding,
             settled_tier,
@@ -676,7 +540,7 @@ where
                 binding: state_binding,
                 maintained_subscription,
             },
-            groove_runtime_token: self.node.node.borrow().groove_runtime_token(),
+            groove_runtime_token: self.node.borrow().groove_runtime_token(),
             local_subscription_cleanup,
             propagates_upstream,
             author,
@@ -712,16 +576,13 @@ where
                     "subscription receiver closed",
                 ))
             })?;
-        self.node
-            .subscriptions
-            .borrow_mut()
-            .push(Rc::downgrade(&state));
+        self.subscriptions.borrow_mut().push(Rc::downgrade(&state));
         let cleanup = if upstream_subscription_handles.is_empty() {
             local_cleanup.take()
         } else {
             let owner = Rc::downgrade(&state);
             register_upstream_subscription_owner(
-                &self.node.upstream_subscription_owners,
+                &self.upstream_subscription_owners,
                 &upstream_subscription_handles,
                 &state,
             );
@@ -746,24 +607,10 @@ where
     ) -> Result<(), Error> {
         let ast = ShapeAst::from_validated(&prepared.shape);
         let validation = {
-            let node = self.node.node.borrow();
+            let node = self.node.borrow();
             validate_shape_ast_for_registration(&node, prepared.shape.shape_id(), &ast)
         };
         validation.map(|_| ()).map_err(Error::from)
-    }
-
-    async fn open_relation_subscription(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: AuthorId,
-        authorization_mode: QueryAuthorizationMode,
-    ) -> Result<SubscriptionStream, Error> {
-        ensure_supported_subscription_read_opts(&opts)?;
-        let query = relation_query_to_query(query)?;
-        let prepared = self.prepare_query(&query)?;
-        self.open_subscription_resident(&prepared, opts, author, authorization_mode)
-            .map_err(SubscriptionOpenError::into_api)
     }
 
     fn open_subscription_upstream_coverage(
@@ -775,7 +622,6 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<OpenedUpstreamCoverage, Error> {
         self.node
-            .node
             .borrow_mut()
             .ensure_peer_maintained_subscription_view_supported(
                 shape,
@@ -787,26 +633,22 @@ where
             )?;
         let coverage = coverage_key(shape, binding, opts.clone());
         if self
-            .node
             .upstream_coverage_refcounts
             .borrow()
             .contains_key(&coverage)
         {
             if let Some(subscription) = self
-                .node
                 .latest_coverage_subscriptions
                 .borrow()
                 .get(&coverage)
                 .copied()
             {
                 *self
-                    .node
                     .upstream_coverage_refcounts
                     .borrow_mut()
                     .entry(coverage.clone())
                     .or_insert(0) += 1;
                 let awaits_initial_authority_response = self
-                    .node
                     .awaiting_initial_authority_coverage
                     .borrow()
                     .contains(&coverage);
@@ -822,18 +664,16 @@ where
         let subscription =
             self.attach_query_shape_binding_with_opts(shape, binding, opts, identity)?;
         *self
-            .node
             .upstream_coverage_refcounts
             .borrow_mut()
             .entry(coverage.clone())
             .or_insert(0) += 1;
         let has_live_upstream =
-            self.node.connections.borrow().iter().any(|connection| {
+            self.connections.borrow().iter().any(|connection| {
                 matches!(&connection.borrow().link, ConnectionLink::Upstream { .. })
             });
         if has_live_upstream {
-            self.node
-                .awaiting_initial_authority_coverage
+            self.awaiting_initial_authority_coverage
                 .borrow_mut()
                 .insert(coverage.clone());
         }
@@ -851,14 +691,14 @@ where
         upstream_subscriptions: Vec<UpstreamCoverageHandle>,
         owner: Weak<RefCell<SubscriptionState>>,
     ) -> Box<dyn FnOnce()> {
-        let node = Rc::clone(&self.node.node);
-        let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
-        let upstream_coverage_refcounts = Rc::clone(&self.node.upstream_coverage_refcounts);
+        let node = Rc::clone(&self.node);
+        let latest_coverage_subscriptions = Rc::clone(&self.latest_coverage_subscriptions);
+        let upstream_coverage_refcounts = Rc::clone(&self.upstream_coverage_refcounts);
         let awaiting_initial_authority_coverage =
-            Rc::clone(&self.node.awaiting_initial_authority_coverage);
-        let upstream_subscription_owners = Rc::clone(&self.node.upstream_subscription_owners);
-        let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
-        let scheduler = Rc::clone(&self.node.scheduler);
+            Rc::clone(&self.awaiting_initial_authority_coverage);
+        let upstream_subscription_owners = Rc::clone(&self.upstream_subscription_owners);
+        let pending_upstream_subscriptions = Rc::clone(&self.upstream_subscriptions);
+        let scheduler = Rc::clone(&self.scheduler);
         Box::new(move || {
             for handle in upstream_subscriptions {
                 unregister_upstream_subscription_owner(

@@ -18,9 +18,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::db::{
-    CommitUnitTrust, ConnectionSessionContext, DbConfig, DbIdentity, DemandDrivenDb,
-    Error as DbError, PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, Transport,
-    WireTransportAdapter,
+    CommitUnitTrust, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error as DbError,
+    PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, Transport, WireTransportAdapter,
 };
 use crate::groove::records::Value;
 use crate::groove::storage::{BoxedStorage, DemandLoadedStorage, MemoryStorage, StorageFactory};
@@ -232,7 +231,7 @@ pub struct AbiTransportDiagnostics {
     pub last_resume_bytes: Option<usize>,
 }
 
-struct ShellDb(DemandDrivenDb);
+struct ShellDb(Db);
 
 struct ServerSessionState {
     connection: ShellPeerConnection,
@@ -304,7 +303,7 @@ impl ShellDb {
                     config = config.with_id_source(SeededRowIdSource::new(seed));
                 }
                 Ok(Self(crate::db::block_on(
-                    DemandDrivenDb::open_catalogue_uninitialized_immediate(config),
+                    Db::open_catalogue_uninitialized(config),
                 )?))
             }
             StorageConfig::RocksDb { path } => {
@@ -324,7 +323,7 @@ impl ShellDb {
                     config = config.with_id_source(SeededRowIdSource::new(seed));
                 }
                 Ok(Self(crate::db::block_on(
-                    DemandDrivenDb::open_catalogue_uninitialized_immediate(config),
+                    Db::open_catalogue_uninitialized(config),
                 )?))
             }
             StorageConfig::SQLite { .. } => Err(ShellError::UnsupportedStorage {
@@ -544,9 +543,7 @@ impl InMemoryServerShell {
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                ShellDb(crate::db::block_on(
-                    DemandDrivenDb::open_history_complete_immediate(db_config),
-                )?)
+                ShellDb(crate::db::block_on(Db::open_history_complete(db_config))?)
             }
             StorageConfig::RocksDb { path } => {
                 let refs = config.schema.column_families();
@@ -564,9 +561,7 @@ impl InMemoryServerShell {
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                ShellDb(crate::db::block_on(
-                    DemandDrivenDb::open_history_complete_immediate(db_config),
-                )?)
+                ShellDb(crate::db::block_on(Db::open_history_complete(db_config))?)
             }
             StorageConfig::SQLite { .. } => {
                 return Err(ShellError::UnsupportedStorage {

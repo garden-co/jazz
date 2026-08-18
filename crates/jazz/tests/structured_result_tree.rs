@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use jazz::block_on;
+use jazz::db::BlockingResultFutureExt;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -46,7 +47,7 @@ fn schema() -> JazzSchema {
     ])
 }
 
-fn open_db() -> Db<MemoryStorage> {
+fn open_db() -> Db {
     let schema = schema();
     let column_families = schema.column_families();
     let references = column_families
@@ -85,7 +86,7 @@ fn children<'a>(
 
 #[test]
 fn nested_tree_preserves_projection_order_offset_and_reset() {
-    let db = open_db();
+    let mut db = open_db();
     let parent = db
         .insert(
             "parents",
@@ -212,7 +213,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
 
 #[test]
 fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
-    let db = open_db();
+    let mut db = open_db();
     let matching_parent = db
         .insert(
             "parents",
@@ -316,7 +317,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
 
 #[test]
 fn omitted_array_limit_is_unbounded_for_prepare_read_and_subscribe() {
-    let db = open_db();
+    let mut db = open_db();
     let parent = db
         .insert(
             "parents",
@@ -384,7 +385,7 @@ fn omitted_array_limit_is_unbounded_for_prepare_read_and_subscribe() {
 
 #[test]
 fn large_parent_is_materialized_atomically_without_a_frame_bound() {
-    let db = open_db();
+    let mut db = open_db();
     let parent = db
         .insert(
             "parents",

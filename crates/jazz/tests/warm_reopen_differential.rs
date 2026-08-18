@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::block_on;
+use jazz::db::BlockingResultFutureExt;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, RemovedRow, SeededRowIdSource,
     SubscriptionEvent,
@@ -41,7 +42,7 @@ enum CanonicalEvent {
     Closed,
 }
 
-type NamedMutation = (&'static str, Box<dyn Fn(&Db<RocksDbStorage>)>);
+type NamedMutation = (&'static str, Box<dyn Fn(&mut Db)>);
 
 fn row(seed: u64) -> RowUuid {
     let mut bytes = [0_u8; 16];
@@ -99,12 +100,7 @@ fn local_opts() -> ReadOpts {
     }
 }
 
-fn open_db(
-    dir: &tempfile::TempDir,
-    schema: &JazzSchema,
-    node_byte: u8,
-    seed: u64,
-) -> Db<RocksDbStorage> {
+fn open_db(dir: &tempfile::TempDir, schema: &JazzSchema, node_byte: u8, seed: u64) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).expect("open rocks storage");
@@ -138,7 +134,7 @@ fn child_cells(parent: RowUuid, label: &str, rank: u32) -> BTreeMap<String, Valu
 }
 
 fn seed_store(dir: &tempfile::TempDir, schema: &JazzSchema, node_byte: u8) {
-    let db = open_db(dir, schema, node_byte, node_byte as u64);
+    let mut db = open_db(dir, schema, node_byte, node_byte as u64);
     db.insert_with_id("parents", row(1), parent_cells("alpha", 1))
         .expect("insert alpha");
     db.insert_with_id("parents", row(2), parent_cells("beta", 2))
@@ -311,7 +307,7 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
 
 fn assert_one_shot_matches_subscription(
     schema: &JazzSchema,
-    db: &Db<RocksDbStorage>,
+    db: &mut Db,
     snapshot: &RelationSnapshot,
     label: &str,
 ) {
@@ -325,17 +321,13 @@ fn assert_one_shot_matches_subscription(
     );
 }
 
-fn apply_to_pair(
-    rebuild: &Db<RocksDbStorage>,
-    persisted_placeholder: &Db<RocksDbStorage>,
-    mutation: impl Fn(&Db<RocksDbStorage>),
-) {
+fn apply_to_pair(rebuild: &mut Db, persisted_placeholder: &mut Db, mutation: impl Fn(&mut Db)) {
     mutation(rebuild);
     mutation(persisted_placeholder);
 }
 
 fn next_event_after(
-    db: &Db<RocksDbStorage>,
+    db: &mut Db,
     stream: &mut jazz::db::SubscriptionStream,
     label: &str,
 ) -> SubscriptionEvent {
@@ -358,8 +350,8 @@ fn reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent() 
     seed_store(&rebuild_dir, &schema, 0x21);
     seed_store(&persisted_dir, &schema, 0x22);
 
-    let rebuild = open_db(&rebuild_dir, &schema, 0x31, 0x31);
-    let persisted_placeholder = open_db(&persisted_dir, &schema, 0x32, 0x32);
+    let mut rebuild = open_db(&rebuild_dir, &schema, 0x31, 0x31);
+    let mut persisted_placeholder = open_db(&persisted_dir, &schema, 0x32, 0x32);
     let rebuild_prepared = rebuild.prepare_query(&query()).expect("prepare rebuild");
     let persisted_prepared = persisted_placeholder
         .prepare_query(&query())
@@ -388,10 +380,10 @@ fn reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent() 
         canonical_snapshot(&schema, &persisted_snapshot),
         "initial reopened subscription snapshots diverged"
     );
-    assert_one_shot_matches_subscription(&schema, &rebuild, &rebuild_snapshot, "rebuild open");
+    assert_one_shot_matches_subscription(&schema, &mut rebuild, &rebuild_snapshot, "rebuild open");
     assert_one_shot_matches_subscription(
         &schema,
-        &persisted_placeholder,
+        &mut persisted_placeholder,
         &persisted_snapshot,
         "persisted placeholder open",
     );
@@ -413,10 +405,10 @@ fn reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent() 
     ];
 
     for (label, mutation) in mutations {
-        apply_to_pair(&rebuild, &persisted_placeholder, mutation);
-        let rebuild_event = next_event_after(&rebuild, &mut rebuild_stream, label);
+        apply_to_pair(&mut rebuild, &mut persisted_placeholder, mutation);
+        let rebuild_event = next_event_after(&mut rebuild, &mut rebuild_stream, label);
         let persisted_event =
-            next_event_after(&persisted_placeholder, &mut persisted_stream, label);
+            next_event_after(&mut persisted_placeholder, &mut persisted_stream, label);
         assert_eq!(
             canonical_event(&schema, &rebuild_event),
             canonical_event(&schema, &persisted_event),
@@ -429,10 +421,10 @@ fn reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent() 
             canonical_snapshot(&schema, &persisted_snapshot),
             "{label}: folded subscription snapshots diverged"
         );
-        assert_one_shot_matches_subscription(&schema, &rebuild, &rebuild_snapshot, label);
+        assert_one_shot_matches_subscription(&schema, &mut rebuild, &rebuild_snapshot, label);
         assert_one_shot_matches_subscription(
             &schema,
-            &persisted_placeholder,
+            &mut persisted_placeholder,
             &persisted_snapshot,
             label,
         );

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use jazz::db::BlockingResultFutureExt;
 use jazz::db::{Db, DbConfig, DbIdentity};
 use jazz::groove::records::Value;
 use jazz::groove::schema::ColumnType;
@@ -29,7 +30,7 @@ fn schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
-fn open_db() -> Db<MemoryStorage> {
+fn open_db() -> Db {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -52,7 +53,7 @@ fn cells(values: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<St
         .collect()
 }
 
-fn stored_row(db: &Db<MemoryStorage>, row_id: RowUuid) -> BTreeMap<String, Value> {
+fn stored_row(db: &mut Db, row_id: RowUuid) -> BTreeMap<String, Value> {
     let table = schema()
         .tables
         .into_iter()
@@ -78,7 +79,7 @@ fn stored_row(db: &Db<MemoryStorage>, row_id: RowUuid) -> BTreeMap<String, Value
 
 #[test]
 fn core_insert_applies_literal_defaults_for_omitted_columns() {
-    let db = open_db();
+    let mut db = open_db();
 
     db.insert_with_id(
         "events",
@@ -87,7 +88,7 @@ fn core_insert_applies_literal_defaults_for_omitted_columns() {
     )
     .expect("insert row");
 
-    let stored = stored_row(&db, row(1));
+    let stored = stored_row(&mut db, row(1));
     assert_eq!(
         stored.get("title"),
         Some(&Value::String("created".to_owned()))
@@ -107,7 +108,7 @@ fn core_insert_applies_literal_defaults_for_omitted_columns() {
 
 #[test]
 fn core_insert_preserves_explicit_null_instead_of_using_default() {
-    let db = open_db();
+    let mut db = open_db();
 
     db.insert_with_id(
         "events",
@@ -119,14 +120,14 @@ fn core_insert_preserves_explicit_null_instead_of_using_default() {
     )
     .expect("insert row");
 
-    let stored = stored_row(&db, row(2));
+    let stored = stored_row(&mut db, row(2));
     assert_eq!(stored.get("note"), Some(&Value::Nullable(None)));
     assert_eq!(stored.get("count"), Some(&Value::I64(BIG_DEFAULT)));
 }
 
 #[test]
 fn core_insert_keeps_explicit_values_for_defaulted_columns() {
-    let db = open_db();
+    let mut db = open_db();
 
     db.insert_with_id(
         "events",
@@ -143,7 +144,7 @@ fn core_insert_keeps_explicit_values_for_defaulted_columns() {
     )
     .expect("insert row");
 
-    let stored = stored_row(&db, row(3));
+    let stored = stored_row(&mut db, row(3));
     assert_eq!(stored.get("count"), Some(&Value::I64(7)));
     assert_eq!(
         stored.get("status"),

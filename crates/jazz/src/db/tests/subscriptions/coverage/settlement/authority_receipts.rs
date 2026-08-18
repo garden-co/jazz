@@ -4,19 +4,20 @@ use super::*;
 
 #[test]
 fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client = open_db(0xc1, client_author, &schema);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let query = Query::from("todos");
-    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let opened = block_on(subscription.next_raw()).unwrap();
+    let mut query = Query::from("todos");
+    let mut subscription =
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
+    let mut opened = block_on(subscription.next_raw()).unwrap();
     assert!(!event_settled(&opened));
     assert!(opened_rows(opened).is_empty());
 
@@ -24,7 +25,7 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let settled = block_on(subscription.next_raw()).unwrap();
+    let mut settled = block_on(subscription.next_raw()).unwrap();
     assert!(event_settled(&settled));
     let (added, updated, removed) = delta_rows(settled);
     assert!(added.is_empty());
@@ -34,18 +35,19 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
 
 #[test]
 fn edge_global_settlement_requires_a_fresh_current_connection_view_receipt() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client = open_db(0xc1, client_author, &schema);
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut owner = AuthorId::from_bytes([0xa1; 16]);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("cached", false, owner));
 
     let (first_client_transport, first_server_transport) = duplex();
-    let first_upstream = client.connect_upstream(first_client_transport);
-    let _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
-    let query = Query::from("todos");
-    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut first_upstream = client.connect_upstream(first_client_transport);
+    let mut _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
+    let mut query = Query::from("todos");
+    let mut subscription =
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
 
     client.tick().unwrap();
@@ -54,19 +56,19 @@ fn edge_global_settlement_requires_a_fresh_current_connection_view_receipt() {
     assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
 
     assert!(client.detach_connection(&first_upstream));
-    let disconnected = block_on(subscription.next_raw()).unwrap();
+    let mut disconnected = block_on(subscription.next_raw()).unwrap();
     assert!(
         !event_settled(&disconnected),
         "disconnect must immediately demote cached Edge/Global rows to unsettled"
     );
     assert_eq!(
-        prepared_read(&client, &query).len(),
+        prepared_read(&mut client, &query).len(),
         1,
         "disconnect keeps the durable cached row as local data"
     );
 
     let (reconnected_client_transport, reconnected_server_transport) = duplex();
-    let _reconnected_upstream = client.connect_upstream(reconnected_client_transport);
+    let mut _reconnected_upstream = client.connect_upstream(reconnected_client_transport);
     let _reconnected_subscriber =
         server.accept_subscriber(reconnected_server_transport, client_author);
     client.tick().unwrap();
@@ -80,18 +82,19 @@ fn edge_global_settlement_requires_a_fresh_current_connection_view_receipt() {
 
 #[test]
 fn nonselected_upstream_update_demotes_selected_receipt_before_publication() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client = open_db(0xc1, client_author, &schema);
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut owner = AuthorId::from_bytes([0xa1; 16]);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("initial", false, owner));
 
     let (old_client_transport, old_server_transport) = duplex();
-    let old_upstream = client.connect_upstream(old_client_transport);
-    let _old_subscriber = server.accept_subscriber(old_server_transport, client_author);
-    let query = Query::from("todos");
-    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut old_upstream = client.connect_upstream(old_client_transport);
+    let mut _old_subscriber = server.accept_subscriber(old_server_transport, client_author);
+    let mut query = Query::from("todos");
+    let mut subscription =
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     let _ = block_on(subscription.next_raw()).unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -99,8 +102,8 @@ fn nonselected_upstream_update_demotes_selected_receipt_before_publication() {
     assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
 
     let (new_client_transport, new_server_transport) = duplex();
-    let new_upstream = client.connect_upstream(new_client_transport);
-    let _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
+    let mut new_upstream = client.connect_upstream(new_client_transport);
+    let mut _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
     assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
     client.tick().unwrap();
     server.tick().unwrap();
@@ -128,12 +131,12 @@ fn nonselected_upstream_update_demotes_selected_receipt_before_publication() {
 
 #[test]
 fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let client = open_db(0xc1, client_author, &schema);
-    let all_query = Query::from("todos");
-    let filtered_query = Query::from("todos").filter(eq(col("title"), lit("matching")));
-    let view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut client = open_db(0xc1, client_author, &schema);
+    let mut all_query = Query::from("todos");
+    let mut filtered_query = Query::from("todos").filter(eq(col("title"), lit("matching")));
+    let mut view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
         subscription,
         settled_through,
         reset_result_set: true,
@@ -148,11 +151,11 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     };
 
     let (old_client_transport, mut old_authority) = duplex();
-    let _old_upstream = client.connect_upstream(old_client_transport);
+    let mut _old_upstream = client.connect_upstream(old_client_transport);
     let mut all_subscription =
-        prepared_subscribe(&client, &all_query, global_subscribe_opts()).unwrap();
+        prepared_subscribe(&mut client, &all_query, global_subscribe_opts()).unwrap();
     let mut filtered_subscription =
-        prepared_subscribe(&client, &filtered_query, global_subscribe_opts()).unwrap();
+        prepared_subscribe(&mut client, &filtered_query, global_subscribe_opts()).unwrap();
     let _ = block_on(all_subscription.next_raw()).unwrap();
     let _ = block_on(filtered_subscription.next_raw()).unwrap();
     client.tick().unwrap();
@@ -172,7 +175,7 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     assert!(filtered_subscription._state.borrow().settled);
 
     let (new_client_transport, mut new_authority) = duplex();
-    let _new_upstream = client.connect_upstream(new_client_transport);
+    let mut _new_upstream = client.connect_upstream(new_client_transport);
     assert!(!all_subscription._state.borrow().settled);
     assert!(!filtered_subscription._state.borrow().settled);
     client.tick().unwrap();
@@ -191,7 +194,7 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     assert!(all_subscription._state.borrow().settled);
     assert!(filtered_subscription._state.borrow().settled);
 
-    let all_key = old_keys[&all_query.validate(&schema).unwrap().shape_id()];
+    let mut all_key = old_keys[&all_query.validate(&schema).unwrap().shape_id()];
     old_authority
         .send(view_update(all_key, GlobalSeq(3)))
         .unwrap();
@@ -225,11 +228,11 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
 
 #[test]
 fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client = open_db(0xc1, client_author, &schema);
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut owner = AuthorId::from_bytes([0xa1; 16]);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut client = open_db(0xc1, client_author, &schema);
     seed(
         &server,
         "todos",
@@ -237,10 +240,11 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     );
 
     let (old_client_transport, old_server_transport) = duplex();
-    let old_upstream = client.connect_upstream(old_client_transport);
-    let _old_subscriber = server.accept_subscriber(old_server_transport, client_author);
-    let query = Query::from("todos");
-    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut old_upstream = client.connect_upstream(old_client_transport);
+    let mut _old_subscriber = server.accept_subscriber(old_server_transport, client_author);
+    let mut query = Query::from("todos");
+    let mut subscription =
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
     client.tick().unwrap();
     server.tick().unwrap();
@@ -250,8 +254,8 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     // Switching links immediately retires the old receipt, even while the old
     // transport remains alive long enough to race one more response.
     let (new_client_transport, new_server_transport) = duplex();
-    let new_upstream = client.connect_upstream(new_client_transport);
-    let _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
+    let mut new_upstream = client.connect_upstream(new_client_transport);
+    let mut _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
     assert!(
         !event_settled(&block_on(subscription.next_raw()).unwrap()),
         "edge switch must immediately demote the prior edge receipt"
@@ -308,11 +312,11 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
 
 #[test]
 fn fallback_staged_cut_blocks_older_selected_confirmation() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let client = open_db(0xc1, client_author, &schema);
-    let query = Query::from("todos");
-    let update = |subscription, settled_through| SyncMessage::ViewUpdate {
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut client = open_db(0xc1, client_author, &schema);
+    let mut query = Query::from("todos");
+    let mut update = |subscription, settled_through| SyncMessage::ViewUpdate {
         subscription,
         settled_through,
         reset_result_set: true,
@@ -327,11 +331,12 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
     };
 
     let (old_client_transport, mut old_authority) = duplex();
-    let _old_upstream = client.connect_upstream(old_client_transport);
-    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut _old_upstream = client.connect_upstream(old_client_transport);
+    let mut subscription =
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     let _ = block_on(subscription.next_raw()).unwrap();
     client.tick().unwrap();
-    let old_key = loop {
+    let mut old_key = loop {
         if let SyncMessage::Subscribe(subscribe) = old_authority.try_recv().unwrap() {
             break subscribe.subscription;
         }
@@ -341,9 +346,9 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
     assert!(subscription._state.borrow().settled);
 
     let (new_client_transport, mut new_authority) = duplex();
-    let new_upstream = client.connect_upstream(new_client_transport);
+    let mut new_upstream = client.connect_upstream(new_client_transport);
     client.tick().unwrap();
-    let new_key = loop {
+    let mut new_key = loop {
         if let SyncMessage::Subscribe(subscribe) = new_authority.try_recv().unwrap() {
             break subscribe.subscription;
         }
@@ -370,23 +375,24 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
 
 #[test]
 fn fallback_replay_of_preselection_row_repair_cannot_settle() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let client = open_db(0xc1, client_author, &schema);
-    let query = Query::from("todos");
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut client = open_db(0xc1, client_author, &schema);
+    let mut query = Query::from("todos");
 
     let (old_client_transport, mut old_authority_transport) = duplex();
-    let old_upstream = client.connect_upstream(old_client_transport);
-    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut old_upstream = client.connect_upstream(old_client_transport);
+    let mut subscription =
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     let _ = block_on(subscription.next_raw()).unwrap();
     client.tick().unwrap();
-    let old_subscription = loop {
+    let mut old_subscription = loop {
         match old_authority_transport.try_recv().unwrap() {
             SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
             _ => continue,
         }
     };
-    let view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
+    let mut view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
         subscription,
         settled_through,
         reset_result_set: true,
@@ -406,9 +412,9 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     assert!(subscription._state.borrow().settled);
 
     let (new_client_transport, mut new_authority_transport) = duplex();
-    let new_upstream = client.connect_upstream(new_client_transport);
+    let mut new_upstream = client.connect_upstream(new_client_transport);
     client.tick().unwrap();
-    let new_subscription = loop {
+    let mut new_subscription = loop {
         match new_authority_transport.try_recv().unwrap() {
             SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
             _ => continue,
@@ -456,23 +462,24 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
 
 #[test]
 fn fallback_replay_of_preselection_branch_view_cannot_settle() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let client = open_db(0xc1, client_author, &schema);
-    let query = Query::from("todos");
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut client = open_db(0xc1, client_author, &schema);
+    let mut query = Query::from("todos");
 
     let (old_client_transport, mut old_authority_transport) = duplex();
-    let old_upstream = client.connect_upstream(old_client_transport);
-    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut old_upstream = client.connect_upstream(old_client_transport);
+    let mut subscription =
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     let _ = block_on(subscription.next_raw()).unwrap();
     client.tick().unwrap();
-    let old_subscription = loop {
+    let mut old_subscription = loop {
         match old_authority_transport.try_recv().unwrap() {
             SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
             _ => continue,
         }
     };
-    let view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
+    let mut view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
         subscription,
         settled_through,
         reset_result_set: true,
@@ -491,9 +498,9 @@ fn fallback_replay_of_preselection_branch_view_cannot_settle() {
     client.tick().unwrap();
 
     let (new_client_transport, mut new_authority_transport) = duplex();
-    let new_upstream = client.connect_upstream(new_client_transport);
+    let mut new_upstream = client.connect_upstream(new_client_transport);
     client.tick().unwrap();
-    let new_subscription = loop {
+    let mut new_subscription = loop {
         match new_authority_transport.try_recv().unwrap() {
             SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
             _ => continue,
@@ -505,7 +512,7 @@ fn fallback_replay_of_preselection_branch_view_cannot_settle() {
     client.tick().unwrap();
     assert!(subscription._state.borrow().settled);
 
-    let branch = BranchId::from_bytes([0x42; 16]);
+    let mut branch = BranchId::from_bytes([0x42; 16]);
     let mut old = old_upstream.borrow_mut();
     let ConnectionLink::Upstream {
         pending_branch_view_updates,
@@ -548,18 +555,18 @@ fn fallback_replay_of_preselection_branch_view_cannot_settle() {
 
 #[test]
 fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receipt() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_node = NodeUuid::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut owner = AuthorId::from_bytes([0xa1; 16]);
+    let mut client_node = NodeUuid::from_bytes([0xc1; 16]);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     seed(&server, "todos", cells("durable cache", false, owner));
-    let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut dir = tempfile::tempdir().unwrap();
+    let mut cfs = schema.column_families();
+    let mut refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
 
-    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let client = block_on(Db::open(DbConfig {
+    let mut storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let mut client = block_on(Db::open(DbConfig {
         schema: schema.clone(),
         storage,
         identity: DbIdentity {
@@ -570,11 +577,11 @@ fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receip
     }))
     .unwrap();
     let (first_client_transport, first_server_transport) = duplex();
-    let first_upstream = client.connect_upstream(first_client_transport);
-    let first_subscriber = server.accept_subscriber(first_server_transport, client_author);
-    let query = Query::from("todos");
+    let mut first_upstream = client.connect_upstream(first_client_transport);
+    let mut first_subscriber = server.accept_subscriber(first_server_transport, client_author);
+    let mut query = Query::from("todos");
     let mut first_subscription =
-        prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     assert!(!event_settled(
         &block_on(first_subscription.next_raw()).unwrap()
     ));
@@ -590,10 +597,9 @@ fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receip
     drop(first_upstream);
     drop(first_subscriber);
     client.close().unwrap();
-    drop(client);
 
-    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let reopened = block_on(Db::open(DbConfig {
+    let mut storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let mut reopened = block_on(Db::open(DbConfig {
         schema,
         storage,
         identity: DbIdentity {
@@ -603,14 +609,16 @@ fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receip
         id_source: None,
     }))
     .unwrap();
-    let mut subscription = prepared_subscribe(&reopened, &query, global_subscribe_opts()).unwrap();
+    let mut subscription =
+        prepared_subscribe(&mut reopened, &query, global_subscribe_opts()).unwrap();
     assert!(
         !event_settled(&block_on(subscription.next_raw()).unwrap()),
         "an offline Edge/Global subscription must expose durable cached rows as unsettled"
     );
     let (reopened_client_transport, reopened_server_transport) = duplex();
-    let _reopened_upstream = reopened.connect_upstream(reopened_client_transport);
-    let _reopened_subscriber = server.accept_subscriber(reopened_server_transport, client_author);
+    let mut _reopened_upstream = reopened.connect_upstream(reopened_client_transport);
+    let mut _reopened_subscriber =
+        server.accept_subscriber(reopened_server_transport, client_author);
     reopened.tick().unwrap();
     server.tick().unwrap();
     reopened.tick().unwrap();

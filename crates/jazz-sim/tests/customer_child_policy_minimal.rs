@@ -173,27 +173,28 @@ fn db_config(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorId) -> DbCon
     }
 }
 
-fn open_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorId) -> Db<MemoryStorage> {
+fn open_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorId) -> Db {
     jazz::db::block_on(Db::open(db_config(schema, node_uuid, author))).expect("open db")
 }
 
-fn open_history_complete_db(
-    schema: JazzSchema,
-    node_uuid: NodeUuid,
-    author: AuthorId,
-) -> Db<MemoryStorage> {
+fn open_history_complete_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorId) -> Db {
     jazz::db::block_on(Db::open_history_complete(db_config(
         schema, node_uuid, author,
     )))
     .expect("open db")
 }
 
-fn insert(db: &Db<MemoryStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
-    db.seed_settled_mergeable_for_bootstrap(table, row, AuthorId::SYSTEM, cells)
-        .expect("seed settled row");
+fn insert(db: &mut Db, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
+    jazz::db::block_on(db.seed_settled_mergeable_for_bootstrap(
+        table,
+        row,
+        AuthorId::SYSTEM,
+        cells,
+    ))
+    .expect("seed settled row");
 }
 
-fn count(db: &Db<MemoryStorage>, table: &str, author: AuthorId) -> usize {
+fn count(db: &mut Db, table: &str, author: AuthorId) -> usize {
     let prepared = db.prepare_query(&Query::from(table)).expect("prepare");
     let rows = jazz::db::block_on(db.all_for_identity(&prepared, ReadOpts::default(), author))
         .expect("one-shot");
@@ -226,19 +227,19 @@ fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
     }
 }
 
-fn tick_all(core: &Db<MemoryStorage>, relay: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
-    core.tick().expect("core tick");
-    relay.tick().expect("relay tick");
-    client.tick().expect("client tick");
+fn tick_all(core: &mut Db, relay: &mut Db, client: &mut Db) {
+    jazz::db::block_on(core.tick()).expect("core tick");
+    jazz::db::block_on(relay.tick()).expect("relay tick");
+    jazz::db::block_on(client.tick()).expect("client tick");
 }
 
 #[test]
 fn child_policy_reaches_client_through_relay() {
     let schema = schema();
     let member = AuthorId(row(0x10).0);
-    let core = open_history_complete_db(schema.clone(), node(0x01), AuthorId::SYSTEM);
-    let relay = open_db(schema.clone(), node(0x02), AuthorId::SYSTEM);
-    let client = open_db(schema.clone(), node(0x03), member);
+    let mut core = open_history_complete_db(schema.clone(), node(0x01), AuthorId::SYSTEM);
+    let mut relay = open_db(schema.clone(), node(0x02), AuthorId::SYSTEM);
+    let mut client = open_db(schema.clone(), node(0x03), member);
 
     let member_group = row(0x10);
     let reachable_group = row(0x11);
@@ -246,19 +247,19 @@ fn child_policy_reaches_client_through_relay() {
     let child = row(0x30);
 
     insert(
-        &core,
+        &mut core,
         GROUP,
         member_group,
         BTreeMap::from([("label".to_owned(), Value::String("member".to_owned()))]),
     );
     insert(
-        &core,
+        &mut core,
         GROUP,
         reachable_group,
         BTreeMap::from([("label".to_owned(), Value::String("reachable".to_owned()))]),
     );
     insert(
-        &core,
+        &mut core,
         GROUP_ENTRY,
         row(0x40),
         BTreeMap::from([
@@ -268,7 +269,7 @@ fn child_policy_reaches_client_through_relay() {
         ]),
     );
     insert(
-        &core,
+        &mut core,
         PARENT,
         parent,
         BTreeMap::from([
@@ -280,7 +281,7 @@ fn child_policy_reaches_client_through_relay() {
         ]),
     );
     insert(
-        &core,
+        &mut core,
         PARENT_ACCESS,
         row(0x21),
         BTreeMap::from([
@@ -290,7 +291,7 @@ fn child_policy_reaches_client_through_relay() {
         ]),
     );
     insert(
-        &core,
+        &mut core,
         CHILD,
         child,
         BTreeMap::from([
@@ -299,7 +300,7 @@ fn child_policy_reaches_client_through_relay() {
         ]),
     );
     insert(
-        &core,
+        &mut core,
         CHILD_ACCESS,
         row(0x50),
         BTreeMap::from([
@@ -309,7 +310,7 @@ fn child_policy_reaches_client_through_relay() {
         ]),
     );
 
-    let core_member_count = count(&core, CHILD, member);
+    let core_member_count = count(&mut core, CHILD, member);
     eprintln!("MIN_CHILD core member one-shot child rows={core_member_count}");
     assert_eq!(core_member_count, 1, "core member one-shot must see child");
 
@@ -342,7 +343,7 @@ fn child_policy_reaches_client_through_relay() {
     }
 
     for tick in 0..200 {
-        tick_all(&core, &relay, &client);
+        tick_all(&mut core, &mut relay, &mut client);
         for (_, stream, rows) in &mut subscriptions {
             while let Some(event) = stream.try_next_event() {
                 apply_event(rows, event);
@@ -355,11 +356,11 @@ fn child_policy_reaches_client_through_relay() {
             .unwrap();
 
         if tick == 10 || tick == 50 || tick == 199 {
-            let relay_member_count = count(&relay, CHILD, member);
-            let relay_system_child = count(&relay, CHILD, AuthorId::SYSTEM);
-            let relay_system_child_access = count(&relay, CHILD_ACCESS, AuthorId::SYSTEM);
-            let relay_system_group_entry = count(&relay, GROUP_ENTRY, AuthorId::SYSTEM);
-            let relay_system_parent_access = count(&relay, PARENT_ACCESS, AuthorId::SYSTEM);
+            let relay_member_count = count(&mut relay, CHILD, member);
+            let relay_system_child = count(&mut relay, CHILD, AuthorId::SYSTEM);
+            let relay_system_child_access = count(&mut relay, CHILD_ACCESS, AuthorId::SYSTEM);
+            let relay_system_group_entry = count(&mut relay, GROUP_ENTRY, AuthorId::SYSTEM);
+            let relay_system_parent_access = count(&mut relay, PARENT_ACCESS, AuthorId::SYSTEM);
             eprintln!(
                 "MIN_CHILD tick={tick} relay->core={} core->relay={} client->relay={} relay->client={} relay member child={relay_member_count} relay system child={relay_system_child} child_access={relay_system_child_access} group_entry={relay_system_group_entry} parent_access={relay_system_parent_access} client_subscription_rows={}",
                 relay_core_left_sent.get(),
@@ -370,7 +371,7 @@ fn child_policy_reaches_client_through_relay() {
             );
         }
         if seen.contains(&child) {
-            let relay_member_count = count(&relay, CHILD, member);
+            let relay_member_count = count(&mut relay, CHILD, member);
             eprintln!(
                 "MIN_CHILD reached tick={tick} relay member one-shot child rows={relay_member_count} client_subscription_rows={}",
                 seen.len()
@@ -379,11 +380,11 @@ fn child_policy_reaches_client_through_relay() {
         }
     }
 
-    let relay_member_count = count(&relay, CHILD, member);
-    let relay_system_child = count(&relay, CHILD, AuthorId::SYSTEM);
-    let relay_system_child_access = count(&relay, CHILD_ACCESS, AuthorId::SYSTEM);
-    let relay_system_group_entry = count(&relay, GROUP_ENTRY, AuthorId::SYSTEM);
-    let relay_system_parent_access = count(&relay, PARENT_ACCESS, AuthorId::SYSTEM);
+    let relay_member_count = count(&mut relay, CHILD, member);
+    let relay_system_child = count(&mut relay, CHILD, AuthorId::SYSTEM);
+    let relay_system_child_access = count(&mut relay, CHILD_ACCESS, AuthorId::SYSTEM);
+    let relay_system_group_entry = count(&mut relay, GROUP_ENTRY, AuthorId::SYSTEM);
+    let relay_system_parent_access = count(&mut relay, PARENT_ACCESS, AuthorId::SYSTEM);
     let seen = subscriptions
         .iter()
         .find(|(table, _, _)| *table == CHILD)

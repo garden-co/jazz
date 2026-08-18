@@ -1,3 +1,4 @@
+use jazz::db::BlockingResultFutureExt;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -7,8 +8,8 @@ use jazz_testkit::duplex_transport;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
-    SeededRowIdSource, SubscriptionEvent,
+    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
+    SubscriptionEvent,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -153,11 +154,11 @@ fn resident_read_opts() -> ReadOpts {
 
 use duplex_transport::duplex;
 
-fn open_db(scale: usize) -> Db<MemoryStorage> {
+fn open_db(scale: usize) -> Db {
     open_db_with_schema(scale, relation_schema())
 }
 
-fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
@@ -174,7 +175,7 @@ fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db<MemoryStorage> {
     .expect("open canary db")
 }
 
-fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(
@@ -191,10 +192,7 @@ fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db<
     .expect("open history-complete canary db")
 }
 
-fn open_rocks_db_with_schema(
-    scale: usize,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+fn open_rocks_db_with_schema(scale: usize, schema: JazzSchema) -> (tempfile::TempDir, Db) {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let dir = tempfile::tempdir().expect("temp rocks dir");
@@ -227,7 +225,7 @@ fn relation_query() -> Query {
     )
 }
 
-fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
+fn seed_relation_fixture(db: &mut Db, child_rows: usize) -> RowUuid {
     let parent = row(1);
     db.insert_with_id(
         "parents",
@@ -258,7 +256,7 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
     parent
 }
 
-fn seed_reset_batch_fixture(db: &Db<MemoryStorage>, rows: usize) {
+fn seed_reset_batch_fixture(db: &mut Db, rows: usize) {
     for index in 0..rows {
         db.seed_settled_mergeable_for_bootstrap(
             "items",
@@ -273,11 +271,7 @@ fn seed_reset_batch_fixture(db: &Db<MemoryStorage>, rows: usize) {
     }
 }
 
-fn drive_until_covered(
-    server: &Db<MemoryStorage>,
-    client: &Db<MemoryStorage>,
-    attachment: &jazz::db::QueryAttachment,
-) {
+fn drive_until_covered(server: &mut Db, client: &mut Db, attachment: &jazz::db::QueryAttachment) {
     for _ in 0..100 {
         client.tick().expect("tick client");
         server.tick().expect("tick server");
@@ -289,7 +283,7 @@ fn drive_until_covered(
     panic!("timed out waiting for query coverage");
 }
 
-fn drain_until_idle(server: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
+fn drain_until_idle(server: &mut Db, client: &mut Db) {
     for _ in 0..1_000 {
         let client_before = client.tick_stats().expect("drain client");
         let server_stats = server.tick_stats().expect("drain server");
@@ -335,8 +329,8 @@ fn expect_parent_snapshot(event: SubscriptionEvent, parent: RowUuid, label: &str
 }
 
 fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
-    let db = open_db(scale);
-    let parent = seed_relation_fixture(&db, scale);
+    let mut db = open_db(scale);
+    let parent = seed_relation_fixture(&mut db, scale);
     let prepared = db
         .prepare_query(&relation_query())
         .expect("prepare relation query");
@@ -393,7 +387,7 @@ fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
     let schema = reset_batch_schema();
     let server = open_history_complete_db_with_schema(existing_rows, schema.clone());
     let client = open_db_with_schema(existing_rows + 1, schema);
-    seed_reset_batch_fixture(&server, existing_rows);
+    seed_reset_batch_fixture(&mut server, existing_rows);
 
     let (client_transport, server_transport) = duplex();
     let _upstream = client.connect_upstream(client_transport);
@@ -405,11 +399,11 @@ fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
     let attachment = client
         .attach_query_with_opts(&prepared, global_read_opts())
         .expect("attach reset-batch query");
-    drive_until_covered(&server, &client, &attachment);
+    drive_until_covered(&mut server, &mut client, &attachment);
     let reset_rows = block_on(client.all(&prepared, global_read_opts()))
         .expect("read reset-batch rows after reset");
     assert_eq!(reset_rows.len(), existing_rows);
-    drain_until_idle(&server, &client);
+    drain_until_idle(&mut server, &mut client);
 
     server
         .seed_settled_mergeable_for_bootstrap(
@@ -468,7 +462,7 @@ fn write_cells(parent: RowUuid, index: usize) -> BTreeMap<String, Value> {
     ])
 }
 
-fn seed_rocks_write_fixture(db: &Db<RocksDbStorage>, child_rows: usize) -> RowUuid {
+fn seed_rocks_write_fixture(db: &mut Db, child_rows: usize) -> RowUuid {
     let parent = row(50_000_000);
     db.insert_with_id(
         "parents",
@@ -484,37 +478,43 @@ fn seed_rocks_write_fixture(db: &Db<RocksDbStorage>, child_rows: usize) -> RowUu
     while next < child_rows {
         let start = next;
         let end = (start + 200).min(child_rows);
-        db.transaction(|tx| {
-            for index in start..end {
-                tx.insert_with_id(
-                    "children",
-                    row(60_000_000 + index as u64),
-                    write_cells(parent, index),
-                )?;
-            }
-            Ok(())
-        })
-        .unwrap_or_else(|err| panic!("seed rocks write tx {start}..{end}: {err}"));
+        let tx = db.begin_mergeable().expect("begin seed transaction");
+        for index in start..end {
+            db.mergeable_insert(
+                tx,
+                "children",
+                row(60_000_000 + index as u64),
+                write_cells(parent, index),
+            )
+            .unwrap_or_else(|err| panic!("stage rocks write {index}: {err}"));
+        }
+        db.commit_mergeable(tx)
+            .unwrap_or_else(|err| panic!("seed rocks write tx {start}..{end}: {err}"));
         next = end;
     }
     parent
 }
 
 fn measure_rocks_write_transaction(existing_rows: usize) -> TxMeasurement {
-    let (_dir, db) = open_rocks_db_with_schema(existing_rows + 10, write_schema());
-    let parent = seed_rocks_write_fixture(&db, existing_rows);
+    let (_dir, mut db) = open_rocks_db_with_schema(existing_rows + 10, write_schema());
+    let parent = seed_rocks_write_fixture(&mut db, existing_rows);
     let start_index = 70_000_000 + existing_rows;
 
     reset_alloc_counter();
     let started = Instant::now();
-    db.transaction(|tx| {
-        for offset in 0..200 {
-            let index = start_index + offset;
-            tx.update("children", row(index as u64), write_cells(parent, index))?;
-        }
-        Ok(())
-    })
-    .expect("measured rocks write transaction");
+    let tx = db.begin_mergeable().expect("begin measured transaction");
+    for offset in 0..200 {
+        let index = start_index + offset;
+        db.mergeable_update(
+            tx,
+            "children",
+            row(index as u64),
+            write_cells(parent, index),
+        )
+        .expect("stage measured update");
+    }
+    db.commit_mergeable(tx)
+        .expect("measured rocks write transaction");
     let elapsed = started.elapsed();
     let allocs = stop_alloc_counter();
     TxMeasurement {

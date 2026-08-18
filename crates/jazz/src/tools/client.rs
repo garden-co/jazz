@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
-    ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
+    ErrorCode as CoreDbErrorCode, LocalUpdates as CoreLocalUpdates,
     PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
     TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
@@ -54,8 +54,9 @@ use crate::tools::{
     SubscriptionStream, SubscriptionStreamItem,
 };
 
-type CoreClientDb = CoreDb<CoreStorage>;
-type BackendConnection = Rc<RefCell<CorePeerConnection<CoreStorage>>>;
+type CoreClientDb = CoreDb;
+type BackendConnection =
+    Rc<RefCell<CorePeerConnection<crate::groove::storage::DemandLoadedStorage>>>;
 
 const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
@@ -216,7 +217,7 @@ enum ClosedTransactionState {
 }
 
 #[derive(Clone)]
-struct Backend(Rc<CoreClientDb>);
+struct Backend(Rc<RefCell<CoreClientDb>>);
 
 impl Backend {
     async fn open(
@@ -224,32 +225,33 @@ impl Backend {
         storage: StorageBundle,
         identity: CoreDbIdentity,
     ) -> Result<Self> {
-        Ok(Self(Rc::new(
-            CoreDb::open(CoreDbConfig::new(schema, storage, identity))
-                .await
-                .map_err(|error| JazzError::Connection(error.to_string()))?,
-        )))
+        let db = CoreDb::open(CoreDbConfig::new(schema, storage, identity))
+            .await
+            .map_err(|error| JazzError::Connection(error.to_string()))?;
+        Ok(Self(Rc::new(RefCell::new(db))))
     }
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
-        self.0.set_tick_scheduler(Some(scheduler));
+        self.0.borrow().set_tick_scheduler(Some(scheduler));
     }
 
     fn connect_upstream(&self, transport: Box<dyn CoreTransport>) -> BackendConnection {
-        self.0.connect_upstream(transport)
+        self.0.borrow().connect_upstream(transport)
     }
 
     fn detach_connection(&self, connection: &BackendConnection) -> bool {
-        self.0.detach_connection(connection)
+        self.0.borrow().detach_connection(connection)
     }
 
     fn set_identity_claims(&self, identity: CoreAuthorId, claims: HashMap<String, CoreValue>) {
         self.0
-            .set_identity_claims(identity, claims.into_iter().collect());
+            .borrow()
+            .set_identity_claims(identity, claims.into_iter().collect())
+            .expect("claims update is resident");
     }
 
     fn tick(&self) -> std::result::Result<(), CoreDbError> {
-        self.0.tick()
+        crate::db::block_on(self.0.borrow_mut().tick()).map(|_| ())
     }
 
     fn insert(
@@ -257,7 +259,7 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = self.0.insert(table, cells)?;
+        let write = crate::db::block_on(self.0.borrow_mut().insert(table, cells))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
@@ -267,7 +269,11 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = self.0.insert_for_identity(identity, table, cells)?;
+        let write = crate::db::block_on(
+            self.0
+                .borrow_mut()
+                .insert_for_identity(identity, table, cells),
+        )?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
@@ -277,10 +283,10 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .insert_with_id(table, row_id, cells)?
-            .mergeable_tx_id())
+        Ok(
+            crate::db::block_on(self.0.borrow_mut().insert_with_id(table, row_id, cells))?
+                .mergeable_tx_id(),
+        )
     }
 
     fn insert_with_id_for_identity(
@@ -290,10 +296,12 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .insert_with_id_for_identity(identity, table, row_id, cells)?
-            .mergeable_tx_id())
+        Ok(crate::db::block_on(
+            self.0
+                .borrow_mut()
+                .insert_with_id_for_identity(identity, table, row_id, cells),
+        )?
+        .mergeable_tx_id())
     }
 
     fn upsert(
@@ -302,7 +310,10 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.upsert(table, row_id, cells)?.mergeable_tx_id())
+        Ok(
+            crate::db::block_on(self.0.borrow_mut().upsert(table, row_id, cells))?
+                .mergeable_tx_id(),
+        )
     }
 
     fn upsert_for_identity(
@@ -312,10 +323,12 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .upsert_for_identity(identity, table, row_id, cells)?
-            .mergeable_tx_id())
+        Ok(crate::db::block_on(
+            self.0
+                .borrow_mut()
+                .upsert_for_identity(identity, table, row_id, cells),
+        )?
+        .mergeable_tx_id())
     }
 
     fn update(
@@ -324,7 +337,10 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.update(table, row_id, cells)?.mergeable_tx_id())
+        Ok(
+            crate::db::block_on(self.0.borrow_mut().update(table, row_id, cells))?
+                .mergeable_tx_id(),
+        )
     }
 
     fn delete_for_identity(
@@ -333,10 +349,12 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .delete_for_identity(identity, table, row_id)?
-            .mergeable_tx_id())
+        Ok(crate::db::block_on(
+            self.0
+                .borrow_mut()
+                .delete_for_identity(identity, table, row_id),
+        )?
+        .mergeable_tx_id())
     }
 
     fn delete(
@@ -344,14 +362,14 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.delete(table, row_id)?.mergeable_tx_id())
+        Ok(crate::db::block_on(self.0.borrow_mut().delete(table, row_id))?.mergeable_tx_id())
     }
 
     fn prepare_query(
         &self,
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
-        self.0.prepare_query_for_open_schema(query)
+        self.0.borrow().prepare_query(query)
     }
 
     fn attach_query(
@@ -359,22 +377,22 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<crate::db::QueryAttachment, CoreDbError> {
-        self.0.attach_query_with_opts(prepared, opts)
+        self.0.borrow().attach_query_with_opts(prepared, opts)
     }
 
     fn query_attachment_is_covered(&self, attachment: &crate::db::QueryAttachment) -> bool {
-        self.0.query_attachment_is_covered(attachment)
+        self.0.borrow().query_attachment_is_covered(attachment)
     }
 
     fn detach_query(&self, attachment: crate::db::QueryAttachment) {
-        self.0.detach_query(attachment);
+        let _ = self.0.borrow().detach_query(attachment);
     }
 
     fn row_provenance(
         &self,
         row: &crate::node::CurrentRow,
     ) -> std::result::Result<Option<crate::node::RowProvenance>, CoreDbError> {
-        self.0.row_provenance(row)
+        self.0.borrow().row_provenance(row)
     }
 
     async fn all(
@@ -382,7 +400,7 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        self.0.all(prepared, opts).await
+        crate::db::block_on(self.0.borrow_mut().all(prepared, opts))
     }
 
     fn transaction_all_for_identity(
@@ -392,8 +410,11 @@ impl Backend {
         author: CoreAuthorId,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        self.0
-            .transaction_all_for_identity(tx_id, prepared, author, opts)
+        crate::db::block_on(
+            self.0
+                .borrow_mut()
+                .transaction_all_for_identity(tx_id, prepared, opts, author),
+        )
     }
 
     async fn subscribe(
@@ -401,22 +422,22 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<crate::db::SubscriptionStream, CoreDbError> {
-        self.0.subscribe(prepared, opts).await
+        crate::db::block_on(self.0.borrow_mut().subscribe(prepared, opts))
     }
 
     fn write_state(
         &self,
         tx_id: CoreTxId,
     ) -> std::result::Result<crate::db::WriteState, CoreDbError> {
-        self.0.write_state(tx_id)
+        self.0.borrow().write_state(tx_id)
     }
 
     async fn next_write_state_change(&self, tx_id: CoreTxId) {
-        self.0.next_write_state_change(tx_id).await;
+        crate::db::block_on(self.0.borrow().next_write_state_change(tx_id));
     }
 
     fn begin_exclusive(&self, id: OpenBatchId) -> std::result::Result<(), CoreDbError> {
-        self.0.begin_exclusive(id)
+        crate::db::block_on(self.0.borrow_mut().begin_exclusive_with_id(id))
     }
 
     fn exclusive_write(
@@ -426,9 +447,11 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        self.0
-            .exclusive_tx_ref(tx_id)
-            .insert_with_id(table, row_id, cells)
+        crate::db::block_on(
+            self.0
+                .borrow_mut()
+                .exclusive_insert(tx_id, table, row_id, cells),
+        )
     }
 
     fn exclusive_update(
@@ -438,7 +461,11 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        self.0.exclusive_tx_ref(tx_id).update(table, row_id, cells)
+        crate::db::block_on(
+            self.0
+                .borrow_mut()
+                .exclusive_update(tx_id, table, row_id, cells),
+        )
     }
 
     fn exclusive_delete(
@@ -447,14 +474,14 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
-        self.0.exclusive_tx_ref(tx_id).delete(table, row_id)
+        crate::db::block_on(self.0.borrow_mut().exclusive_delete(tx_id, table, row_id))
     }
 
     fn commit_exclusive_handle(
         &self,
         tx_id: OpenBatchId,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        self.0.commit_exclusive_handle(tx_id)
+        crate::db::block_on(self.0.borrow_mut().commit_exclusive(tx_id))
     }
 }
 

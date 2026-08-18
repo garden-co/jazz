@@ -4,22 +4,23 @@ use super::*;
 
 #[test]
 fn server_reset_subscription_materializes_without_local_snapshot_eval() {
-    let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut schema = schema();
+    let mut owner = AuthorId::from_bytes([0xa1; 16]);
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client = open_db(0xc1, client_author, &schema);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
     seed(&server, "todos", cells("second", true, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let query = Query::from("todos");
-    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut query = Query::from("todos");
+    let mut subscription =
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
@@ -29,7 +30,7 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
         .node
         .borrow_mut()
         .reset_subscription_snapshot_for_link_call_count();
-    let stats = client.tick_stats().unwrap();
+    let mut stats = client.tick().unwrap();
     assert_eq!(stats.subscription_events, 1);
     assert_eq!(
         client
@@ -41,7 +42,7 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
         "authoritative server reset should not re-run the subscription query locally"
     );
 
-    let event = block_on(subscription.next_raw()).unwrap();
+    let mut event = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -62,27 +63,27 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
 
 #[test]
 fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let client = open_db(0xc1, client_author, &schema);
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut client = open_db(0xc1, client_author, &schema);
 
-    let first = row(0x71);
-    let middle = row(0x72);
-    let last = row(0x73);
-    let first_write = client
+    let mut first = row(0x71);
+    let mut middle = row(0x72);
+    let mut last = row(0x73);
+    let mut first_write = client
         .insert_with_id("todos", first, cells("alpha", false, client_author))
         .unwrap();
-    let _middle_write = client
+    let mut _middle_write = client
         .insert_with_id("todos", middle, cells("middle", false, client_author))
         .unwrap();
-    let last_write = client
+    let mut last_write = client
         .insert_with_id("todos", last, cells("omega", false, client_author))
         .unwrap();
     client.tick().unwrap();
 
-    let query = Query::from("todos").order_by("title", OrderDirection::Asc);
-    let prepared = prepared(&client, &query);
-    let opts = ReadOpts::default();
+    let mut query = Query::from("todos").order_by("title", OrderDirection::Asc);
+    let mut prepared = prepared(&mut client, &query);
+    let mut opts = ReadOpts::default();
     let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
     let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
         panic!("expected opening subscription delta");
@@ -92,14 +93,14 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
         vec![first, middle, last]
     );
 
-    let first_updated = client
+    let mut first_updated = client
         .update(
             "todos",
             first,
             BTreeMap::from([("title".to_owned(), Value::String("zulu".to_owned()))]),
         )
         .unwrap();
-    let binding_view_key = BindingViewKey::new(
+    let mut binding_view_key = BindingViewKey::new(
         prepared.shape().shape_id(),
         prepared.binding().binding_id(),
         RegisterShapeOptions {
@@ -131,8 +132,8 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
         );
 
     assert_eq!(client.refresh_subscriptions().unwrap(), 1);
-    let event = block_on(subscription.next_raw()).unwrap();
-    let reset = if matches!(event, SubscriptionEvent::Delta { reset: true, .. }) {
+    let mut event = block_on(subscription.next_raw()).unwrap();
+    let mut reset = if matches!(event, SubscriptionEvent::Delta { reset: true, .. }) {
         event
     } else {
         block_on(subscription.next_raw()).unwrap()
@@ -150,7 +151,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
         "the reset wire payload must preserve the maintained snapshot order"
     );
 
-    let state = subscription._state.borrow();
+    let mut state = subscription._state.borrow();
     let SubscriptionKind::Prepared {
         maintained_subscription: Some(maintained),
         ..
@@ -158,7 +159,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
     else {
         panic!("expected maintained subscription state");
     };
-    let paired = subscription_outputs_with_occurrence_sidecar(
+    let mut paired = subscription_outputs_with_occurrence_sidecar(
         &state.snapshot,
         maintained.root_occurrence_ids(),
     )
@@ -190,18 +191,18 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
 
 #[test]
 fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client = open_db(0xc1, client_author, &schema);
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let query = Query::from("todos");
-    let prepared = prepared(&client, &query);
-    let opts = global_subscribe_opts();
+    let mut query = Query::from("todos");
+    let mut prepared = prepared(&mut client, &query);
+    let mut opts = global_subscribe_opts();
     let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     client.tick().unwrap();
@@ -215,11 +216,11 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
     // while retaining the real connection receipt required by Edge/Global.
     subscription._state.borrow_mut().settled = false;
 
-    let missing_tx = TxId::new(
+    let mut missing_tx = TxId::new(
         TxTime(116_898_697_390_129_152),
         NodeUuid::from_bytes([0x77; 16]),
     );
-    let binding_view_key = BindingViewKey::new(
+    let mut binding_view_key = BindingViewKey::new(
         prepared.shape().shape_id(),
         prepared.binding().binding_id(),
         RegisterShapeOptions {
@@ -248,9 +249,9 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
         .borrow_mut()
         .reset_subscription_snapshot_for_link_call_count();
 
-    let changed = client.refresh_subscriptions().unwrap();
+    let mut changed = client.refresh_subscriptions().unwrap();
     assert_eq!(changed, 1);
-    let node = client.node.node.borrow();
+    let mut node = client.node.node.borrow();
     assert_eq!(
         node.sync_metrics()
             .authoritative_reset_missing_payload_fallbacks,
@@ -262,24 +263,24 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
         "missing payload fallback must keep the authoritative reset pending for a later retry"
     );
     drop(node);
-    assert!(prepared_all(&client, &query, ReadOpts::default()).is_empty());
+    assert!(prepared_all(&mut client, &query, ReadOpts::default()).is_empty());
 }
 
 #[test]
 fn authoritative_reset_skips_stale_member_without_falling_back() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let client = open_db(0xc1, client_author, &schema);
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut client = open_db(0xc1, client_author, &schema);
 
-    let query = Query::from("todos");
-    let prepared = prepared(&client, &query);
-    let opts = global_subscribe_opts();
+    let mut query = Query::from("todos");
+    let mut prepared = prepared(&mut client, &query);
+    let mut opts = global_subscribe_opts();
     let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
-    let live_row = row(0x7a);
-    let stale_row = row(0x7b);
-    let tx_id = client
+    let mut live_row = row(0x7a);
+    let mut stale_row = row(0x7b);
+    let mut tx_id = client
         .node
         .node
         .borrow_mut()
@@ -291,7 +292,7 @@ fn authoritative_reset_skips_stale_member_without_falling_back() {
         )
         .unwrap();
 
-    let binding_view_key = BindingViewKey::new(
+    let mut binding_view_key = BindingViewKey::new(
         prepared.shape().shape_id(),
         prepared.binding().binding_id(),
         RegisterShapeOptions {
@@ -319,7 +320,7 @@ fn authoritative_reset_skips_stale_member_without_falling_back() {
         .borrow_mut()
         .reset_subscription_snapshot_for_link_call_count();
 
-    let changed = client.refresh_subscriptions().unwrap();
+    let mut changed = client.refresh_subscriptions().unwrap();
     assert_eq!(changed, 1);
     assert_eq!(
         client
@@ -330,7 +331,7 @@ fn authoritative_reset_skips_stale_member_without_falling_back() {
         0,
         "stale members with present tx metadata must not force local query fallback"
     );
-    let event = block_on(subscription.next_raw()).unwrap();
+    let mut event = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -358,13 +359,13 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     // The client holds an extra raw row locally while the serving host has
     // only the published row. This guards against an Edge facade widening
     // server scope by re-scanning a broad local transport cache.
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let db = open_db(0xc1, client_author, &schema);
-    let published = seed(&server, "todos", cells("published", false, client_author));
-    let server_overemitted = row(0x72);
-    let published_tx = db
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let mut db = open_db(0xc1, client_author, &schema);
+    let mut published = seed(&server, "todos", cells("published", false, client_author));
+    let mut server_overemitted = row(0x72);
+    let mut published_tx = db
         .node
         .node
         .borrow_mut()
@@ -375,7 +376,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
                 .cells(cells("not published", false, client_author)),
         )
         .unwrap();
-    let overemitted_tx = db
+    let mut overemitted_tx = db
         .node
         .node
         .borrow_mut()
@@ -404,24 +405,24 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
         .unwrap();
     }
 
-    let query = Query::from("todos").filter(in_list(
+    let mut query = Query::from("todos").filter(in_list(
         col("id"),
         [lit(published.0), lit(server_overemitted.0)],
     ));
-    let prepared = prepared(&db, &query);
-    let ids = |rows: Vec<CurrentRow>| {
+    let mut prepared = prepared(&mut db, &query);
+    let mut ids = |rows: Vec<CurrentRow>| {
         rows.into_iter()
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>()
     };
-    let none_opts = ReadOpts {
+    let mut none_opts = ReadOpts {
         tier: DurabilityTier::None,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     };
-    let local_opts = ReadOpts {
+    let mut local_opts = ReadOpts {
         tier: DurabilityTier::Local,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::LocalOnly,
@@ -440,9 +441,9 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = db.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, client_author);
-    let attachment = db
+    let mut _upstream = db.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut attachment = db
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .expect("attach Edge coverage");
     db.tick().unwrap();
@@ -454,11 +455,11 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     // shares the canonical Global result set, but must wait for its own server
     // response rather than treating the older attachment's empty/non-empty
     // state as fresh coverage.
-    let fresh_attachment = db
+    let mut fresh_attachment = db
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .expect("attach a second Edge coverage request");
     db.tick().unwrap();
-    let concurrent_attachment = db
+    let mut concurrent_attachment = db
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .expect("attach concurrent Edge coverage");
     db.tick().unwrap();
@@ -489,7 +490,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
         "Global reads consume the canonical Global settled member set"
     );
     db.detach_query(attachment);
-    let reattached = db
+    let mut reattached = db
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .expect("re-attach Edge coverage after unsubscribe");
     db.tick().unwrap();
@@ -512,7 +513,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
         BTreeSet::from([published]),
         "Edge maintained facades consume Global result members instead of raw local rows"
     );
-    let refresh_attachment = db
+    let mut refresh_attachment = db
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .expect("refresh a deduplicated Edge attachment");
     db.tick().unwrap();
@@ -536,7 +537,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
 
 #[test]
 fn client_settled_file_member_reads_bytes_for_bound_id_read() {
-    let schema = JazzSchema::new([
+    let mut schema = JazzSchema::new([
         TableSchema::new(
             "files",
             [
@@ -557,11 +558,11 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
         .with_read_policy(Policy::public())
         .with_write_policy(Policy::public()),
     ]);
-    let client_author = AuthorId::from_bytes([0xc2; 16]);
-    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
-    let db = open_db(0xc2, client_author, &schema);
-    let bytes = vec![0, 1, 9, 3, 255, 64, 128, 200];
-    let file = seed(
+    let mut client_author = AuthorId::from_bytes([0xc2; 16]);
+    let mut server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let mut db = open_db(0xc2, client_author, &schema);
+    let mut bytes = vec![0, 1, 9, 3, 255, 64, 128, 200];
+    let mut file = seed(
         &server,
         "files",
         BTreeMap::from([
@@ -579,26 +580,26 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
         "attachments",
         BTreeMap::from([("file_id".to_owned(), Value::Uuid(file.0))]),
     );
-    let query = Query::from("files").filter(eq(col("id"), lit(file.0)));
-    let prepared = prepared(&db, &query);
+    let mut query = Query::from("files").filter(eq(col("id"), lit(file.0)));
+    let mut prepared = prepared(&mut db, &query);
     let (client_transport, server_transport) = duplex();
-    let _upstream = db.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, client_author);
-    let attachment = db
+    let mut _upstream = db.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut attachment = db
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .expect("attach file coverage");
     db.tick().unwrap();
     server.tick().unwrap();
     db.tick().unwrap();
     assert!(db.query_attachment_is_covered(&attachment));
-    let rows = block_on(db.all(&prepared, edge_subscribe_opts())).unwrap();
+    let mut rows = block_on(db.all(&prepared, edge_subscribe_opts())).unwrap();
     assert_eq!(
         rows.len(),
         1,
         "settled file member must materialize as an Edge row"
     );
     assert_eq!(rows[0].row_uuid(), file);
-    let table = schema
+    let mut table = schema
         .tables
         .iter()
         .find(|table| table.name == "files")
@@ -614,13 +615,13 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
 
 #[test]
 fn propagated_authoritative_reset_uses_delivered_binding_view() {
-    let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let client = open_db(0xc1, client_author, &schema);
+    let mut schema = schema();
+    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let mut client = open_db(0xc1, client_author, &schema);
 
-    let query = Query::from("todos");
-    let prepared = prepared(&client, &query);
-    let opts = ReadOpts {
+    let mut query = Query::from("todos");
+    let mut prepared = prepared(&mut client, &query);
+    let mut opts = ReadOpts {
         tier: DurabilityTier::Local,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
@@ -630,8 +631,8 @@ fn propagated_authoritative_reset_uses_delivered_binding_view() {
     let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
-    let live_row = row(0x7c);
-    let tx_id = client
+    let mut live_row = row(0x7c);
+    let mut tx_id = client
         .node
         .node
         .borrow_mut()
@@ -642,7 +643,7 @@ fn propagated_authoritative_reset_uses_delivered_binding_view() {
                 .cells(cells("delivered reset", false, client_author)),
         )
         .unwrap();
-    let delivered_binding_view_key = BindingViewKey::new(
+    let mut delivered_binding_view_key = BindingViewKey::new(
         prepared.shape().shape_id(),
         prepared.binding().binding_id(),
         RegisterShapeOptions {
@@ -671,7 +672,7 @@ fn propagated_authoritative_reset_uses_delivered_binding_view() {
         .borrow_mut()
         .reset_subscription_snapshot_for_link_call_count();
 
-    let changed = client.refresh_subscriptions().unwrap();
+    let mut changed = client.refresh_subscriptions().unwrap();
     assert_eq!(changed, 1);
     assert_eq!(
         client
@@ -682,7 +683,7 @@ fn propagated_authoritative_reset_uses_delivered_binding_view() {
         0,
         "propagated resets are delivered under the app subscription binding view, not the upstream global coverage key"
     );
-    let event = block_on(subscription.next_raw()).unwrap();
+    let mut event = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -707,12 +708,12 @@ fn propagated_authoritative_reset_uses_delivered_binding_view() {
 
 #[test]
 fn view_update_is_not_empty_when_it_only_carries_program_facts() {
-    let subscription = crate::protocol::SubscriptionKey {
+    let mut subscription = crate::protocol::SubscriptionKey {
         shape_id: crate::query::ShapeId(uuid::Uuid::from_bytes([0x11; 16])),
         binding_id: crate::query::BindingId(uuid::Uuid::from_bytes([0x22; 16])),
         read_view: Default::default(),
     };
-    let empty = SyncMessage::ViewUpdate {
+    let mut empty = SyncMessage::ViewUpdate {
         subscription,
         settled_through: crate::time::GlobalSeq(0),
         reset_result_set: false,
@@ -727,7 +728,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
     };
     assert!(view_update_is_empty(&empty));
 
-    let fact_only = SyncMessage::ViewUpdate {
+    let mut fact_only = SyncMessage::ViewUpdate {
         subscription,
         settled_through: crate::time::GlobalSeq(0),
         reset_result_set: false,

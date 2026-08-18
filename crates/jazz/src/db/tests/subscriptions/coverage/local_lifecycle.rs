@@ -4,10 +4,10 @@ use super::*;
 
 #[test]
 fn db_facade_local_subscription_reports_initial_and_changed_results() {
-    let schema = doctest_support::schema();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let db = doctest_support::block_on(Db::open_history_complete(DbConfig {
+    let mut schema = doctest_support::schema();
+    let mut cfs = schema.column_families();
+    let mut refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut db = doctest_support::block_on(Db::open_history_complete(DbConfig {
         schema,
         storage: doctest_support::MemoryStorage::new(&refs),
         identity: DbIdentity {
@@ -17,9 +17,9 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
         id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
     }))
     .unwrap();
-    let query = db.table("todos");
-    let table = &doctest_support::schema().tables[0];
-    let prepared_query = prepared(&db, &query);
+    let mut query = db.table("todos");
+    let mut table = &doctest_support::schema().tables[0];
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = doctest_support::block_on(db.subscribe(
         &prepared_query,
         ReadOpts {
@@ -34,7 +34,7 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
 
     assert!(opened_rows(doctest_support::block_on(subscription.next_raw()).unwrap()).is_empty());
 
-    let todo = RowUuid::from_bytes([0x44; 16]);
+    let mut todo = RowUuid::from_bytes([0x44; 16]);
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
         todo,
@@ -57,9 +57,9 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
 
 #[test]
 fn db_facade_subscription_refresh_preserves_read_tier() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let query = db.table("todos");
-    let prepared_query = prepared(&db, &query);
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut query = db.table("todos");
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription = doctest_support::block_on(db.subscribe(
         &prepared_query,
         ReadOpts {
@@ -80,21 +80,21 @@ fn db_facade_subscription_refresh_preserves_read_tier() {
     )
     .unwrap();
 
-    assert_eq!(prepared_read(&db, &query).len(), 1);
+    assert_eq!(prepared_read(&mut db, &query).len(), 1);
 }
 
 #[test]
 fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let scheduler = Rc::new(RecordingScheduler::default());
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut scheduler = Rc::new(RecordingScheduler::default());
     db.set_tick_scheduler(Some(scheduler.clone()));
-    let query = db.table("todos");
-    let prepared_query = prepared(&db, &query);
+    let mut query = db.table("todos");
+    let mut prepared_query = prepared(&mut db, &query);
 
     let mut subscription =
         doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
-    let opened = doctest_support::block_on(subscription.next_raw()).unwrap();
+    let mut opened = doctest_support::block_on(subscription.next_raw()).unwrap();
     assert_eq!(opened_rows(opened), Vec::<CurrentRow>::new());
 
     db.insert(
@@ -102,7 +102,7 @@ fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
         doctest_support::todo_cells("local callback", false),
     )
     .unwrap();
-    let changed = doctest_support::block_on(subscription.next_raw()).unwrap();
+    let mut changed = doctest_support::block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta { added, tier, .. } = changed else {
         panic!("expected local subscription delta");
     };
@@ -113,11 +113,11 @@ fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
 
 #[test]
 fn local_write_is_readable_synchronously_without_running_tick() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let scheduler = Rc::new(RecordingScheduler::default());
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut scheduler = Rc::new(RecordingScheduler::default());
     db.set_tick_scheduler(Some(scheduler.clone()));
-    let query = db.table("todos");
-    let prepared_query = prepared(&db, &query);
+    let mut query = db.table("todos");
+    let mut prepared_query = prepared(&mut db, &query);
 
     db.insert(
         "todos",
@@ -125,18 +125,18 @@ fn local_write_is_readable_synchronously_without_running_tick() {
     )
     .unwrap();
 
-    let rows = db.read(&prepared_query).unwrap();
+    let mut rows = db.read(&prepared_query).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(scheduler.take(), vec![TickUrgency::Deferred]);
 }
 
 #[test]
 fn local_write_notifies_subscription_synchronously_without_running_tick() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let scheduler = Rc::new(RecordingScheduler::default());
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut scheduler = Rc::new(RecordingScheduler::default());
     db.set_tick_scheduler(Some(scheduler.clone()));
-    let query = db.table("todos");
-    let prepared_query = prepared(&db, &query);
+    let mut query = db.table("todos");
+    let mut prepared_query = prepared(&mut db, &query);
     let mut subscription =
         doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
@@ -158,11 +158,11 @@ fn local_write_notifies_subscription_synchronously_without_running_tick() {
 
 #[test]
 fn db_facade_schedules_immediate_tick_for_attached_query_coverage() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let scheduler = Rc::new(RecordingScheduler::default());
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut scheduler = Rc::new(RecordingScheduler::default());
     db.set_tick_scheduler(Some(scheduler.clone()));
-    let query = db.table("todos");
-    let prepared_query = prepared(&db, &query);
+    let mut query = db.table("todos");
+    let mut prepared_query = prepared(&mut db, &query);
 
     db.attach_query_with_opts(
         &prepared_query,
@@ -181,11 +181,11 @@ fn db_facade_schedules_immediate_tick_for_attached_query_coverage() {
 
 #[test]
 fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let scheduler = Rc::new(RecordingScheduler::default());
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut scheduler = Rc::new(RecordingScheduler::default());
     db.set_tick_scheduler(Some(scheduler.clone()));
-    let query = db.table("todos");
-    let prepared_query = prepared(&db, &query);
+    let mut query = db.table("todos");
+    let mut prepared_query = prepared(&mut db, &query);
 
     let mut subscription = doctest_support::block_on(db.subscribe(
         &prepared_query,
@@ -206,11 +206,11 @@ fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
 
 #[test]
 fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let baseline = db.runtime_stats_for_test().active_subscriptions;
-    let query = db.table("todos");
-    let prepared_query = prepared(&db, &query);
-    let opts = ReadOpts {
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut baseline = db.runtime_stats_for_test().active_subscriptions;
+    let mut query = db.table("todos");
+    let mut prepared_query = prepared(&mut db, &query);
+    let mut opts = ReadOpts {
         tier: DurabilityTier::Global,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
@@ -253,9 +253,9 @@ fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
 
 #[test]
 fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let query = db.table("todos");
-    let prepared_query = prepared(&db, &query);
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut query = db.table("todos");
+    let mut prepared_query = prepared(&mut db, &query);
 
     let mut inspector = doctest_support::block_on(db.subscribe(
         &prepared_query,
@@ -271,8 +271,8 @@ fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
     let _ = doctest_support::block_on(inspector.next_raw()).unwrap();
 
     let (client_transport, _server_transport) = duplex();
-    let upstream = db.connect_upstream(client_transport);
-    let pending_subscribes = match &upstream.borrow().link {
+    let mut upstream = db.connect_upstream(client_transport);
+    let mut pending_subscribes = match &upstream.borrow().link {
         ConnectionLink::Upstream { pending, .. } => pending
             .iter()
             .filter(|command| matches!(command, PendingUpstreamCommand::Subscribe(_)))
@@ -284,31 +284,32 @@ fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
 
 #[test]
 fn db_facade_schedules_immediate_tick_for_upstream_connection() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let scheduler = Rc::new(RecordingScheduler::default());
+    let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut scheduler = Rc::new(RecordingScheduler::default());
     db.set_tick_scheduler(Some(scheduler.clone()));
     let (client_transport, _server_transport) = duplex();
 
-    let _upstream = db.connect_upstream(client_transport);
+    let mut _upstream = db.connect_upstream(client_transport);
 
     assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
 }
 
 #[test]
 fn upstream_inbound_application_schedules_immediate_tick() {
-    let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x51, author, &schema);
-    let client = open_db(0x52, author, &schema);
-    let scheduler = Rc::new(RecordingScheduler::default());
+    let mut schema = schema();
+    let mut author = AuthorId::from_bytes([0xa1; 16]);
+    let mut server = open_core(0x51, author, &schema);
+    let mut client = open_db(0x52, author, &schema);
+    let mut scheduler = Rc::new(RecordingScheduler::default());
     client.set_tick_scheduler(Some(scheduler.clone()));
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut _upstream = client.connect_upstream(client_transport);
+    let mut _subscriber = server.accept_subscriber(server_transport, author);
     scheduler.take();
 
-    let query = client.table("todos");
-    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut query = client.table("todos");
+    let mut subscription =
+        prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     scheduler.take();
 

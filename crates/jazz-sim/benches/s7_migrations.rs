@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
-use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, SeededRowIdSource, Transport};
+use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -159,12 +159,12 @@ fn rows_for_schema(
 
 struct ClientHarness {
     _dir: tempfile::TempDir,
-    db: Db<RocksDbStorage>,
+    db: Db,
     _edge_dir: tempfile::TempDir,
     edge: NodeState<RocksDbStorage>,
     edge_peer: PeerState,
     outbound: Rc<RefCell<Vec<SyncMessage>>>,
-    _upstream: Rc<RefCell<jazz::db::PeerConnection<RocksDbStorage>>>,
+    _upstream: Rc<RefCell<jazz::db::PeerConnection<jazz::groove::storage::DemandLoadedStorage>>>,
 }
 
 struct QueueTransport {
@@ -188,10 +188,10 @@ fn commit_client_mergeable(
     row: RowUuid,
     cells: BTreeMap<String, Value>,
 ) -> SyncMessage {
-    let tx = client.db.mergeable_tx().unwrap();
-    tx.insert_with_id(table, row, cells).unwrap();
-    tx.commit().unwrap();
-    client.db.tick().unwrap();
+    let tx = jazz::db::block_on(client.db.begin_mergeable()).unwrap();
+    jazz::db::block_on(client.db.mergeable_insert(tx, table, row, cells)).unwrap();
+    jazz::db::block_on(client.db.commit_mergeable(tx)).unwrap();
+    jazz::db::block_on(client.db.tick()).unwrap();
     client
         .outbound
         .borrow_mut()
@@ -520,11 +520,7 @@ fn open_client(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
     }
 }
 
-fn open_db(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-    author: AuthorId,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+fn open_db(node_uuid: NodeUuid, schema: JazzSchema, author: AuthorId) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
