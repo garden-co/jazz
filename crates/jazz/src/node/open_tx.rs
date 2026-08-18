@@ -774,14 +774,30 @@ where
         open_batch_id: OpenBatchId,
         mut next_now_ms: impl FnMut() -> u64,
     ) -> Result<TxId, Error> {
-        let prepared = self.prepare_mergeable_open(open_batch_id, next_now_ms())?;
+        let fallback_now_ms = (0..self.mergeable_open_missing_timestamp_count(open_batch_id)?)
+            .map(|_| next_now_ms())
+            .collect::<Vec<_>>();
+        let prepared = self.prepare_mergeable_open(open_batch_id, &fallback_now_ms, false)?;
         self.publish_prepared_mergeable_open(prepared)
+    }
+
+    pub(crate) fn mergeable_open_missing_timestamp_count(
+        &self,
+        open_batch_id: OpenBatchId,
+    ) -> Result<usize, Error> {
+        Ok(self
+            .open_tx(open_batch_id)?
+            .writes
+            .iter()
+            .filter(|write| write.now_ms.is_none())
+            .count())
     }
 
     pub(crate) fn prepare_mergeable_open(
         &mut self,
         open_batch_id: OpenBatchId,
-        fallback_now_ms: u64,
+        fallback_now_ms: &[u64],
+        acquire_tick_storage: bool,
     ) -> Result<PreparedOpenMergeableCommit, Error> {
         if !matches!(
             self.open_tx(open_batch_id)?.kind,
@@ -807,6 +823,7 @@ where
             ));
         };
         let mut commits = Vec::with_capacity(open_tx.writes.len());
+        let mut fallback_now_ms = fallback_now_ms.iter().copied();
         for (index, write) in open_tx.writes.into_iter().enumerate() {
             let parents = if write.refresh_parents_at_commit {
                 if write.deletion.is_none() {
@@ -840,14 +857,15 @@ where
                     (cells, Some(authored_columns))
                 }
             };
-            let mut commit = MergeableCommit::new(
-                &write.table,
-                write.row_uuid,
-                write.now_ms.unwrap_or(fallback_now_ms),
-            )
-            .made_by(made_by)
-            .parents(parents)
-            .cells(cells);
+            let now_ms = write.now_ms.unwrap_or_else(|| {
+                fallback_now_ms
+                    .next()
+                    .expect("one stable fallback timestamp per unstamped write")
+            });
+            let mut commit = MergeableCommit::new(&write.table, write.row_uuid, now_ms)
+                .made_by(made_by)
+                .parents(parents)
+                .cells(cells);
             if let Some(authored_columns) = authored_columns {
                 commit = commit.authored_columns(authored_columns);
             }
@@ -872,8 +890,12 @@ where
             .map(|(_, commit)| commit.clone())
             .collect::<Vec<_>>();
         let made_at = self.preview_mergeable_tx_time(&plain_commits, first.1.now_ms);
-        let commit =
-            self.prepare_mergeable_many_at_with_schema_versions(commits, made_at, None, true)?;
+        let commit = self.prepare_mergeable_many_at_with_schema_versions(
+            commits,
+            made_at,
+            None,
+            acquire_tick_storage,
+        )?;
         Ok(PreparedOpenMergeableCommit {
             open_batch_id,
             commit,

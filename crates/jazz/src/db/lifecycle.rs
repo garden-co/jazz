@@ -1111,10 +1111,18 @@ impl DemandDrivenDb {
 
     /// Publish every staged write as one resident and durable transaction.
     pub async fn commit_mergeable(&mut self, tx_id: OpenBatchId) -> Result<TxId, Error> {
-        let fallback_now_ms = self.database.next_now_ms();
+        let fallback_count = self
+            .database
+            .node
+            .node
+            .borrow()
+            .mergeable_open_missing_timestamp_count(tx_id)?;
+        let fallback_now_ms = (0..fallback_count)
+            .map(|_| self.database.next_now_ms())
+            .collect::<Vec<_>>();
         let committed = std::future::poll_fn(|context| {
             self.runtime
-                .poll_mergeable_open(context, tx_id, fallback_now_ms)
+                .poll_mergeable_open(context, tx_id, &fallback_now_ms)
         })
         .await
         .map_err(Error::from)?;

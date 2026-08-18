@@ -268,11 +268,11 @@ impl DemandDrivenNode {
         &mut self,
         context: &mut std::task::Context<'_>,
         open_batch_id: OpenBatchId,
-        fallback_now_ms: u64,
+        fallback_now_ms: &[u64],
     ) -> std::task::Poll<Result<TxId, Error>> {
         self.poll_local_operation(
             context,
-            |node| node.prepare_mergeable_open(open_batch_id, fallback_now_ms),
+            |node| node.prepare_mergeable_open(open_batch_id, fallback_now_ms, true),
             |node, prepared| node.publish_prepared_mergeable_open(prepared),
         )
     }
