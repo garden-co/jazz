@@ -45,6 +45,7 @@ pub struct DemandDrivenNode {
         Option<std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>>,
     pending_fate: Option<PendingFateApplication>,
     pending_ingress: Option<PendingDurableIngress>,
+    pending_peer_fate: Option<PendingPeerFate>,
     persistence_failed: bool,
 }
 
@@ -64,6 +65,12 @@ enum PendingDurableIngress {
         versions: Vec<VersionRecord>,
         publication: groove::db::DurablePublicationScope,
     },
+}
+
+struct PendingPeerFate {
+    request: ingest::FateUpdateRequest,
+    publication: groove::db::DurablePublicationScope,
+    resident_done: bool,
 }
 
 impl DemandDrivenNode {
@@ -497,10 +504,31 @@ impl DemandDrivenNode {
         global_seq: Option<GlobalSeq>,
         durability: Option<DurabilityTier>,
     ) -> std::task::Poll<Result<(), Error>> {
+        self.poll_apply_fate_update_inner(
+            context,
+            tx_id,
+            fate,
+            global_seq,
+            durability,
+            false,
+        )
+    }
+
+    fn poll_apply_fate_update_inner(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        tx_id: TxId,
+        fate: Fate,
+        global_seq: Option<GlobalSeq>,
+        durability: Option<DurabilityTier>,
+        peer_scope_active: bool,
+    ) -> std::task::Poll<Result<(), Error>> {
         if let Err(error) = self.ensure_persistence_usable() {
             return std::task::Poll::Ready(Err(error));
         }
-        if let Err(error) = self.ensure_durable_publication_idle() {
+        if !peer_scope_active
+            && let Err(error) = self.ensure_durable_publication_idle()
+        {
             return std::task::Poll::Ready(Err(error));
         }
         let root = ingest::FateUpdateRequest {
@@ -573,6 +601,109 @@ impl DemandDrivenNode {
                     }
                     return std::task::Poll::Ready(Err(error));
                 }
+            }
+        }
+    }
+
+    /// Apply a fate received from a peer while retaining the frame's external
+    /// publication boundary until every resident cascade unit is durable.
+    pub fn poll_apply_peer_fate_update(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        tx_id: TxId,
+        fate: Fate,
+        global_seq: Option<GlobalSeq>,
+        durability: Option<DurabilityTier>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        let request = ingest::FateUpdateRequest {
+            tx_id,
+            fate,
+            global_seq,
+            durability,
+        };
+        match &self.pending_peer_fate {
+            Some(pending) if pending.request != request => {
+                return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                    "a different peer fate was polled while one is pending",
+                )));
+            }
+            None => {
+                if let Err(error) = self.ensure_durable_publication_idle() {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                let publication = match self
+                    .node
+                    .borrow_mut()
+                    .database
+                    .begin_durable_publication_scope()
+                {
+                    Ok(publication) => publication,
+                    Err(error) => return std::task::Poll::Ready(Err(error.into())),
+                };
+                self.pending_peer_fate = Some(PendingPeerFate {
+                    request: request.clone(),
+                    publication,
+                    resident_done: false,
+                });
+            }
+            Some(_) => {}
+        }
+
+        if !self
+            .pending_peer_fate
+            .as_ref()
+            .expect("peer fate retains state")
+            .resident_done
+        {
+            match self.poll_apply_fate_update_inner(
+                context,
+                request.tx_id,
+                request.fate.clone(),
+                request.global_seq,
+                request.durability,
+                true,
+            ) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(error)) => {
+                    let pending = self
+                        .pending_peer_fate
+                        .take()
+                        .expect("failed peer fate retains publication state");
+                    pending
+                        .publication
+                        .abort(&mut self.node.borrow_mut().database);
+                    return std::task::Poll::Ready(Err(error));
+                }
+                std::task::Poll::Ready(Ok(())) => {
+                    self.pending_peer_fate
+                        .as_mut()
+                        .expect("published peer fate retains state")
+                        .resident_done = true;
+                }
+            }
+        }
+
+        match self.poll_persistence_queue(context) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(())) => {
+                let pending = self
+                    .pending_peer_fate
+                    .take()
+                    .expect("durable peer fate retains publication state");
+                pending
+                    .publication
+                    .finish(&mut self.node.borrow_mut().database);
+                std::task::Poll::Ready(Ok(()))
+            }
+            std::task::Poll::Ready(Err(error)) => {
+                let pending = self
+                    .pending_peer_fate
+                    .take()
+                    .expect("failed peer fate retains publication state");
+                pending
+                    .publication
+                    .abort(&mut self.node.borrow_mut().database);
+                std::task::Poll::Ready(Err(error))
             }
         }
     }
@@ -680,7 +811,7 @@ impl DemandDrivenNode {
         &mut self,
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Error>> {
-        if self.pending_ingress.is_some() {
+        if self.pending_ingress.is_some() || self.pending_peer_fate.is_some() {
             return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
                 "ingress persistence must be polled through its typed operation",
             )));
@@ -836,7 +967,7 @@ impl DemandDrivenNode {
     }
 
     fn ensure_durable_publication_idle(&self) -> Result<(), Error> {
-        if self.pending_ingress.is_some() {
+        if self.pending_ingress.is_some() || self.pending_peer_fate.is_some() {
             Err(Error::InvalidStoredValue(
                 "a durable publication is awaiting completion",
             ))
@@ -912,6 +1043,7 @@ impl PollableNodeOpen {
             pending_shutdown: None,
             pending_fate: None,
             pending_ingress: None,
+            pending_peer_fate: None,
             persistence_failed: false,
         }
     }

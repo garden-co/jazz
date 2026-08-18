@@ -226,6 +226,29 @@ where
         Some((tx.clone(), versions.clone()))
     }
 
+    pub(super) fn staged_accepted_fate(
+        &self,
+    ) -> Option<(TxId, Option<GlobalSeq>, Option<DurabilityTier>)> {
+        let ConnectionLink::Upstream { .. } = &self.link else {
+            return None;
+        };
+        let staged = self.staged_inbound.front()?;
+        let SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq,
+            durability,
+        } = &staged.message
+        else {
+            return None;
+        };
+        (!self.edge_fate_routes.borrow().contains_key(tx_id)).then_some((
+            *tx_id,
+            *global_seq,
+            *durability,
+        ))
+    }
+
     pub(super) fn complete_staged_relay_commit(&mut self, tx_id: TxId) {
         let staged = self
             .staged_inbound
@@ -235,6 +258,20 @@ where
             staged.message,
             SyncMessage::CommitUnit { ref tx, .. } if tx.tx_id == tx_id
         ));
+        self.externally_applied_inbound = true;
+    }
+
+    pub(super) fn complete_staged_accepted_fate(&mut self, tx_id: TxId) {
+        let staged = self
+            .staged_inbound
+            .pop_front()
+            .expect("completed fate ingress retains its staged frame");
+        debug_assert!(matches!(
+            staged.message,
+            SyncMessage::FateUpdate { tx_id: staged_tx, fate: Fate::Accepted, .. }
+                if staged_tx == tx_id
+        ));
+        notify_write_state_waiters(&self.write_state_waiters, tx_id);
         self.externally_applied_inbound = true;
     }
 
@@ -876,8 +913,14 @@ where
                         })
                 }) {
                     if self.external_durable_ingress
-                        && *local_receiver
-                        && matches!(message, SyncMessage::CommitUnit { .. })
+                        && ((*local_receiver && matches!(&message, SyncMessage::CommitUnit { .. }))
+                            || matches!(
+                                &message,
+                                SyncMessage::FateUpdate {
+                                    fate: Fate::Accepted,
+                                    ..
+                                }
+                            ))
                     {
                         self.staged_inbound.push_front(StagedInboundMessage {
                             message,

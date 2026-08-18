@@ -1737,8 +1737,14 @@ fn demand_driven_peer_tick_retains_relay_frame_across_async_commit() {
         Some(crate::db::SubscriptionEvent::Delta { reset: true, .. })
     ));
 
+    let accepted = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_seq: None,
+        durability: Some(DurabilityTier::Edge),
+    };
     let inbound = std::rc::Rc::new(std::cell::RefCell::new(
-        std::collections::VecDeque::from([unit]),
+        std::collections::VecDeque::from([unit, accepted]),
     ));
     let _connection = relay.connect_upstream(Box::new(QueuedInboundTransport {
         inbound: std::rc::Rc::clone(&inbound),
@@ -1748,9 +1754,10 @@ fn demand_driven_peer_tick_retains_relay_frame_across_async_commit() {
     assert!(subscription.try_next_event().is_none());
 
     released.set(true);
-    let std::task::Poll::Ready(Ok(_)) = relay.poll_tick(&mut context) else {
-        panic!("released peer relay frame must finish exactly once")
-    };
+    assert!(
+        relay.poll_tick(&mut context).is_pending(),
+        "the following fate frame must remain staged after the relay commit"
+    );
     let Some(crate::db::SubscriptionEvent::Delta { added, .. }) =
         subscription.try_next_event()
     else {
@@ -1758,6 +1765,12 @@ fn demand_driven_peer_tick_retains_relay_frame_across_async_commit() {
     };
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].row_uuid(), row(0xcf));
+    released.set(false);
+    assert!(
+        relay.poll_tick(&mut context).is_pending(),
+        "the accepted fate frame must remain owned until its durable unit completes"
+    );
+    released.set(true);
     assert!(matches!(relay.poll_tick(&mut context), std::task::Poll::Ready(Ok(_))));
     assert!(subscription.try_next_event().is_none());
     let rows = futures::executor::block_on(relay.all(
@@ -1770,10 +1783,10 @@ fn demand_driven_peer_tick_retains_relay_frame_across_async_commit() {
     ))
     .unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(relay.write_state(tx_id).unwrap().fate, Fate::Pending);
+    assert_eq!(relay.write_state(tx_id).unwrap().fate, Fate::Accepted);
     assert_eq!(
         relay.write_state(tx_id).unwrap().durability,
-        DurabilityTier::Local
+        DurabilityTier::Edge
     );
 }
 
