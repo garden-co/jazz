@@ -196,9 +196,7 @@ pub use storage_helpers::{
     StorageWriteMetrics,
 };
 #[doc(hidden)]
-pub use storage_runtime::{
-    DemandDrivenDatabase, PersistenceQueue, PersistenceUnitId, PollableDatabase, StorageAcquisition,
-};
+pub use storage_runtime::{DemandDrivenDatabase, StorageAcquisition};
 
 #[derive(Debug, Error)]
 pub enum Error {
