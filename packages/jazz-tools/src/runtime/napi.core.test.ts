@@ -881,7 +881,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "none");
     runtime.executeSubscription(handle, (delta: unknown) => {
       updates.push(
         manager.handleDelta(
@@ -920,7 +920,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     expect(updates).toHaveLength(1);
 
     const batchId = await runtime.commitTransaction(tx);
-    await runtime.waitForTransaction(batchId, "local");
+    await runtime.waitForTransaction(batchId, "none");
 
     expect(updates).toHaveLength(2);
     expect(updates[1]?.reset).not.toBe(true);
@@ -952,13 +952,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       },
       aliceSession,
     );
-    await runtime.waitForTransaction(await committedBatchId(aliceTodo), "local");
+    await runtime.waitForTransaction(await committedBatchId(aliceTodo), "none");
 
-    const aliceRows = await runtime.query(
-      JSON.stringify({ table: "todos" }),
-      aliceSession,
-      "local",
-    );
+    const aliceRows = await runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "none");
     expect(aliceRows).toHaveLength(1);
     expect(aliceRows).toEqual([
       expect.objectContaining({
@@ -981,12 +977,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       },
       aliceSession,
     );
-    await runtime.waitForTransaction(await committedBatchId(foreignOwnerTodo), "local");
+    await runtime.waitForTransaction(await committedBatchId(foreignOwnerTodo), "none");
 
     const aliceRowsAfterForeignOwnerInsert = await runtime.query(
       JSON.stringify({ table: "todos" }),
       aliceSession,
-      "local",
+      "none",
     );
     expect(aliceRowsAfterForeignOwnerInsert).toEqual(
       expect.arrayContaining([
@@ -1004,12 +1000,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       },
       bobSession,
     );
-    await runtime.waitForTransaction(await committedBatchId(bobTodo), "local");
+    await runtime.waitForTransaction(await committedBatchId(bobTodo), "none");
 
     const aliceRowsAfterBobInsert = await runtime.query(
       JSON.stringify({ table: "todos" }),
       aliceSession,
-      "local",
+      "none",
     );
     expect(aliceRowsAfterBobInsert).toEqual(
       expect.arrayContaining([
@@ -1049,7 +1045,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       );
     const aliceDecodedUpdates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
 
-    const aliceHandle = runtime.createSubscription(query, aliceSession, "local");
+    const aliceHandle = runtime.createSubscription(query, aliceSession, "none");
     runtime.executeSubscription(aliceHandle, (delta: unknown) => {
       aliceUpdates.push(delta);
       aliceDecodedUpdates.push(decodeAliceDelta(delta));
@@ -1077,17 +1073,17 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     await Promise.all([
-      runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
-      runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
+      runtime.waitForTransaction(await committedBatchId(aliceTodo), "none"),
+      runtime.waitForTransaction(await committedBatchId(bobTodo), "none"),
     ]);
 
-    await expect(runtime.query(query, aliceSession, "local")).resolves.toEqual(
+    await expect(runtime.query(query, aliceSession, "none")).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: aliceTodo.id }),
         expect.objectContaining({ id: bobTodo.id }),
       ]),
     );
-    await expect(runtime.query(query, bobSession, "local")).resolves.toEqual(
+    await expect(runtime.query(query, bobSession, "none")).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: aliceTodo.id }),
         expect.objectContaining({ id: bobTodo.id }),
@@ -1158,15 +1154,15 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     await Promise.all([
-      runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
-      runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
+      runtime.waitForTransaction(await committedBatchId(aliceTodo), "none"),
+      runtime.waitForTransaction(await committedBatchId(bobTodo), "none"),
     ]);
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "none"),
     ).resolves.toEqual([expect.objectContaining({ id: aliceTodo.id })]);
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "none"),
     ).resolves.toEqual([expect.objectContaining({ id: bobTodo.id })]);
 
     // This adapter's direct writes are advisory: capture both cross-identity
@@ -1174,15 +1170,15 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceDeletesBob = runtime.delete("todos", bobTodo.id, aliceSession);
     const bobDeletesAlice = runtime.delete("todos", aliceTodo.id, bobSession);
     await Promise.all([
-      runtime.waitForTransaction(await committedBatchId(aliceDeletesBob), "local"),
-      runtime.waitForTransaction(await committedBatchId(bobDeletesAlice), "local"),
+      runtime.waitForTransaction(await committedBatchId(aliceDeletesBob), "none"),
+      runtime.waitForTransaction(await committedBatchId(bobDeletesAlice), "none"),
     ]);
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "none"),
     ).resolves.toEqual([]);
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "none"),
     ).resolves.toEqual([]);
   });
 
@@ -1235,11 +1231,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     await Promise.all([
-      runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
-      runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
+      runtime.waitForTransaction(await committedBatchId(aliceTodo), "none"),
+      runtime.waitForTransaction(await committedBatchId(bobTodo), "none"),
     ]);
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "none"),
     ).resolves.toHaveLength(2);
 
     const aliceDenied = runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge");
@@ -1388,7 +1384,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       "22222222-2222-4222-8222-222222222222",
     );
     const committed = await runtime.commitTransaction(tx);
-    await runtime.waitForTransaction(committed, "local");
+    await runtime.waitForTransaction(committed, "none");
 
     const rows = await runtime.query(JSON.stringify({ table: "todos" }));
     expect(rows).toHaveLength(3);

@@ -48,6 +48,10 @@ pub struct DemandDrivenNode {
     acquisition: groove::db::StorageAcquisition,
     pending_persistence:
         std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>,
+    pending_local_durability: std::collections::BTreeMap<
+        groove::storage::async_ordered::StorageRequestId,
+        Vec<TxId>,
+    >,
     pending_shutdown:
         Option<std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>>,
     pending_fate: Option<PendingFateApplication>,
@@ -203,6 +207,53 @@ impl DemandDrivenNode {
         std::task::Poll::Ready(result)
     }
 
+    fn track_local_tx(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        result: std::task::Poll<Result<TxId, Error>>,
+    ) -> std::task::Poll<Result<TxId, Error>> {
+        match result {
+            std::task::Poll::Ready(Ok(tx_id)) => {
+                self.track_local_transaction(tx_id);
+                if self.persistence.completes_synchronously() {
+                    match self.poll_persistence_queue(context) {
+                        std::task::Poll::Ready(Ok(())) => {}
+                        std::task::Poll::Ready(Err(error)) => {
+                            return std::task::Poll::Ready(Err(error));
+                        }
+                        std::task::Poll::Pending => {
+                            self.fail_persistence();
+                            return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                                "synchronous storage left a local commit pending",
+                            )));
+                        }
+                    }
+                }
+                std::task::Poll::Ready(Ok(tx_id))
+            }
+            result => result,
+        }
+    }
+
+    fn track_local_transaction(&mut self, tx_id: TxId) {
+        if self.node.borrow().authored_commit_durability() >= DurabilityTier::Local {
+            return;
+        }
+        let Some(request) = self.pending_persistence.iter().rev().find(|request| {
+            matches!(
+                request.operation(),
+                groove::storage::async_ordered::OwnedStorageOperation::Commit(_)
+            )
+        }) else {
+            self.fail_persistence();
+            return;
+        };
+        self.pending_local_durability
+            .entry(request.id())
+            .or_default()
+            .push(tx_id);
+    }
+
     /// Commit one mergeable write through the native acquire-then-publish
     /// operation boundary.
     pub fn poll_mergeable_commit(
@@ -210,11 +261,12 @@ impl DemandDrivenNode {
         context: &mut std::task::Context<'_>,
         commit: &MergeableCommit,
     ) -> std::task::Poll<Result<TxId, Error>> {
-        self.poll_local_operation(
+        let result = self.poll_local_operation(
             context,
             |node| node.prepare_current_mergeable_commit(commit.clone()),
             |node, prepared| node.publish_prepared_mergeable_commit(prepared),
-        )
+        );
+        self.track_local_tx(context, result)
     }
 
     /// Commit one mergeable write authored against an explicit schema view.
@@ -224,11 +276,12 @@ impl DemandDrivenNode {
         schema: SchemaVersionId,
         commit: &MergeableCommit,
     ) -> std::task::Poll<Result<TxId, Error>> {
-        self.poll_local_operation(
+        let result = self.poll_local_operation(
             context,
             |node| node.prepare_mergeable_commit_in_schema(schema, commit.clone()),
             |node, prepared| node.publish_prepared_mergeable_commit(prepared),
-        )
+        );
+        self.track_local_tx(context, result)
     }
 
     /// Commit several mergeable writes as one transaction under an explicit
@@ -240,11 +293,12 @@ impl DemandDrivenNode {
         schema: SchemaVersionId,
         commits: &[MergeableCommit],
     ) -> std::task::Poll<Result<TxId, Error>> {
-        self.poll_local_operation(
+        let result = self.poll_local_operation(
             context,
             |node| node.prepare_mergeable_many_in_schema(schema, commits.to_vec()),
             |node, prepared| node.publish_prepared_mergeable_commit(prepared),
-        )
+        );
+        self.track_local_tx(context, result)
     }
 
     /// Commit a branch-local write together with any lazily-created physical
@@ -256,7 +310,7 @@ impl DemandDrivenNode {
         schema: SchemaVersionId,
         commits: &[MergeableCommit],
     ) -> std::task::Poll<Result<TxId, Error>> {
-        self.poll_local_operation(
+        let result = self.poll_local_operation(
             context,
             |node| {
                 node.prepare_mergeable_many_on_branch_in_schema(
@@ -266,7 +320,8 @@ impl DemandDrivenNode {
                 )
             },
             |node, prepared| node.publish_prepared_branch_mergeable_commit(prepared),
-        )
+        );
+        self.track_local_tx(context, result)
     }
 
     /// Commit a staged mergeable transaction without consuming its open handle
@@ -277,11 +332,12 @@ impl DemandDrivenNode {
         open_batch_id: OpenBatchId,
         fallback_now_ms: &[u64],
     ) -> std::task::Poll<Result<TxId, Error>> {
-        self.poll_local_operation(
+        let result = self.poll_local_operation(
             context,
             |node| node.prepare_mergeable_open(open_batch_id, fallback_now_ms, true),
             |node, prepared| node.publish_prepared_mergeable_open(prepared),
-        )
+        );
+        self.track_local_tx(context, result)
     }
 
     /// Validate and publish a staged exclusive transaction without consuming
@@ -293,11 +349,19 @@ impl DemandDrivenNode {
         made_by: AuthorId,
         now_ms: u64,
     ) -> std::task::Poll<Result<(TxId, SyncMessage), Error>> {
-        self.poll_local_operation(
+        let result = self.poll_local_operation(
             context,
             |node| node.prepare_exclusive_commit(open_batch_id, made_by, now_ms),
             |node, prepared| node.publish_prepared_exclusive_commit(prepared),
-        )
+        );
+        match result {
+            std::task::Poll::Ready(Ok((tx_id, message))) => {
+                self.track_local_transaction(tx_id);
+                std::task::Poll::Ready(Ok((tx_id, message)))
+            }
+            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
     }
 
     /// Create one local branch through the same acquire-then-publish boundary
@@ -1514,7 +1578,37 @@ impl DemandDrivenNode {
                 std::task::Poll::Ready(Ok(response))
                     if storage_response_matches(request.operation(), &response) =>
                 {
+                    let request_id = request.id();
                     self.pending_persistence.pop_front();
+                    if let Some(transactions) = self.pending_local_durability.remove(&request_id)
+                        && self.persistence.is_durable()
+                    {
+                        for tx_id in transactions {
+                            let Some((fate, global_seq, durability)) =
+                                self.node.borrow_mut().transaction_state(tx_id)
+                            else {
+                                self.fail_persistence();
+                                return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                                    "durably committed local transaction disappeared",
+                                )));
+                            };
+                            if durability < DurabilityTier::Local {
+                                let result = {
+                                    self.node.borrow_mut().apply_fate_update(
+                                        tx_id,
+                                        fate,
+                                        global_seq,
+                                        Some(DurabilityTier::Local),
+                                    )
+                                };
+                                if let Err(error) = result {
+                                    self.fail_persistence();
+                                    return std::task::Poll::Ready(Err(error));
+                                }
+                            }
+                        }
+                        self.collect_persistence_unit();
+                    }
                 }
                 std::task::Poll::Ready(Ok(response)) => {
                     let error = Error::Storage(groove::storage::Error::Backend {
@@ -1604,6 +1698,7 @@ impl DemandDrivenNode {
 
     fn fail_persistence(&mut self) {
         self.persistence_failed = true;
+        self.pending_local_durability.clear();
         for request in self.pending_persistence.drain(..) {
             let _ = self.persistence.cancel_request(request.id());
         }
@@ -1652,10 +1747,9 @@ impl PollableNodeOpen {
         mut node: NodeState<groove::storage::DemandLoadedStorage>,
         cache: groove::storage::DemandLoadedStorage,
     ) -> DemandDrivenNode {
-        // Durable completion belongs to this wrapper, not the synchronous
-        // NodeState call stack. Authored rows therefore enter the resident
-        // view at None and gain stronger durability only through the normal
-        // acknowledged sync/fate path.
+        // Every local mutation first publishes resident visibility at None.
+        // Durable storage advances the exact transaction to Local only after
+        // its commit completes; volatile storage never makes that claim.
         node.set_non_durable_client();
         DemandDrivenNode {
             node: std::rc::Rc::new(std::cell::RefCell::new(node)),
@@ -1666,6 +1760,7 @@ impl PollableNodeOpen {
                 .expect("ready node takes its persistence session"),
             acquisition: groove::db::StorageAcquisition::default(),
             pending_persistence: std::collections::VecDeque::new(),
+            pending_local_durability: std::collections::BTreeMap::new(),
             pending_shutdown: None,
             pending_fate: None,
             pending_ingress: None,

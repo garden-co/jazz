@@ -141,6 +141,10 @@ struct GatedAuthorityStorage {
 }
 
 impl groove::storage::async_ordered::OrderedKvStorage for GatedAuthorityStorage {
+    fn is_durable(&self) -> bool {
+        true
+    }
+
     fn poll_request(
         &mut self,
         request: &groove::storage::async_ordered::OwnedStorageRequest,
@@ -211,6 +215,10 @@ impl crate::db::Transport for QueuedInboundTransport {
 }
 
 impl groove::storage::async_ordered::OrderedKvStorage for CommitGatedAuthorityStorage {
+    fn is_durable(&self) -> bool {
+        true
+    }
+
     fn poll_request(
         &mut self,
         request: &groove::storage::async_ordered::OwnedStorageRequest,
@@ -339,12 +347,22 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
     assert_eq!(added.len(), 1);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), write.row_uuid());
+    assert_eq!(
+        owner.write_state(write.mergeable_tx_id()).unwrap().durability,
+        DurabilityTier::None,
+        "resident publication must not claim durability before commit"
+    );
     assert!(owner.poll_persistence(&mut context).is_pending());
     released.set(true);
     assert!(matches!(
         owner.poll_persistence(&mut context),
         std::task::Poll::Ready(Ok(()))
     ));
+    assert_eq!(
+        owner.write_state(write.mergeable_tx_id()).unwrap().durability,
+        DurabilityTier::Local,
+        "a completed durable commit must advance the exact transaction"
+    );
     drop(subscription);
     drop(write);
     crate::db::block_on(owner.close()).unwrap();
@@ -356,6 +374,44 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[test]
+fn synchronous_memory_publication_never_claims_local_durability() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = groove::storage::async_ordered::ImmediateStorage::new(
+        MemoryStorage::new(&refs),
+    );
+    let mut opening = crate::db::PollableDbOpen::new(
+        node_schema,
+        crate::db::DbIdentity {
+            node: node(0xcb),
+            author: AuthorId::from_bytes([0xcb; 16]),
+        },
+        Box::new(storage),
+    );
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
+        panic!("memory must open in its first poll")
+    };
+
+    let write = crate::db::block_on(owner.insert("todos", title_cells("volatile"))).unwrap();
+    assert_eq!(
+        owner.write_state(write.mergeable_tx_id()).unwrap().durability,
+        DurabilityTier::None
+    );
+    assert!(matches!(
+        owner.poll_persistence(&mut context),
+        std::task::Poll::Ready(Ok(()))
+    ));
+    assert_eq!(
+        owner.write_state(write.mergeable_tx_id()).unwrap().durability,
+        DurabilityTier::None,
+        "completion timing cannot turn volatile memory into local durability"
     );
 }
 

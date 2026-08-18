@@ -326,6 +326,17 @@ impl DemandDrivenDb {
         self.database.set_non_durable_client();
     }
 
+    pub fn set_initial_sync_flush_cadence(
+        &self,
+        cadence: InitialSyncFlushCadence,
+    ) -> Result<(), Error> {
+        self.database.set_initial_sync_flush_cadence(cadence)
+    }
+
+    pub fn abandon_transaction(&mut self, tx_id: OpenBatchId) -> Result<(), Error> {
+        self.database.abandon_transaction_handle(tx_id)
+    }
+
     #[cfg(any(feature = "runtime", test))]
     pub async fn apply_trusted_catalogue_snapshot(
         &mut self,
@@ -1218,7 +1229,7 @@ impl DemandDrivenDb {
             let (tx_id, local_tier) = std::future::poll_fn(|context| {
                 self.runtime.poll_operation(
                     context,
-                    || database.prepare_noop_update_for_owner(table, row),
+                    || database.prepare_noop_update_for_owner(table, row, database.identity.author),
                     MutationPrepareError::missing_input,
                 )
             })
@@ -1236,7 +1247,15 @@ impl DemandDrivenDb {
         let prepared = std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.prepare_update_commit_for_owner(table, row, patch.clone(), now_ms),
+                || {
+                    database.prepare_update_commit_for_owner(
+                        table,
+                        row,
+                        patch.clone(),
+                        now_ms,
+                        database.identity.author,
+                    )
+                },
                 MutationPrepareError::missing_input,
             )
         })
@@ -1349,7 +1368,15 @@ impl DemandDrivenDb {
         let prepared = std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.prepare_upsert_commit_for_owner(table, row, cells.clone(), now_ms),
+                || {
+                    database.prepare_upsert_commit_for_owner(
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                        database.identity.author,
+                    )
+                },
                 MutationPrepareError::missing_input,
             )
         })
@@ -1697,6 +1724,26 @@ impl DemandDrivenViewDb<'_> {
         self.database.prepare_query(query)
     }
 
+    pub async fn all_relation_query(
+        &mut self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+        author: Option<AuthorId>,
+    ) -> Result<RelationSnapshot, Error> {
+        ensure_default_read_view(&opts)?;
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        let rows = match author {
+            Some(author) => self.all_for_identity(&prepared, opts, author).await?,
+            None => self.all(&prepared, opts).await?,
+        };
+        Ok(RelationSnapshot {
+            root_count: rows.len(),
+            rows,
+            edges: Vec::new(),
+        })
+    }
+
     /// Run a one-shot query, loading only missing physical inputs.
     pub async fn all(
         &mut self,
@@ -1885,6 +1932,20 @@ impl DemandDrivenViewDb<'_> {
         .await
     }
 
+    pub async fn subscribe_relation_query(
+        &mut self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+        author: Option<AuthorId>,
+    ) -> Result<SubscriptionStream, Error> {
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        match author {
+            Some(author) => self.subscribe_for_identity(&prepared, opts, author).await,
+            None => self.subscribe(&prepared, opts).await,
+        }
+    }
+
     pub fn set_identity_claims(
         &self,
         author: AuthorId,
@@ -1960,16 +2021,19 @@ impl DemandDrivenViewDb<'_> {
         made_by: Option<AuthorId>,
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let permission_subject = made_by;
         let author = made_by.unwrap_or(self.database.identity.author);
         let cells = self.database.apply_insert_defaults(table, cells)?;
-        let commit = MergeableCommit::new(
+        let mut commit = MergeableCommit::new(
             table,
             row,
             now_ms.unwrap_or_else(|| self.database.next_now_ms()),
         )
         .made_by(author)
-        .permission_subject(author)
         .cells(cells);
+        if let Some(subject) = permission_subject {
+            commit = commit.permission_subject(subject);
+        }
         let database = &self.database;
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
@@ -1993,12 +2057,14 @@ impl DemandDrivenViewDb<'_> {
         made_by: Option<AuthorId>,
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let permission_subject = made_by;
+        let author = made_by.unwrap_or(self.database.identity.author);
         if patch.is_empty() {
             let database = &self.database;
             let (tx_id, local_tier) = std::future::poll_fn(|context| {
                 self.runtime.poll_operation(
                     context,
-                    || database.prepare_noop_update_for_owner(table, row),
+                    || database.prepare_noop_update_for_owner(table, row, author),
                     MutationPrepareError::missing_input,
                 )
             })
@@ -2012,19 +2078,28 @@ impl DemandDrivenViewDb<'_> {
             });
         }
         let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
-        let author = made_by.unwrap_or(self.database.identity.author);
         let database = &self.database;
-        let commit = std::future::poll_fn(|context| {
+        let mut commit = std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.prepare_update_commit_for_owner(table, row, patch.clone(), now_ms),
+                || {
+                    database.prepare_update_commit_for_owner(
+                        table,
+                        row,
+                        patch.clone(),
+                        now_ms,
+                        author,
+                    )
+                },
                 MutationPrepareError::missing_input,
             )
         })
         .await
         .map_err(MutationPrepareError::into_api)?
-        .made_by(author)
-        .permission_subject(author);
+        .made_by(author);
+        if let Some(subject) = permission_subject {
+            commit = commit.permission_subject(subject);
+        }
         self.publish_mergeable(std::slice::from_ref(&commit), row)
             .await
     }
@@ -2039,19 +2114,30 @@ impl DemandDrivenViewDb<'_> {
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
         let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let permission_subject = made_by;
         let author = made_by.unwrap_or(self.database.identity.author);
         let database = &self.database;
-        let commit = std::future::poll_fn(|context| {
+        let mut commit = std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.prepare_upsert_commit_for_owner(table, row, cells.clone(), now_ms),
+                || {
+                    database.prepare_upsert_commit_for_owner(
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                        author,
+                    )
+                },
                 MutationPrepareError::missing_input,
             )
         })
         .await
         .map_err(MutationPrepareError::into_api)?
-        .made_by(author)
-        .permission_subject(author);
+        .made_by(author);
+        if let Some(subject) = permission_subject {
+            commit = commit.permission_subject(subject);
+        }
         self.publish_mergeable(std::slice::from_ref(&commit), row)
             .await
     }
@@ -2065,9 +2151,10 @@ impl DemandDrivenViewDb<'_> {
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
         let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let permission_subject = made_by;
         let author = made_by.unwrap_or(self.database.identity.author);
         let database = &self.database;
-        let commit = std::future::poll_fn(|context| {
+        let mut commit = std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
                 || database.prepare_delete_commit_for_owner(table, row, now_ms),
@@ -2076,8 +2163,10 @@ impl DemandDrivenViewDb<'_> {
         })
         .await
         .map_err(MutationPrepareError::into_api)?
-        .made_by(author)
-        .permission_subject(author);
+        .made_by(author);
+        if let Some(subject) = permission_subject {
+            commit = commit.permission_subject(subject);
+        }
         self.publish_mergeable(std::slice::from_ref(&commit), row)
             .await
     }
@@ -2092,6 +2181,7 @@ impl DemandDrivenViewDb<'_> {
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
         let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let permission_subject = made_by;
         let author = made_by.unwrap_or(self.database.identity.author);
         let database = &self.database;
         let commits = std::future::poll_fn(|context| {
@@ -2104,7 +2194,13 @@ impl DemandDrivenViewDb<'_> {
         .await
         .map_err(MutationPrepareError::into_api)?
         .into_iter()
-        .map(|commit| commit.made_by(author).permission_subject(author))
+        .map(|commit| {
+            let commit = commit.made_by(author);
+            match permission_subject {
+                Some(subject) => commit.permission_subject(subject),
+                None => commit,
+            }
+        })
         .collect::<Vec<_>>();
         self.publish_mergeable(&commits, row).await
     }

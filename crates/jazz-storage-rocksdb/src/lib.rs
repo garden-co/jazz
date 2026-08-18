@@ -371,6 +371,10 @@ impl ReopenableStorage for RocksDbStorage {
 }
 
 impl ResidentStorage for RocksDbStorage {
+    fn is_durable(&self) -> bool {
+        true
+    }
+
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         if cf == "default" {
             self.db.get(key).storage()

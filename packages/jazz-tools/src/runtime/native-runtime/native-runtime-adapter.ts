@@ -2338,7 +2338,7 @@ function readPropagationIsFull(optionsJson?: string | null): boolean {
 }
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
-  if (tier != null && !["local", "edge", "global"].includes(tier)) {
+  if (tier != null && !["none", "local", "edge", "global"].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
   if (optionsJson != null) readSupportedReadOptions(optionsJson);

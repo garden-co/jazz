@@ -93,6 +93,7 @@ where
         row: RowUuid,
         patch: RowCells,
         now_ms: u64,
+        author: AuthorId,
     ) -> Result<MergeableCommit, MutationPrepareError> {
         let table_schema = self
             .table_schema(table)
@@ -140,7 +141,7 @@ where
                     &prepared.shape,
                     &prepared.binding,
                     DurabilityTier::Local,
-                    self.identity.author,
+                    author,
                 )
                 .map_err(MutationPrepareError::Node)?
                 .into_iter()
@@ -173,6 +174,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
+        author: AuthorId,
     ) -> Result<(TxId, DurabilityTier), MutationPrepareError> {
         self.table_schema(table)
             .map_err(MutationPrepareError::Api)?;
@@ -201,7 +203,7 @@ where
                 &prepared.shape,
                 &prepared.binding,
                 DurabilityTier::Local,
-                self.identity.author,
+                author,
             )
             .map_err(MutationPrepareError::Node)?
             .into_iter()
@@ -306,6 +308,7 @@ where
         row: RowUuid,
         patch: RowCells,
         now_ms: u64,
+        author: AuthorId,
     ) -> Result<MergeableCommit, MutationPrepareError> {
         let table_schema = self
             .table_schema(table)
@@ -335,13 +338,13 @@ where
                 &prepared.shape,
                 &prepared.binding,
                 DurabilityTier::Local,
-                self.identity.author,
+                author,
             )
             .map_err(MutationPrepareError::Node)?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row);
         if visible.is_some() {
-            return self.prepare_update_commit_for_owner(table, row, patch, now_ms);
+            return self.prepare_update_commit_for_owner(table, row, patch, now_ms, author);
         }
         let raw_existing = self
             .node
@@ -350,7 +353,7 @@ where
             .local_current_row(table, row)
             .map_err(MutationPrepareError::Node)?;
         if raw_existing.is_some()
-            && self.identity.author != AuthorId::SYSTEM
+            && author != AuthorId::SYSTEM
             && table_schema.read_policy.is_some()
         {
             return Err(MutationPrepareError::Api(read_for_write_denied(

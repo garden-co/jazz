@@ -116,6 +116,10 @@ impl IndexedDbOrderedStorage {
 }
 
 impl OrderedKvStorage for IndexedDbOrderedStorage {
+    fn is_durable(&self) -> bool {
+        true
+    }
+
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,

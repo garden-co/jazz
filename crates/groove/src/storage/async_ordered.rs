@@ -120,6 +120,22 @@ pub enum OwnedStorageResponse {
 /// thread-affine; neither the backend nor its wake path is required to be
 /// `Send`.
 pub trait OrderedKvStorage {
+    /// Whether every operation is guaranteed to complete on its first poll.
+    ///
+    /// This capability lets higher layers preserve synchronous local
+    /// durability semantics without selecting a separate runtime mode.
+    fn completes_synchronously(&self) -> bool {
+        false
+    }
+
+    /// Whether a completed commit is recoverable after process loss.
+    ///
+    /// This is deliberately separate from completion timing: memory is
+    /// synchronous but volatile, while IndexedDB is asynchronous and durable.
+    fn is_durable(&self) -> bool {
+        false
+    }
+
     /// Poll one uniquely identified owned operation.
     ///
     /// A request that returns [`Poll::Pending`] retains its identity and may be
@@ -162,6 +178,14 @@ impl<S> OrderedKvStorage for ImmediateStorage<S>
 where
     S: ResidentStorage + ReopenableStorage,
 {
+    fn completes_synchronously(&self) -> bool {
+        true
+    }
+
+    fn is_durable(&self) -> bool {
+        self.inner.as_ref().is_some_and(ResidentStorage::is_durable)
+    }
+
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,

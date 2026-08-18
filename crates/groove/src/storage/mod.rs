@@ -190,6 +190,15 @@ fn current_winner_key(
 /// backing details consumed by record-store plumbing; higher layers should use
 /// typed record-store handles instead of calling these methods directly.
 pub trait ResidentStorage {
+    /// Whether a successful commit survives process loss and can therefore
+    /// satisfy a caller's local-durability contract.
+    ///
+    /// Volatile resident stores deliberately keep the default. This property
+    /// is independent from how quickly an operation completes.
+    fn is_durable(&self) -> bool {
+        false
+    }
+
     /// Begin an encoded storage transaction over this backend.
     ///
     /// The transaction buffers already-encoded key/value writes and presents
@@ -587,6 +596,10 @@ impl<S> ResidentStorage for LayoutStorage<S>
 where
     S: ResidentStorage,
 {
+    fn is_durable(&self) -> bool {
+        self.inner.is_durable()
+    }
+
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         let (physical_cf, physical_key) = self.physical_key(cf, key);
         self.inner.get(&physical_cf, &physical_key)
@@ -772,6 +785,10 @@ impl BoxedStorage {
 }
 
 impl ResidentStorage for BoxedStorage {
+    fn is_durable(&self) -> bool {
+        self.inner.is_durable()
+    }
+
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         self.inner.get(cf, key)
     }

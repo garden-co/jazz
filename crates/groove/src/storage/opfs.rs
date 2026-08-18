@@ -146,6 +146,10 @@ impl<F> ResidentStorage for BtreeStorage<F>
 where
     F: SyncFile,
 {
+    fn is_durable(&self) -> bool {
+        true
+    }
+
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         let key = self.encoded_key(cf, key)?;
         Ok(self.tree.borrow_mut().get(&key)?)
