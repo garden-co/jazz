@@ -22,6 +22,7 @@ import type {
 } from "../client.js";
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
+import { authorBytesForSubject } from "../author-id.js";
 import {
   PostcardReader,
   PostcardWriter,
@@ -4829,32 +4830,6 @@ export function parseUuid(value: string): Uint8Array {
   const bytes = new Uint8Array(16);
   for (let i = 0; i < 16; i += 1) {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function uuidBytes(value: string): Uint8Array | null {
-  try {
-    return parseUuid(value);
-  } catch {
-    return null;
-  }
-}
-
-function authorBytesForSubject(subject: string): Uint8Array {
-  return uuidBytes(subject) ?? deterministicBytes(`session:${subject}:author`);
-}
-
-function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
   }
   return bytes;
 }
