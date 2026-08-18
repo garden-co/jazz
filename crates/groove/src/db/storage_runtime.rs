@@ -218,7 +218,7 @@ impl DemandDrivenDatabase {
                 Poll::Ready(Ok(response)) => {
                     self.database.mark_async_persistence_failed();
                     return Poll::Ready(Err(crate::storage::Error::Backend {
-                        backend: "pollable",
+                        backend: "demand-driven",
                         message: format!("commit returned unexpected response {response:?}"),
                     }
                     .into()));

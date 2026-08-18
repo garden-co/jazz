@@ -17,11 +17,11 @@ use groove::{
 };
 use jazz::db::doctest_support;
 use jazz::db::{
-    DbIdentity, LocalUpdates, PollableDbOpen, Propagation, ReadOpts, SeededRowIdSource,
+    DbIdentity, DemandDrivenDbOpen, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
     SubscriptionEvent,
 };
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::node::{MergeableCommit, NodeState, PollableNodeOpen};
+use jazz::node::{DemandDrivenNodeOpen, MergeableCommit, NodeState};
 use jazz::protocol::{ReadViewSourceSpec, ReadViewSpec, SyncMessage};
 use jazz::tx::DurabilityTier;
 use opfs_btree::BTreeError;
@@ -480,7 +480,7 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
     let persistence = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 32)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let mut opening = PollableDbOpen::new(
+    let mut opening = DemandDrivenDbOpen::new(
         schema.clone(),
         DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
@@ -608,7 +608,7 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
     let reopened = IndexedDbOrderedStorage::open(page_store, 4096, 32)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let mut reopening = PollableDbOpen::new(
+    let mut reopening = DemandDrivenDbOpen::new(
         schema,
         DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
@@ -709,7 +709,7 @@ pub async fn verify_indexeddb_authority_publication(
     let persistence = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 32)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let mut opening = PollableNodeOpen::new(
+    let mut opening = DemandDrivenNodeOpen::new(
         NodeUuid::from_bytes([0x33; 16]),
         schema.clone(),
         Box::new(persistence),
@@ -761,7 +761,7 @@ pub async fn verify_indexeddb_authority_publication(
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mut reopening =
-        PollableNodeOpen::new(NodeUuid::from_bytes([0x33; 16]), schema, Box::new(reopened));
+        DemandDrivenNodeOpen::new(NodeUuid::from_bytes([0x33; 16]), schema, Box::new(reopened));
     let mut reopened = futures::future::poll_fn(|context| reopening.poll(context))
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
@@ -914,15 +914,15 @@ pub async fn verify_indexeddb_demand_loading(page_store: JsValue) -> Result<JsVa
 }
 
 /// Open the full Jazz node over IndexedDB, preserve synchronous resident
-/// visibility, and reopen the durably committed row through the same pollable
-/// node lifecycle.
+/// visibility, and reopen the durably committed row through the same
+/// demand-driven node lifecycle.
 #[wasm_bindgen]
 pub async fn verify_indexeddb_node_lifecycle(page_store: JsValue) -> Result<JsValue, JsValue> {
     let schema = doctest_support::schema();
     let durable = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 8)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let mut opening = PollableNodeOpen::new(
+    let mut opening = DemandDrivenNodeOpen::new(
         NodeUuid::from_bytes([0xd5; 16]),
         schema.clone(),
         Box::new(durable),
@@ -973,7 +973,7 @@ pub async fn verify_indexeddb_node_lifecycle(page_store: JsValue) -> Result<JsVa
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mut reopening =
-        PollableNodeOpen::new(NodeUuid::from_bytes([0xd5; 16]), schema, Box::new(durable));
+        DemandDrivenNodeOpen::new(NodeUuid::from_bytes([0xd5; 16]), schema, Box::new(durable));
     let mut reopened = futures::future::poll_fn(|context| reopening.poll(context))
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
@@ -988,7 +988,7 @@ pub async fn verify_indexeddb_node_lifecycle(page_store: JsValue) -> Result<JsVa
                 .await
                 .map_err(|error| JsValue::from_str(&error.to_string()))?;
         return Err(JsValue::from_str(&format!(
-            "pollable Jazz node did not reconstruct its IndexedDB row (current={}, history={})",
+            "demand-driven Jazz node did not reconstruct its IndexedDB row (current={}, history={})",
             rows.len(),
             history.len()
         )));

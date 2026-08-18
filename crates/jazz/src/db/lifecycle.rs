@@ -4,14 +4,14 @@ use super::mutations::MutationPrepareError;
 use super::subscriptions::SubscriptionOpenError;
 use super::*;
 use crate::ids::{BranchId, MigrationLensId};
-use crate::node::{DemandDrivenNode, PollableNodeOpen};
+use crate::node::{DemandDrivenNode, DemandDrivenNodeOpen};
 
-/// Pollable construction for a high-level database backed by ordered async
-/// storage. The resulting owner keeps the familiar synchronous `Db` facade
+/// Demand-driven construction for a high-level database backed by ordered
+/// async storage. The resulting owner keeps the familiar synchronous `Db` facade
 /// and its durable runtime together.
 #[doc(hidden)]
-pub struct PollableDbOpen {
-    opening: Option<PollableNodeOpen>,
+pub struct DemandDrivenDbOpen {
+    opening: Option<DemandDrivenNodeOpen>,
     runtime: Option<DemandDrivenNode>,
     schema: JazzSchema,
     identity: DbIdentity,
@@ -44,7 +44,7 @@ pub struct DemandDrivenViewDb<'a> {
     runtime: &'a mut DemandDrivenNode,
 }
 
-impl PollableDbOpen {
+impl DemandDrivenDbOpen {
     #[doc(hidden)]
     pub fn new(
         schema: JazzSchema,
@@ -52,7 +52,7 @@ impl PollableDbOpen {
         persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     ) -> Self {
         Self {
-            opening: Some(PollableNodeOpen::new(
+            opening: Some(DemandDrivenNodeOpen::new(
                 identity.node,
                 schema.clone(),
                 persistence,
@@ -71,7 +71,7 @@ impl PollableDbOpen {
         persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     ) -> Self {
         Self {
-            opening: Some(PollableNodeOpen::new_history_complete(
+            opening: Some(DemandDrivenNodeOpen::new_history_complete(
                 identity.node,
                 schema.clone(),
                 persistence,
@@ -89,7 +89,7 @@ impl PollableDbOpen {
         persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     ) -> Self {
         Self {
-            opening: Some(PollableNodeOpen::new_catalogue_uninitialized(
+            opening: Some(DemandDrivenNodeOpen::new_catalogue_uninitialized(
                 identity.node,
                 persistence,
             )),
@@ -180,7 +180,7 @@ impl DemandDrivenDb {
             identity,
             id_source,
         } = config;
-        let mut opening = PollableDbOpen::new(
+        let mut opening = DemandDrivenDbOpen::new(
             schema,
             identity,
             Box::new(groove::storage::async_ordered::ImmediateStorage::new(
@@ -203,7 +203,7 @@ impl DemandDrivenDb {
             identity,
             id_source,
         } = config;
-        let mut opening = PollableDbOpen::new_history_complete(
+        let mut opening = DemandDrivenDbOpen::new_history_complete(
             schema,
             identity,
             Box::new(groove::storage::async_ordered::ImmediateStorage::new(
@@ -229,7 +229,7 @@ impl DemandDrivenDb {
             id_source,
             ..
         } = config;
-        let mut opening = PollableDbOpen::new_catalogue_uninitialized(
+        let mut opening = DemandDrivenDbOpen::new_catalogue_uninitialized(
             identity,
             Box::new(groove::storage::async_ordered::ImmediateStorage::new(
                 storage,

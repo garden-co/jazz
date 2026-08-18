@@ -145,7 +145,7 @@ fn stale_fetch_completion_cannot_overwrite_a_synchronous_local_write() {
 }
 
 #[test]
-fn pollable_query_fetches_on_demand_and_then_reads_resident_state() {
+fn demand_loaded_query_fetches_then_reads_resident_state() {
     let schema = schema();
     let durable = MemoryStorage::new(&["rows", "indices"]);
     let mut seeded = Database::new(schema.clone(), durable).unwrap();

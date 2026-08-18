@@ -1,4 +1,4 @@
-/// Pollable, query-driven node construction over one resident working set.
+/// Demand-driven node construction over one resident working set.
 ///
 /// Each attempt runs as an isolated resident-storage transaction. A missing
 /// durable input discards that attempt, admits exactly the requested input, and
@@ -6,10 +6,10 @@
 /// view, and metadata it created is durably committed before the node becomes
 /// ready.
 #[doc(hidden)]
-pub struct PollableNodeOpen {
+pub struct DemandDrivenNodeOpen {
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    kind: PollableNodeKind,
+    kind: DemandDrivenNodeKind,
     cache: groove::storage::DemandLoadedStorage,
     persistence: Option<Box<dyn groove::storage::async_ordered::OrderedKvStorage>>,
     acquisition: groove::db::StorageAcquisition,
@@ -17,7 +17,7 @@ pub struct PollableNodeOpen {
 }
 
 #[derive(Clone, Copy)]
-enum PollableNodeKind {
+enum DemandDrivenNodeKind {
     Client,
     HistoryComplete,
     CatalogueUninitialized,
@@ -37,7 +37,7 @@ enum NodeOpenPhase {
 /// Ready Jazz node together with the durable session that supplies cold inputs
 /// and persists resident mutations.
 ///
-/// This is the durable owner produced by [`PollableNodeOpen`]. Keeping these
+/// This is the durable owner produced by [`DemandDrivenNodeOpen`]. Keeping these
 /// resources together prevents a ready resident node from outliving the async
 /// storage session whose ordering and cancellation state it depends on.
 #[doc(hidden)]
@@ -1803,7 +1803,7 @@ impl Drop for DemandDrivenNode {
     }
 }
 
-impl PollableNodeOpen {
+impl DemandDrivenNodeOpen {
     fn finish(
         &mut self,
         mut node: NodeState<groove::storage::DemandLoadedStorage>,
@@ -1854,7 +1854,7 @@ impl PollableNodeOpen {
         schema: JazzSchema,
         persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     ) -> Self {
-        Self::with_kind(node_uuid, schema, persistence, PollableNodeKind::Client)
+        Self::with_kind(node_uuid, schema, persistence, DemandDrivenNodeKind::Client)
     }
 
     #[doc(hidden)]
@@ -1867,7 +1867,7 @@ impl PollableNodeOpen {
             node_uuid,
             schema,
             persistence,
-            PollableNodeKind::HistoryComplete,
+            DemandDrivenNodeKind::HistoryComplete,
         )
     }
 
@@ -1880,7 +1880,7 @@ impl PollableNodeOpen {
             node_uuid,
             JazzSchema::new([]),
             persistence,
-            PollableNodeKind::CatalogueUninitialized,
+            DemandDrivenNodeKind::CatalogueUninitialized,
         )
     }
 
@@ -1888,7 +1888,7 @@ impl PollableNodeOpen {
         node_uuid: NodeUuid,
         schema: JazzSchema,
         persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
-        kind: PollableNodeKind,
+        kind: DemandDrivenNodeKind,
     ) -> Self {
         let column_families = schema.column_families();
         let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1942,7 +1942,7 @@ impl PollableNodeOpen {
                         self.phase = NodeOpenPhase::Complete;
                         return std::task::Poll::Ready(Err(Error::Storage(
                             groove::storage::Error::Backend {
-                                backend: "pollable-node-open",
+                                backend: "demand-driven-node-open",
                                 message: format!(
                                     "node-open commit returned unexpected response {response:?}"
                                 ),
@@ -1971,7 +1971,7 @@ impl PollableNodeOpen {
                 context,
                 || {
                     let transaction = self.cache.begin_transaction()?;
-                    let node = construct_pollable_node(
+                    let node = construct_demand_driven_node(
                         node_uuid,
                         schema.clone(),
                         kind,
@@ -2025,7 +2025,7 @@ impl PollableNodeOpen {
     }
 }
 
-impl Drop for PollableNodeOpen {
+impl Drop for DemandDrivenNodeOpen {
     fn drop(&mut self) {
         let Some(persistence) = self.persistence.as_mut() else {
             return;
@@ -2039,18 +2039,18 @@ impl Drop for PollableNodeOpen {
     }
 }
 
-fn construct_pollable_node(
+fn construct_demand_driven_node(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    kind: PollableNodeKind,
+    kind: DemandDrivenNodeKind,
     cache: groove::storage::DemandLoadedStorage,
 ) -> Result<NodeState<groove::storage::DemandLoadedStorage>, Error> {
     match kind {
-        PollableNodeKind::Client => NodeState::new(node_uuid, schema, cache),
-        PollableNodeKind::HistoryComplete => {
+        DemandDrivenNodeKind::Client => NodeState::new(node_uuid, schema, cache),
+        DemandDrivenNodeKind::HistoryComplete => {
             NodeState::new_history_complete(node_uuid, schema, cache)
         }
-        PollableNodeKind::CatalogueUninitialized => {
+        DemandDrivenNodeKind::CatalogueUninitialized => {
             NodeState::new_catalogue_uninitialized(node_uuid, cache)
         }
     }
