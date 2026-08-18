@@ -1,7 +1,32 @@
 # Async ordered storage and immediate local visibility
 
-_Design experiment. This chapter records the intended boundary and the
-invariants the implementation must prove before it becomes normative._
+_Implemented design experiment. This chapter records both the intended
+boundary and the invariants exercised by the implementation while the change
+remains under review._
+
+## Implementation status
+
+The experiment now uses the same demand-driven owner from Groove through Jazz:
+
+- owned storage requests may complete immediately or suspend;
+- `DemandLoadedStorage` admits only the exact input requested by an operation;
+- `StorageTransaction` stages one read-your-own-writes overlay and publishes it
+  only after acquisition succeeds;
+- `DemandDrivenDatabase`, `DemandDrivenNode`, and `DemandDrivenDb` own the
+  resident runtime and ordered persistence scheduler without a legacy parallel
+  runtime;
+- volatile Memory remains `Pending/None` even though its operations complete
+  in their first poll, while persistent RocksDB and IndexedDB may advance the
+  Local frontier only after their storage commit completes;
+- a deterministic pending backend and a real browser IndexedDB backend exercise
+  suspension, cancellation, failure, reopen, and immediate resident visibility;
+- NAPI and browser-worker receipts assert that tier-none application callbacks
+  are published before the corresponding mutation completion is returned to
+  application code.
+
+The browser IndexedDB implementation is currently a real boundary/proof backend;
+the production browser driver may continue to choose OPFS independently. Backend
+selection does not alter the owner, IVM, transaction, or publication model.
 
 ## Goal
 
@@ -97,8 +122,7 @@ write before a persistent worker receives it.
 
 ## Storage contract
 
-The eventual `OrderedKvStorage` surface owns every request and result across
-suspension:
+The `OrderedKvStorage` surface owns every request and result across suspension:
 
 - point reads own their column-family name and key;
 - scans return owned key/value chunks and an owned continuation identity;
@@ -139,8 +163,8 @@ pending. This is topology, not a second core mode.
 
 ## Groove implications
 
-The following storage-touching seams must become pollable while retaining one
-deterministic evaluator:
+The following storage-touching seams use the pollable boundary while retaining
+one deterministic evaluator:
 
 - `LayoutStorage`, typed `RecordStore`, storage transactions, staged overlays,
   metering, reopen, close, and flush;
@@ -238,10 +262,11 @@ write it makes, and either:
 This is transaction retry, not mutationful constructor replay: failed attempts
 cannot affect the admitted cache, the future node, subscriptions, or durable
 storage. The transaction abstraction owns this rule so individual recovery
-functions remain ordinary synchronous code. Its initial implementation may
-snapshot the resident store; a copy-on-write overlay is an optimization behind
-the same boundary. Immediate storage inherits first-poll readiness because all
-requested inputs and the final commit complete in that poll.
+functions remain ordinary synchronous code. The implementation uses a
+storage-shaped read-your-own-writes overlay: it stages only touched encoded keys
+and reads untouched state from the resident base. Immediate storage inherits
+first-poll readiness because all requested inputs and the final commit complete
+in that poll.
 
 The ready value owns the resident `NodeState`, admitted cache, durable storage
 session, acquisition state, and ordered persistence queue together. Returning a
@@ -386,10 +411,11 @@ and denied subscriptions must not allocate it.
 ## Binding requirement
 
 Core readiness is not enough if a binding defers delivery. Native bindings
-already drain queued subscription events inline after writes. The browser
-binding needs an equivalent synchronous drain/notification path for immediate
-local events; a `ReadableStream` microtask alone does not prove the application
-invariant. Storage- and network-driven events may continue through async streams.
+drain queued subscription events inline before a mutation method returns. A
+browser worker necessarily crosses an asynchronous message boundary, so its
+equivalent contract is ordering: a tier-none mutation completion cannot reach
+application code before the corresponding immediate subscription callback.
+Storage- and network-driven events may continue through async streams.
 
 ### One owner, many typed views
 

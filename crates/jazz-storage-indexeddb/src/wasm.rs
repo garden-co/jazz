@@ -547,6 +547,16 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
     futures::future::poll_fn(|context| owner.poll_persistence(context))
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if owner
+        .write_state(write.mergeable_tx_id())
+        .map_err(|error| JsValue::from_str(&error.to_string()))?
+        .durability
+        != DurabilityTier::Local
+    {
+        return Err(JsValue::from_str(
+            "Jazz durable IndexedDB commit did not advance the transaction to Local",
+        ));
+    }
 
     let branch = owner
         .create_branch()
