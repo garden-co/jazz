@@ -1,14 +1,14 @@
-# Partition-dimension overlays: removal-first implementation plan
+# Branch views: removal-first implementation plan
 
 ## Outcome
 
-Replace the unreleased core-owned branch subsystem with the ch. 11 partition
+Replace the unreleased core-owned branch subsystem with the ch. 11 branch-view
 primitive in two deliberate movements:
 
 1. remove every old branch identity, lifecycle, storage, transport, query, and
    test dependency until the ordinary shared-table core is green; then
-2. introduce stable partition dimensions from the storage key upward, followed
-   by exact-partition reads, head/base reduction, policy, sync, copy-on-write,
+2. introduce stable branch dimensions from the storage key upward, followed
+   by exact-branch-key reads, head/base branch-view reduction, policy, sync, copy-on-write,
    and contribution merges.
 
 Do not retain a compatibility adapter. There are no persisted or API users to
@@ -19,13 +19,13 @@ dual-running old and new branch semantics.
 ## Ground rules
 
 - `RowUuid` remains global object identity.
-- `PartitionTuple` is explicit immutable version metadata even though its values
+- `BranchKey` is explicit immutable version metadata even though its values
   are also projected through ordinary bound application columns. Deletion rows
-  have no user cells, so deriving the tuple from cells cannot be the storage
+  have no user cells, so deriving the branch key from cells cannot be the storage
   contract.
-- Content and deletion version parents never cross partition tuples.
-- One transaction may contain versions from several tuples.
-- The empty tuple is the only representation needed for ordinary shared tables;
+- Content and deletion version parents never cross branch keys.
+- One transaction may contain versions from several branch keys.
+- The empty branch key is the only representation needed for ordinary shared tables;
   it is not a special root lineage.
 - No core branch row, lifecycle, parent graph, metadata outbox, metadata repair,
   or transaction-level target lineage survives the cut.
@@ -65,7 +65,7 @@ Use `rg` receipts in the removal PR so the final zero-match check is mechanical.
 
 ### 0.2 Preserve tests without compiling the old API
 
-Create `dev/partition-overlay-test-porting.md` with one row per affected test:
+Create `dev/branch-view-test-porting.md` with one row per affected test:
 
 ```text
 old test | old guarantee | new invariant | disposition | replacement test
@@ -73,7 +73,7 @@ old test | old guarantee | new invariant | disposition | replacement test
 
 Use three dispositions:
 
-- **port** — the guarantee remains, such as tuple isolation, frozen-base reads,
+- **port** — the guarantee remains, such as branch key isolation, frozen-base reads,
   delete/restore masking, subscription identity, or no-echo merges;
 - **replace** — the useful scenario remains but the public setup changes, such
   as branch-row RLS becoming ordinary reference-traversing policy;
@@ -94,7 +94,7 @@ mechanism that cannot be observed through the public API; document that reason.
 ## Phase 1 — delete the old model and return to a shared-table core
 
 This phase intentionally removes functionality before replacement. Its exit is
-a green core in which every table behaves as `partitionBy: []`.
+a green core in which every table behaves as `branchBy: []`.
 
 ### 1.1 Remove facade and semantic read vocabulary
 
@@ -103,7 +103,7 @@ a green core in which every table behaves as `partitionBy: []`.
 - Remove `Branch`, `MergedBranches`, branch strings, `"main"` aliases, and
   branch-specific capability errors from `ReadViewSourceSpec` and public query
   options.
-- Keep ordinary current, snapshot, schema, and transaction-overlay read forms.
+- Keep ordinary current, snapshot, schema, and open-transaction read views.
 - Remove branch subscription setup and cache discriminators. Do not temporarily
   map a branch request to current state.
 
@@ -116,15 +116,15 @@ a green core in which every table behaves as `partitionBy: []`.
 - Delete `jazz_branches` and `jazz_branch_partitions` from schema lowering,
   recovery, descriptors, server helpers, and simulations.
 - Delete open/discard/root-branch concepts rather than emulating them with the
-  empty tuple.
+  empty branch key.
 
-### 1.3 Collapse storage to one empty partition tuple
+### 1.3 Collapse storage to one empty branch key
 
 - Replace `BranchLineage` parameters in content/deletion/current helpers with no
   lineage parameter temporarily.
-- Remove physical branch-history tables, partition discovery, branch projection
+- Remove physical branch-history tables, branch-key discovery, branch projection
   registration, and branch-specific recovery.
-- Encode existing shared content and deletion history as the future empty-tuple
+- Encode existing shared content and deletion history as the future empty branch key
   case where practical, so phase 2 extends keys rather than redesigning them
   twice.
 - Rebuild root currentness, fate, rejection, retransmission, and reopen behavior
@@ -155,58 +155,58 @@ a green core in which every table behaves as `partitionBy: []`.
   history.
 - Ordinary mergeable/exclusive transactions, current reads, historical reads,
   policies, subscriptions, sync, recovery, and lenses pass their focused suites.
-- Storage reopen reconstructs the empty-tuple current state.
+- Storage reopen reconstructs the empty branch key current state.
 - `cargo check -p jazz-sim --benches` passes after branch scenario references are
   removed or replaced with explicit target placeholders.
 
-## Phase 2 — stable schema dimensions and canonical tuple encoding
+## Phase 2 — stable schema dimensions and canonical branch key encoding
 
 ### 2.1 Add schema identities
 
 Introduce:
 
 ```rust
-PartitionDimensionId(Uuid)
-PartitionDimension {
+BranchDimensionId(Uuid)
+BranchDimension {
     id,
     name,
     value_type,
     canonical_order,
     migration_default,
 }
-PartitionBinding {
-    dimension: PartitionDimensionId,
+BranchBinding {
+    dimension: BranchDimensionId,
     column: PhysicalColumnId,
 }
-PartitionTuple(Vec<(PartitionDimensionId, Value)>)
+BranchKey(Vec<(BranchDimensionId, Value)>)
 ```
 
 The public schema builder declares global dimensions and binds table columns to
 subsets. Validation enforces one stable type/encoding per dimension, no duplicate
 binding, non-null supported values, and canonical dimension order. Bind through
-`PhysicalColumnId` so application columns can be renamed without changing tuple
+`PhysicalColumnId` so application columns can be renamed without changing branch key
 identity.
 
 Start with UUID, stable enum identity, and fixed-width integer dimensions.
 Reject strings, floats, blobs, nullable values, and composite values until their
 canonical identity contract is explicit.
 
-### 2.2 Encode tuples once
+### 2.2 Encode branch keys once
 
 - Define one canonical typed byte encoding sorted by dimension id/order.
-- Normalize a table tuple to exactly its declared dimension subset.
-- Represent the shared table tuple as canonical empty bytes.
-- Store tuple bytes explicitly in every content and deletion `VersionRecord`.
-- Validate that bound application cells agree with the explicit tuple after
+- Normalize a table branch key to exactly its declared dimension subset.
+- Represent the shared table branch key as canonical empty bytes.
+- Store branch key bytes explicitly in every content and deletion `VersionRecord`.
+- Validate that bound application cells agree with the explicit branch key after
   authored-schema decode.
-- Include tuple bytes in canonical wire equality and exact retransmission.
+- Include branch key bytes in canonical wire equality and exact retransmission.
 
 ### 2.3 Add monotone schema evolution
 
 - A new dimension publication must include an immutable typed migration default.
 - Project old versions and old-schema selectors by inserting that default.
 - Require new-schema writes to supply every newly bound value explicitly.
-- Allow cross-schema version parents only when normalized tuples are equal.
+- Allow cross-schema version parents only when normalized branch keys are equal.
 - Forbid dimension removal, stable identity/name change, type/encoding/default
   change, nullable binding, split, and collapse.
 - Permit application column rename because the binding follows
@@ -219,75 +219,75 @@ canonical identity contract is explicit.
 - two tables bind compatible subsets;
 - old history normalizes into the reserved default bucket;
 - new-schema omission fails while old-schema selector completion succeeds;
-- tuple codec canonicality and malformed/duplicate dimension rejection.
+- branch key codec canonicality and malformed/duplicate dimension rejection.
 
-## Phase 3 — tuple-qualified history, current state, and indices
+## Phase 3 — branch key-qualified history, current state, and indices
 
 ### 3.1 Rekey physical state
 
 Use these logical keys:
 
 ```text
-content history:  (table, tuple, row, tx)
-deletion history: (table, tuple, row, tx)
-content current:  (table, tuple, row)
-deletion current: (table, tuple, row)
-combined current: (table, tuple, row)
-global changes:   (table, tuple, row, layer, global_seq)
+content history:  (table, branch key, row, tx)
+deletion history: (table, branch key, row, tx)
+content current:  (table, branch key, row)
+deletion current: (table, branch key, row)
+combined current: (table, branch key, row)
+global changes:   (table, branch key, row, layer, global_seq)
 ```
 
-The exact Groove lowering may use canonical tuple bytes as one prefix field, but
+The exact Groove lowering may use canonical branch key bytes as one prefix field, but
 all bounded scans and rebuilds must preserve the logical key. Content and
 deletion winners remain independent.
 
 ### 3.2 Prefix indices implicitly
 
 - Prefix every physical secondary and unique key with the exact normalized
-  table tuple.
-- Preserve user index declarations without redundant partition columns.
-- Enforce uniqueness per exact tuple only.
-- Rebuild index state when a dimension is added and historical tuples acquire a
+  table branch key.
+- Preserve user index declarations without redundant branch-dimension columns.
+- Enforce uniqueness per exact branch key only.
+- Rebuild index state when a dimension is added and historical branch keys acquire a
   default component.
 
-### 3.3 Admit cross-partition commit units
+### 3.3 Admit cross-branch-key commit units
 
-- Route each version by its explicit tuple.
-- Permit several tuples and shared tables in one transaction.
+- Route each version by its explicit branch key.
+- Permit several branch keys and shared tables in one transaction.
 - Validate all writes before committing any of them.
-- Reject the whole transaction for one malformed tuple, cross-tuple parent,
+- Reject the whole transaction for one malformed branch key, cross-branch-key parent,
   policy denial, schema gap, or storage failure.
 - Preserve one fate and exact idempotency decision for the complete unit.
 
 ### Phase 3 canaries
 
-- same `RowUuid` has independent winners in two tuples;
-- tuple-local delete/restore cannot affect a sibling;
-- same unique value is accepted in two tuples and rejected twice in one tuple;
-- indexed update/delete retracts only the exact tuple key;
-- cross-partition transaction is wholly visible or wholly absent after crash and
+- same `RowUuid` has independent winners in two branch keys;
+- branch-key-local delete/restore cannot affect a sibling;
+- same unique value is accepted in two branch keys and rejected twice in one branch key;
+- indexed update/delete retracts only the exact branch key;
+- cross-branch-key transaction is wholly visible or wholly absent after crash and
   reopen;
-- a cross-tuple version-parent edge is rejected.
+- a cross-branch-key version-parent edge is rejected.
 
-## Phase 4 — exact-partition reads and two-source overlay reduction
+## Phase 4 — exact-branch-key reads and two-source branch-view reduction
 
 ### 4.1 Add canonical read sources
 
 Introduce normalized named values:
 
 ```rust
-PartitionSource::Current { values }
-PartitionSource::Snapshot { values, snapshot }
+BranchSource::Current { values }
+BranchSource::Snapshot { values, snapshot }
 
-OverlayReadView {
-    head: PartitionSource::Current,
-    base: Option<PartitionSource>,
+BranchView {
+    head: BranchSource::Current,
+    base: Option<BranchSource>,
 }
 ```
 
 The facade may accept schema-ordered arrays, but validation immediately produces
 named stable-dimension values. Reject missing required or unknown dimensions.
 Project the selector onto each table's subset; collapse equal head/base
-projections and always collapse the empty tuple.
+projections and always collapse the empty branch key.
 
 ### 4.2 Build layer reducers before query algebra
 
@@ -298,8 +298,8 @@ snapshot base reads all participating tables and policy dependencies at one cut.
 
 Expose two identities:
 
-- effective bound partition columns contain requested head values;
-- hidden typed provenance records the supplying tuple and version independently
+- effective bound branch-dimension columns contain requested head values;
+- hidden typed provenance records the supplying branch key and version independently
   for content and deletion.
 
 ### 4.3 Make indexed plans mask correctly
@@ -318,7 +318,7 @@ base's old matching value.
 
 ### Phase 4 acceptance ladder
 
-1. exact-partition one-shot reads;
+1. exact-branch-key one-shot reads;
 2. shared and subset-dimension tables in one join;
 3. live-base content and deletion fallback;
 4. frozen-base isolation from post-cut base changes;
@@ -331,52 +331,52 @@ base's old matching value.
 
 ### 5.1 Evaluate policy in the effective view
 
-- Partition columns are normal policy-visible candidate values.
+- Bound branch-dimension columns are normal policy-visible candidate values.
 - Ordinary `RowUuid` references resolve through the operation's effective view.
 - Policy dependencies project the same named selector onto their table subsets.
 - Missing referenced branch/lifecycle/membership rows are ordinary missing
   evidence and fail closed.
-- Do not add a core partition-existence or lifecycle hook.
+- Do not add a core branch-row-existence or lifecycle hook.
 
 ### 5.2 Add exact and view-relative mutation targets
 
 ```rust
-ExactRowRef { table, tuple, row_uuid }
+ExactRowRef { table, branch_key, row_uuid }
 ViewRowRef { table, read_view, row_uuid }
 ```
 
 An exact update targets that incarnation. A view-relative update always targets
-the head tuple; if the visible content is inherited, it creates the first head
-version by copy-on-write without a cross-tuple parent. The operation explicitly
+the head branch key; if the visible content is inherited, it creates the first head
+version by copy-on-write without a cross-branch-key parent. The operation explicitly
 authors `Restored` when desired; content alone never restores an inherited
 deletion.
 
 Add an explicit atomic move helper implemented as source delete plus destination
-insert/restore in one cross-partition transaction.
+insert/restore in one cross-branch-key transaction.
 
 ### Phase 5 black-box tests
 
 - reference-traversing policy through an application-owned branch row;
 - forged/nonexistent branch value fails because ordinary policy evidence is
   absent, not because the core recognizes branch ids;
-- workspace-only membership table is shared across branch tuples;
+- workspace-only membership table is shared across branch keys;
 - view-relative inherited update creates a head incarnation and leaves base
   unchanged;
 - exact base update changes base and affects live but not frozen overlays;
 - content-only update does not restore; explicit restore does;
-- policy denial in one tuple rejects a multi-tuple transaction atomically.
+- policy denial in one branch key rejects a multi-branch key transaction atomically.
 
 ## Phase 6 — maintained subscriptions and sync
 
 ### 6.1 Canonical identity
 
 Normalize ordered head/base sources, snapshot cut, schema, tier, binding, and
-policy scope into `ReadViewKey`. Ensure sibling tuples cannot share binding-view
+policy scope into `ReadViewKey`. Ensure sibling branch keys cannot share binding-view
 state, known state, replacement witnesses, receipts, or unsubscribe cleanup.
 
 ### 6.2 Maintained source graph
 
-- Exact partition-current is a maintained source keyed by tuple.
+- Exact branch-key current is a maintained source keyed by branch key.
 - Head content/deletion touches anti-join base winners independently.
 - Live base changes flow when unmasked.
 - Frozen base facts are immutable inline/historical inputs.
@@ -386,16 +386,16 @@ state, known state, replacement witnesses, receipts, or unsubscribe cleanup.
 
 ### 6.3 Replace metadata repair with generic closure repair
 
-There is no branch metadata prerequisite. Tuple routing is self-contained in
+There is no branch metadata prerequisite. Branch-key routing is self-contained in
 each version. Application branch rows needed by policy travel as ordinary safe
 policy dependencies or opaque admission facts under ch. 8.
 
-### 6.4 Cross-partition confidentiality
+### 6.4 Cross-branch-key confidentiality
 
 - Trusted core/edge history links may receive complete commit units.
 - Untrusted selected links receive only authorized version/program facts.
 - A selected witness may name `TxId` for fate/settlement but must not reveal
-  hidden sibling count, table, tuple, or payload.
+  hidden sibling count, table, branch key, or payload.
 - Audit `n_total_writes`, complete-payload refs, repair messages, rejection
   reasons, metrics, and logs for side channels.
 - Publication waits for durable atomic authority fate even when only a subset of
@@ -404,14 +404,14 @@ policy dependencies or opaque admission facts under ch. 8.
 ### Phase 6 canaries
 
 - sibling subscriptions with identical shape/binding remain isolated;
-- head add/replace/delete/restore updates only that tuple;
+- head add/replace/delete/restore updates only that branch key;
 - live base changes update only unmasked rows;
 - frozen base ignores later base writes;
 - reference-policy grant/revoke uses the effective view;
-- reconnect and known-state replay cannot cross tuple identities;
-- a client authorized for one sibling of a cross-partition transaction learns
+- reconnect and known-state replay cannot cross branch key identities;
+- a client authorized for one sibling of a cross-branch-key transaction learns
   neither payload nor count of the hidden sibling;
-- maintained and one-shot overlay results match under seeded differential runs.
+- maintained and one-shot branch-view results match under seeded differential runs.
 
 ## Phase 7 — restore generic contribution merges
 
@@ -420,9 +420,9 @@ policy dependencies or opaque admission facts under ch. 8.
 Replace lineage fields with:
 
 ```rust
-PartitionCoordinate(Vec<(PartitionDimensionId, EncodedValue)>)
+BranchCoordinate(Vec<(BranchDimensionId, EncodedValue)>)
 ContributionDot {
-    partition,
+    branch_key,
     tx_id,
     table,
     row_uuid,
@@ -436,15 +436,15 @@ non-causal and field-grained.
 
 ### 7.2 High-level helper
 
-Expose a helper over explicit source and target partition views. It must:
+Expose a helper over explicit source and target branch views. It must:
 
 - read exact current-schema contribution views;
 - prove initiator source-read and target-write authority;
 - recursively expand prior substitutions;
 - subtract target-known dots;
 - encode novel contributions relative to target incarnation heads;
-- use only target-tuple version parents;
-- emit one ordinary cross-partition-capable transaction;
+- use only target branch-key version parents;
+- emit one ordinary cross-branch-key-capable transaction;
 - fail before minting on incomplete history or unsupported strategy.
 
 Do not add merge cursors, lifecycle transitions, source closure on success, or
@@ -452,7 +452,7 @@ receiver-side source verification.
 
 ### Phase 7 tests
 
-Port the current contribution oracles using public partition schemas:
+Port the current contribution oracles using public branch-dimension schemas:
 
 - scalar and counter source-to-target equivalence;
 - delete/restore;
@@ -467,7 +467,7 @@ Port the current contribution oracles using public partition schemas:
 ## Phase 8 — restore the public surface and delete the quarantine
 
 - Add public schema dimension and table binding builders.
-- Add named partition values and live/frozen base query options across Rust,
+- Add named branch-dimension values and live/frozen base query options across Rust,
   TypeScript, WASM, NAPI, React Native, and server/test helpers.
 - Add copy-on-write and contribution-merge helpers; do not add create/discard or
   a mandatory branch table.
@@ -476,8 +476,8 @@ Port the current contribution oracles using public partition schemas:
   requirement no longer belongs to Jazz.
 - Remove `dev/legacy-branch-tests/` and the temporary ledger when every row has a
   final active-test or retire receipt.
-- Update S8 to benchmark partition overlays, live/frozen bases, tuple-qualified
-  indices, and cross-partition transactions.
+- Update S8 to benchmark branch views, live/frozen bases, branch key-qualified
+  indices, and cross-branch-key transactions.
 
 ## Suggested commit/lever sequence
 
@@ -488,18 +488,18 @@ by `AGENTS.md`:
 2. remove facade/read-view branch vocabulary;
 3. remove lifecycle/metadata protocol and storage;
 4. remove transaction target lineage and merge facade;
-5. make empty-tuple shared core green;
-6. add dimension schema identities and tuple codec;
-7. tuple-qualify content/deletion/current/global-change storage;
-8. tuple-prefix indices and per-tuple uniqueness;
-9. admit cross-partition atomic commit units;
-10. exact-partition read sources;
+5. make empty branch key shared core green;
+6. add dimension schema identities and branch key codec;
+7. branch-key-qualify content/deletion/current/global-change storage;
+8. branch-key-prefix indices and per-branch-key uniqueness;
+9. admit cross-branch-key atomic commit units;
+10. exact-branch-key read sources;
 11. head/live-base and head/frozen-base reducers;
 12. effective-value versus supplying-provenance projection;
 13. policy/reference composition;
 14. copy-on-write and move mutations;
-15. maintained overlay subscriptions;
-16. selected sync and cross-partition confidentiality;
+15. maintained branch-view subscriptions;
+16. selected sync and cross-branch-key confidentiality;
 17. generic contribution provenance and merge helper;
 18. monotone dimension-addition lenses and default rekeying;
 19. restore binding surfaces, benchmarks, and every ledger test;
@@ -510,8 +510,8 @@ by `AGENTS.md`:
 ### Per lever
 
 - affected focused suites through `dev/t`;
-- tuple isolation, deletion/restore, mask-before-filter/index, and
-  cross-partition atomicity canaries once introduced;
+- branch key isolation, deletion/restore, mask-before-filter/index, and
+  cross-branch-key atomicity canaries once introduced;
 - maintained relation/include scale canary;
 - low-seed maintained-vs-one-shot oracle;
 - `cargo check -p jazz-sim --benches` for protocol/storage/public-type changes;
@@ -543,8 +543,8 @@ commit_mergeable_on_branch|query_rows_on_branch|merge_back_branch
 ```
 
 The words “branch” and “branch row” may remain only in application examples and
-userland helper documentation. Core types and invariants use partition
-dimensions, tuples, incarnations, and overlay sources.
+userland helper documentation. Core types and invariants use branch
+dimensions, branch keys, incarnations, and branch sources.
 
 ## Tooling-friction
 

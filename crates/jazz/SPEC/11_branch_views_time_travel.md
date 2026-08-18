@@ -1,22 +1,22 @@
-# jazz — Specification · 11. Partitioned history, overlay views & time travel
+# jazz — Specification · 11. Branch views & time travel
 
 ## Overview
 
 Jazz does not own a branch object, branch lifecycle, branch identifier, or
 branch-routing protocol. Applications model drafts, branches, environments,
 scenarios, and similar concepts as ordinary rows. The core owns only the
-relational mechanism those products need: schema-declared **partition
-dimensions**, partition-qualified history and winner selection, and a read view
-that overlays one current partition over an optional live or frozen base.
+relational mechanism those products need: schema-declared **branch
+dimensions**, branch-key-qualified history and winner selection, and a read view
+that overlays one current branch key over an optional live or frozen base.
 
 A table binds zero or more ordinary application columns to globally named
-partition dimensions. The columns remain visible to queries, references, and
+branch dimensions. The columns remain visible to queries, references, and
 policies, while their encoded values also form an immutable storage coordinate.
 Global object identity remains `RowUuid`; one object may have a distinct
-incarnation in every partition tuple.
+incarnation in every branch key.
 
-For each row and independent content/deletion layer, an overlay read chooses the
-head-partition winner when one exists and otherwise chooses the base-partition
+For each row and independent content/deletion layer, a branch-view read chooses the
+head-key winner when one exists and otherwise chooses the base-key
 winner. This reduction happens before visibility, predicates, joins, policy,
 aggregation, windows, or index-result publication. An application resolves any
 branch row and supplies the concrete head and base selectors; Jazz does not
@@ -29,29 +29,29 @@ Invariant digest:
 - `INV-TIME-3`: `at_time(time)` MUST resolve to the latest settled global position whose transaction time is `<= time`, returning `GlobalSeq(0)` when none exists.
 - `INV-TIME-4`: A local historical read MUST refuse to answer from incomplete local history.
 - `INV-TIME-5`: A history-complete node at a sufficient watermark MUST answer an exact-position historical read locally.
-- `INV-PART-1`: Partition dimensions MUST have schema-lineage-stable identities, names, types, canonical encodings, and deterministic order; tables MAY bind any subset through renameable application columns.
-- `INV-PART-2`: The logical incarnation key MUST be `(PhysicalTableId, PartitionTuple, RowUuid)` while application object identity remains `RowUuid`.
-- `INV-PART-3`: Every content or deletion version on a partitioned table MUST carry a complete canonical partition tuple; its version parents MUST have the same tuple.
-- `INV-PART-4`: Partition bindings MUST be non-null and immutable for one incarnation. Moving an object between tuples requires explicit writes to both incarnations, which MAY share one atomic transaction.
-- `INV-PART-5`: Content and deletion histories and current winners MUST be selected independently per `(PhysicalTableId, PartitionTuple, RowUuid, Layer)`.
-- `INV-PART-6`: Secondary and unique indices MUST be physically prefixed by the exact partition tuple; uniqueness is per exact tuple, not per composed overlay view.
-- `INV-PART-7`: A table with no bound dimensions MUST behave as shared data in every overlay view.
-- `INV-PART-8`: A read selector MUST use globally named dimension values and each table MUST project that selector onto its declared subset; equal projected head/base tuples collapse to one source.
-- `INV-PART-9`: An overlay MUST select head winners before base winners independently for content and deletion layers, and MUST perform that masking before predicates or relational operators.
-- `INV-PART-10`: A content write MUST NOT imply restoration; an inherited or head-partition `Deleted` winner remains effective until an explicit `Restored` winner supersedes it.
-- `INV-PART-11`: A base source MUST be either live current state or the exact state of the selected partition at a supplied `SnapshotRef`; the cut applies consistently to every table and policy dependency in the read.
-- `INV-PART-12`: The canonical read/subscription identity MUST include normalized head and base partition sources, including any snapshot cut.
-- `INV-PART-13`: Normal references MUST resolve a `RowUuid` through the current effective overlay view; exact-incarnation references are a separate, unsupported capability.
-- `INV-PART-14`: A view-relative mutation of an inherited row MUST copy-on-write into the head partition. Exact-incarnation mutation MUST name its partition tuple explicitly.
-- `INV-PART-15`: Effective rows MUST distinguish the requested head tuple from the physical partition that supplied each selected layer; ordinary partition columns project to the head values while hidden provenance retains supplying tuples.
-- `INV-PART-16`: Transactions MAY atomically contain versions in multiple partition tuples, but admission, fate, persistence, and rejection remain all-or-nothing.
-- `INV-PART-17`: Trusted replication MAY carry complete cross-partition commit units; untrusted selected delivery MUST NOT reveal unauthorized sibling versions, tables, tuples, payloads, or counts merely because they share a transaction.
-- `INV-PART-18`: Read and write policy MUST use ordinary partition columns and the same effective view as the operation; missing reference/policy evidence fails closed, and Jazz MUST NOT impose a built-in partition-row existence or lifecycle gate.
-- `INV-PART-19`: Schema evolution MAY only add a partition dimension with an immutable typed migration default. Historical versions and old-schema selectors MUST normalize to that default; removal, identity rename, type/encoding/default change, and tuple collapse are forbidden.
-- `INV-MERGE-1`: Cross-partition merge calculation MUST remain a local, authorized helper that emits one ordinary atomic mergeable transaction; receivers MUST NOT require source history to admit its result.
-- `INV-MERGE-2`: Merge provenance MUST identify source and target contributions by stable partition coordinates and exact field-grained contribution dots.
+- `INV-BVIEW-1`: Branch dimensions MUST have schema-lineage-stable identities, names, types, canonical encodings, and deterministic order; tables MAY bind any subset through renameable application columns.
+- `INV-BVIEW-2`: The logical incarnation key MUST be `(PhysicalTableId, BranchKey, RowUuid)` while application object identity remains `RowUuid`.
+- `INV-BVIEW-3`: Every content or deletion version on a branch-keyed table MUST carry a complete canonical branch key; its version parents MUST have the same branch key.
+- `INV-BVIEW-4`: Branch bindings MUST be non-null and immutable for one incarnation. Moving an object between branch keys requires explicit writes to both incarnations, which MAY share one atomic transaction.
+- `INV-BVIEW-5`: Content and deletion histories and current winners MUST be selected independently per `(PhysicalTableId, BranchKey, RowUuid, Layer)`.
+- `INV-BVIEW-6`: Secondary and unique indices MUST be physically prefixed by the exact branch key; uniqueness is per exact branch key, not per composed branch view.
+- `INV-BVIEW-7`: A table with no bound dimensions MUST behave as shared data in every branch view.
+- `INV-BVIEW-8`: A read selector MUST use globally named dimension values and each table MUST project that selector onto its declared subset; equal projected head/base branch keys collapse to one source.
+- `INV-BVIEW-9`: An overlay MUST select head winners before base winners independently for content and deletion layers, and MUST perform that masking before predicates or relational operators.
+- `INV-BVIEW-10`: A content write MUST NOT imply restoration; an inherited or head-key `Deleted` winner remains effective until an explicit `Restored` winner supersedes it.
+- `INV-BVIEW-11`: A base source MUST be either live current state or the exact state of the selected branch key at a supplied `SnapshotRef`; the cut applies consistently to every table and policy dependency in the read.
+- `INV-BVIEW-12`: The canonical read/subscription identity MUST include normalized head and base branch sources, including any snapshot cut.
+- `INV-BVIEW-13`: Normal references MUST resolve a `RowUuid` through the current effective branch view; exact-incarnation references are a separate, unsupported capability.
+- `INV-BVIEW-14`: A view-relative mutation of an inherited row MUST copy-on-write into the head branch key. Exact-incarnation mutation MUST name its branch key explicitly.
+- `INV-BVIEW-15`: Effective rows MUST distinguish the requested head branch key from the physical branch key that supplied each selected layer; ordinary branch-dimension columns project to the head values while hidden provenance retains supplying branch keys.
+- `INV-BVIEW-16`: Transactions MAY atomically contain versions in multiple branch keys, but admission, fate, persistence, and rejection remain all-or-nothing.
+- `INV-BVIEW-17`: Trusted replication MAY carry complete cross-branch-key commit units; untrusted selected delivery MUST NOT reveal unauthorized sibling versions, tables, branch keys, payloads, or counts merely because they share a transaction.
+- `INV-BVIEW-18`: Read and write policy MUST use ordinary branch-dimension columns and the same effective view as the operation; missing reference/policy evidence fails closed, and Jazz MUST NOT impose a built-in branch-row existence or lifecycle gate.
+- `INV-BVIEW-19`: Schema evolution MAY only add a branch dimension with an immutable typed migration default. Historical versions and old-schema selectors MUST normalize to that default; removal, identity rename, type/encoding/default change, and branch key collapse are forbidden.
+- `INV-MERGE-1`: Cross-branch-key merge calculation MUST remain a local, authorized helper that emits one ordinary atomic mergeable transaction; receivers MUST NOT require source history to admit its result.
+- `INV-MERGE-2`: Merge provenance MUST identify source and target contributions by stable branch coordinates and exact field-grained contribution dots.
 - `INV-MERGE-3`: A merge calculator MUST recursively subtract source contributions already represented in the target and MUST NOT echo target-originated effects back to their origin.
-- `INV-MERGE-4`: Emitted version parents MUST be only the target incarnation's observed row/layer heads; source-partition versions are never causal parents.
+- `INV-MERGE-4`: Emitted version parents MUST be only the target incarnation's observed row/layer heads; source-key versions are never causal parents.
 - `INV-MERGE-5`: Merge calculation MUST fail atomically when exact contribution history, strategy capabilities, current-schema projection, source-read authority, or target-write authority is unavailable.
 - `INV-MERGE-6`: Prior provenance visible in the target prevents observed duplicate transfer, but Jazz MUST NOT claim globally coordinated exactly-once behavior for concurrent offline calculations.
 
@@ -76,10 +76,10 @@ error or routes to a history-complete authority; it never fabricates a partial
 answer (`INV-TIME-4`). Historical reads are immutable one-shots rather than live
 subscriptions.
 
-### 11.2 Partition dimensions
+### 11.2 Branch dimensions
 
-A schema lineage declares globally named partition dimensions. Each dimension
-has a stable internal `PartitionDimensionId`, a stable semantic name, one
+A schema lineage declares globally named branch dimensions. Each dimension
+has a stable internal `BranchDimensionId`, a stable semantic name, one
 non-null key-encodable type, one canonical wire/storage encoding, and a stable
 ordering position. A table binds an application column to any subset of those
 dimensions:
@@ -92,71 +92,71 @@ dimensions:
 todos:
   workspace_id: Uuid  -> dimension workspace
   draft_id: Uuid      -> dimension branch
-  partitionBy: [workspace_id, draft_id]
+  branchBy: [workspace_id, draft_id]
 
 memberships:
   workspace_id: Uuid  -> dimension workspace
-  partitionBy: [workspace_id]
+  branchBy: [workspace_id]
 
 users:
-  partitionBy: []
+  branchBy: []
 ```
 
 Application columns may later be renamed while retaining the same dimension
-binding. Canonical partition identity uses stable dimension ids and typed bytes,
-never current column names or declaration order (`INV-PART-1`). Two tables that
+binding. Canonical branch-key identity uses stable dimension ids and typed bytes,
+never current column names or declaration order (`INV-BVIEW-1`). Two tables that
 bind the same named dimension must use the same type and encoding.
 
-The empty tuple denotes shared data. It is not a privileged root partition and
-has no lifecycle semantics (`INV-PART-7`).
+The empty branch key denotes shared data. It is not a privileged root branch key and
+has no lifecycle semantics (`INV-BVIEW-7`).
 
 #### Incarnation identity
 
 `RowUuid` remains the stable application object identity. The same `RowUuid` may
-have content and deletion histories in many partition tuples. The physical
+have content and deletion histories in many branch keys. The physical
 incarnation key is:
 
 ```text
-(PhysicalTableId, PartitionTuple, RowUuid)
+(PhysicalTableId, BranchKey, RowUuid)
 ```
 
 and each layer winner is keyed by that incarnation plus `Content` or `Deletion`
-(`INV-PART-2`, `INV-PART-5`). A raw fetch of a partitioned object therefore
-requires a read view or an exact partition tuple.
+(`INV-BVIEW-2`, `INV-BVIEW-5`). A raw fetch of a branch-keyed object therefore
+requires a read view or an exact branch key.
 
-Partition columns are ordinary values for query projection, reference traversal,
+Bound branch-dimension columns are ordinary values for query projection, reference traversal,
 and policy, but key-like coordinates for mutation. Every version must carry the
-complete canonical tuple. A patch cannot omit, inherit ambiguously, or change
-that coordinate, and a version parent must belong to the same tuple
-(`INV-PART-3`, `INV-PART-4`). An application move is an explicit atomic write to
-the source and destination incarnations, not a cross-partition parent edge.
+complete canonical branch key. A patch cannot omit, inherit ambiguously, or change
+that coordinate, and a version parent must belong to the same branch key
+(`INV-BVIEW-3`, `INV-BVIEW-4`). An application move is an explicit atomic write to
+the source and destination incarnations, not a cross-branch-key parent edge.
 
 #### Storage and indices
 
-Content and deletion history use the same partition coordinate. Sparse deletion
+Content and deletion history use the same branch coordinate. Sparse deletion
 records are keyed by:
 
 ```text
-(PhysicalTableId, PartitionTuple, RowUuid, TxId)
+(PhysicalTableId, BranchKey, RowUuid, TxId)
 ```
 
-and never affect another tuple with the same `RowUuid`. Current caches preserve
+and never affect another branch key with the same `RowUuid`. Current caches preserve
 independent content/deletion winner identities so they remain rebuildable from
 history.
 
 Every physical secondary or unique index implicitly prefixes its user key with
-the partition tuple:
+the branch key:
 
 ```text
-(PhysicalTableId, PartitionTuple, UserIndexKey..., RowUuid)
+(PhysicalTableId, BranchKey, UserIndexKey..., RowUuid)
 ```
 
 The application declares only its user columns. Unique constraints are enforced
-within one exact tuple. Composing a head over a base does not create a new
+within one exact branch key. Composing a head over a base does not create a new
 constraint domain and may expose equal indexed values from different row ids
-even when both partitions are independently valid (`INV-PART-6`).
+even when both branch keys are independently valid (`INV-BVIEW-6`).
 
-### 11.3 Overlay read views
+### 11.3 Branch views
 
 The canonical request uses named dimension values even when an ergonomic facade
 accepts schema-ordered arrays:
@@ -175,7 +175,7 @@ whatever ordinary row represents its branch and supplies the resolved selector;
 Jazz neither knows nor validates that representation.
 
 Each participating table projects the selector onto its declared dimension
-subset (`INV-PART-8`). With the example schema above:
+subset (`INV-BVIEW-8`). With the example schema above:
 
 ```text
 todos:       head=(W,Draft), base=(W,Main)
@@ -189,7 +189,7 @@ facade sugar and is canonicalized immediately.
 
 #### Independent layer reduction
 
-For table `T`, row `R`, projected head tuple `H`, and optional base tuple `B`:
+For table `T`, row `R`, projected head branch key `H`, and optional base branch key `B`:
 
 ```text
 effective_content(R) = content_winner(H,R) ?? content_winner(B,R)
@@ -200,12 +200,12 @@ visible(R) = effective_content exists
 
 For a snapshot base, both base winners are chosen at the supplied cut. The cut
 applies to every table, join, reference, and policy dependency in the read
-(`INV-PART-11`).
+(`INV-BVIEW-11`).
 
 Layer fallback is intentionally independent. Head content does not restore an
 inherited deletion; a head `Restored` winner may reveal inherited content; a
-head deletion hides either head or inherited content (`INV-PART-9`,
-`INV-PART-10`).
+head deletion hides either head or inherited content (`INV-BVIEW-9`,
+`INV-BVIEW-10`).
 
 Masking precedes predicates. If base row A has `status="open"` and head row A
 has `status="closed"`, a query for open rows must not return base A. Index plans
@@ -220,24 +220,24 @@ late result filter.
 #### Effective values and source provenance
 
 An effective row distinguishes its requested view from its supplying history.
-Ordinary bound partition columns project to the head selector even when content
+Ordinary bound branch-dimension columns project to the head selector even when content
 or deletion fell back to the base. Hidden typed provenance records the exact
-partition and version that supplied each selected layer (`INV-PART-15`). This
+branch key and version that supplied each selected layer (`INV-BVIEW-15`). This
 gives application code a coherent draft-shaped row while preserving exact
 history for authorization diagnostics, synchronization, and merge calculation.
 
 Normal `RowUuid` references resolve the visible target incarnation through the
-same effective view. An exact-incarnation reference containing a partition tuple
-is a distinct future capability (`INV-PART-13`). Policy reference traversal uses
+same effective view. An exact-incarnation reference containing a branch key
+is a distinct future capability (`INV-BVIEW-13`). Policy reference traversal uses
 the same rule.
 
 ### 11.4 Mutations and authorization
 
-An exact mutation names `(table, PartitionTuple, RowUuid)`. A view-relative
+An exact mutation names `(table, BranchKey, RowUuid)`. A view-relative
 mutation names the head view and `RowUuid`; if the visible row is inherited, the
-mutation performs copy-on-write into the head tuple (`INV-PART-14`). The helper
+mutation performs copy-on-write into the head branch key (`INV-BVIEW-14`). The helper
 may materialize inherited values needed by a merge strategy, but the first head
-version has no cross-partition causal parent. Source derivation may be retained
+version has no cross-branch-key causal parent. Source derivation may be retained
 only as typed non-causal provenance.
 
 Content writes do not implicitly author `Restored`. An ergonomic update helper
@@ -248,31 +248,31 @@ Jazz imposes no built-in branch row, creator, open/closed state, parent, or
 existence check. Applications express those rules with ordinary tables and
 policies, for example by traversing `todo.branch_id -> branches.id`. A missing
 referenced branch or membership row is missing policy evidence and fails closed.
-Read policy evaluates over the effective overlay view; write policy evaluates
-the exact target tuple and the operation's candidate view (`INV-PART-18`).
+Read policy evaluates over the effective branch view; write policy evaluates
+the exact target branch key and the operation's candidate view (`INV-BVIEW-18`).
 
-#### Cross-partition atomicity
+#### Cross-branch-key atomicity
 
-One transaction may write several partition tuples and shared tables. Every
-version routes by its own canonical tuple, while the transaction retains one
+One transaction may write several branch keys and shared tables. Every
+version routes by its own canonical branch key, while the transaction retains one
 identity, permission subject, fate, limit budget, durability state, and atomic
-admission decision (`INV-PART-16`). Any malformed tuple or denied write rejects
+admission decision (`INV-BVIEW-16`). Any malformed branch key or denied write rejects
 the complete unit.
 
-Version-parent edges remain tuple-local. Cross-partition atomic grouping does
+Version-parent edges remain branch-key-local. Cross-branch-key atomic grouping does
 not make one incarnation causally descend from another.
 
 Trusted history replication may carry complete commit units. Client-facing
 selected delivery must not reveal unauthorized sibling versions or even hidden
-table/tuple/write-count structure merely because an authorized version shares
+table/branch key/write-count structure merely because an authorized version shares
 their `TxId`. Selected view facts may retain the transaction witness needed for
-settlement without reconstructing hidden payload (`INV-PART-17`, ch. 8).
+settlement without reconstructing hidden payload (`INV-BVIEW-17`, ch. 8).
 
 ### 11.5 Maintained subscriptions
 
 The normalized head/base sources are part of canonical `ReadViewKey`,
 `SubscriptionKey`, binding-view identity, known state, coverage, settlement,
-and cache reuse (`INV-PART-12`). Equal shapes and bindings over different tuples
+and cache reuse (`INV-BVIEW-12`). Equal shapes and bindings over different branch keys
 must never share results, policy facts, replacement witnesses, receipts, or
 unsubscribe cleanup.
 
@@ -284,27 +284,27 @@ refresh. A base change affects a live-base view only when the corresponding
 layer is not masked by a head winner.
 
 Policy dependency tables project the same named selectors as user-query tables.
-Tables whose projected head and base tuples are equal have one maintained source,
+Tables whose projected head and base branch keys are equal have one maintained source,
 preventing duplicate shared evidence.
 
-### 11.6 Cross-partition merge helper
+### 11.6 Cross-branch-key merge helper
 
-Cross-partition merge is a high-level local calculation, not an admission or
+Cross-branch-key merge is a high-level local calculation, not an admission or
 replication primitive. Given explicit source and target read views, an initiating
 identity, and complete authorized history, the helper calculates novel source
 contributions and emits one ordinary atomic mergeable transaction whose versions
-carry target partition tuples (`INV-MERGE-1`). A receiver applies that transaction
+carry target branch keys (`INV-MERGE-1`). A receiver applies that transaction
 without source history.
 
 #### Contribution identity
 
-A contribution dot is field-grained and partition-qualified:
+A contribution dot is field-grained and branch-key-qualified:
 
 ```text
-PartitionCoordinate = sorted [(PartitionDimensionId, EncodedValue)]
+BranchCoordinate = sorted [(BranchDimensionId, EncodedValue)]
 
 ContributionDot = {
-  partition,
+  branch_key,
   tx_id,
   table,
   row_uuid,
@@ -341,22 +341,22 @@ duplicates; Jazz provides no global merge cursor or exactly-once import claim
 
 ### 11.7 Schema evolution
 
-Partition evolution is monotone. A schema may add a globally named dimension and
+Branch-key evolution is monotone. A schema may add a globally named dimension and
 bind it to tables only when the publication supplies one immutable, typed,
 deterministic migration default. Old history and selectors authored under an
-older schema normalize the missing dimension to that default (`INV-PART-19`).
+older schema normalize the missing dimension to that default (`INV-BVIEW-19`).
 
 For example:
 
 ```text
-v1 tuple: (branch=A)
-v2 tuple: (workspace=DEFAULT, branch=A)
+v1 branch key: (branch=A)
+v2 branch key: (workspace=DEFAULT, branch=A)
 ```
 
 All old incarnations enter the reserved default bucket. New-schema writes must
 explicitly provide the new dimension. Only old-schema queries receive automatic
 default completion; omission in a new-schema query is an error. A cross-schema
-version parent is valid only when both effective normalized tuples are equal.
+version parent is valid only when both effective normalized branch keys are equal.
 
 The migration default is schema-lineage metadata, not an ordinary insert
 default. It must never change. Adding a dimension rekeys/rebuilds current and
@@ -366,16 +366,16 @@ identities over user-reachable sentinel values.
 
 The initial contract forbids removing a dimension, renaming its stable semantic
 identity, changing its type or encoding, changing its default, splitting or
-collapsing dimensions, and nullable partition bindings. Application columns may
+collapsing dimensions, and nullable branch bindings. Application columns may
 be renamed because their binding retains the stable dimension id.
 
 ## Open Questions
 
-- **Selected delivery for cross-partition transactions.** Specify the minimal
+- **Selected delivery for cross-branch-key transactions.** Specify the minimal
   transaction witness an untrusted receiver needs for atomic settlement without
   exposing hidden sibling count or structure.
 - **Exclusive transactions.** Define predicate-read coordinates and conflict
-  validation for overlay views before allowing view-relative exclusive writes.
+  validation for branch views before allowing view-relative exclusive writes.
 - **Dimension type surface.** Start with UUIDs, stable enums, and fixed-width
   integers; decide whether strings or composite values can ever provide stable
   canonical coordinates.

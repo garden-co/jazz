@@ -506,5 +506,5 @@ result changes back to the correct parent output.
   subqueries with shared prepared/correlation maintenance that remains bounded
   by affected parent and child keys.
 - 🔶 **Partition-aware deletion witnesses.** Overlay views need
-  partition-qualified deletion-register terminal facts so head/base views can
+  branch-key-qualified deletion-register terminal facts so head/base views can
   publish delete/restore changes without full refresh.

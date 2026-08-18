@@ -133,9 +133,9 @@ writes never touch the register (`INV-HIST-11`).
 
 Physically, deletion history is one sparse, schema-independent relation shared
 by all content lineages. Every event is keyed by stable physical table and
-canonical partition tuple before row identity, so a seek for one incarnation is
-bounded to `(physical_table_id, partition_tuple, row_uuid)` and a partition scan
-is bounded to `(physical_table_id, partition_tuple)`. It is not a universal scan
+canonical branch key before row identity, so a seek for one incarnation is
+bounded to `(physical_table_id, branch_key, row_uuid)` and a branch-key scan
+is bounded to `(physical_table_id, branch_key)`. It is not a universal scan
 and it never identifies an incarnation by `RowUuid` alone.
 
 ### 4.5 Global-current as derived state

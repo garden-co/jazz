@@ -13,7 +13,7 @@ Invariant digest:
 
 - `INV-API-28`: Permission advice is a three-valued, authority-scoped dry run: only the serving authority may issue definitive Allowed/Denied; client-local, offline, incomplete, not-ready, and timed-out requests yield Unknown. Advice is non-mutating and does not reserve a later mutation; its authenticated request/response exchange exposes no policy evidence and is correlation-, cancellation-, replay-, and dedup-safe.
 - `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
-- `INV-PART-18`: Read and write policy MUST use ordinary partition columns and the same effective overlay view as the operation; missing reference/policy evidence fails closed, and Jazz MUST NOT impose a built-in partition-row existence or lifecycle gate.
+- `INV-BVIEW-18`: Read and write policy MUST use ordinary branch-dimension columns and the same effective branch view as the operation; missing reference/policy evidence fails closed, and Jazz MUST NOT impose a built-in branch-row existence or lifecycle gate.
 - `INV-RLS-1`: A non-system commit unit MUST be rejected with Fate::Rejected(RejectionReason::AuthorizationDenied) and MUST NOT ingest accepted version rows when any version in the u...
 - `INV-RLS-2`: AuthorId::SYSTEM MUST bypass both read and write policy checks.
 - `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("sub"), where claim("sub") is bound from the authenticated AuthorId, not from caller-provided q...
@@ -152,9 +152,9 @@ global content is denied (`INV-RLS-7`).
 
 Partition-relative writes have no built-in metadata gate. Their complete target
 tuple is part of the candidate incarnation, so ordinary table policy may inspect
-the bound partition columns or traverse them to application-owned lifecycle and
+the bound branch-dimension columns or traverse them to application-owned lifecycle and
 membership rows. Missing traversal evidence fails closed, and policy is
-evaluated in the operation's effective overlay view (ch. 11, `INV-PART-18`).
+evaluated in the operation's effective branch view (ch. 11, `INV-BVIEW-18`).
 
 Authorization deliberately separates authorship from permission identity.
 `made_by` is the _author_ attribution and is not necessarily the _permission_
@@ -201,11 +201,11 @@ node does not re-filter its own local reads or subscriptions by policy. The spec
 therefore makes no post-delivery confidentiality promise against a node that
 already received data: revocation is forward-looking sync narrowing.
 
-Overlay reads evaluate ordinary table policy over the effective partitioned
+effective branch-view reads evaluate ordinary table policy over the effective branch-view
 view. Partition columns are normal policy-visible values, including references
 to application-owned rows that represent a draft or lifecycle when the schema
 chooses that model. Jazz has no privileged branch-existence oracle or mandatory
-metadata row (ch. 11, `INV-PART-18`).
+metadata row (ch. 11, `INV-BVIEW-18`).
 
 ### 7.4 Policy composition for query-driven sync
 

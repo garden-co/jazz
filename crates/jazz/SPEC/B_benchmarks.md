@@ -28,7 +28,7 @@ resolution, ingest/commit-unit/read-set costs) · **S1** relevance-scaled
 query-driven partial sync · **S2** realtime canvas (mergeable, tier `none`) ·
 **S3** recursive permission-filtered sync · **S4** serializable order processing
 (exclusive, TPC-C-derived) · **S5** durable streams · **S7** migration lenses ·
-**S8** partition overlays · **S9** durable execution. Every
+**S8** branch views · **S9** durable execution. Every
 _implemented_ harness runs against the current feature set; **S8 has no harness yet** (`[needs: scenario
 harness]`).
 
@@ -925,31 +925,31 @@ version.
 The native single-version run is the floor; the naive alternative
 (stop-the-world rewrite) is described, not implemented.
 
-### 8. Partition overlays `[needs: scenario harness]`
+### 8. Branch views `[needs: scenario harness]`
 
-_Motivation: schema-declared partition dimensions and overlay reads provide
+_Motivation: schema-declared branch dimensions and overlay reads provide
 isolated parallel lines of work over shared live or frozen bases without a
 core-owned branch object._
 
 #### Workload (agent-sandbox shape)
 
-A large base database (S1 fixture scale). N concurrent partition tuples
+A large base database (S1 fixture scale). N concurrent branch keys
 (N = 1 / 10 / 100) each receive a burst of writes over shared `RowUuid`s and
 serve head-over-base reads; half use live bases and half frozen `SnapshotRef`
-bases. Transactions include same-tuple and cross-tuple atomic writes while the
-base tuples keep receiving their own streams.
+bases. Transactions include same-key and cross-key atomic writes while the base
+branch keys keep receiving their own streams.
 
 #### Metrics
 
-selector normalization cost · overlay read overhead vs exact-partition reads ·
-storage per sparse tuple vs naive copy · index masking cost · contribution-merge
-cost vs source size · subscription behavior across tuples · cross-partition
+selector normalization cost · branch-view overhead vs exact-branch-key reads ·
+storage per sparse branch key vs naive copy · index masking cost · contribution-merge
+cost vs source size · subscription behavior across branch keys · cross-branch-key
 atomic admission and selected-delivery cost.
 
 #### Correctness
 
 overlay reads == independent-layer head-then-base oracle · masking precedes
-predicates and index publication · unrelated tuples never compete · shared
+predicates and index publication · unrelated branch keys never compete · shared
 tables appear once · frozen bases ignore post-cut writes while live bases track
 them · contribution merge equals the equivalent direct-on-target strategy
 effects without echo.

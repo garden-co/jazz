@@ -46,7 +46,7 @@ Limits retained for semantic or adversarial-resource reasons:
 
 - `MAX_WIRE_FRAME_BYTES`: allocation bound before frame decode;
 - `MAX_SHAPE_AST_BYTES`: executable query/shape complexity admission;
-- commit-version, repair-ref, partition-qualified repair, known-state-ref and structured
+- commit-version, repair-ref, branch-key-qualified repair, known-state-ref and structured
   result depth/width limits: CPU/fan-out/state bounds independent of framing;
 - receiver in-flight/aggregate/advertised-length budgets and WebSocket frame
   limits: unauthenticated allocation and peer-fairness defenses.

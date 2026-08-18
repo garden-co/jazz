@@ -7,13 +7,13 @@ identities that name durable objects, the layout of rows and row versions, and
 the lowering from application schema to groove storage. It is limited to
 _identity and shape_. Transaction semantics (ch. 3), history and merging
 (ch. 4), reads (ch. 5), authorization (ch. 7), sync (ch. 8), schema evolution
-(ch. 10), and partitioned overlay views (ch. 11) all build on the
+(ch. 10), and branch views (ch. 11) all build on the
 names defined here, but their behavior is specified in those chapters.
 
 Invariant digest:
 
 - `INV-CLASS-1`: Column-class shipping principle: upstream-decided mutable state and node-local derived state MUST NOT be shipped as replicated row payload.
-- `INV-DATA-1`: Stable wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`, `PartitionDimensionId`, `AuthorId`) in wire byte order; node-local alias types MUST NOT be part of wire identity.
+- `INV-DATA-1`: Stable wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`, `BranchDimensionId`, `AuthorId`) in wire byte order; node-local alias types MUST NOT be part of wire identity.
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
 - `INV-DATA-3`: `AuthorId::SYSTEM` MUST equal the UUIDv5 derivation `Uuid::new_v5(&Uuid::NAMESPACE_OID, b"jazz:system-author")`.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 48 bits and a logical counter in the low 16 bits; construction MUST reject values outside those packed ranges.
@@ -30,7 +30,7 @@ Invariant digest:
 - `INV-DATA-18`: Derived global-current storage MUST identify the per-layer winner by row and preserve the content fields needed for global current reads.
 - `INV-DATA-19`: The global change stream MUST retain enough table, row, layer, and sequence information to reconstruct global as-of reads.
 - `INV-DATA-20`: Schema lowering MUST provide storage for metadata, transaction outcomes, row-version layers, globally accepted current state, and change history.
-- `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(physical_table_id, partition_tuple, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or partition incarnations.
+- `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(physical_table_id, branch_key, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or branch-key incarnations.
 - `INV-DATA-22`: A per-lineage derived current row MUST carry the independently selected content winner and deletion winner/event, an explicit visibility bit, and projected content cells. It is node-local derived state, never replicated payload.
 
 ## Details
@@ -59,7 +59,7 @@ node-local derived state is never shipped.
 
 Cross-node identity is stable because every durable name is a wire-stable UUID
 newtype (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
-`MigrationLensId`, `PartitionDimensionId`, `AuthorId`, and
+`MigrationLensId`, `BranchDimensionId`, `AuthorId`, and
 `TxId { time: TxTime, node: NodeUuid }`. Global settlement ordering uses the
 distinct packed HLC newtype `GlobalTime` (ch. 3–4). A transaction id combines a
 packed hybrid logical clock (`TxTime`,
@@ -133,10 +133,10 @@ lineage, rather than a logical table name or schema version. `PhysicalTableId`
 is allocated once when a table lineage is created and retained through
 compatible schema changes, including table renames; a dropped lineage is never
 silently reused. Its full incarnation identity also contains the canonical
-partition tuple declared by ch. 11, so content and deletion events for one
+branch key declared by ch. 11, so content and deletion events for one
 application object in different tuples remain independent. This permits exactly
 one sparse immutable deletion history across the database without cross-table or
-cross-partition row-UUID collisions (`INV-DATA-21`).
+cross-branch-key row-UUID collisions (`INV-DATA-21`).
 
 The replicated wire payload for a version (`VersionRecord`) is exactly the
 replicated-immutable fields (§2.1): `row_uuid`, `parents`, a nullable
@@ -176,16 +176,16 @@ from those tables on recovery.
 **Lowered tables.** `lower_to_groove()` produces:
 
 - _metadata_ — `jazz_nodes`, `jazz_schema_versions` (including durable physical
-  and partition-dimension mappings), `jazz_catalogue`, and
+  and branch-dimension mappings), `jazz_catalogue`, and
   `jazz_catalogue_pointer`;
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
   `jazz_rejected_transactions`;
 - _per physical lineage_ — `jazz_physical_{id}_history`, keyed by
   `(row_uuid, tx_time, tx_node_id)`, plus a per-lineage combined derived current
-  row per exact partition tuple. The database has exactly one
-  `jazz_deletion_history`, keyed by `(physical_table_id, partition_tuple,
+  row per exact branch key. The database has exactly one
+  `jazz_deletion_history`, keyed by `(physical_table_id, branch_key,
   row_uuid, tx_time, tx_node_id)` and with a seek/index prefix
-  `(physical_table_id, partition_tuple, row_uuid)`. The
+  `(physical_table_id, branch_key, row_uuid)`. The
   deletion record's `schema_version` is retained provenance, not a storage
   partition. Content rows use `schema_version` as a Groove descriptor
   discriminator, while deletion history uses a stable system descriptor
@@ -206,7 +206,7 @@ visible/current surfaces are derived indexes over that history.
 
 The old alpha wording around reserved `_jazz_*` fields maps to the typed identity
 and column-class model here: stable row identity, transaction identity, authorship
-or `made_by`, parents, deletion state, durability/fate observations, partition or
+or `made_by`, parents, deletion state, durability/fate observations, branch key or
 schema context, and implementation metadata are engine-owned facts, not
 application columns. Catalogue rows stay on the schema/lens catalogue lane
 (ch. 10); they are not ordinary user rows even though they reuse the same storage
