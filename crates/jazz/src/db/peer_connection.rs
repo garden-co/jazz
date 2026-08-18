@@ -226,10 +226,14 @@ where
         Some((tx.clone(), versions.clone()))
     }
 
-    pub(super) fn staged_unrouted_fate(
+    pub(super) fn staged_owned_fate(
         &self,
     ) -> Option<(TxId, Fate, Option<GlobalSeq>, Option<DurabilityTier>)> {
-        let ConnectionLink::Upstream { .. } = &self.link else {
+        let ConnectionLink::Upstream {
+            expected_scope_authority,
+            ..
+        } = &self.link
+        else {
             return None;
         };
         let staged = self.staged_inbound.front()?;
@@ -242,12 +246,14 @@ where
         else {
             return None;
         };
-        (!self.edge_fate_routes.borrow().contains_key(tx_id)).then_some((
-            *tx_id,
-            fate.clone(),
-            *global_seq,
-            *durability,
-        ))
+        let routed = self.edge_fate_routes.borrow().contains_key(tx_id);
+        let admitted = *self.admitted_upstream_authority.borrow();
+        let owns_route = !routed
+            || matches!(
+                (admitted, *expected_scope_authority),
+                (Some(admitted), Some(expected)) if admitted.same_admitted_link(expected)
+            );
+        owns_route.then_some((*tx_id, fate.clone(), *global_seq, *durability))
     }
 
     pub(super) fn staged_ready_view_update(&self) -> Option<(SyncMessage, ViewUpdateParts)> {
@@ -316,6 +322,29 @@ where
         self.staged_ready_view_update().is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_selected_fate_route_for_test(
+        &self,
+        tx_id: TxId,
+    ) -> Rc<RefCell<Vec<SyncMessage>>> {
+        let ConnectionLink::Upstream {
+            expected_scope_authority,
+            ..
+        } = &self.link
+        else {
+            panic!("fate routes belong to upstream connections")
+        };
+        let queue = Rc::new(RefCell::new(Vec::new()));
+        self.edge_fate_routes.borrow_mut().insert(
+            tx_id,
+            vec![EdgeFateRoute {
+                authority: *expected_scope_authority,
+                queue: Rc::downgrade(&queue),
+            }],
+        );
+        queue
+    }
+
     pub(super) fn complete_staged_relay_commit(&mut self, tx_id: TxId) {
         let staged = self
             .staged_inbound
@@ -328,17 +357,55 @@ where
         self.externally_applied_inbound = true;
     }
 
-    pub(super) fn complete_staged_unrouted_fate(&mut self, tx_id: TxId) {
+    pub(super) fn complete_staged_owned_fate(&mut self, tx_id: TxId) {
         let staged = self
             .staged_inbound
             .pop_front()
             .expect("completed fate ingress retains its staged frame");
         debug_assert!(matches!(
-            staged.message,
+            &staged.message,
             SyncMessage::FateUpdate { tx_id: staged_tx, .. }
-                if staged_tx == tx_id
+                if *staged_tx == tx_id
         ));
-        notify_write_state_waiters(&self.write_state_waiters, tx_id);
+        let authority = match &self.link {
+            ConnectionLink::Upstream {
+                expected_scope_authority,
+                ..
+            } => *expected_scope_authority,
+            ConnectionLink::Subscriber { .. } => None,
+        };
+        let mut routes = self.edge_fate_routes.borrow_mut();
+        if let Some(pending) = routes.get_mut(&tx_id) {
+            let mut remaining = Vec::new();
+            for route in std::mem::take(pending) {
+                let authority_matches = matches!(
+                    (route.authority, authority),
+                    (Some(route), Some(authority)) if route.same_admitted_link(authority)
+                );
+                let queue = route.queue.upgrade();
+                if authority_matches {
+                    if let Some(queue) = queue {
+                        queue.borrow_mut().push(staged.message.clone());
+                    }
+                } else {
+                    remaining.push(route);
+                }
+            }
+            if remaining.is_empty() {
+                routes.remove(&tx_id);
+            } else {
+                *routes.get_mut(&tx_id).expect("route remains present") = remaining;
+            }
+        }
+        drop(routes);
+        route_local_fate(&self.local_fate_routes, tx_id, &staged.message);
+        handle_write_state_update(
+            &self.node,
+            &self.write_state_waiters,
+            &self.mutation_errors,
+            &self.scheduler,
+            tx_id,
+        );
         self.externally_applied_inbound = true;
     }
 
@@ -1109,6 +1176,11 @@ where
                                 &message,
                                 SyncMessage::FateUpdate { tx_id, .. }
                                     if !self.edge_fate_routes.borrow().contains_key(tx_id)
+                                        || matches!(
+                                            (*self.admitted_upstream_authority.borrow(), *expected_scope_authority),
+                                            (Some(admitted), Some(expected))
+                                                if admitted.same_admitted_link(expected)
+                                        )
                             ))
                     {
                         self.staged_inbound.push_front(StagedInboundMessage {

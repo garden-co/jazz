@@ -188,6 +188,7 @@ struct CommitGatedAuthorityStorage {
 
 struct QueuedInboundTransport {
     inbound: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<SyncMessage>>>,
+    session_context: Option<crate::db::ConnectionSessionContext>,
 }
 
 impl crate::db::Transport for QueuedInboundTransport {
@@ -200,6 +201,10 @@ impl crate::db::Transport for QueuedInboundTransport {
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.inbound.borrow_mut().pop_front()
+    }
+
+    fn connection_session_context(&self) -> Option<crate::db::ConnectionSessionContext> {
+        self.session_context
     }
 }
 
@@ -1976,6 +1981,7 @@ fn demand_driven_peer_tick_retains_view_update_until_durable() {
     ));
     let connection = receiver.connect_upstream(Box::new(QueuedInboundTransport {
         inbound: std::rc::Rc::clone(&inbound),
+        session_context: None,
     }));
     released.set(false);
     assert!(receiver.poll_tick(&mut context).is_pending());
@@ -2061,6 +2067,7 @@ fn demand_driven_peer_tick_retains_relay_frame_across_async_commit() {
     ));
     let _connection = relay.connect_upstream(Box::new(QueuedInboundTransport {
         inbound: std::rc::Rc::clone(&inbound),
+        session_context: None,
     }));
     released.set(false);
     assert!(relay.poll_tick(&mut context).is_pending());
@@ -2101,6 +2108,85 @@ fn demand_driven_peer_tick_retains_relay_frame_across_async_commit() {
         relay.write_state(tx_id).unwrap().durability,
         DurabilityTier::Edge
     );
+}
+
+#[test]
+fn routed_peer_fate_reaches_downstream_only_after_durable_commit() {
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xd0), 10).cells(title_cells("routed fate")),
+        )
+        .unwrap();
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        fail: std::rc::Rc::new(std::cell::Cell::new(false)),
+        completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+    };
+    let identity = crate::db::DbIdentity {
+        node: node(0xd0),
+        author: AuthorId::from_bytes([0xd0; 16]),
+    };
+    let mut opening = crate::db::PollableDbOpen::new(node_schema, identity, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut edge)) = opening.poll(&mut context) else {
+        panic!("commit-only gate must open the demand-driven edge")
+    };
+    let inbound = std::rc::Rc::new(std::cell::RefCell::new(
+        std::collections::VecDeque::from([unit]),
+    ));
+    let connection = edge.connect_upstream(Box::new(QueuedInboundTransport {
+        inbound: std::rc::Rc::clone(&inbound),
+        session_context: Some(crate::db::ConnectionSessionContext {
+            local: crate::wire::WireAuthorityEndpoint {
+                node: identity.node,
+                epoch: 1,
+            },
+            remote: crate::wire::WireAuthorityEndpoint {
+                node: node(0xa0),
+                epoch: 2,
+            },
+            link_identity: identity.author,
+            negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
+        }),
+    }));
+    loop {
+        match edge.poll_tick(&mut context) {
+            std::task::Poll::Pending => {}
+            std::task::Poll::Ready(Ok(_)) => break,
+            std::task::Poll::Ready(Err(error)) => panic!("relay ingress failed: {error}"),
+        }
+    }
+    let routed = connection
+        .borrow()
+        .install_selected_fate_route_for_test(tx_id);
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_seq: Some(GlobalSeq(1)),
+        durability: Some(DurabilityTier::Global),
+    };
+    inbound.borrow_mut().push_back(fate.clone());
+
+    released.set(false);
+    assert!(edge.poll_tick(&mut context).is_pending());
+    assert!(routed.borrow().is_empty());
+
+    released.set(true);
+    loop {
+        match edge.poll_tick(&mut context) {
+            std::task::Poll::Pending => assert!(routed.borrow().is_empty()),
+            std::task::Poll::Ready(Ok(_)) => break,
+            std::task::Poll::Ready(Err(error)) => panic!("routed fate failed: {error}"),
+        }
+    }
+    assert_eq!(routed.borrow().as_slice(), [fate]);
 }
 
 #[test]
