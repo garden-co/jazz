@@ -23,6 +23,10 @@ where
         self.batch.insert(table, record);
     }
 
+    pub fn insert_fresh(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
+        self.batch.insert_fresh(table, record);
+    }
+
     pub fn insert_raw(
         &mut self,
         table: impl Into<String>,
@@ -117,6 +121,15 @@ impl DatabaseBatch {
 
     pub fn insert(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
         self.push_operation(BatchOperation::Insert {
+            table: table.into(),
+            record: record.into(),
+        });
+    }
+
+    /// Stage an insert whose enclosing transaction identity proves that its
+    /// primary key cannot already exist.
+    pub fn insert_fresh(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
+        self.push_operation(BatchOperation::InsertFresh {
             table: table.into(),
             record: record.into(),
         });
@@ -238,6 +251,10 @@ impl From<VariantRecord> for RawRecordInput {
 #[derive(Clone, Debug, PartialEq)]
 pub enum BatchOperation {
     Insert {
+        table: String,
+        record: RecordInput,
+    },
+    InsertFresh {
         table: String,
         record: RecordInput,
     },

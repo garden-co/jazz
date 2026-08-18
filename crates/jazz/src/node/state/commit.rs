@@ -315,7 +315,7 @@ where
         }
         for parent in pending_parents {
             if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
-                batch.insert(
+                batch.insert_fresh(
                     "jazz_pending_edges",
                     pending_edge_values(tx_node_alias, tx_id, parent_alias, parent),
                 );

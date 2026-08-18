@@ -89,8 +89,13 @@ where
     /// ```
     pub fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
         let prepared = self.prepare_resident_batch(&batch)?;
-        self.commit_pending_writes(prepared.pending_writes, prepared.direct_operations, false)
-            .map(drop)
+        self.commit_pending_writes(
+            prepared.pending_writes,
+            prepared.direct_operations,
+            prepared.table_deltas,
+            false,
+        )
+        .map(drop)
     }
 
     /// Apply a batch to resident state and synchronously publish its IVM
@@ -102,8 +107,13 @@ where
         batch: DatabaseBatch,
     ) -> Result<PendingPersistenceBatch, Error> {
         let prepared = self.prepare_resident_batch(&batch)?;
-        self.commit_pending_writes(prepared.pending_writes, prepared.direct_operations, true)
-            .map(|receipt| receipt.expect("async persistence requested a receipt"))
+        self.commit_pending_writes(
+            prepared.pending_writes,
+            prepared.direct_operations,
+            prepared.table_deltas,
+            true,
+        )
+        .map(|receipt| receipt.expect("async persistence requested a receipt"))
     }
 
     /// Publish one storage-resolved batch through the real resident IVM.
@@ -112,15 +122,25 @@ where
         &mut self,
         prepared: PreparedDatabaseBatch,
     ) -> Result<PendingPersistenceBatch, Error> {
-        self.commit_pending_writes(prepared.pending_writes, prepared.direct_operations, true)
-            .map(|receipt| receipt.expect("async persistence requested a receipt"))
+        self.commit_pending_writes(
+            prepared.pending_writes,
+            prepared.direct_operations,
+            prepared.table_deltas,
+            true,
+        )
+        .map(|receipt| receipt.expect("async persistence requested a receipt"))
     }
 
     /// Publish a storage-resolved batch through the resident runtime and its
     /// configured storage transaction.
     pub fn commit_prepared_batch(&mut self, prepared: PreparedDatabaseBatch) -> Result<(), Error> {
-        self.commit_pending_writes(prepared.pending_writes, prepared.direct_operations, false)
-            .map(drop)
+        self.commit_pending_writes(
+            prepared.pending_writes,
+            prepared.direct_operations,
+            prepared.table_deltas,
+            false,
+        )
+        .map(drop)
     }
 
     /// Acquire every durable input that a subsequent live IVM tick can read.
@@ -133,7 +153,29 @@ where
         batch: &DatabaseBatch,
     ) -> Result<PreparedDatabaseBatch, Error> {
         self.ensure_not_poisoned()?;
-        let prepared = self.prepare_resident_batch(batch)?;
+        let mut prepared = self.prepare_resident_batch(batch)?;
+        let descriptors = prepared
+            .pending_writes
+            .iter()
+            .map(PendingTableWrite::descriptor)
+            .collect::<Vec<_>>();
+        let stores = prepared
+            .pending_writes
+            .iter()
+            .zip(&descriptors)
+            .map(|(write, descriptor)| {
+                let key_descriptor = self
+                    .table(write.table())
+                    .ok()
+                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
+                record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
+            })
+            .collect::<Vec<_>>();
+        prepared.table_deltas = Some(compute_table_deltas(
+            &prepared.pending_writes,
+            &stores,
+            self.ivm_runtime.schema(),
+        )?);
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .tick_storage_requirements()
@@ -159,6 +201,7 @@ where
         Ok(PreparedDatabaseBatch {
             pending_writes: self.pending_writes_from_operations(&batch.operations)?,
             direct_operations: batch.direct_operations.clone(),
+            table_deltas: None,
         })
     }
 
@@ -180,7 +223,7 @@ where
             key,
             record: record.into(),
         })?;
-        self.commit_pending_writes(vec![pending], Vec::new(), false)
+        self.commit_pending_writes(vec![pending], Vec::new(), None, false)
             .map(drop)
     }
 
@@ -188,6 +231,7 @@ where
         &mut self,
         pending_writes: Vec<PendingTableWrite>,
         direct_operations: Vec<OwnedWriteOperation>,
+        prepared_table_deltas: Option<Vec<TableDelta>>,
         retain_persistence_batch: bool,
     ) -> Result<Option<PendingPersistenceBatch>, Error> {
         let descriptors = pending_writes
@@ -205,8 +249,10 @@ where
                 record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
             })
             .collect::<Vec<_>>();
-        let table_deltas =
-            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema())?;
+        let table_deltas = match prepared_table_deltas {
+            Some(table_deltas) => table_deltas,
+            None => compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema())?,
+        };
         let mut staged_operations = pending_writes
             .iter()
             .map(|write| match write {
@@ -334,6 +380,19 @@ where
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
+                    table: table.clone(),
+                    key,
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::InsertFresh { table, record } => {
+                let table_schema = self.table(table)?;
+                let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
+                let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::InsertFresh,
                     table: table.clone(),
                     key,
                     variant_tag,

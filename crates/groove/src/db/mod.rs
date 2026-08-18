@@ -82,6 +82,7 @@ pub struct PendingPersistenceBatch {
 pub struct PreparedDatabaseBatch {
     pending_writes: Vec<PendingTableWrite>,
     direct_operations: Vec<OwnedWriteOperation>,
+    table_deltas: Option<Vec<crate::ivm::TableDelta>>,
 }
 
 impl PendingPersistenceBatch {
