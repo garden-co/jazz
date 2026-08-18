@@ -235,6 +235,33 @@ where
         Ok((tx_id, durability))
     }
 
+    pub(super) fn prepare_delete_commit_for_owner(
+        &self,
+        table: &str,
+        row: RowUuid,
+        now_ms: u64,
+    ) -> Result<MergeableCommit, MutationPrepareError> {
+        self.table_schema(table)
+            .map_err(MutationPrepareError::Api)?;
+        let (content_parent, deletion_parent) = {
+            let mut node = self.node.node.borrow_mut();
+            (
+                node.local_content_winner_tx_id(table, row)
+                    .map_err(MutationPrepareError::Node)?,
+                node.local_deletion_winner_tx_id(table, row)
+                    .map_err(MutationPrepareError::Node)?,
+            )
+        };
+        if deletion_parent.is_some() {
+            return Err(MutationPrepareError::Api(row_already_deleted(row)));
+        }
+        Ok(MergeableCommit::new(table, row, now_ms)
+            .made_by(self.identity.author)
+            .parents(content_parent.into_iter().collect())
+            .cells(BTreeMap::<String, Value>::new())
+            .deletion(DeletionEvent::Deleted))
+    }
+
     /// Insert a row locally, generating a uuidv7-shaped row id.
     ///
     /// The generated id is available from [`WriteHandle::row_uuid`].

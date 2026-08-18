@@ -299,7 +299,8 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
     else {
         panic!("insert must queue its immediate callback before returning")
     };
-    let std::task::Poll::Ready(Ok(rows)) = owner.poll_all(&mut context, &prepared, opts) else {
+    let std::task::Poll::Ready(Ok(rows)) = owner.poll_all(&mut context, &prepared, opts.clone())
+    else {
         panic!("a resident post-write read must complete in its first poll")
     };
     assert_eq!(added.len(), 1);
@@ -418,7 +419,9 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].row_uuid(), write.row_uuid());
     released.set(false);
-    let std::task::Poll::Ready(Ok(rows)) = owner.poll_all(&mut context, &prepared, opts) else {
+    let std::task::Poll::Ready(Ok(rows)) =
+        owner.poll_all(&mut context, &prepared, opts.clone())
+    else {
         panic!("the direct written rows must remain first-poll visible")
     };
     assert_eq!(rows.len(), 2);
@@ -448,6 +451,28 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     };
     assert_eq!(updated.len(), 1);
     assert_eq!(updated[0].row_uuid(), updated_write.row_uuid());
+
+    let deleted_write = {
+        let mut delete = std::pin::pin!(owner.delete("todos", write.row_uuid()));
+        match std::future::Future::poll(delete.as_mut(), &mut context) {
+            std::task::Poll::Ready(Ok(deleted)) => deleted,
+            std::task::Poll::Ready(Err(error)) => panic!("resident delete failed: {error}"),
+            std::task::Poll::Pending => {
+                panic!("a delete over a resident row must complete in its first poll")
+            }
+        }
+    };
+    let Some(crate::db::SubscriptionEvent::Delta { removed, .. }) =
+        subscription.try_next_event()
+    else {
+        panic!("the first-poll delete must synchronously refresh subscriptions")
+    };
+    assert_eq!(removed.len(), 1);
+    assert_eq!(deleted_write.row_uuid(), write.row_uuid());
+    let std::task::Poll::Ready(Ok(rows)) = owner.poll_all(&mut context, &prepared, opts) else {
+        panic!("a resident post-delete read must complete in its first poll")
+    };
+    assert_eq!(rows.len(), 1);
     assert!(owner.poll_persistence(&mut context).is_pending());
 }
 
@@ -510,7 +535,7 @@ fn demand_driven_db_acquires_cold_relation_snapshot() {
 }
 
 #[test]
-fn demand_driven_db_acquires_cold_update_before_single_publish() {
+fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
     let node_schema = schema();
     let column_families = node_schema.column_families();
     let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -530,6 +555,10 @@ fn demand_driven_db_acquires_cold_update_before_single_publish() {
         .insert("todos", title_cells("cold update seed"))
         .unwrap()
         .row_uuid();
+    let delete_row = seeded
+        .insert("todos", title_cells("cold delete seed"))
+        .unwrap()
+        .row_uuid();
     drop(seeded);
 
     let released = std::rc::Rc::new(std::cell::Cell::new(true));
@@ -546,6 +575,19 @@ fn demand_driven_db_acquires_cold_update_before_single_publish() {
     let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
         panic!("released metadata reads must open the database")
     };
+    released.set(false);
+    let deleted = {
+        let mut delete = std::pin::pin!(owner.delete("todos", delete_row));
+        assert!(std::future::Future::poll(delete.as_mut(), &mut context).is_pending());
+        released.set(true);
+        let std::task::Poll::Ready(Ok(deleted)) =
+            std::future::Future::poll(delete.as_mut(), &mut context)
+        else {
+            panic!("released delete dependencies must publish exactly once")
+        };
+        deleted
+    };
+    assert_eq!(deleted.row_uuid(), delete_row);
     released.set(false);
     let write = {
         let mut update = std::pin::pin!(owner.update(

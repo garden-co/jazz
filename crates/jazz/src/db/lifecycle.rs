@@ -350,6 +350,43 @@ impl DemandDrivenDb {
             local_tier,
         })
     }
+
+    /// Soft-delete one row through typed acquisition followed by one resident
+    /// publish. Existing local observers see the deletion in the resolving
+    /// poll, before asynchronous durability may complete.
+    #[doc(hidden)]
+    pub async fn delete(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let now_ms = self.database.next_now_ms();
+        let database = &self.database;
+        let prepared = std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.prepare_delete_commit_for_owner(table, row, now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?;
+        let schema = self.database.schema_version_id;
+        let tx_id = std::future::poll_fn(|context| {
+            self.runtime
+                .poll_mergeable_commit_in_schema(context, schema, &prepared)
+        })
+        .await
+        .map_err(Error::from)?;
+        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        self.database.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.database.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
 }
 
 impl<S> Db<S>
