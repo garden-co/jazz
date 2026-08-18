@@ -3065,7 +3065,8 @@ where
     // Branch view payloads carry branch-target version witnesses. Provision
     // their sparse physical partitions before staging the receiver batch, so
     // a durable table exists before the selected result becomes observable.
-    node_ref.prepare_view_update_branch_partitions(&updates)?;
+    let branch_partitions = node_ref.prepare_view_update_branch_partitions(&updates)?;
+    node_ref.publish_prepared_view_update_branch_partitions(branch_partitions)?;
     node_ref.apply_view_updates_in_batch(updates)?;
     drop(node_ref);
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()

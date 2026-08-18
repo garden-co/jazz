@@ -1952,7 +1952,7 @@ where
         Ok(versions)
     }
 
-    fn ensure_branch_open(&self, branch_id: BranchId) -> Result<(), Error> {
+    pub(super) fn ensure_branch_open(&self, branch_id: BranchId) -> Result<(), Error> {
         match self.branches.branches.get(&branch_id) {
             Some(record) if record.state == codec::BranchState::Open => Ok(()),
             Some(_) => Err(Error::BranchClosed(branch_id)),

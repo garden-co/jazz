@@ -877,6 +877,14 @@ pub(crate) struct PreparedKnownStateFact {
     facts: Vec<ViewFactEntry>,
 }
 
+/// Sparse branch tables and durable partition markers required by a receiver
+/// batch, validated against a prospective schema but not yet made live.
+pub(crate) struct PreparedViewUpdateBranchPartitions {
+    registrations: Vec<groove::db::PreparedTableRegistration>,
+    partitions: BTreeSet<(PhysicalTableId, BranchId)>,
+    batch: groove::db::PreparedDatabaseBatch,
+}
+
 /// Rejection records and derived indexes used for pending-cascade handling.
 #[derive(Clone, Debug, Default)]
 struct RejectionTracking {

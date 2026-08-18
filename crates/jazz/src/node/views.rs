@@ -847,26 +847,96 @@ where
         Ok(())
     }
 
-    /// Materialize sparse branch storage before a trusted receiver batch can
-    /// stage its branch-target versions. The branch metadata gate runs before
-    /// this path, so a receiver only provisions a partition for content it is
-    /// already allowed to name. Keeping this before the batch is essential:
-    /// the physical history table must be durable before a ViewUpdate can make
-    /// its version witness public to a maintained subscription.
+    /// Resolve sparse branch tables and their metadata writes against a
+    /// prospective schema without changing the live database.
     pub(crate) fn prepare_view_update_branch_partitions(
         &mut self,
         updates: &[ViewUpdateParts],
-    ) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
+    ) -> Result<PreparedViewUpdateBranchPartitions, Error> {
+        let mut partitions = BTreeSet::new();
         for update in updates {
             for bundle in
                 version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
             {
-                self.prepare_branch_target_partitions_if_ready(&bundle.tx, bundle.versions)?;
+                let crate::tx::BranchLineage::Branch(branch_id) = bundle.tx.target_lineage else {
+                    continue;
+                };
+                if !self.branches.branches.contains_key(&branch_id)
+                    || !ingest::commit_unit_write_count_matches(&bundle.tx, bundle.versions.len())
+                    || bundle.versions.iter().any(|version| {
+                        !self
+                            .catalogue
+                            .catalogue_schemas
+                            .contains_key(&version.schema_version())
+                    })
+                {
+                    continue;
+                }
+                self.ensure_branch_open(branch_id)?;
+                for version in bundle.versions {
+                    self.table_in_schema(version.table(), version.schema_version())?;
+                    partitions.insert((
+                        self.physical_table_id_for_schema(
+                            version.schema_version(),
+                            version.table(),
+                        )?,
+                        branch_id,
+                    ));
+                }
             }
         }
+        let new_partitions = partitions
+            .difference(&self.branches.branch_partitions)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut prospective_partitions = self.branches.branch_partitions.clone();
+        prospective_partitions.extend(new_partitions.iter().copied());
+        let registrations = physical_version_storage_tables(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.schema_version_aliases,
+            &self.catalogue.physical_mappings,
+            &prospective_partitions,
+        )?
+        .into_iter()
+        .filter_map(|table| match self.database.table_schema(&table.name) {
+            Ok(_) => None,
+            Err(GrooveDbError::TableNotFound(_)) => {
+                Some(self.database.prepare_table_registration(table))
+            }
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        let mut batch = self.database.open_batch();
+        for (table_id, branch_id) in &new_partitions {
+            batch.update(
+                "jazz_branch_partitions",
+                vec![Value::U64(table_id.0), Value::Uuid(branch_id.0)],
+            );
+        }
+        let batch = self
+            .database
+            .prepare_batch_storage_inputs_with_table_registrations(&batch, &registrations)?;
+        Ok(PreparedViewUpdateBranchPartitions {
+            registrations,
+            partitions: new_partitions,
+            batch,
+        })
+    }
+
+    /// Publish previously validated sparse branch tables and partition
+    /// markers. No durable reads are permitted in this phase.
+    pub(crate) fn publish_prepared_view_update_branch_partitions(
+        &mut self,
+        prepared: PreparedViewUpdateBranchPartitions,
+    ) -> Result<(), Error> {
+        let PreparedViewUpdateBranchPartitions {
+            registrations,
+            partitions,
+            batch,
+        } = prepared;
+        self.database
+            .commit_prepared_batch_with_table_registrations(registrations, batch)?;
+        self.branches.branch_partitions.extend(partitions);
         Ok(())
     }
 

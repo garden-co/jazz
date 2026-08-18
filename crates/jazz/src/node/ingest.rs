@@ -84,7 +84,7 @@ fn fate_update_durability_claim(fate: &Fate, durability: DurabilityTier) -> Opti
     }
 }
 
-fn commit_unit_write_count_matches(tx: &Transaction, version_count: usize) -> bool {
+pub(super) fn commit_unit_write_count_matches(tx: &Transaction, version_count: usize) -> bool {
     usize::try_from(tx.n_total_writes) == Ok(version_count)
 }
 
