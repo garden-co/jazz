@@ -2813,8 +2813,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn write_many_writes_all_operations_atomically() {
+    #[futures_test::test]
+    async fn write_many_writes_all_operations_atomically() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = TestBtreeStorage::open(
             temp_dir.path().join("groove-test.btree"),
@@ -2823,27 +2823,37 @@ mod tests {
         .unwrap();
 
         storage
-            .write_many(&[
-                WriteOperation::set("records", b"1", b"record"),
-                WriteOperation::set("indices", b"name:record", b"1"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"1", b"record"),
+                OwnedWriteOperation::set("indices", b"name:record", b"1"),
             ])
+            .await
             .unwrap();
 
         assert_eq!(
-            storage.get("records", b"1").unwrap(),
+            storage.get("records".into(), b"1".to_vec()).await.unwrap(),
             Some(b"record".to_vec())
         );
         assert_eq!(
-            storage.get("indices", b"name:record").unwrap(),
+            storage
+                .get("indices".into(), b"name:record".to_vec())
+                .await
+                .unwrap(),
             Some(b"1".to_vec())
         );
     }
 
-    #[test]
-    fn staged_overlay_reads_staged_sets_and_deletes_before_base_storage() {
+    #[futures_test::test]
+    async fn staged_overlay_reads_staged_sets_and_deletes_before_base_storage() {
         let storage = MemoryStorage::new(&["indices"]);
-        storage.set("indices", b"a", b"base-a").unwrap();
-        storage.set("indices", b"b", b"base-b").unwrap();
+        storage
+            .set("indices".into(), b"a".to_vec(), b"base-a".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("indices".into(), b"b".to_vec(), b"base-b".to_vec())
+            .await
+            .unwrap();
         let staged = RefCell::new(StagedWriteState::from(vec![
             OwnedWriteOperation::Set {
                 cf: "indices".to_owned(),
@@ -2863,43 +2873,65 @@ mod tests {
         let overlay = StagedWriteOverlay::new(&storage, &staged);
 
         assert_eq!(
-            overlay.get("indices", b"a").unwrap(),
+            overlay.get("indices".into(), b"a".to_vec()).await.unwrap(),
             Some(b"staged-a".to_vec())
         );
-        assert_eq!(overlay.get("indices", b"b").unwrap(), None);
         assert_eq!(
-            overlay.get("indices", b"c").unwrap(),
+            overlay.get("indices".into(), b"b".to_vec()).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            overlay.get("indices".into(), b"c".to_vec()).await.unwrap(),
             Some(b"staged-c".to_vec())
         );
         assert_eq!(
-            overlay.prefix("indices", b"").unwrap(),
+            overlay.prefix("indices".into(), Vec::new()).await.unwrap(),
             vec![
                 (b"a".to_vec(), b"staged-a".to_vec()),
                 (b"c".to_vec(), b"staged-c".to_vec()),
             ]
         );
         assert_eq!(
-            storage.get("indices", b"a").unwrap(),
+            storage.get("indices".into(), b"a".to_vec()).await.unwrap(),
             Some(b"base-a".to_vec())
         );
     }
 
-    #[test]
-    fn storage_transaction_reads_own_writes_and_commits_atomically() {
+    #[futures_test::test]
+    async fn storage_transaction_reads_own_writes_and_commits_atomically() {
         let storage = MemoryStorage::new(&["records"]);
-        storage.set("records", b"a", b"base-a").unwrap();
-        storage.set("records", b"b", b"base-b").unwrap();
+        storage
+            .set("records".into(), b"a".to_vec(), b"base-a".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"b".to_vec(), b"base-b".to_vec())
+            .await
+            .unwrap();
 
         let txn = storage.begin_txn();
-        txn.set("records", b"a", b"txn-a").unwrap();
-        txn.delete("records", b"b").unwrap();
-        txn.set("records", b"c", b"txn-c").unwrap();
+        txn.set("records".into(), b"a".to_vec(), b"txn-a".to_vec())
+            .await
+            .unwrap();
+        txn.delete("records".into(), b"b".to_vec()).await.unwrap();
+        txn.set("records".into(), b"c".to_vec(), b"txn-c".to_vec())
+            .await
+            .unwrap();
 
-        assert_eq!(txn.get("records", b"a").unwrap(), Some(b"txn-a".to_vec()));
-        assert_eq!(txn.get("records", b"b").unwrap(), None);
-        assert_eq!(txn.get("records", b"c").unwrap(), Some(b"txn-c".to_vec()));
         assert_eq!(
-            txn.prefix("records", b"").unwrap(),
+            txn.get("records".into(), b"a".to_vec()).await.unwrap(),
+            Some(b"txn-a".to_vec())
+        );
+        assert_eq!(
+            txn.get("records".into(), b"b".to_vec()).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            txn.get("records".into(), b"c".to_vec()).await.unwrap(),
+            Some(b"txn-c".to_vec())
+        );
+        assert_eq!(
+            txn.prefix("records".into(), Vec::new()).await.unwrap(),
             vec![
                 (b"a".to_vec(), b"txn-a".to_vec()),
                 (b"c".to_vec(), b"txn-c".to_vec()),
@@ -2907,91 +2939,126 @@ mod tests {
         );
 
         assert_eq!(
-            storage.get("records", b"a").unwrap(),
+            storage.get("records".into(), b"a".to_vec()).await.unwrap(),
             Some(b"base-a".to_vec())
         );
         assert_eq!(
-            storage.get("records", b"b").unwrap(),
+            storage.get("records".into(), b"b".to_vec()).await.unwrap(),
             Some(b"base-b".to_vec())
         );
-        assert_eq!(storage.get("records", b"c").unwrap(), None);
+        assert_eq!(
+            storage.get("records".into(), b"c".to_vec()).await.unwrap(),
+            None
+        );
 
-        txn.commit().unwrap();
+        txn.commit().await.unwrap();
 
         assert_eq!(
-            storage.get("records", b"a").unwrap(),
+            storage.get("records".into(), b"a".to_vec()).await.unwrap(),
             Some(b"txn-a".to_vec())
         );
-        assert_eq!(storage.get("records", b"b").unwrap(), None);
         assert_eq!(
-            storage.get("records", b"c").unwrap(),
+            storage.get("records".into(), b"b".to_vec()).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            storage.get("records".into(), b"c".to_vec()).await.unwrap(),
             Some(b"txn-c".to_vec())
         );
     }
 
-    #[test]
-    fn write_many_fails_without_writing_when_column_family_is_missing() {
+    #[futures_test::test]
+    async fn write_many_fails_without_writing_when_column_family_is_missing() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                 .unwrap();
 
         let error = storage
-            .write_many(&[
-                WriteOperation::set("records", b"1", b"record"),
-                WriteOperation::set("missing", b"2", b"nope"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"1", b"record"),
+                OwnedWriteOperation::set("missing", b"2", b"nope"),
             ])
+            .await
             .unwrap_err();
 
         assert!(matches!(error, Error::ColumnFamilyNotFound(_)));
-        assert_eq!(storage.get("records", b"1").unwrap(), None);
+        assert_eq!(
+            storage.get("records".into(), b"1".to_vec()).await.unwrap(),
+            None
+        );
     }
 
-    #[test]
-    fn write_many_can_mix_sets_and_deletes_atomically() {
+    #[futures_test::test]
+    async fn write_many_can_mix_sets_and_deletes_atomically() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                 .unwrap();
 
-        storage.set("records", b"old", b"value").unwrap();
         storage
-            .write_many(&[
-                WriteOperation::set("records", b"new", b"value"),
-                WriteOperation::delete("records", b"old"),
+            .set("records".into(), b"old".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
+        storage
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"new", b"value"),
+                OwnedWriteOperation::delete("records", b"old"),
             ])
+            .await
             .unwrap();
 
         assert_eq!(
-            storage.get("records", b"new").unwrap(),
+            storage
+                .get("records".into(), b"new".to_vec())
+                .await
+                .unwrap(),
             Some(b"value".to_vec())
         );
-        assert_eq!(storage.get("records", b"old").unwrap(), None);
+        assert_eq!(
+            storage
+                .get("records".into(), b"old".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
     }
 
-    #[test]
-    fn memory_storage_orders_scans_and_errors_on_missing_column_families() {
+    #[futures_test::test]
+    async fn memory_storage_orders_scans_and_errors_on_missing_column_families() {
         let storage = MemoryStorage::new(&["records"]);
-        storage.set("records", b"b", b"two").unwrap();
-        storage.set("records", b"a", b"one").unwrap();
-        storage.set("records", b"aa", b"one-one").unwrap();
-
-        assert!(matches!(
-            storage.get("missing", b"a"),
-            Err(Error::ColumnFamilyNotFound(_))
-        ));
-        assert!(matches!(
-            storage.set("missing", b"a", b"one"),
-            Err(Error::ColumnFamilyNotFound(_))
-        ));
-
-        let mut range = Vec::new();
         storage
-            .scan_range("records", b"a", b"b", &mut |key, value| {
-                range.push((key.to_vec(), value.to_vec()));
-                Ok(())
-            })
+            .set("records".into(), b"b".to_vec(), b"two".to_vec())
+            .await
             .unwrap();
+        storage
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"aa".to_vec(), b"one-one".to_vec())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            storage.get("missing".into(), b"a".to_vec()).await,
+            Err(Error::ColumnFamilyNotFound(_))
+        ));
+        assert!(matches!(
+            storage
+                .set("missing".into(), b"a".to_vec(), b"one".to_vec())
+                .await,
+            Err(Error::ColumnFamilyNotFound(_))
+        ));
+
+        let range = collect_scan(
+            storage
+                .scan_range("records".into(), b"a".to_vec(), b"b".to_vec())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             range,
             vec![
@@ -3000,13 +3067,14 @@ mod tests {
             ]
         );
 
-        let mut prefix = Vec::new();
-        storage
-            .scan_prefix("records", b"a", &mut |key, value| {
-                prefix.push((key.to_vec(), value.to_vec()));
-                Ok(())
-            })
-            .unwrap();
+        let prefix = collect_scan(
+            storage
+                .scan_prefix("records".into(), b"a".to_vec())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             prefix,
             vec![
