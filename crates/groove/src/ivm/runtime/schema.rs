@@ -141,6 +141,23 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        let mut staged = self.clone();
+        staged
+            .register_table_index_staged(table, index, storage)
+            .await?;
+        *self = staged;
+        Ok(())
+    }
+
+    async fn register_table_index_staged<S>(
+        &mut self,
+        table: &str,
+        index: IndexSchema,
+        storage: &S,
+    ) -> Result<(), IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
         let table_position = self
             .schema
             .tables
@@ -698,6 +715,20 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        let mut staged = self.clone();
+        let records = staged.query_snapshot_staged(graph, storage).await?;
+        *self = staged;
+        Ok(records)
+    }
+
+    async fn query_snapshot_staged<S>(
+        &mut self,
+        graph: GraphBuilder,
+        storage: &S,
+    ) -> Result<RecordDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
         self.flush_pending_binding_retractions(storage).await?;
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
@@ -731,11 +762,25 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage).await?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
+        let mut staged = self.clone();
+        let snapshots = staged.query_snapshots_staged(sinks, storage).await?;
+        *self = staged;
+        Ok(snapshots)
+    }
+
+    async fn query_snapshots_staged<S>(
+        &mut self,
+        sinks: Vec<(String, GraphBuilder)>,
+        storage: &S,
+    ) -> Result<MultisinkDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        self.flush_pending_binding_retractions(storage).await?;
         if sinks.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
         }
