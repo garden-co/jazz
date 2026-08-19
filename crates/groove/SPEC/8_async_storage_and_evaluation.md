@@ -59,13 +59,15 @@ must not accidentally make backend transaction lifecycle a new requirement.
 
 ### Migration bridge versus target
 
-The minimal bridge may drive hydration with a boxed executor-local future, but
-it MUST evaluate against private staged operator, arrangement, memo, and node
-metadata. Those staged values are installed only after the complete hydration
-succeeds. Cancellation or a storage error therefore discards all partial IVM
-work. This is a worthwhile intermediate safety property, not the target
-scheduler: it neither discovers independent blocked branches eagerly nor
-shares in-flight requests.
+The minimal bridge owns a queue of hydration roots plus private staged
+operator, arrangement, memo, and node metadata. Multiple roots in one terminal
+installation advance through that one session and share its completed-node
+memo; the staged values are installed only after every root succeeds.
+Cancellation or a storage error therefore discards all partial IVM work. Node
+traversal within each root may temporarily use a boxed executor-local future.
+This is a worthwhile intermediate lifecycle and atomicity property, not the
+target scheduler: it neither discovers independent blocked branches eagerly
+nor shares in-flight requests.
 
 The target remains the explicit owned session below. In particular, a boxed
 recursive future MUST NOT become the durable representation of blocked work or

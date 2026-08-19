@@ -1,6 +1,49 @@
 //! Tick orchestration, hydration, memo eviction, and durable-node evaluation.
 
+use std::collections::VecDeque;
+
 use super::*;
+
+/// First owned slice of the interruptible evaluator design.
+///
+/// The session owns its roots and every mutable value that may change while a
+/// storage future is pending. Node traversal is still the boxed recursive
+/// bridge; moving that traversal into an explicit node work queue is the next,
+/// deliberately separate step.
+struct EvaluationSession {
+    runnable_roots: VecDeque<NodeId>,
+    outputs: HashMap<NodeId, RecordDeltas>,
+    operator_states: HashMap<OperatorStateKey, OperatorState>,
+    arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo_bytes: usize,
+    memo_use_clock: u64,
+    node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+}
+
+impl EvaluationSession {
+    fn hydration(runtime: &IvmRuntime, root: NodeId) -> Self {
+        Self {
+            runnable_roots: VecDeque::from([root]),
+            outputs: HashMap::default(),
+            operator_states: runtime.operator_states.clone(),
+            arrangement_states: runtime.arrangement_states.clone(),
+            eval_memo: runtime.eval_memo.clone(),
+            eval_memo_bytes: runtime.eval_memo_bytes,
+            memo_use_clock: runtime.memo_use_clock,
+            node_meta: runtime.node_meta.clone(),
+        }
+    }
+
+    fn install(self, runtime: &mut IvmRuntime) {
+        runtime.operator_states = self.operator_states;
+        runtime.arrangement_states = self.arrangement_states;
+        runtime.eval_memo = self.eval_memo;
+        runtime.eval_memo_bytes = self.eval_memo_bytes;
+        runtime.memo_use_clock = self.memo_use_clock;
+        runtime.node_meta = self.node_meta;
+    }
+}
 
 impl IvmRuntime {
     pub async fn tick<S>(
@@ -386,73 +429,80 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        let table_deltas =
-            snapshot_table_deltas(&self.schema, &self.graph, storage, output_node).await?;
+        self.hydration_roots([output_node], storage, mode)
+            .await?
+            .remove(&output_node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(output_node))
+    }
+
+    async fn hydration_roots<S>(
+        &mut self,
+        roots: impl IntoIterator<Item = NodeId>,
+        storage: &S,
+        mode: HydrationMode,
+    ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let roots = roots.into_iter().collect::<VecDeque<_>>();
+        let mut table_deltas_by_root = HashMap::default();
+        for root in roots.iter().copied() {
+            let table_deltas =
+                snapshot_table_deltas(&self.schema, &self.graph, storage, root).await?;
+            table_deltas_by_root.insert(root, table_deltas);
+        }
         let binding_snapshots = self.binding_snapshot_deltas();
-        let context = match mode {
-            HydrationMode::Ordinary => EvalContext::root_snapshot(),
-            // Subscription hydration must rebuild arrangements for aggregate
-            // outputs, while ordinary snapshot hydration intentionally only
-            // probes them. Keep that distinction at this policy boundary so
-            // both paths share the same frontier and memo lifecycle.
-            HydrationMode::Subscription if self.output_depends_on_aggregate(output_node)? => {
-                EvalContext::root_subscription_snapshot()
-            }
-            HydrationMode::Subscription => EvalContext::root_snapshot(),
-        };
         let mut metrics = TickMetrics::default();
-        // The recursive async evaluator is a migration bridge, not the durable
-        // representation of interrupted IVM work. Keep every mutation private
-        // across its awaits so cancellation or a storage error cannot leave the
-        // shared runtime partially hydrated. The explicit EvaluationSession in
-        // the spec will eventually replace this clone-and-install boundary.
-        let mut operator_states = self.operator_states.clone();
-        let mut arrangement_states = self.arrangement_states.clone();
-        let mut eval_memo = self.eval_memo.clone();
-        let mut eval_memo_bytes = self.eval_memo_bytes;
-        let mut memo_use_clock = self.memo_use_clock;
-        let mut node_meta = self.node_meta.clone();
-        let mut evaluator = TickEvaluator {
-            schema: &self.schema,
-            graph: &self.graph,
-            variant_projections: &self.variant_projections,
-            table_deltas: &table_deltas,
-            binding_deltas: &[],
-            binding_snapshots: &binding_snapshots,
-            current_tick: self.current_tick,
-            operator_states: &mut operator_states,
-            arrangement_states: &mut arrangement_states,
-            // Snapshot hydration is evaluated at the runtime's current
-            // logical frontier. If a canonical fragment has already been
-            // hydrated at this frontier, reusing its memoized output is an
-            // attach/probe operation, not an accumulation over stale state:
-            // any table or binding change that could invalidate it advances the
-            // input frontier counters stored with each memo entry.
-            eval_memo: &mut eval_memo,
-            eval_memo_bytes: &mut eval_memo_bytes,
-            table_frontiers: &self.table_frontiers,
-            binding_frontiers: &self.binding_frontiers,
-            memo_use_clock: &mut memo_use_clock,
-            node_meta: &mut node_meta,
-            storage: Some(storage),
-            context,
-            metrics: &mut metrics,
-            terminal_deltas: HashMap::default(),
-            root_ordering_windows: HashMap::default(),
-        };
-        let records = evaluator
-            .update_node(output_node)
-            .await
-            .map(|records| records.as_ref().clone())?;
-        self.operator_states = operator_states;
-        self.arrangement_states = arrangement_states;
-        self.eval_memo = eval_memo;
-        self.eval_memo_bytes = eval_memo_bytes;
-        self.memo_use_clock = memo_use_clock;
-        self.node_meta = node_meta;
+        let first_root = roots
+            .front()
+            .copied()
+            .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+        let mut session = EvaluationSession::hydration(self, first_root);
+        session.runnable_roots = roots;
+        while let Some(root) = session.runnable_roots.pop_front() {
+            let context = match mode {
+                HydrationMode::Ordinary => EvalContext::root_snapshot(),
+                HydrationMode::Subscription if self.output_depends_on_aggregate(root)? => {
+                    EvalContext::root_subscription_snapshot()
+                }
+                HydrationMode::Subscription => EvalContext::root_snapshot(),
+            };
+            let table_deltas = table_deltas_by_root
+                .get(&root)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(root))?;
+            let mut evaluator = TickEvaluator {
+                schema: &self.schema,
+                graph: &self.graph,
+                variant_projections: &self.variant_projections,
+                table_deltas,
+                binding_deltas: &[],
+                binding_snapshots: &binding_snapshots,
+                current_tick: self.current_tick,
+                operator_states: &mut session.operator_states,
+                arrangement_states: &mut session.arrangement_states,
+                eval_memo: &mut session.eval_memo,
+                eval_memo_bytes: &mut session.eval_memo_bytes,
+                table_frontiers: &self.table_frontiers,
+                binding_frontiers: &self.binding_frontiers,
+                memo_use_clock: &mut session.memo_use_clock,
+                node_meta: &mut session.node_meta,
+                storage: Some(storage),
+                context,
+                metrics: &mut metrics,
+                terminal_deltas: HashMap::default(),
+                root_ordering_windows: HashMap::default(),
+            };
+            let records = evaluator
+                .update_node(root)
+                .await
+                .map(|records| records.as_ref().clone())?;
+            session.outputs.insert(root, records);
+        }
+        let outputs = std::mem::take(&mut session.outputs);
+        session.install(self);
         self.record_hydration_memo_metrics(&metrics);
         self.evict_eval_memo();
-        Ok(records)
+        Ok(outputs)
     }
 
     pub(super) async fn hydration_snapshots<S>(
@@ -464,13 +514,29 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        let mut seen_roots = HashSet::new();
+        let roots = outputs
+            .values()
+            .flat_map(|output| [output.root_ordering_node, Some(output.node)])
+            .flatten()
+            .filter(|root| seen_roots.insert(*root))
+            .collect::<Vec<_>>();
+        let hydrated = self.hydration_roots(roots, storage, mode).await?;
         let mut sinks = BTreeMap::new();
         for (sink, output) in outputs {
             let ordering = match output.root_ordering_node {
-                Some(node) => Some(self.hydration_snapshot(node, storage, mode).await?),
+                Some(node) => Some(
+                    hydrated
+                        .get(&node)
+                        .cloned()
+                        .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?,
+                ),
                 None => None,
             };
-            let mut records = self.hydration_snapshot(output.node, storage, mode).await?;
+            let mut records = hydrated
+                .get(&output.node)
+                .cloned()
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(output.node))?;
             if !records.descriptor.registry_compatible_with(&output.output) {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
