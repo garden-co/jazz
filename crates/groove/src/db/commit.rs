@@ -95,8 +95,10 @@ impl Database {
     /// # }).unwrap();
     /// ```
     pub async fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
-        let pending_writes = self.pending_writes_from_batch(batch)?;
-        self.commit_pending_writes(pending_writes).await
+        let publication = self.publish_batch(batch).await?;
+        let persistence = publication.persist().await;
+        self.settle_publication(persistence)?;
+        Ok(())
     }
 
     /// Publish resident rows and unblocked terminal deltas before ordered
@@ -148,15 +150,25 @@ impl Database {
         ));
         let publication = PublicationId(self.next_publication_id);
         self.next_publication_id = self.next_publication_id.saturating_add(1);
-        if let Err(error) = self
+        let tick_start = Instant::now();
+        let tick = match self
             .ivm_runtime
             .tick_resident_staged(table_deltas, OwnedStorage::new(storage), publication)
             .await
         {
-            self.poisoned = true;
-            return Err(Error::IvmRuntime(error));
-        }
+            Ok(tick) => tick,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
+        let ivm_tick_time = tick_start.elapsed();
         let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
+        let operations = staged_operations
+            .iter()
+            .map(OwnedWriteOperation::as_write_operation)
+            .collect::<Vec<_>>();
+        let storage_writes = StorageWriteMetrics::from_operations(&operations);
 
         self.resident_writes
             .borrow_mut()
@@ -168,6 +180,9 @@ impl Database {
             storage: Rc::clone(&self.storage),
             operations: staged_operations,
             order: Rc::clone(&self.publication_persistence),
+            ivm_tick_time,
+            storage_writes,
+            tick,
         })
     }
 
@@ -177,6 +192,8 @@ impl Database {
         &mut self,
         persistence: PublicationPersistence,
     ) -> Result<PublicationId, Error> {
+        self.last_tick_metrics = Some(persistence.metrics.tick.clone());
+        self.last_commit_metrics = Some(persistence.metrics.clone());
         if let Err(error) = persistence.result {
             self.poisoned = true;
             return Err(Error::from(error));
@@ -210,103 +227,9 @@ impl Database {
         key: PrimaryKeyValue,
         record: impl Into<RawRecordInput>,
     ) -> Result<(), Error> {
-        let pending = self.pending_write_from_operation(&BatchOperation::UpdateRaw {
-            table: table.to_owned(),
-            key,
-            record: record.into(),
-        })?;
-        self.commit_pending_writes(vec![pending]).await
-    }
-
-    pub(super) async fn commit_pending_writes(
-        &mut self,
-        pending_writes: Vec<PendingTableWrite>,
-    ) -> Result<(), Error> {
-        let descriptors = pending_writes
-            .iter()
-            .map(PendingTableWrite::descriptor)
-            .collect::<Vec<_>>();
-        let stores = pending_writes
-            .iter()
-            .zip(&descriptors)
-            .map(|(write, descriptor)| {
-                let key_descriptor = self
-                    .table(write.table())
-                    .ok()
-                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
-                record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
-            })
-            .collect::<Vec<_>>();
-        let table_deltas =
-            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
-        let mut staged_operations = pending_writes
-            .iter()
-            .map(|write| match write {
-                PendingTableWrite::Set { key, .. } => OwnedWriteOperation::Set {
-                    cf: write.table().to_owned(),
-                    key: key.clone(),
-                    value: write.stored_record().expect("set has a stored record"),
-                },
-                PendingTableWrite::Delete { key, .. } => OwnedWriteOperation::Delete {
-                    cf: write.table().to_owned(),
-                    key: key.clone(),
-                },
-            })
-            .collect::<Vec<_>>();
-        let tick_start = Instant::now();
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        let tick = self
-            .ivm_runtime
-            .tick_staged(table_deltas, &storage, &mut staged_operations)
-            .await
-            .map_err(Error::IvmRuntime)?;
-        let publication = PublicationId(self.next_publication_id);
-        self.next_publication_id = self.next_publication_id.saturating_add(1);
-        self.ivm_runtime
-            .tag_staged_subscription_notifications(publication);
-        let ivm_tick_time = tick_start.elapsed();
-        let operations = staged_operations
-            .iter()
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        let storage_writes = StorageWriteMetrics::from_operations(&operations);
-        let storage_write_count = storage_writes.total.count;
-        let storage_write_bytes = storage_writes.total.bytes;
-        let storage_start = Instant::now();
-        let txn = self.storage.begin_txn();
-        drop(operations);
-        txn.stage_owned_operations(staged_operations);
-        if let Err(error) = txn.commit().await {
-            self.ivm_runtime.discard_staged_subscription_notifications();
-            self.poisoned = true;
-            return Err(Error::from(error));
-        }
-        self.durable_publication_frontier = Some(publication);
-        if self
-            .durable_publication_state
-            .lock()
-            .expect("durable publication state mutex poisoned")
-            .depth
-            == 0
-        {
-            self.ivm_runtime.publish_staged_subscription_notifications();
-        } else {
-            self.durable_publication_state
-                .lock()
-                .expect("durable publication state mutex poisoned")
-                .successful_commits += 1;
-        }
-        let storage_write_time = storage_start.elapsed();
-        self.last_tick_metrics = Some(tick.clone());
-        self.last_commit_metrics = Some(CommitMetrics {
-            storage_write_time,
-            ivm_tick_time,
-            storage_write_count,
-            storage_write_bytes,
-            storage_writes,
-            tick,
-        });
-        Ok(())
+        let mut batch = self.open_batch();
+        batch.update_raw(table, key, record);
+        self.commit_batch(batch).await
     }
 
     pub(super) fn pending_writes_from_batch(
@@ -448,13 +371,7 @@ impl Database {
     }
 
     pub(super) fn ensure_not_poisoned(&self) -> Result<(), Error> {
-        if self.poisoned
-            || self
-                .durable_publication_state
-                .lock()
-                .expect("durable publication state mutex poisoned")
-                .aborted
-        {
+        if self.poisoned {
             Err(Error::DatabasePoisoned)
         } else {
             Ok(())

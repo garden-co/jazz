@@ -57,7 +57,6 @@ impl Database {
             last_commit_metrics: None,
             last_tick_metrics: None,
             storage_read_metrics: Rc::new(RefCell::new(StorageReadMetrics::default())),
-            durable_publication_state: Arc::new(Mutex::new(DurablePublicationState::default())),
             next_publication_id: 1,
             durable_publication_frontier: None,
             resident_publications: BTreeMap::new(),
@@ -75,61 +74,10 @@ impl Database {
         self.durable_publication_frontier
     }
 
-    /// Begin a host transaction whose subscription publication boundary spans
-    /// one or more calls to [`Database::commit_batch`].
-    ///
-    /// Jazz uses this for durable finalization that writes canonical state and
-    /// cleanup/consistency metadata in separate storage batches. Nested scopes
-    /// are supported; only the outermost successful completion publishes.
-    #[doc(hidden)]
-    pub fn begin_durable_publication_scope(&mut self) -> Result<DurablePublicationScope, Error> {
-        self.ensure_not_poisoned()?;
-        let mut state = self
-            .durable_publication_state
-            .lock()
-            .expect("durable publication state mutex poisoned");
-        state.depth = state
-            .depth
-            .checked_add(1)
-            .expect("durable publication scope depth exhausted");
-        drop(state);
-        Ok(DurablePublicationScope {
-            state: Arc::clone(&self.durable_publication_state),
-            resolved: false,
-        })
-    }
-
     /// Reject any host operation after an ambiguous durable finalization.
     #[doc(hidden)]
     pub fn ensure_usable(&self) -> Result<(), Error> {
         self.ensure_not_poisoned()
-    }
-
-    pub(super) fn settle_durable_publication_scopes(&mut self) {
-        let state = self
-            .durable_publication_state
-            .lock()
-            .expect("durable publication state mutex poisoned");
-        let depth = state.depth;
-        let aborted = state.aborted;
-        let successful_commits = state.successful_commits;
-        drop(state);
-        if aborted && successful_commits != 0 {
-            self.ivm_runtime.discard_staged_subscription_notifications();
-            self.poisoned = true;
-        } else if aborted {
-            self.ivm_runtime.discard_staged_subscription_notifications();
-        } else if depth == 0 {
-            self.ivm_runtime.publish_staged_subscription_notifications();
-        }
-        if depth == 0 {
-            let mut state = self
-                .durable_publication_state
-                .lock()
-                .expect("durable publication state mutex poisoned");
-            state.aborted = false;
-            state.successful_commits = 0;
-        }
     }
 
     /// Return approximate live bytes for one backing class/column family when

@@ -473,8 +473,32 @@ where
         &mut self,
         commit: MergeableCommit,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        let made_by = commit.made_by;
+        let permission_subject = commit.permission_subject;
+        let user_metadata_json = commit.user_metadata_json.clone();
         let published = self.commit_mergeable(commit).await?;
-        let unit = self.commit_unit_for(published.tx_id).await?;
+        let tx_id = published.tx_id;
+        let tx = Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by,
+            permission_subject,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json,
+            target_lineage: BranchLineage::Root,
+            branch_merge: None,
+        };
+        let versions = self
+            .cached_tx_versions(tx_id)
+            .expect("newly published mergeable transaction retains its resident versions")
+            .into_iter()
+            .map(|row| self.version_record_from_row(&row))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let unit = SyncMessage::CommitUnit { tx, versions };
         Ok((published, unit))
     }
 

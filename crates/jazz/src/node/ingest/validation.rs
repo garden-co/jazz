@@ -52,7 +52,7 @@ where
     ) -> Result<PublishedTransaction, Error> {
         let tx_id = tx.tx_id;
         let mut batch = self.database.open_batch();
-        self.stage_transaction_and_versions_with_current_indexes(
+        let _ = self.stage_transaction_and_versions_with_current_indexes(
             &mut batch,
             tx,
             versions,
@@ -122,6 +122,7 @@ where
                 Err(error)
             }
         }
+        Ok(())
     }
 
     async fn stage_transaction_and_versions_with_current_indexes(
@@ -337,26 +338,24 @@ where
         } else if matches!(fate, Fate::Pending) {
             self.record_child_edges(tx.tx_id, parent_edges).await;
         }
-        self.cache_tx_versions(tx.tx_id, stored_versions);
-        Ok(())
+        self.cache_tx_versions(tx.tx_id, stored_versions.clone());
+        Ok(stored_versions)
     }
 
     async fn finalize_staged_transaction_ingest(
         &mut self,
         batch: &mut DatabaseBatch,
-        tx_id: TxId,
         fate: Fate,
         global_time: Option<GlobalTime>,
         staged_global_times: &mut Vec<GlobalTime>,
+        staged_versions: &[VersionRow],
     ) -> Result<(), Error> {
-        self.invalidate_tx_version_table_names_cache(tx_id);
         if matches!(fate, Fate::Accepted)
             && let Some(global_time) = global_time
         {
             staged_global_times.push(global_time);
             let advanced_global_times = self.record_applied_global_time(global_time);
-            self.cleanup_fated_ahead_current_for_tx(batch, tx_id)
-                .await?;
+            self.cleanup_fated_ahead_current_for_versions(batch, staged_versions)?;
             if !advanced_global_times.is_empty() {
                 for advanced in advanced_global_times
                     .into_iter()

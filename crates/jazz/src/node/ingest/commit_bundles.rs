@@ -951,7 +951,7 @@ where
                 .ingest_known_transaction(tx, versions, fate, global_time, durability)
                 .await;
         }
-        self.stage_transaction_and_versions_with_current_indexes(
+        let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
             batch,
             tx.clone(),
             versions,
@@ -965,10 +965,10 @@ where
         .await?;
         self.finalize_staged_transaction_ingest(
             batch,
-            tx.tx_id,
             fate,
             global_time,
             staged_global_times,
+            &staged_versions,
         )
         .await
     }
