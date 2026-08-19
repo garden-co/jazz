@@ -36,6 +36,8 @@ pub(super) struct IncrementalEvaluation<'a> {
     table_deltas: Vec<TableDelta>,
     binding_deltas: Vec<BindingDelta>,
     binding_snapshots: HashMap<String, RecordDeltas>,
+    table_frontiers: HashMap<String, u64>,
+    binding_frontiers: HashMap<String, u64>,
     current_tick: u64,
     metrics: TickMetrics,
     retained_roots: Vec<NodeId>,
@@ -50,7 +52,15 @@ pub(super) struct IncrementalEvaluation<'a> {
 }
 
 #[derive(Default)]
-pub(super) struct PendingIncrementalEvaluation(Rc<RefCell<Option<IncrementalEvaluation<'static>>>>);
+struct PendingIncrementalState {
+    evaluations: BTreeMap<u64, IncrementalEvaluation<'static>>,
+    order: VecDeque<u64>,
+    waiters_by_node: HashMap<NodeId, VecDeque<u64>>,
+    next_id: u64,
+}
+
+#[derive(Default)]
+pub(super) struct PendingIncrementalEvaluation(Rc<RefCell<PendingIncrementalState>>);
 
 impl Clone for PendingIncrementalEvaluation {
     fn clone(&self) -> Self {
@@ -62,7 +72,7 @@ impl std::fmt::Debug for PendingIncrementalEvaluation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PendingIncrementalEvaluation")
-            .field("pending", &self.0.borrow().is_some())
+            .field("pending", &self.0.borrow().order.len())
             .finish()
     }
 }
@@ -85,6 +95,8 @@ struct EvaluationWorkQueue {
     storage_dependents: std::collections::BTreeMap<StorageRequestKey, Vec<NodeId>>,
     runnable: VecDeque<NodeId>,
     roots: HashSet<NodeId>,
+    completed_events: Vec<NodeId>,
+    temporal_waiting: HashMap<NodeId, usize>,
 }
 
 impl EvaluationWorkQueue {
@@ -98,6 +110,8 @@ impl EvaluationWorkQueue {
             storage_dependents: std::collections::BTreeMap::new(),
             runnable: VecDeque::new(),
             roots: roots.into_iter().collect(),
+            completed_events: Vec::new(),
+            temporal_waiting: HashMap::default(),
         }
     }
 
@@ -213,6 +227,7 @@ impl EvaluationWorkQueue {
 
     fn complete(&mut self, node: NodeId) {
         self.entries.insert(node, EvaluationEntry::Complete);
+        self.completed_events.push(node);
         let dependents = self.dependents.get(&node).cloned().unwrap_or_default();
         for dependent in dependents {
             let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&dependent) else {
@@ -231,6 +246,62 @@ impl EvaluationWorkQueue {
 
     fn is_complete(&self, node: NodeId) -> bool {
         self.entries.get(&node) == Some(&EvaluationEntry::Complete)
+    }
+
+    fn roots_complete(&self) -> bool {
+        self.roots.iter().all(|node| self.is_complete(*node))
+    }
+
+    fn incomplete_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.entries
+            .iter()
+            .filter_map(|(node, entry)| (*entry != EvaluationEntry::Complete).then_some(*node))
+    }
+
+    fn add_temporal_blockers(&mut self, blockers: &HashMap<NodeId, usize>) {
+        let blocked = self
+            .entries
+            .keys()
+            .filter_map(|node| blockers.get(node).map(|count| (*node, *count)))
+            .collect::<Vec<_>>();
+        for (node, count) in blocked {
+            if count == 0 {
+                continue;
+            }
+            self.temporal_waiting.insert(node, count);
+            match self.entries.get(&node).copied() {
+                Some(EvaluationEntry::Runnable) => {
+                    self.runnable.retain(|candidate| *candidate != node);
+                    self.entries.insert(node, EvaluationEntry::Waiting(count));
+                }
+                Some(EvaluationEntry::Waiting(remaining)) => {
+                    self.entries
+                        .insert(node, EvaluationEntry::Waiting(remaining + count));
+                }
+                Some(EvaluationEntry::Complete) | None => {}
+            }
+        }
+    }
+
+    fn temporal_ready(&mut self, node: NodeId) {
+        let Some(temporal_remaining) = self.temporal_waiting.get_mut(&node) else {
+            return;
+        };
+        *temporal_remaining = temporal_remaining.saturating_sub(1);
+        if *temporal_remaining == 0 {
+            self.temporal_waiting.remove(&node);
+        }
+        let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&node) else {
+            return;
+        };
+        *remaining = remaining.saturating_sub(1);
+        if *remaining == 0 {
+            self.make_runnable(node);
+        }
+    }
+
+    fn drain_completed_events(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.completed_events)
     }
 }
 
@@ -265,8 +336,8 @@ impl IncrementalEvaluation<'_> {
             arrangement_keys_by_input: &mut runtime.arrangement_keys_by_input,
             eval_memo: &mut runtime.eval_memo,
             eval_memo_bytes: &mut runtime.eval_memo_bytes,
-            table_frontiers: &runtime.table_frontiers,
-            binding_frontiers: &runtime.binding_frontiers,
+            table_frontiers: &self.table_frontiers,
+            binding_frontiers: &self.binding_frontiers,
             memo_use_clock: &mut runtime.memo_use_clock,
             node_meta: &mut runtime.node_meta,
             storage: Some(self.storage.as_ref()),
@@ -389,7 +460,7 @@ impl IncrementalEvaluation<'_> {
         self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
         self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
 
-        if self.storage_requests.has_pending() {
+        if self.storage_requests.has_pending() || !self.work_queue.roots_complete() {
             return Poll::Pending;
         }
 
@@ -693,19 +764,39 @@ impl IvmRuntime {
         publication: PublicationId,
     ) -> Result<TickMetrics, IvmRuntimeError> {
         debug_assert!(!self.defer_subscription_notifications);
-        if self.pending_incremental.0.borrow().is_some() {
-            return Err(IvmRuntimeError::EvaluationBlocked);
-        }
+        let temporal_blockers = {
+            let pending = self.pending_incremental.0.borrow();
+            pending
+                .waiters_by_node
+                .keys()
+                .map(|node| (*node, 1))
+                .collect()
+        };
         let mut evaluation = self
             .begin_tick_with_params(table_deltas, Vec::new(), storage, Some(publication))
             .await?;
+        evaluation
+            .work_queue
+            .add_temporal_blockers(&temporal_blockers);
         let progress = std::future::poll_fn(|cx| Poll::Ready(evaluation.poll(self, cx))).await;
+        let metrics = evaluation.metrics.clone();
         match progress {
-            Poll::Ready(Ok(())) => Ok(evaluation.metrics),
+            Poll::Ready(Ok(())) => Ok(metrics),
             Poll::Ready(Err(error)) => Err(error),
             Poll::Pending => {
-                let metrics = evaluation.metrics.clone();
-                *self.pending_incremental.0.borrow_mut() = Some(evaluation);
+                evaluation.work_queue.drain_completed_events();
+                let mut pending = self.pending_incremental.0.borrow_mut();
+                let evaluation_id = pending.next_id;
+                pending.next_id = pending.next_id.saturating_add(1);
+                for node in evaluation.work_queue.incomplete_nodes() {
+                    pending
+                        .waiters_by_node
+                        .entry(node)
+                        .or_default()
+                        .push_back(evaluation_id);
+                }
+                pending.evaluations.insert(evaluation_id, evaluation);
+                pending.order.push_back(evaluation_id);
                 Ok(metrics)
             }
         }
@@ -716,15 +807,54 @@ impl IvmRuntime {
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), IvmRuntimeError>> {
         let slot = Rc::clone(&self.pending_incremental.0);
-        let Some(mut evaluation) = slot.borrow_mut().take() else {
+        let mut state = std::mem::take(&mut *slot.borrow_mut());
+        if state.order.is_empty() {
             return Poll::Ready(Ok(()));
-        };
-        match evaluation.poll(self, cx) {
-            Poll::Pending => {
-                *slot.borrow_mut() = Some(evaluation);
-                Poll::Pending
+        }
+        let mut retained_order = VecDeque::new();
+        while let Some(evaluation_id) = state.order.pop_front() {
+            let mut evaluation = state
+                .evaluations
+                .remove(&evaluation_id)
+                .expect("pending evaluation order references a live session");
+            let progress = evaluation.poll(self, cx);
+            let completed = evaluation.work_queue.drain_completed_events();
+            for node in &completed {
+                let Some(waiters) = state.waiters_by_node.get_mut(node) else {
+                    continue;
+                };
+                debug_assert_eq!(waiters.front(), Some(&evaluation_id));
+                waiters.pop_front();
+                let successor = waiters.front().copied();
+                if waiters.is_empty() {
+                    state.waiters_by_node.remove(node);
+                }
+                if let Some(successor) = successor
+                    && let Some(later) = state.evaluations.get_mut(&successor)
+                {
+                    later.work_queue.temporal_ready(*node);
+                }
             }
-            ready => ready,
+            match progress {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(error)) => {
+                    state.order = retained_order;
+                    *slot.borrow_mut() = state;
+                    return Poll::Ready(Err(error));
+                }
+                Poll::Pending => {
+                    state.evaluations.insert(evaluation_id, evaluation);
+                    retained_order.push_back(evaluation_id);
+                }
+            }
+        }
+        let done = retained_order.is_empty();
+        state.order = retained_order;
+        *slot.borrow_mut() = state;
+        if done {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
         }
     }
 
@@ -771,6 +901,7 @@ impl IvmRuntime {
         storage: OwnedStorage<'a>,
         notification_publication: Option<PublicationId>,
     ) -> Result<TickMetrics, IvmRuntimeError> {
+        self.drive_pending_incremental().await?;
         let mut evaluation = self
             .begin_tick_with_params(
                 table_deltas,
@@ -858,6 +989,8 @@ impl IvmRuntime {
             table_deltas,
             binding_deltas,
             binding_snapshots,
+            table_frontiers: self.table_frontiers.clone(),
+            binding_frontiers: self.binding_frontiers.clone(),
             current_tick,
             metrics,
             retained_roots,

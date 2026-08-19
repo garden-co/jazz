@@ -436,6 +436,68 @@ fn resident_publication_returns_before_independent_recursive_hydration() {
 }
 
 #[test]
+fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
+    let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage)).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+
+    let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(albums.recv().unwrap().is_empty());
+    let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(reach.recv().unwrap().deltas.len(), 3);
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let mut first = database.open_batch();
+    first.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Speak No Evil".into())],
+    );
+    first.delete("edges", PrimaryKeyValue::U64(2));
+    let mut first = Box::pin(database.publish_batch(first));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        first.as_mut().poll(&mut context),
+        Poll::Ready(Ok(_))
+    ));
+    drop(first);
+    assert_eq!(albums.try_recv().unwrap().deltas.len(), 1);
+
+    for id in 2..=33 {
+        let mut later = database.open_batch();
+        later.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("resident-{id}"))],
+        );
+        let mut later = Box::pin(database.publish_batch(later));
+        assert!(matches!(
+            later.as_mut().poll(&mut context),
+            Poll::Ready(Ok(_))
+        ));
+        drop(later);
+        assert_eq!(albums.try_recv().unwrap().deltas.len(), 1);
+    }
+    assert!(reach.try_recv().is_err());
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1,
+        "later resident ticks must not retry the suspended request"
+    );
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    block_on(database.flush()).unwrap();
+    assert_eq!(reach.recv().unwrap().deltas.len(), 2);
+}
+
+#[test]
 fn completed_stateful_branch_is_not_reapplied_while_sibling_is_blocked() {
     let (storage, control) = TestStorage::controlled(&["left_metrics", "right_metrics"]);
     let mut database = block_on(Database::new(two_metrics_schema(), storage)).unwrap();
