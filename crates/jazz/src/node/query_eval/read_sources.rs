@@ -79,12 +79,16 @@ where
                         SourceGap::SchemaProjection,
                     ));
                 }
-                match self.node.settled_binding_view_source_rows(
-                    &request.source.table,
-                    self.read_view.read_schema,
-                    *binding_view,
-                    *rows,
-                ) {
+                match self
+                    .node
+                    .settled_binding_view_source_rows(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        *binding_view,
+                        *rows,
+                    )
+                    .await
+                {
                     Ok(rows) => {
                         let table = self
                             .node
@@ -251,7 +255,9 @@ where
                 );
             }
             let descriptor = current_row_descriptor_with_hidden_source_fields(&table, &metadata);
-            let base = self.projected_historical_source_graph(request, &table, position)?;
+            let base = self
+                .projected_historical_source_graph(request, &table, position)
+                .await?;
             let base = if needs_settle_position {
                 base.project_fields(
                     current_row_fields(&table)
@@ -830,7 +836,7 @@ where
         }))
     }
 
-    pub(crate) fn projected_historical_source_graph(
+    pub(crate) async fn projected_historical_source_graph(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -843,6 +849,7 @@ where
             let rows = self
                 .node
                 .bounded_historical_current_rows(&request.source.table, position)
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
             return inline_current_graph(table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut));
@@ -903,6 +910,7 @@ where
                         row.row_uuid(),
                         base.global_base,
                     )
+                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
                     .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?
             };
