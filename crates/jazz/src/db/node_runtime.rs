@@ -13,7 +13,7 @@ pub struct Node<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) node: Rc<RefCell<NodeState<S>>>,
+    pub(super) node: SharedNodeState<S>,
     pub(super) subscriptions: SubscriptionList,
     pub(super) outbox: Outbox,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
@@ -55,7 +55,7 @@ where
             })
             .collect();
         Self {
-            node: Rc::new(RefCell::new(node)),
+            node: Rc::new(futures::lock::Mutex::new(node)),
             subscriptions: Rc::new(RefCell::new(Vec::new())),
             outbox: Rc::new(RefCell::new(Vec::new())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
@@ -107,7 +107,7 @@ where
     }
 
     /// Borrow the served node.
-    pub fn node(&self) -> Rc<RefCell<NodeState<S>>> {
+    pub fn node(&self) -> SharedNodeState<S> {
         Rc::clone(&self.node)
     }
 
@@ -1027,7 +1027,7 @@ where
 }
 
 fn optimistic_transaction_row_keys_for_query<S>(
-    node: &Rc<RefCell<NodeState<S>>>,
+    node: &SharedNodeState<S>,
     cache: &mut BTreeMap<AuthorId, BTreeSet<(String, RowUuid)>>,
     shape: &ValidatedQuery,
     author: AuthorId,
@@ -1055,7 +1055,7 @@ where
 /// ([`Db::refresh_subscriptions`]) and by inbound sync application
 /// ([`PeerConnection::tick`]).
 pub(super) fn refresh_subscriptions_in<S>(
-    node: &Rc<RefCell<NodeState<S>>>,
+    node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
     active_authority_view_receipts: &ActiveAuthorityViewReceipts,
 ) -> Result<usize, Error>
