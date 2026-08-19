@@ -1670,49 +1670,6 @@ where
                         };
                         if let Some(update) = maintained_update {
                             if terminal_rows {
-                                if !update.terminal_operations.is_empty() {
-                                    let settled = subscription_is_settled(
-                                        &node.borrow(),
-                                        active_authority_view_receipts,
-                                        &shape,
-                                        &binding,
-                                        settled_tier,
-                                        read_view,
-                                        remote_propagate_upstream,
-                                        requires_authority_receipt,
-                                    );
-                                    let state_ref = &mut *state_ref;
-                                    let event = SubscriptionEvent::Delta {
-                                        reset: false,
-                                        publishable: true,
-                                        added: Vec::new(),
-                                        updated: Vec::new(),
-                                        removed: Vec::new(),
-                                        terminal_operations: update.terminal_operations,
-                                        terminal_layout: update.terminal_layout,
-                                        settled,
-                                        tier: snapshot_tier,
-                                    };
-                                    state_ref.settled = settled;
-                                    retained.push(Rc::downgrade(&state));
-                                    if state_ref.sender.unbounded_send(event).is_ok() {
-                                        changed += 1;
-                                    }
-                                    continue;
-                                }
-                                let Some(maintained) = maintained_subscription.as_ref() else {
-                                    return Err(Error::new(
-                                        ErrorCode::Protocol,
-                                        "structured subscription lost its Groove terminal",
-                                    ));
-                                };
-                                let materialized = node
-                                    .borrow_mut()
-                                    .materialize_local_maintained_relation_snapshot_with_occurrences(
-                                        maintained,
-                                    )?;
-                                let snapshot = materialized.snapshot;
-                                let current_root_occurrences = materialized.root_occurrence_ids;
                                 let settled = subscription_is_settled(
                                     &node.borrow(),
                                     active_authority_view_receipts,
@@ -1723,27 +1680,129 @@ where
                                     remote_propagate_upstream,
                                     requires_authority_receipt,
                                 );
+                                let reset_materialized = if matches!(
+                                    update.structured_terminal,
+                                    StructuredTerminalUpdate::ReconcileAuthority
+                                        | StructuredTerminalUpdate::ResetRequired
+                                ) {
+                                    let Some(maintained) = maintained_subscription.as_ref() else {
+                                        return Err(Error::new(
+                                            ErrorCode::Protocol,
+                                            "structured subscription lost its Groove terminal",
+                                        ));
+                                    };
+                                    Some(
+                                        node.borrow_mut()
+                                            .materialize_local_maintained_relation_snapshot_with_occurrences(
+                                                maintained,
+                                            )?,
+                                    )
+                                } else {
+                                    None
+                                };
                                 let state_ref = &mut *state_ref;
-                                let previous_root_occurrences = snapshot_root_occurrences(
-                                    &state_ref.snapshot,
-                                    &state_ref.snapshot_index,
-                                )?;
-                                let event = subscription_terminal_delta_event(
-                                    snapshot_tier,
-                                    settled,
-                                    &state_ref.snapshot,
-                                    &previous_root_occurrences,
-                                    &snapshot,
-                                    &current_root_occurrences,
-                                )?;
-                                state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
-                                state_ref.snapshot_index =
-                                    relation_snapshot_index_with_root_occurrences(
-                                        &state_ref.snapshot,
-                                        &current_root_occurrences,
-                                    )?;
-                                state_ref.snapshot_source =
-                                    SubscriptionSnapshotSource::LocalMaintained;
+                                let event = match update.structured_terminal {
+                                    StructuredTerminalUpdate::Patches { operations, layout } => {
+                                        SubscriptionEvent::Delta {
+                                            reset: false,
+                                            publishable: true,
+                                            added: Vec::new(),
+                                            updated: Vec::new(),
+                                            removed: Vec::new(),
+                                            terminal_operations: operations,
+                                            terminal_layout: Some(layout),
+                                            settled,
+                                            tier: snapshot_tier,
+                                        }
+                                    }
+                                    StructuredTerminalUpdate::Unchanged => {
+                                        SubscriptionEvent::Delta {
+                                            reset: false,
+                                            publishable: true,
+                                            added: Vec::new(),
+                                            updated: Vec::new(),
+                                            removed: Vec::new(),
+                                            terminal_operations: Vec::new(),
+                                            terminal_layout: None,
+                                            settled,
+                                            tier: snapshot_tier,
+                                        }
+                                    }
+                                    StructuredTerminalUpdate::ReconcileAuthority => {
+                                        let materialized = reset_materialized.ok_or_else(|| {
+                                            Error::new(
+                                                ErrorCode::Protocol,
+                                                "structured reconciliation lost its materialized snapshot",
+                                            )
+                                        })?;
+                                        let snapshot = materialized.snapshot;
+                                        let current_root_occurrences =
+                                            materialized.root_occurrence_ids;
+                                        let previous_root_occurrences = snapshot_root_occurrences(
+                                            &state_ref.snapshot,
+                                            &state_ref.snapshot_index,
+                                        )?;
+                                        let event = subscription_terminal_delta_event(
+                                            snapshot_tier,
+                                            settled,
+                                            &state_ref.snapshot,
+                                            &previous_root_occurrences,
+                                            &snapshot,
+                                            &current_root_occurrences,
+                                        )?;
+                                        state_ref.snapshot =
+                                            relation_snapshot_with_delta_slack(&snapshot);
+                                        state_ref.snapshot_index =
+                                            relation_snapshot_index_with_root_occurrences(
+                                                &state_ref.snapshot,
+                                                &current_root_occurrences,
+                                            )?;
+                                        state_ref.snapshot_source =
+                                            SubscriptionSnapshotSource::LocalMaintained;
+                                        event
+                                    }
+                                    StructuredTerminalUpdate::ResetRequired => {
+                                        let materialized = reset_materialized.ok_or_else(|| {
+                                            Error::new(
+                                                ErrorCode::Protocol,
+                                                "structured reset lost its materialized snapshot",
+                                            )
+                                        })?;
+                                        let snapshot = materialized.snapshot;
+                                        let current_root_occurrences =
+                                            materialized.root_occurrence_ids;
+                                        let added = subscription_outputs_with_occurrence_sidecar(
+                                            &snapshot,
+                                            &current_root_occurrences,
+                                        )?;
+                                        state_ref.snapshot =
+                                            relation_snapshot_with_delta_slack(&snapshot);
+                                        state_ref.snapshot_index =
+                                            relation_snapshot_index_with_root_occurrences(
+                                                &state_ref.snapshot,
+                                                &current_root_occurrences,
+                                            )?;
+                                        state_ref.snapshot_source =
+                                            SubscriptionSnapshotSource::LocalMaintained;
+                                        SubscriptionEvent::Delta {
+                                            reset: true,
+                                            publishable: true,
+                                            added,
+                                            updated: Vec::new(),
+                                            removed: Vec::new(),
+                                            terminal_operations: Vec::new(),
+                                            terminal_layout: None,
+                                            settled,
+                                            tier: snapshot_tier,
+                                        }
+                                    }
+                                    StructuredTerminalUpdate::NotStructured => {
+                                        return Err(Error::new(
+                                            ErrorCode::Protocol,
+                                            "terminal subscription produced a non-terminal update",
+                                        ));
+                                    }
+                                };
                                 state_ref.settled = settled;
                                 retained.push(Rc::downgrade(&state));
                                 if state_ref.sender.unbounded_send(event).is_ok() {

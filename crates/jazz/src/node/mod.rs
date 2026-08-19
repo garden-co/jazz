@@ -378,6 +378,7 @@ mod views;
 pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
 pub(crate) use query_eval::{
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
+    StructuredTerminalUpdate,
 };
 pub(crate) use views::MaintainedViewBundleInputs;
 

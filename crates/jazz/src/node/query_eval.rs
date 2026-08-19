@@ -216,6 +216,7 @@ pub(crate) use maintained_views::LocalMaintainedViewSubscriptionFootprint;
 use maintained_views::SubscriptionPreparedPlan;
 pub(crate) use maintained_views::{
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
+    StructuredTerminalUpdate,
 };
 
 impl<S> NodeState<S>

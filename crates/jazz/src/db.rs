@@ -42,7 +42,7 @@ use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
-    RelationEdge, RelationSnapshot, RowProvenance, ViewUpdateParts,
+    RelationEdge, RelationSnapshot, RowProvenance, StructuredTerminalUpdate, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
@@ -2185,9 +2185,21 @@ fn apply_maintained_update_to_snapshot(
         removed: update_removed,
         added_edges: update_added_edges,
         removed_edges: update_removed_edges,
-        terminal_operations,
-        terminal_layout,
+        structured_terminal,
     } = update;
+    let (terminal_operations, terminal_layout) = match structured_terminal {
+        StructuredTerminalUpdate::Patches { operations, layout } => (operations, Some(layout)),
+        StructuredTerminalUpdate::NotStructured | StructuredTerminalUpdate::Unchanged => {
+            (Vec::new(), None)
+        }
+        StructuredTerminalUpdate::ReconcileAuthority | StructuredTerminalUpdate::ResetRequired => {
+            debug_assert!(
+                false,
+                "structured reconciliation must be handled before row-delta application"
+            );
+            (Vec::new(), None)
+        }
+    };
 
     if snapshot.rows.is_empty()
         && snapshot.edges.is_empty()

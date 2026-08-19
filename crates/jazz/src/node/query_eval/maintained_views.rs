@@ -168,8 +168,18 @@ pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
     pub(crate) removed: Vec<OutputOccurrenceId>,
     pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
     pub(crate) removed_edges: Vec<RelationEdge>,
-    pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
-    pub(crate) terminal_layout: Option<crate::db::TerminalRootLayout>,
+    pub(crate) structured_terminal: StructuredTerminalUpdate,
+}
+
+pub(crate) enum StructuredTerminalUpdate {
+    NotStructured,
+    Unchanged,
+    Patches {
+        operations: Vec<groove::ivm::TerminalOperation>,
+        layout: crate::db::TerminalRootLayout,
+    },
+    ReconcileAuthority,
+    ResetRequired,
 }
 
 impl<S> NodeState<S>
@@ -240,8 +250,12 @@ where
             program_facts: BTreeSet::new(),
             root_occurrence_ids: Vec::new(),
         };
-        let _initial_delta =
-            self.apply_local_maintained_view_transitions(&mut local, transitions)?;
+        let _initial_delta = self.apply_local_maintained_view_transitions_inner(
+            &mut local,
+            transitions,
+            true,
+            true,
+        )?;
         let initial =
             self.materialize_local_maintained_relation_snapshot_with_occurrences(&local)?;
         local.root_occurrence_ids = initial.root_occurrence_ids;
@@ -276,7 +290,8 @@ where
         else {
             return Ok(false);
         };
-        let _ = self.apply_local_maintained_view_transitions_inner(local, transitions, false)?;
+        let _ =
+            self.apply_local_maintained_view_transitions_inner(local, transitions, false, false)?;
         Ok(true)
     }
 
@@ -727,7 +742,7 @@ where
         local: &mut LocalMaintainedViewSubscription,
         transitions: super::maintained_subscription_view::ResultTransitions,
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
-        self.apply_local_maintained_view_transitions_inner(local, transitions, true)
+        self.apply_local_maintained_view_transitions_inner(local, transitions, true, false)
     }
 
     fn apply_local_maintained_view_transitions_inner(
@@ -735,15 +750,47 @@ where
         local: &mut LocalMaintainedViewSubscription,
         transitions: super::maintained_subscription_view::ResultTransitions,
         materialize_update: bool,
+        explicit_reset: bool,
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
         let structured_output = !local.result_query.array_subqueries.is_empty();
+        let terminal_rows = structured_output
+            || (local.result_query.select.is_some() && !local.result_query.order_by.is_empty());
         let authoritative_membership_changed = transitions.authoritative_membership_changed;
         let authoritative_member_adds = transitions.authoritative_member_adds;
         let structured_app_row_changes = transitions.structured_app_row_changes.clone();
         let terminal_operations = transitions.terminal_operations.clone();
-        let terminal_layout = (!terminal_operations.is_empty())
-            .then(|| local.terminal_schemas.terminal_root_layout().cloned())
-            .flatten();
+        let observable_terminal_change = !structured_app_row_changes.is_empty()
+            || !transitions.adds.is_empty()
+            || !transitions.removes.is_empty()
+            || !transitions.result_payload_adds.is_empty()
+            || !transitions.result_payload_removes.is_empty();
+        let structured_terminal = if !materialize_update {
+            StructuredTerminalUpdate::NotStructured
+        } else if terminal_rows && explicit_reset {
+            StructuredTerminalUpdate::ResetRequired
+        } else if terminal_rows && authoritative_membership_changed {
+            StructuredTerminalUpdate::ReconcileAuthority
+        } else if !terminal_operations.is_empty() {
+            let layout = local
+                .terminal_schemas
+                .terminal_root_layout()
+                .cloned()
+                .ok_or(Error::InvalidStoredValue(
+                    "structured terminal patches have no root layout",
+                ))?;
+            StructuredTerminalUpdate::Patches {
+                operations: terminal_operations,
+                layout,
+            }
+        } else if terminal_rows && observable_terminal_change {
+            return Err(Error::InvalidStoredValue(
+                "structured terminal changed without emitting patches",
+            ));
+        } else if !terminal_rows {
+            StructuredTerminalUpdate::NotStructured
+        } else {
+            StructuredTerminalUpdate::Unchanged
+        };
         let aggregate_replacements = transitions
             .adds
             .iter()
@@ -882,27 +929,13 @@ where
                 added_edges.push((relation_edge, row));
             }
         }
-        if materialize_update && structured_output {
-            for root in structured_app_row_changes {
-                match local.maintained.structured_app_row(root) {
-                    Some(record) => added.push((
-                        OutputOccurrenceId::single_source(ObjectId::from_uuid(root.0)),
-                        CurrentRow::new(local.result_table.clone(), record),
-                    )),
-                    None => removed.push(OutputOccurrenceId::single_source(ObjectId::from_uuid(
-                        root.0,
-                    ))),
-                }
-            }
-        }
         Ok(LocalMaintainedViewSubscriptionUpdate {
             authoritative_membership_changed,
             added,
             removed,
             added_edges,
             removed_edges,
-            terminal_operations,
-            terminal_layout,
+            structured_terminal,
         })
     }
 }
