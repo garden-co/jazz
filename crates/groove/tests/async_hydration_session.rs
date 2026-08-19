@@ -435,6 +435,8 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
         block_on(database.next_subscription(&failed_reach)),
         Err(DatabaseError::SubscriptionEnded)
     ));
+    let reinstalled = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(reinstalled.recv().unwrap().deltas.len(), 1);
     let persistence = block_on(published.persist());
     database.settle_publication(persistence).unwrap();
 
@@ -442,9 +444,6 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
     later.insert("albums", vec![Value::U64(2), Value::String("JuJu".into())]);
     let later = block_on(database.publish_batch(later)).unwrap();
     assert_eq!(albums.recv().unwrap().deltas.len(), 1);
-
-    let reinstalled = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
-    assert_eq!(reinstalled.recv().unwrap().deltas.len(), 1);
 
     let persistence = block_on(later.persist());
     database.settle_publication(persistence).unwrap();

@@ -153,10 +153,14 @@ where
         ));
         let publication = PublicationId(self.next_publication_id);
         self.next_publication_id = self.next_publication_id.saturating_add(1);
-        self.ivm_runtime
+        if let Err(error) = self
+            .ivm_runtime
             .tick_resident_staged(table_deltas, OwnedStorage::new(storage), publication)
             .await
-            .map_err(Error::IvmRuntime)?;
+        {
+            self.poisoned = true;
+            return Err(Error::IvmRuntime(error));
+        }
         let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
 
         self.resident_writes

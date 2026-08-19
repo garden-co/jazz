@@ -52,8 +52,15 @@ pub(super) struct IncrementalEvaluation<'a> {
 }
 
 struct EvaluationFailure {
+    kind: EvaluationFailureKind,
     affected_nodes: HashSet<NodeId>,
     error: Arc<IvmRuntimeError>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EvaluationFailureKind {
+    Scoped,
+    Fatal,
 }
 
 impl EvaluationFailure {
@@ -65,6 +72,7 @@ impl EvaluationFailure {
 impl From<IvmRuntimeError> for EvaluationFailure {
     fn from(error: IvmRuntimeError) -> Self {
         Self {
+            kind: EvaluationFailureKind::Fatal,
             affected_nodes: HashSet::default(),
             error: Arc::new(error),
         }
@@ -296,6 +304,7 @@ impl EvaluationWorkQueue {
         error: IvmRuntimeError,
     ) -> EvaluationFailure {
         EvaluationFailure {
+            kind: EvaluationFailureKind::Scoped,
             affected_nodes: self.downstream_closure(
                 self.storage_dependents
                     .get(request)
@@ -309,6 +318,7 @@ impl EvaluationWorkQueue {
 
     fn failure_for_node(&self, node: NodeId, error: IvmRuntimeError) -> EvaluationFailure {
         EvaluationFailure {
+            kind: EvaluationFailureKind::Scoped,
             affected_nodes: self.downstream_closure([node]),
             error: Arc::new(error),
         }
@@ -910,7 +920,9 @@ impl IvmRuntime {
             loop {
                 let progress = evaluation.poll(self, cx);
                 match progress {
-                    Poll::Ready(Err(ref failure)) if !failure.affected_nodes.is_empty() => {
+                    Poll::Ready(Err(ref failure))
+                        if failure.kind == EvaluationFailureKind::Scoped =>
+                    {
                         self.fail_evaluation_nodes(failure);
                         evaluation.abandon(&failure.affected_nodes);
                     }
@@ -978,7 +990,7 @@ impl IvmRuntime {
             match progress {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(failure)) => {
-                    if failure.affected_nodes.is_empty() {
+                    if failure.kind == EvaluationFailureKind::Fatal {
                         state.order = retained_order;
                         *slot.borrow_mut() = state;
                         return Poll::Ready(Err(failure.into_error()));
