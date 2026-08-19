@@ -310,8 +310,12 @@ pub fn derive_user_id(seed: &[u8; 32]) -> Uuid {
 /// UUID principals retain their value; other external subjects are mapped
 /// deterministically so clients and servers derive the same identity.
 pub fn author_id_from_principal(principal: &str) -> AuthorId {
-    let uuid = Uuid::parse_str(principal.trim())
-        .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_URL, principal.as_bytes()));
+    let compact = principal.replace('-', "");
+    let uuid = if compact.len() == 32 && compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Uuid::parse_str(&compact).expect("validated UUID hex")
+    } else {
+        Uuid::new_v5(&Uuid::NAMESPACE_URL, principal.as_bytes())
+    };
     AuthorId::from_bytes(*uuid.as_bytes())
 }
 
