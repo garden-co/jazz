@@ -264,20 +264,23 @@ where
     }
 
     /// Calculate and commit an ordinary mergeable write from a branch into root.
-    pub fn merge_back_branch(&mut self, branch_id: BranchId) -> Result<TxId, Error>
+    pub async fn merge_back_branch(
+        &mut self,
+        branch_id: BranchId,
+    ) -> Result<PublishedTransaction, Error>
     where
         S: ReopenableStorage,
     {
-        self.merge_back_branch_as(branch_id, AuthorId::SYSTEM)
+        self.merge_back_branch_as(branch_id, AuthorId::SYSTEM).await
     }
 
     /// Calculate a branch merge under the initiating identity's source-read and
     /// ordinary target-write permissions.
-    pub fn merge_back_branch_as(
+    pub async fn merge_back_branch_as(
         &mut self,
         branch_id: BranchId,
         identity: AuthorId,
-    ) -> Result<TxId, Error>
+    ) -> Result<PublishedTransaction, Error>
     where
         S: ReopenableStorage,
     {
@@ -286,28 +289,30 @@ where
             BranchLineage::Root,
             identity,
         )
+        .await
     }
 
     /// Calculate an ordinary transaction which transfers the source's novel
     /// contributions into the target lineage.
-    pub fn merge_lineage_into(
+    pub async fn merge_lineage_into(
         &mut self,
         source: BranchLineage,
         target: BranchLineage,
-    ) -> Result<TxId, Error>
+    ) -> Result<PublishedTransaction, Error>
     where
         S: ReopenableStorage,
     {
         self.merge_lineage_into_as(source, target, AuthorId::SYSTEM)
+            .await
     }
 
     /// Identity-aware form of [`Self::merge_lineage_into`].
-    pub fn merge_lineage_into_as(
+    pub async fn merge_lineage_into_as(
         &mut self,
         source: BranchLineage,
         target: BranchLineage,
         identity: AuthorId,
-    ) -> Result<TxId, Error>
+    ) -> Result<PublishedTransaction, Error>
     where
         S: ReopenableStorage,
     {
@@ -631,6 +636,7 @@ where
         )
         .map_err(Error::BranchMergeCalculation)?;
         self.commit_merge_transaction(target, branch_merge, versions)
+            .await
     }
 
     /// Branch-scoped exclusives are intentionally not implemented in v1.
@@ -643,52 +649,55 @@ where
     }
 
     /// Commit a mergeable write into a branch overlay partition.
-    pub fn commit_mergeable_on_branch(
+    pub async fn commit_mergeable_on_branch(
         &mut self,
         branch_id: BranchId,
         commit: MergeableCommit,
-    ) -> Result<TxId, Error>
+    ) -> Result<PublishedTransaction, Error>
     where
         S: ReopenableStorage,
     {
         self.commit_mergeable_many_on_branch(branch_id, vec![commit])
+            .await
     }
 
     /// Commit a branch-local write under an admitted authored schema.
-    pub(crate) fn commit_mergeable_on_branch_in_schema(
+    pub(crate) async fn commit_mergeable_on_branch_in_schema(
         &mut self,
         branch_id: BranchId,
         schema_version: SchemaVersionId,
         commit: MergeableCommit,
-    ) -> Result<TxId, Error>
+    ) -> Result<PublishedTransaction, Error>
     where
         S: ReopenableStorage,
     {
         self.commit_mergeable_many_on_branch_in_schema(branch_id, schema_version, vec![commit])
+            .await
     }
 
     /// Commit multiple ordinary mergeable writes atomically into one branch
     /// target. The resulting transaction differs from a root commit only in
     /// its explicit target lineage and the target-relative policy/storage view.
-    pub fn commit_mergeable_many_on_branch(
+    pub async fn commit_mergeable_many_on_branch(
         &mut self,
         branch_id: BranchId,
         commits: Vec<MergeableCommit>,
-    ) -> Result<TxId, Error>
+    ) -> Result<PublishedTransaction, Error>
     where
         S: ReopenableStorage,
     {
         let schema_version = self.catalogue.current_write_schema.schema;
         self.commit_mergeable_many_on_branch_in_schema(branch_id, schema_version, commits)
+            .await
     }
 
     /// Commit branch-local writes atomically under one admitted authored schema.
-    pub(crate) fn commit_mergeable_many_on_branch_in_schema(
+    pub(crate) async fn commit_mergeable_many_on_branch_in_schema(
         &mut self,
         branch_id: BranchId,
         schema_version: SchemaVersionId,
         commits: Vec<MergeableCommit>,
-    ) -> Result<TxId, Error>
+    ) -> Result<PublishedTransaction, Error>
     where
         S: ReopenableStorage,
     {
@@ -734,16 +743,17 @@ where
         }
         let made_at = self.mint_tx_time(commits[0].now_ms);
         self.commit_mergeable_many_on_branch_at(branch_id, schema_version, commits, made_at, None)
+            .await
     }
 
-    fn commit_mergeable_many_on_branch_at(
+    async fn commit_mergeable_many_on_branch_at(
         &mut self,
         branch_id: BranchId,
         write_schema_version: SchemaVersionId,
         commits: Vec<MergeableCommit>,
         made_at: TxTime,
         branch_merge: Option<BranchMergeProvenance>,
-    ) -> Result<TxId, Error>
+    ) -> Result<PublishedTransaction, Error>
     where
         S: ReopenableStorage,
     {
@@ -790,8 +800,10 @@ where
             target_lineage: BranchLineage::Branch(branch_id),
             branch_merge,
         };
-        let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
-        let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
+        let tx_node_alias = self.ensure_node_alias(tx_id.node).await?;
+        let schema_version_alias = self
+            .ensure_schema_version_alias(write_schema_version)
+            .await?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",
@@ -839,9 +851,9 @@ where
                 branch_record,
             );
         }
-        self.database.commit_batch(batch)?;
+        let persistence = self.database.publish_batch(batch).await?;
         self.cache_tx_version_tables(tx_id, transaction_tables);
-        Ok(tx_id)
+        Ok(PublishedTransaction { tx_id, persistence })
     }
 
     /// Read a validated query in a branch view: overlay rows first, then the
@@ -1906,12 +1918,12 @@ where
         }
     }
 
-    fn commit_merge_transaction(
+    async fn commit_merge_transaction(
         &mut self,
         target: BranchLineage,
         branch_merge: BranchMergeProvenance,
         commits: Vec<MergeableCommit>,
-    ) -> Result<TxId, Error>
+    ) -> Result<PublishedTransaction, Error>
     where
         S: ReopenableStorage,
     {
@@ -1923,6 +1935,7 @@ where
                     made_at,
                     Some(branch_merge),
                 )
+                .await
             }
             BranchLineage::Branch(branch_id) => {
                 let write_schema_version = self.catalogue.current_write_schema.schema;
@@ -1941,6 +1954,7 @@ where
                     made_at,
                     Some(branch_merge),
                 )
+                .await
             }
         }
     }
