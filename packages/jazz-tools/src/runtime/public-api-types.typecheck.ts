@@ -8,6 +8,11 @@ import type {
   InsertOptions as RuntimeInsertOptions,
 } from "./index.js";
 
+// @ts-expect-error CreateOptions was renamed to InsertOptions.
+import type { CreateOptions as PackageCreateOptions } from "../index.js";
+// @ts-expect-error CreateOptions was renamed to InsertOptions.
+import type { CreateOptions as RuntimeCreateOptions } from "./index.js";
+
 const packageInsertOptions: PackageInsertOptions = { id: "row-1", updatedAt: 1 };
 const runtimeInsertOptions: RuntimeInsertOptions = { id: "row-1", updatedAt: 1 };
 const session: Session = { user_id: "user", claims: {}, authMode: "external" };
@@ -57,3 +62,5 @@ void optionalJwt;
 void localFirstWithJwt;
 void localFirstWithCookie;
 void jwtWithCookie;
+void (null as unknown as PackageCreateOptions);
+void (null as unknown as RuntimeCreateOptions);

@@ -31,6 +31,17 @@ describe("DbConfig auth validation", () => {
     await expect(createDb(config)).rejects.toThrow("mutually exclusive");
   });
 
+  it("rejects setting both secret and cookieSession from untyped callers", async () => {
+    const { createDb } = await import("./db.js");
+    const config = {
+      appId: "test-app",
+      secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      cookieSession,
+    } as unknown as DbConfig;
+
+    await expect(createDb(config)).rejects.toThrow("mutually exclusive");
+  });
+
   it("accepts flat secret field", async () => {
     const { createDb } = await import("./db.js");
     const db = await createDb({
