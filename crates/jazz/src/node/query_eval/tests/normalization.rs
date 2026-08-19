@@ -59,6 +59,50 @@ fn predicate_params_collects_every_operand_position_and_operator() {
     );
 }
 
+/// A declared `id` remains a user field in order and aggregate lowering;
+/// the physical row UUID is retained only for tables that do not declare it.
+#[test]
+fn declared_id_order_and_aggregate_lower_as_source_fields() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "things",
+        [
+            ColumnSchema::new("id", ColumnType::Uuid),
+            ColumnSchema::new("label", ColumnType::String),
+        ],
+    )]);
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([7; 16]), schema.clone());
+    let source = root_source_id("things");
+
+    let ordered = Query::from("things")
+        .order_by("id", OrderDirection::Asc)
+        .validate(&schema)
+        .unwrap();
+    let ordered = node
+        .normalized_row_set_shape(&ordered, &ordered.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+    assert!(matches!(
+        ordered.nodes.get(&RowSetNodeId("order".to_owned())),
+        Some(RowSetExpr::OrderBy { keys, .. })
+            if matches!(keys.as_slice(), [NormalizedOrderKey { value: NormalizedValueRef::SourceField { source: key_source, field }, .. }]
+                if key_source == &source && field == "id")
+    ));
+
+    let grouped = Query::from("things")
+        .count()
+        .group_by("id")
+        .validate(&schema)
+        .unwrap();
+    let grouped = node
+        .normalized_row_set_shape(&grouped, &grouped.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+    assert!(matches!(
+        grouped.nodes.get(&RowSetNodeId("aggregate".to_owned())),
+        Some(RowSetExpr::Aggregate { group_by, .. })
+            if matches!(group_by.as_slice(), [NormalizedValueRef::SourceField { source: key_source, field }]
+                if key_source == &source && field == "id")
+    ));
+}
+
 #[test]
 fn join_read_tables_include_source_lookups_and_nested_joins() {
     let nested = crate::query::JoinVia {

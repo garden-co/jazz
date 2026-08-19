@@ -390,9 +390,7 @@ fn validate_join(
                 });
             }
         }
-        if lookup.value_column != "id" {
-            planner_column_type(&lookup_table, &lookup.value_column)?;
-        }
+        planner_column_type(&lookup_table, &lookup.value_column)?;
         if join.source_column.as_deref() != Some(lookup.value_column.as_str()) {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: lookup.table.clone(),
@@ -581,6 +579,10 @@ fn planner_column_type<'a>(
     Ok(&column_schema(table, column)?.column_type)
 }
 
+fn has_declared_id(table: &TableSchema) -> bool {
+    table.columns.iter().any(|column| column.name == "id")
+}
+
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
     if is_permission_introspection_magic_column(column) {
         return Err(QueryError::UnsupportedMagicColumn {
@@ -678,7 +680,7 @@ fn validate_reachable(
     let access = table(schema, &reachable.access_table)?;
     planner_column_type(&access, &reachable.access_row_column)?;
     planner_column_type(&access, &reachable.access_team_column)?;
-    if reachable.access_row_column == "id" {
+    if reachable.access_row_column == "id" && !has_declared_id(&access) {
         if access.name != root.name {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: reachable.access_table.clone(),
@@ -731,7 +733,7 @@ fn validate_reachable(
     let edge = table(schema, &reachable.edge_table)?;
     for column in [&reachable.edge_member_column, &reachable.edge_parent_column] {
         planner_column_type(&edge, column)?;
-        if *column == "id" && edge.name == *team_table {
+        if *column == "id" && !has_declared_id(&edge) && edge.name == *team_table {
             continue;
         }
         match edge.references.get(column) {
@@ -751,7 +753,7 @@ fn validate_reachable(
         if let Some(user_column) = &seed.user_column {
             planner_column_type(&seed_table, user_column)?;
         }
-        let seed_projects_team = if seed.team_column == "id" {
+        let seed_projects_team = if seed.team_column == "id" && !has_declared_id(&seed_table) {
             seed_table.name == *team_table
         } else {
             matches!(

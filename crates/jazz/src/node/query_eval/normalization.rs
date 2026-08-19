@@ -790,11 +790,16 @@ fn provenance_field(column: &str) -> Option<ProvenanceField> {
 }
 
 fn normalize_order_key(
+    schema: &JazzSchema,
     source: &SourceId,
     order: &crate::query::OrderBy,
 ) -> Result<NormalizedOrderKey, Error> {
     Ok(NormalizedOrderKey {
-        value: normalize_operand(source, &Operand::Column(order.column.clone()))?,
+        value: normalize_operand_for_schema(
+            schema,
+            source,
+            &Operand::Column(order.column.clone()),
+        )?,
         direction: match order.direction {
             OrderDirection::Asc => NormalizedSortDirection::Asc,
             OrderDirection::Desc => NormalizedSortDirection::Desc,
@@ -803,17 +808,21 @@ fn normalize_order_key(
 }
 
 fn normalized_aggregate_group_by(
+    schema: &JazzSchema,
     source: &SourceId,
     aggregate: &AggregateQuery,
 ) -> Result<Vec<NormalizedValueRef>, Error> {
     aggregate
         .group_by
         .iter()
-        .map(|column| normalize_operand(source, &Operand::Column(column.clone())))
+        .map(|column| {
+            normalize_operand_for_schema(schema, source, &Operand::Column(column.clone()))
+        })
         .collect()
 }
 
 fn normalized_aggregate_outputs(
+    schema: &JazzSchema,
     source: &SourceId,
     aggregate: &AggregateQuery,
 ) -> Result<Vec<NormalizedAggregateExpr>, Error> {
@@ -830,7 +839,13 @@ fn normalized_aggregate_outputs(
                 input: aggregate
                     .column
                     .as_ref()
-                    .map(|column| normalize_operand(source, &Operand::Column(column.clone())))
+                    .map(|column| {
+                        normalize_operand_for_schema(
+                            schema,
+                            source,
+                            &Operand::Column(column.clone()),
+                        )
+                    })
                     .transpose()?,
             })
         })
@@ -1026,7 +1041,7 @@ fn normalize_array_subquery(
                 keys: subquery
                     .order_by
                     .iter()
-                    .map(|order| normalize_order_key(&child_source, order))
+                    .map(|order| normalize_order_key(schema, &child_source, order))
                     .collect::<Result<Vec<_>, Error>>()
                     .map_err(|err| normalization_gap(err.to_string()))?,
             },
@@ -1040,10 +1055,12 @@ fn normalize_array_subquery(
             slice_node.clone(),
             RowSetExpr::Slice {
                 input: child_current,
-                partition_by: vec![NormalizedValueRef::SourceField {
-                    source: child_source.clone(),
-                    field: subquery.inner_column.clone(),
-                }],
+                partition_by: vec![source_column_value(
+                    schema,
+                    &child_source,
+                    &subquery.inner_column,
+                    JoinTarget::Column,
+                )],
                 limit: subquery
                     .limit
                     .map(|limit| limit.min(u32::MAX as usize) as u32),
@@ -1074,7 +1091,8 @@ fn normalize_array_subquery(
                     field: subquery.inner_column.clone(),
                 },
                 op: NormalizedComparisonOp::Eq,
-                right: normalize_operand(
+                right: normalize_operand_for_schema(
+                    schema,
                     owner_source,
                     &Operand::Column(subquery.outer_column.clone()),
                 )
@@ -1167,14 +1185,12 @@ fn normalize_reachable(
                     field: "reachable_team".to_owned(),
                 },
                 op: NormalizedComparisonOp::Eq,
-                right: if reachable.edge_member_column == "id" {
-                    NormalizedValueRef::RowId(RowIdRef::Source(edge_source.clone()))
-                } else {
-                    NormalizedValueRef::SourceField {
-                        source: edge_source.clone(),
-                        field: reachable.edge_member_column.clone(),
-                    }
-                },
+                right: source_column_value(
+                    schema,
+                    &edge_source,
+                    &reachable.edge_member_column,
+                    JoinTarget::Column,
+                ),
             },
         },
     );
@@ -1262,6 +1278,7 @@ fn normalize_reachable(
             mode: NormalizedJoinMode::Inner,
             on: NormalizedPredicateExpr::Compare {
                 left: reachable_access_key(
+                    schema,
                     &access_source,
                     &reachable.access_team_column,
                     reachable.access_team_target,
@@ -1283,9 +1300,10 @@ fn normalize_reachable(
             right: access_join_node.clone(),
             mode: NormalizedJoinMode::Inner,
             on: NormalizedPredicateExpr::Compare {
-                left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+                left: source_column_value(schema, root_source, "id", JoinTarget::Column),
                 op: NormalizedComparisonOp::Eq,
                 right: reachable_access_key(
+                    schema,
                     &access_source,
                     &reachable.access_row_column,
                     JoinTarget::Column,
@@ -1304,19 +1322,29 @@ fn normalize_reachable(
     ))
 }
 
+fn source_column_value(
+    schema: &JazzSchema,
+    source: &SourceId,
+    column: &str,
+    target: JoinTarget,
+) -> NormalizedValueRef {
+    if target == JoinTarget::RowId || (column == "id" && !source_has_declared_id(schema, source)) {
+        NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
+    } else {
+        NormalizedValueRef::SourceField {
+            source: source.clone(),
+            field: column.to_owned(),
+        }
+    }
+}
+
 fn reachable_access_key(
+    schema: &JazzSchema,
     access_source: &SourceId,
     column: &str,
     target: JoinTarget,
 ) -> NormalizedValueRef {
-    if column == "id" || target == JoinTarget::RowId {
-        NormalizedValueRef::RowId(RowIdRef::Source(access_source.clone()))
-    } else {
-        NormalizedValueRef::SourceField {
-            source: access_source.clone(),
-            field: column.to_owned(),
-        }
-    }
+    source_column_value(schema, access_source, column, target)
 }
 
 fn normalize_join_via_right(
@@ -1371,14 +1399,12 @@ fn normalize_join_via_right(
                 on: NormalizedPredicateExpr::Compare {
                     left: join_via_target_key(&join_source, join),
                     op: NormalizedComparisonOp::Eq,
-                    right: if lookup.value_column == "id" {
-                        NormalizedValueRef::RowId(RowIdRef::Source(lookup_source.clone()))
-                    } else {
-                        NormalizedValueRef::SourceField {
-                            source: lookup_source.clone(),
-                            field: lookup.value_column.clone(),
-                        }
-                    },
+                    right: source_column_value(
+                        schema,
+                        &lookup_source,
+                        &lookup.value_column,
+                        JoinTarget::Column,
+                    ),
                 },
             },
         );
@@ -1517,14 +1543,8 @@ fn normalize_reachable_seed(
             seed_current = seed_filter_node;
         }
         let seed_project_node = RowSetNodeId(format!("{reachable_id}:seed_project"));
-        let seed_team_value = if seed.team_column == "id" {
-            NormalizedValueRef::RowId(RowIdRef::Source(seed_source.clone()))
-        } else {
-            NormalizedValueRef::SourceField {
-                source: seed_source.clone(),
-                field: seed.team_column.clone(),
-            }
-        };
+        let seed_team_value =
+            source_column_value(schema, &seed_source, &seed.team_column, JoinTarget::Column);
         let mut seed_columns = vec![
             RowProjection {
                 output: typed_output_field("team", ColumnType::Uuid),
@@ -1607,14 +1627,7 @@ fn reachable_seed_frontier_columns(
             seed.table, seed.team_column, team_column_ty
         )));
     }
-    let value = if seed.team_column == "id" {
-        NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
-    } else {
-        NormalizedValueRef::SourceField {
-            source: source.clone(),
-            field: seed.team_column.clone(),
-        }
-    };
+    let value = source_column_value(schema, source, &seed.team_column, JoinTarget::Column);
     let mut columns = vec![
         ValueSourceColumn {
             name: "team".to_owned(),
@@ -2675,13 +2688,10 @@ where
                     let source = sources.get(scope).ok_or_else(|| {
                         Error::QueryCapability(format!("unknown flat join source {scope}"))
                     })?;
-                    Ok(if column == "id" || column == "_id" {
+                    Ok(if column == "_id" {
                         NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
                     } else {
-                        NormalizedValueRef::SourceField {
-                            source: source.clone(),
-                            field: column.to_owned(),
-                        }
+                        source_column_value(schema, source, column, JoinTarget::Column)
                     })
                 };
                 let (_, right_column) = join.on.right.rsplit_once('.').ok_or_else(|| {
@@ -2700,13 +2710,15 @@ where
                         on: NormalizedPredicateExpr::Compare {
                             left: value_ref(&join.on.left)?,
                             op: NormalizedComparisonOp::Eq,
-                            right: if right_column == "id" || right_column == "_id" {
+                            right: if right_column == "_id" {
                                 NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
                             } else {
-                                NormalizedValueRef::SourceField {
-                                    source: source.clone(),
-                                    field: right_column.to_owned(),
-                                }
+                                source_column_value(
+                                    schema,
+                                    &source,
+                                    right_column,
+                                    JoinTarget::Column,
+                                )
                             },
                         },
                     },
@@ -2802,7 +2814,7 @@ where
                     keys: query
                         .order_by
                         .iter()
-                        .map(|order| normalize_order_key(&root_source, order))
+                        .map(|order| normalize_order_key(schema, &root_source, order))
                         .collect::<Result<Vec<_>, Error>>()?,
                 },
             );
@@ -2844,8 +2856,8 @@ where
                 aggregate_node.clone(),
                 RowSetExpr::Aggregate {
                     input: current,
-                    group_by: normalized_aggregate_group_by(&root_source, aggregate)?,
-                    outputs: normalized_aggregate_outputs(&root_source, aggregate)?,
+                    group_by: normalized_aggregate_group_by(schema, &root_source, aggregate)?,
+                    outputs: normalized_aggregate_outputs(schema, &root_source, aggregate)?,
                 },
             );
             current = aggregate_node;
