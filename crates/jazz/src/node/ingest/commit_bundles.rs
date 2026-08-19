@@ -212,7 +212,9 @@ where
             },
             &records,
             None,
-        )? {
+        )
+        .await?
+        {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
@@ -652,7 +654,10 @@ where
                 durability: None,
             }]));
         }
-        if !self.commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)? {
+        if !self
+            .commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)
+            .await?
+        {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -834,7 +839,10 @@ where
                 durability: None,
             }]));
         }
-        if !self.commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)? {
+        if !self
+            .commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)
+            .await?
+        {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             let mut updates = vec![SyncMessage::FateUpdate {
