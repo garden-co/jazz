@@ -244,7 +244,7 @@ fn failed_multi_row_local_commit_is_not_partially_durable_or_published() {
     storage.fail_nth_following_write_many(1);
 
     let error = writer
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", row(0xd1), 10).cells(title_cells("first")),
             MergeableCommit::new("todos", row(0xd2), 10).cells(title_cells("second")),
         ])
@@ -280,7 +280,7 @@ fn failed_multi_row_local_commit_is_not_partially_durable_or_published() {
 fn authority_storage_failure_returns_no_fate_ack_or_partial_transaction() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0xd3), 10).cells(title_cells("authority")),
         )
         .unwrap();
@@ -291,7 +291,7 @@ fn authority_storage_failure_returns_no_fate_ack_or_partial_transaction() {
         panic!("local write must produce a commit unit")
     };
     let error = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .expect_err("authority must not acknowledge a unit whose persistence failed");
     assert!(
         matches!(error, Error::Groove(groove::db::Error::Storage(_))),
@@ -536,7 +536,7 @@ fn derived_merge_failure_after_source_durability_does_not_reuse_global_time() {
 fn restart_after_finalization_boundary_failure_recovers_one_coherent_transaction() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0xd4), 10).cells(title_cells("recovered")),
         )
         .unwrap();
@@ -551,7 +551,7 @@ fn restart_after_finalization_boundary_failure_recovers_one_coherent_transaction
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("local write must produce a commit unit")
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .expect_err("interrupted finalization must not acknowledge the unit");
     assert!(
         matches!(history.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
@@ -587,7 +587,7 @@ fn restart_after_finalization_boundary_failure_recovers_one_coherent_transaction
 fn marker_failure_publishes_no_history_or_fate_and_reopens_coherently() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0xd6), 10).cells(title_cells("marker recovery")),
         )
         .unwrap();
@@ -599,7 +599,7 @@ fn marker_failure_publishes_no_history_or_fate_and_reopens_coherently() {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("local write must produce a commit unit")
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .expect_err("failed consistency marker must not acknowledge the unit");
     assert!(
         matches!(
@@ -636,7 +636,7 @@ fn marker_failure_publishes_no_history_or_fate_and_reopens_coherently() {
 fn successful_authority_finalization_publishes_after_every_storage_batch() {
     let (mut writer, _) = fail_write_many_node();
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0xd5), 10).cells(title_cells("published")),
         )
         .unwrap();
@@ -649,7 +649,7 @@ fn successful_authority_finalization_publishes_after_every_storage_batch() {
         panic!("local write must produce a commit unit")
     };
     let updates = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
     assert_eq!(
@@ -686,7 +686,7 @@ fn successful_authority_finalization_publishes_after_every_storage_batch() {
 fn nested_inner_failure_makes_outer_finish_safe_and_publishes_nothing() {
     let (mut writer, _) = fail_write_many_node();
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0xd7), 10).cells(title_cells("nested failure")),
         )
         .unwrap();
@@ -699,7 +699,7 @@ fn nested_inner_failure_makes_outer_finish_safe_and_publishes_nothing() {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("local write must produce a commit unit")
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .expect_err("inner finalization failure must abort the nested publication unit");
 
     outer.finish(&mut core.database);
@@ -715,7 +715,7 @@ fn nested_inner_failure_makes_outer_finish_safe_and_publishes_nothing() {
 fn nested_success_publishes_exactly_once_at_outer_finish() {
     let (mut writer, _) = fail_write_many_node();
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0xd8), 10).cells(title_cells("nested success")),
         )
         .unwrap();
@@ -728,7 +728,7 @@ fn nested_success_publishes_exactly_once_at_outer_finish() {
         panic!("local write must produce a commit unit")
     };
     let updates = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     assert!(matches!(
         updates.as_slice(),

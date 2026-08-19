@@ -17,7 +17,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
     );
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), base.clone());
-    node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
@@ -39,7 +39,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
         )),
     })
     .unwrap();
-    node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -132,7 +132,7 @@ fn historical_cut_bounded_source_matches_full_scan_graph() {
         2,
     );
     let delete_tx = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("docs", first, 1_002).deletion(DeletionEvent::Deleted),
         )
         .expect("commit delete");
@@ -251,7 +251,7 @@ fn denormalized_current_content_witness_matches_history_payload_bytes() {
         1,
     );
     let second = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("issues", row(11), 1_100)
                 .made_by(AuthorId::SYSTEM)
                 .parents(vec![first])

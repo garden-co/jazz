@@ -4,7 +4,9 @@
 //! model comparisons use [`crate::oracle`].
 
 use super::*;
-use crate::legacy_test_future::{OptionFutureExt as _, ResultFutureExt as _};
+use crate::legacy_test_future::{
+    OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+};
 use crate::oracle::{ModelRowVersion, Oracle, OracleTxState, ParallelMaterializationOracle};
 use crate::peer::{PeerEvictionPins, PeerMetrics, PeerState};
 use crate::protocol::{

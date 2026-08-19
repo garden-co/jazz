@@ -14,7 +14,7 @@ fn view_updates_drop_unknown_usage_site_bindings() {
     // in-flight traffic by design, so unknown per-subscription packets are
     // benign drops, not protocol corruption.
     reader
-        .apply_sync_message(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate {
             subscription: unknown_usage_site,
             settled_through: GlobalTime(0),
             reset_result_set: false,
@@ -86,12 +86,12 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
     let mut peer = PeerState::new();
 
     let (lost_a, _lost_a_unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(1), 10).cells(title_cells("lost-a")),
         )
         .unwrap();
     let (lost_b, _lost_b_unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(2), 11).cells(title_cells("lost-b")),
         )
         .unwrap();
@@ -112,7 +112,7 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
     );
 
     let empty_update = peer.current_rows_update(&mut core, "todos").unwrap();
-    reader.apply_sync_message(empty_update).unwrap();
+    reader.apply_sync_message_settled(empty_update).unwrap();
     assert!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -128,15 +128,15 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
 
     let (_replacement_dir, mut replacement) = open_node_with_schema(node(2), schema);
     let (kept, kept_unit) = replacement
-        .commit_mergeable_unit(MergeableCommit::new("todos", row(3), 12).cells(title_cells("kept")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row(3), 12).cells(title_cells("kept")))
         .unwrap();
-    let fates = core.apply_sync_message(kept_unit).unwrap();
+    let fates = core.apply_sync_message_settled(kept_unit).unwrap();
     assert_eq!(fates.len(), 1);
     replacement
-        .apply_sync_message(fates.into_iter().next().unwrap())
+        .apply_sync_message_settled(fates.into_iter().next().unwrap())
         .unwrap();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
 
     for lost in [lost_a, lost_b] {
         assert!(core.transaction_state(lost).is_none());
@@ -163,23 +163,23 @@ fn accepted_fates_maintain_global_current_tables() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let row = row(7);
     let (first, first_message) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(title_cells("first")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("first")))
         .unwrap();
     let (second, second_message) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 11)
                 .parents(vec![first])
                 .cells(title_cells("second")),
         )
         .unwrap();
 
-    core.apply_sync_message(first_message).unwrap();
+    core.apply_sync_message_settled(first_message).unwrap();
     assert_eq!(
         global_winner_tx(&mut core, "todos", row, VersionLayer::Content),
         Some(first)
     );
 
-    core.apply_sync_message(second_message).unwrap();
+    core.apply_sync_message_settled(second_message).unwrap();
     assert_eq!(
         global_winner_tx(&mut core, "todos", row, VersionLayer::Content),
         Some(second)
@@ -196,7 +196,7 @@ fn reopened_core_continues_sync_after_restart() {
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
 
     let first_unit = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(1), 10).cells(title_cells("before")),
         )
         .unwrap()
@@ -204,22 +204,22 @@ fn reopened_core_continues_sync_after_restart() {
     {
         let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
         let mut core = NodeState::new(node(9), schema.clone(), storage).unwrap();
-        core.apply_sync_message(first_unit).unwrap();
+        core.apply_sync_message_settled(first_unit).unwrap();
     }
 
     let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
     let mut reopened_core = NodeState::new(node(9), schema, storage).unwrap();
     let second_unit = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(2), 11).cells(title_cells("after")),
         )
         .unwrap()
         .1;
-    reopened_core.apply_sync_message(second_unit).unwrap();
+    reopened_core.apply_sync_message_settled(second_unit).unwrap();
     let update = peer
         .current_rows_update(&mut reopened_core, "todos")
         .unwrap();
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
 
     assert_eq!(
         reader
@@ -240,7 +240,7 @@ fn originating_causality_rejection_retains_child_payload() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
     let parent = TxId::new(TxTime::from(200), node(2));
-    core.ingest_commit_unit(
+    core.ingest_commit_unit_settled(
         Transaction {
             tx_id: parent,
             kind: TxKind::Mergeable,
@@ -272,7 +272,7 @@ fn originating_causality_rejection_retains_child_payload() {
     };
     assert!(tx.tx_id.time < parent.time);
     let [fate] = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap()
         .try_into()
         .unwrap();
@@ -286,7 +286,7 @@ fn originating_causality_rejection_retains_child_payload() {
         }
     );
     assert!(core.rejected_transaction(child).is_none());
-    writer.apply_sync_message(fate).unwrap();
+    writer.apply_sync_message_settled(fate).unwrap();
     let stored = writer.rejected_transaction(child).unwrap();
     assert_eq!(stored.reason(), RejectionReason::CausalityViolation);
     assert_eq!(stored.versions().len(), 1);
@@ -309,7 +309,7 @@ fn originating_cascade_rejection_retains_root_cause() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
     let (root, root_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, SKEW_TOLERANCE_MS + 1).cells(title_cells("root")),
         )
         .unwrap();
@@ -317,21 +317,21 @@ fn originating_cascade_rejection_retains_root_cause() {
         panic!("expected commit unit");
     };
     let [root_fate] = core
-        .ingest_commit_unit(tx, versions, 0)
+        .ingest_commit_unit_settled(tx, versions, 0)
         .unwrap()
         .try_into()
         .unwrap();
-    writer.apply_sync_message(root_fate).unwrap();
+    writer.apply_sync_message_settled(root_fate).unwrap();
 
     let (child, child_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, SKEW_TOLERANCE_MS + 2)
                 .parents(vec![root])
                 .cells(title_cells("child")),
         )
         .unwrap();
     let [child_fate] = core
-        .apply_sync_message(child_unit)
+        .apply_sync_message_settled(child_unit)
         .unwrap()
         .try_into()
         .unwrap();
@@ -344,7 +344,7 @@ fn originating_cascade_rejection_retains_root_cause() {
             durability: None,
         }
     );
-    writer.apply_sync_message(child_fate).unwrap();
+    writer.apply_sync_message_settled(child_fate).unwrap();
     let stored = writer.rejected_transaction(child).unwrap();
     assert_eq!(stored.reason(), RejectionReason::Cascade { root });
     assert_eq!(stored.cascade_root(), Some(root));
@@ -358,7 +358,7 @@ fn commit_units_sync_upstream_and_fates_flow_back() {
     let row = row(7);
 
     let (tx_id, message) = client
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(title_cells("sync me")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("sync me")))
         .unwrap();
 
     assert_eq!(
@@ -370,12 +370,12 @@ fn commit_units_sync_upstream_and_fates_flow_back() {
         panic!("commit_mergeable_unit must emit a commit unit");
     };
     let [fate] = core
-        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap()
         .try_into()
         .unwrap();
     let duplicate_fate = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     assert_eq!(duplicate_fate, vec![fate.clone()]);
     let SyncMessage::FateUpdate {
@@ -415,19 +415,19 @@ fn duplicate_commit_units_must_match_original_payload() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
     let (_, message) = client
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(title_cells("first")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("first")))
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("commit_mergeable_unit must emit a commit unit");
     };
-    core.ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
     let mut conflicting = versions;
     conflicting[0] = version_record(row, Vec::new(), title_cells("changed"), None);
 
     assert!(matches!(
-        core.ingest_commit_unit(tx, conflicting, u64::MAX - SKEW_TOLERANCE_MS),
+        core.ingest_commit_unit_settled(tx, conflicting, u64::MAX - SKEW_TOLERANCE_MS),
         Err(Error::ConflictingCommitUnit(_))
     ));
 }
@@ -436,7 +436,7 @@ fn duplicate_commit_units_must_match_original_payload() {
 fn fate_update_rejects_backward_global_time_and_keeps_durability_monotone() {
     let (_temp_dir, mut node) = open_node();
     let tx_id = node
-        .commit_mergeable(MergeableCommit::new("todos", row(7), 10).cells(title_cells("base")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(7), 10).cells(title_cells("base")))
         .unwrap();
     node.apply_fate_update(
         tx_id,
@@ -477,11 +477,11 @@ fn fate_update_rejects_backward_global_time_and_keeps_durability_monotone() {
 fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
     let (_temp_dir, mut node) = open_node();
     let tx_id = node
-        .commit_mergeable(MergeableCommit::new("todos", row(8), 10).cells(title_cells("base")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(8), 10).cells(title_cells("base")))
         .unwrap();
 
     let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        node.apply_sync_message(SyncMessage::FateUpdate {
+        node.apply_sync_message_settled(SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
             global_time: Some(GlobalTime(7)),
@@ -500,7 +500,7 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
         Some((Fate::Pending, None, DurabilityTier::Local))
     );
 
-    node.apply_sync_message(SyncMessage::FateUpdate {
+    node.apply_sync_message_settled(SyncMessage::FateUpdate {
         tx_id,
         fate: Fate::Accepted,
         global_time: Some(GlobalTime(7)),
@@ -519,7 +519,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     let bad_tx = TxId::new(TxTime::from(10), node(8));
     let subscription = receiver.whole_table_subscription_key("todos").unwrap();
     receiver
-        .apply_sync_message(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate {
             subscription,
             settled_through: GlobalTime(0),
             reset_result_set: true,
@@ -542,7 +542,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     let before_generation = receiver.applied_view_update_generation(binding_view);
     assert!(receiver.opening_pending_for_binding_view(binding_view));
     let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        receiver.apply_sync_message(SyncMessage::ViewUpdate {
+        receiver.apply_sync_message_settled(SyncMessage::ViewUpdate {
             subscription,
             settled_through: GlobalTime(0),
             reset_result_set: true,
@@ -592,7 +592,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
         before_generation
     );
     receiver
-        .apply_sync_message(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate {
             subscription,
             settled_through: GlobalTime(1),
             reset_result_set: true,
@@ -612,7 +612,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
         before_generation + 1
     );
     assert!(receiver
-        .commit_mergeable(MergeableCommit::new("todos", row(9), 11).cells(title_cells("alive")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(9), 11).cells(title_cells("alive")))
         .is_ok());
 }
 
@@ -624,7 +624,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
 fn internal_sequenced_non_global_fate_trips_the_debug_assertion() {
     let (_temp_dir, mut node) = open_node();
     let tx_id = node
-        .commit_mergeable(MergeableCommit::new("todos", row(10), 10).cells(title_cells("base")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(10), 10).cells(title_cells("base")))
         .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         node.apply_fate_update(

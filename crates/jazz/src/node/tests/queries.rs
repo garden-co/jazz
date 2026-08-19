@@ -358,7 +358,7 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
         base.version_id(),
         "physical indexes are deliberately outside content-addressed schema identity"
     );
-    core.apply_trusted_catalogue_message(SyncMessage::PublishSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
         author: AuthorId::SYSTEM,
         schema: Box::new(indexed.clone()),
     })
@@ -419,7 +419,7 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
@@ -544,7 +544,7 @@ fn history_subscriptions_flow_through_groove() {
     let subscription = node.subscribe_history("todos").unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
-    node.commit_mergeable(MergeableCommit::new("todos", row(8), 10).cells(title_cells("notify")))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row(8), 10).cells(title_cells("notify")))
         .unwrap();
 
     assert!(!subscription.recv().unwrap().is_empty());
@@ -630,7 +630,7 @@ fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
                 _ => commit.cells(title_cells(format!("seed-{seed}-step-{step}"))),
             };
 
-            let tx_id = node.commit_mergeable(commit).unwrap();
+            let tx_id = node.commit_mergeable_settled(commit).unwrap();
             parents.insert(row_uuid, tx_id);
             match action {
                 0 | 4 | 5 => {
@@ -755,7 +755,7 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
         .tx_write(tx_id, "todos", row(2), title_cells("mine"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive(tx_id, AuthorId::SYSTEM, 11)
+        .commit_exclusive_settled(tx_id, AuthorId::SYSTEM, 11)
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
@@ -777,7 +777,7 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
         .unwrap()
     );
     let [fate] = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap()
         .try_into()
         .unwrap();
@@ -799,7 +799,7 @@ fn view_update_result_set_matches_groove_current_rows_for_seeded_commits() {
         MergeableCommit::new("todos", row_a, 13).cells(title_cells("a2")),
         MergeableCommit::new("todos", row_b, 14).deletion(DeletionEvent::Deleted),
     ] {
-        let tx_id = node.commit_mergeable(commit).unwrap();
+        let tx_id = node.commit_mergeable_settled(commit).unwrap();
         node.accept_global_for_test(tx_id).unwrap();
         assert_view_update_result_set_matches_current_rows(&mut node);
     }
@@ -832,7 +832,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         read_view: Default::default(),
     };
 
-    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+    node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
         subscription: usage_subscription,
         values: values.clone(),
@@ -846,7 +846,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
             .contains_key(&shape.shape_id())
     );
 
-    node.apply_sync_message(SyncMessage::RegisterShape {
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
         ast: crate::protocol::ShapeAst::from_validated(&shape),
         opts: crate::protocol::RegisterShapeOptions::default(),
@@ -860,7 +860,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
             .contains_key(&usage_binding_id)
     );
     assert!(matches!(
-        node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+        node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
             shape_id: shape.shape_id(),
             subscription: usage_subscription,
             values: Vec::new(),
@@ -869,14 +869,14 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         Err(Error::InvalidStoredValue("binding arity mismatch"))
     ));
 
-    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+    node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
         subscription: usage_subscription,
         values: values.clone(),
         known_state: None,
     }))
     .unwrap();
-    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+    node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
         subscription: other_usage_subscription,
         values,
@@ -919,7 +919,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
             },
         )]),
     );
-    node.apply_sync_message(SyncMessage::Unsubscribe {
+    node.apply_sync_message_settled(SyncMessage::Unsubscribe {
         subscription: usage_subscription,
     })
     .unwrap();
@@ -938,7 +938,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
     assert!(node.query.settled_result_sets.contains_key(&binding_view_key));
     assert!(node.query.settled_program_facts.contains_key(&binding_view_key));
 
-    node.apply_sync_message(SyncMessage::Unsubscribe {
+    node.apply_sync_message_settled(SyncMessage::Unsubscribe {
         subscription: other_usage_subscription,
     })
     .unwrap();
@@ -980,20 +980,20 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
         read_view: branch_read_view,
     };
 
-    node.apply_sync_message(SyncMessage::RegisterShape {
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
         ast: crate::protocol::ShapeAst::from_validated(&shape),
         opts: crate::protocol::RegisterShapeOptions::default(),
     })
     .unwrap();
-    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+    node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
         subscription: default_usage_subscription,
         values: values.clone(),
         known_state: None,
     }))
     .unwrap();
-    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+    node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
         subscription: branch_usage_subscription,
         values,
@@ -1015,7 +1015,7 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
     // Internal sync-state coverage: public non-default read views fail closed,
     // so this future multi-view cleanup invariant is only observable below the
     // public facade for now.
-    node.apply_sync_message(SyncMessage::Unsubscribe {
+    node.apply_sync_message_settled(SyncMessage::Unsubscribe {
         subscription: default_usage_subscription,
     })
     .unwrap();
@@ -1031,7 +1031,7 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
             .contains_key(&branch_binding_view_key)
     );
 
-    node.apply_sync_message(SyncMessage::Unsubscribe {
+    node.apply_sync_message_settled(SyncMessage::Unsubscribe {
         subscription: branch_usage_subscription,
     })
     .unwrap();
@@ -1046,7 +1046,7 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
 #[test]
 fn prepared_query_lowering_supports_ne_parameter_predicates() {
     let (_temp_dir, mut node) = open_node();
-    node.commit_mergeable(MergeableCommit::new("todos", row(0x31), 10).cells(title_cells("keep")))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x31), 10).cells(title_cells("keep")))
         .unwrap();
     let shape = Query::from("todos")
         .filter(ne(col("title"), param("blocked")))
@@ -1163,14 +1163,14 @@ fn required_forward_include_allows_null_scalar_but_requires_every_array_member()
     let partial = row(0xc2);
     let null_scalar = row(0xc3);
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("profiles", profile_a, 10).cells(BTreeMap::from([(
             "name".to_owned(),
             v("a"),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("profiles", profile_b, 11).cells(BTreeMap::from([(
             "name".to_owned(),
             v("b"),
@@ -1180,7 +1180,7 @@ fn required_forward_include_allows_null_scalar_but_requires_every_array_member()
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("groups", complete, 12).cells(BTreeMap::from([
             ("name".to_owned(), v("complete")),
             ("profile".to_owned(), Value::Nullable(None)),
@@ -1191,7 +1191,7 @@ fn required_forward_include_allows_null_scalar_but_requires_every_array_member()
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("groups", partial, 13).cells(BTreeMap::from([
             ("name".to_owned(), v("partial")),
             ("profile".to_owned(), Value::Nullable(None)),
@@ -1202,7 +1202,7 @@ fn required_forward_include_allows_null_scalar_but_requires_every_array_member()
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("groups", null_scalar, 14).cells(BTreeMap::from([
             ("name".to_owned(), v("null-scalar")),
             ("profile".to_owned(), Value::Nullable(None)),
@@ -1236,14 +1236,14 @@ fn nested_required_include_checks_every_array_member_recursively() {
     let complete = row(0xc1);
     let nested_partial = row(0xc2);
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("profiles", profile_a, 10).cells(BTreeMap::from([
             ("name".to_owned(), v("a")),
             ("best_friend".to_owned(), Value::Nullable(None)),
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("profiles", profile_b, 11).cells(BTreeMap::from([
             ("name".to_owned(), v("b")),
             (
@@ -1253,7 +1253,7 @@ fn nested_required_include_checks_every_array_member_recursively() {
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("groups", complete, 12).cells(BTreeMap::from([
             ("name".to_owned(), v("complete")),
             ("profile".to_owned(), Value::Nullable(None)),
@@ -1261,7 +1261,7 @@ fn nested_required_include_checks_every_array_member_recursively() {
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("groups", nested_partial, 13).cells(BTreeMap::from([
             ("name".to_owned(), v("nested-partial")),
             ("profile".to_owned(), Value::Nullable(None)),
@@ -1299,7 +1299,7 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
     let empty = row(0xc3);
 
     for (idx, profile) in [profile_a, profile_b].into_iter().enumerate() {
-        node.commit_mergeable(
+        node.commit_mergeable_settled(
             MergeableCommit::new("profiles", profile, 10 + idx as u64).cells(BTreeMap::from([
                 ("name".to_owned(), v("profile")),
                 ("best_friend".to_owned(), Value::Nullable(None)),
@@ -1307,7 +1307,7 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
         )
         .unwrap();
     }
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("groups", complete, 12).cells(BTreeMap::from([
             ("name".to_owned(), v("complete")),
             ("profile".to_owned(), Value::Nullable(None)),
@@ -1318,7 +1318,7 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("groups", partial, 13).cells(BTreeMap::from([
             ("name".to_owned(), v("partial")),
             ("profile".to_owned(), Value::Nullable(None)),
@@ -1329,7 +1329,7 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("groups", empty, 14).cells(BTreeMap::from([
             ("name".to_owned(), v("empty")),
             ("profile".to_owned(), Value::Nullable(None)),
@@ -1384,7 +1384,7 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
     let complete_third = row(0xc5);
 
     for (idx, profile) in [profile_a, profile_b].into_iter().enumerate() {
-        node.commit_mergeable(
+        node.commit_mergeable_settled(
             MergeableCommit::new("profiles", profile, 10 + idx as u64).cells(BTreeMap::from([
                 ("name".to_owned(), v("profile")),
                 ("best_friend".to_owned(), Value::Nullable(None)),
@@ -1410,7 +1410,7 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
     .into_iter()
     .enumerate()
     {
-        node.commit_mergeable(
+        node.commit_mergeable_settled(
             MergeableCommit::new("groups", group, 20 + idx as u64).cells(BTreeMap::from([
                 ("name".to_owned(), v(name)),
                 ("profile".to_owned(), Value::Nullable(None)),
@@ -1456,25 +1456,25 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
     let todo_a = row(0x11);
     let todo_b = row(0x12);
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("users", alice, 10).cells(BTreeMap::from([(
             "name".to_owned(),
             v("alice"),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("users", bob, 11).cells(BTreeMap::from([("name".to_owned(), v("bob"))])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", todo_a, 12).cells(BTreeMap::from([
             ("title".to_owned(), v("alpha")),
             ("owner_id".to_owned(), Value::Uuid(alice.0)),
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", todo_b, 13).cells(BTreeMap::from([
             ("title".to_owned(), v("beta")),
             ("owner_id".to_owned(), Value::Uuid(bob.0)),
@@ -1516,35 +1516,35 @@ fn relation_snapshot_materializes_reverse_array_edges() {
     let todo_b = row(0x12);
     let comment = row(0xc1);
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("users", alice, 10).cells(BTreeMap::from([(
             "name".to_owned(),
             v("alice"),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("users", bob, 11).cells(BTreeMap::from([(
             "name".to_owned(),
             v("bob"),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", todo_a, 12).cells(BTreeMap::from([
             ("title".to_owned(), v("alpha")),
             ("owner_id".to_owned(), Value::Uuid(alice.0)),
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", todo_b, 13).cells(BTreeMap::from([
             ("title".to_owned(), v("beta")),
             ("owner_id".to_owned(), Value::Uuid(bob.0)),
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("comments", comment, 14).cells(BTreeMap::from([
             ("body".to_owned(), v("nested")),
             ("todo_id".to_owned(), Value::Uuid(todo_a.0)),
@@ -1595,28 +1595,28 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
     let matching_todo = row(0x11);
     let filtered_todo = row(0x12);
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("users", alice, 10).cells(BTreeMap::from([(
             "name".to_owned(),
             v("alice"),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("users", bob, 11).cells(BTreeMap::from([(
             "name".to_owned(),
             v("bob"),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", matching_todo, 12).cells(BTreeMap::from([
             ("title".to_owned(), v("keep")),
             ("owner_id".to_owned(), Value::Uuid(alice.0)),
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", filtered_todo, 13).cells(BTreeMap::from([
             ("title".to_owned(), v("drop")),
             ("owner_id".to_owned(), Value::Uuid(bob.0)),
@@ -1674,14 +1674,14 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     let alice = user(0xa1);
     let bob = user(0xb1);
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("users", parent, 10).cells(BTreeMap::from([(
             "name".to_owned(),
             v("parent"),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", child, 11).cells(BTreeMap::from([
             ("title".to_owned(), v("hidden")),
             ("owner_id".to_owned(), Value::Uuid(alice.0)),
@@ -1752,13 +1752,13 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     let visible_grandchild = row(0x21);
 
     for (parent, name, time) in [(alice_parent, "alice", 10), (bob_parent, "bob", 11)] {
-        node.commit_mergeable(
+        node.commit_mergeable_settled(
             MergeableCommit::new("users", parent, time)
                 .cells(BTreeMap::from([("name".to_owned(), v(name))])),
         )
         .unwrap();
     }
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("comments", visible_grandchild, 14).cells(BTreeMap::from([
             ("body".to_owned(), v("visible nested")),
             ("todo_id".to_owned(), Value::Uuid(visible_child.0)),
@@ -1769,7 +1769,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         (visible_child, alice, "visible", 12),
         (denied_child, bob, "denied", 13),
     ] {
-        node.commit_mergeable(
+        node.commit_mergeable_settled(
             MergeableCommit::new("todos", child, time).cells(BTreeMap::from([
                 ("title".to_owned(), v(title)),
                 ("owner_id".to_owned(), Value::Uuid(owner.0)),
@@ -1845,7 +1845,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     );
     let bob_before = bob_tree.raw().to_vec();
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x13), 15).cells(BTreeMap::from([
             ("title".to_owned(), v("new visible")),
             ("owner_id".to_owned(), Value::Uuid(alice.0)),
@@ -1900,26 +1900,26 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     let comment = row(0x21);
     let attachment = row(0x31);
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("users", parent, 10)
             .cells(BTreeMap::from([("name".to_owned(), v("alice"))])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", todo_row, 11).cells(BTreeMap::from([
             ("title".to_owned(), v("owned")),
             ("owner_id".to_owned(), Value::Uuid(alice.0)),
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("comments", comment, 12).cells(BTreeMap::from([
             ("body".to_owned(), v("first comment")),
             ("todo_id".to_owned(), Value::Uuid(todo_row.0)),
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("attachments", attachment, 13).cells(BTreeMap::from([
             ("name".to_owned(), v("first attachment")),
             ("todo_id".to_owned(), Value::Uuid(todo_row.0)),
@@ -1994,7 +1994,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
 
     // A new comment changes only that sibling content, preserving the
     // attachment subtree and the one rendered parent identity.
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("comments", row(0x22), 14).cells(BTreeMap::from([
             ("body".to_owned(), v("second comment")),
             ("todo_id".to_owned(), Value::Uuid(todo_row.0)),
@@ -2036,17 +2036,17 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
 fn include_deleted_one_shot_read_uses_lowered_literal_filters() {
     let (_temp_dir, mut node) = open_node();
     let table = schema().tables[0].clone();
-    node.commit_mergeable(MergeableCommit::new("todos", row(0x41), 10).cells(title_cells("keep")))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x41), 10).cells(title_cells("keep")))
         .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x42), 11).cells(title_cells("keep")),
     )
     .unwrap();
-    node.commit_mergeable(MergeableCommit::new("todos", row(0x42), 12).deletion(DeletionEvent::Deleted))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x42), 12).deletion(DeletionEvent::Deleted))
         .unwrap();
-    node.commit_mergeable(MergeableCommit::new("todos", row(0x43), 13).cells(title_cells("drop")))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x43), 13).cells(title_cells("drop")))
         .unwrap();
-    node.commit_mergeable(MergeableCommit::new("todos", row(0x43), 14).deletion(DeletionEvent::Deleted))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x43), 14).deletion(DeletionEvent::Deleted))
         .unwrap();
     let shape = Query::from("todos")
         .filter(eq(col("title"), lit("keep")))
@@ -2079,13 +2079,13 @@ fn include_deleted_one_shot_read_uses_lowered_literal_filters() {
 #[test]
 fn include_deleted_one_shot_read_uses_lowered_param_filters() {
     let (_temp_dir, mut node) = open_node();
-    node.commit_mergeable(MergeableCommit::new("todos", row(0x51), 10).cells(title_cells("match")))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x51), 10).cells(title_cells("match")))
         .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x51), 11).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
-    node.commit_mergeable(MergeableCommit::new("todos", row(0x52), 12).cells(title_cells("miss")))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x52), 12).cells(title_cells("miss")))
         .unwrap();
     let shape = Query::from("todos")
         .filter(eq(col("title"), param("wanted")))
@@ -2133,16 +2133,16 @@ fn include_deleted_one_shot_read_join_matches_visible_join_rows() {
     let schema = include_deleted_join_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(9), schema.clone());
     let issue = row(0x61);
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("issues", issue, 10).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("deleted but matched".to_owned()),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted))
+    node.commit_mergeable_settled(MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted))
         .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("issue_tags", row(0x62), 12).cells(BTreeMap::from([
             ("issue".to_owned(), Value::Uuid(issue.0)),
             ("tag".to_owned(), Value::String("bug".to_owned())),
@@ -2177,23 +2177,23 @@ fn include_deleted_one_shot_read_join_ignores_deleted_join_rows() {
     let (_temp_dir, mut node) = open_node_with_schema(node(9), schema.clone());
     let issue = row(0x63);
     let tag_row = row(0x64);
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("issues", issue, 10).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("deleted root".to_owned()),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted))
+    node.commit_mergeable_settled(MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted))
         .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("issue_tags", tag_row, 12).cells(BTreeMap::from([
             ("issue".to_owned(), Value::Uuid(issue.0)),
             ("tag".to_owned(), Value::String("bug".to_owned())),
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("issue_tags", tag_row, 13).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
@@ -2260,37 +2260,37 @@ fn include_deleted_one_shot_read_reachable_matches_deleted_roots_through_visible
     let schema = include_deleted_reachable_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(9), schema.clone());
     let doc = row(0x73);
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("teams", row(0x71), 10).cells(BTreeMap::from([(
             "name".to_owned(),
             Value::String("parent".to_owned()),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("teams", row(0x72), 11).cells(BTreeMap::from([(
             "name".to_owned(),
             Value::String("member".to_owned()),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("docs", doc, 12).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("deleted reachable".to_owned()),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted))
+    node.commit_mergeable_settled(MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted))
         .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("team_edges", row(0x74), 14).cells(BTreeMap::from([
             ("member".to_owned(), Value::Uuid(row(0x72).0)),
             ("parent".to_owned(), Value::Uuid(row(0x71).0)),
         ])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("team_access", row(0x75), 15).cells(BTreeMap::from([
             ("doc".to_owned(), Value::Uuid(doc.0)),
             ("team".to_owned(), Value::Uuid(row(0x71).0)),
@@ -2322,39 +2322,39 @@ fn include_deleted_one_shot_read_reachable_ignores_deleted_edge_rows() {
     let (_temp_dir, mut node) = open_node_with_schema(node(9), schema.clone());
     let doc = row(0x76);
     let edge = row(0x77);
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("teams", row(0x71), 10).cells(BTreeMap::from([(
             "name".to_owned(),
             Value::String("parent".to_owned()),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("teams", row(0x72), 11).cells(BTreeMap::from([(
             "name".to_owned(),
             Value::String("member".to_owned()),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("docs", doc, 12).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("deleted but not reached".to_owned()),
         )])),
     )
     .unwrap();
-    node.commit_mergeable(MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted))
+    node.commit_mergeable_settled(MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted))
         .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("team_edges", edge, 14).cells(BTreeMap::from([
             ("member".to_owned(), Value::Uuid(row(0x72).0)),
             ("parent".to_owned(), Value::Uuid(row(0x71).0)),
         ])),
     )
     .unwrap();
-    node.commit_mergeable(MergeableCommit::new("team_edges", edge, 15).deletion(DeletionEvent::Deleted))
+    node.commit_mergeable_settled(MergeableCommit::new("team_edges", edge, 15).deletion(DeletionEvent::Deleted))
         .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("team_access", row(0x78), 16).cells(BTreeMap::from([
             ("doc".to_owned(), Value::Uuid(doc.0)),
             ("team".to_owned(), Value::Uuid(row(0x71).0)),
@@ -2386,7 +2386,7 @@ fn node_finishes_aggregation_ordering_pagination_and_projection_after_materializ
         (2, "alpha", "drop"),
         (3, "beta", "keep"),
     ] {
-        node.commit_mergeable(
+        node.commit_mergeable_settled(
             MergeableCommit::new("todos", row(idx), 10 + idx as u64).cells(BTreeMap::from([
                 ("title".to_owned(), Value::String(title.to_owned())),
                 ("body".to_owned(), Value::String(body.to_owned())),
@@ -2492,7 +2492,7 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
     let first_row = row(7);
     let second_row = row(8);
     let tx_id = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", first_row, 10).cells(title_cells("first")),
             MergeableCommit::new("todos", second_row, 10).cells(title_cells("second")),
         ])

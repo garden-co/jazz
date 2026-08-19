@@ -15,17 +15,17 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
     let binding_view_key = BindingViewKey::from_canonical_subscription_key(subscription);
 
     let (_tx_id, visible_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("visible")),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = visible_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
-        .apply_sync_message(core.view_update_for_current_rows("todos").unwrap())
+        .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
         .unwrap();
     let before = reader
         .subscription_current_rows("todos", DurabilityTier::Global)
@@ -41,7 +41,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
         read_view: Default::default(),
     };
     reader
-        .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+        .apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
             shape_id: shape.shape_id(),
             subscription: usage_subscription,
             values: Vec::new(),
@@ -72,7 +72,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
-    reader.apply_sync_message(late).unwrap();
+    reader.apply_sync_message_settled(late).unwrap();
 
     assert_eq!(
         reader.sync_metrics().dropped_detached_subscription_messages,
@@ -114,7 +114,7 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
         program_fact_removes: Vec::new(),
     };
 
-    reader.apply_sync_message(late).unwrap();
+    reader.apply_sync_message_settled(late).unwrap();
 
     assert_eq!(
         reader.sync_metrics().dropped_detached_subscription_messages,
@@ -138,17 +138,17 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
     let binding_view_key = BindingViewKey::from_canonical_subscription_key(subscription);
 
     let (visible_tx, visible_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("visible")),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = visible_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     let initial = core.view_update_for_current_rows("todos").unwrap();
-    reader.apply_sync_message(initial).unwrap();
+    reader.apply_sync_message_settled(initial).unwrap();
     assert_eq!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -184,7 +184,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
             .is_empty(),
         "removals must not request repair bodies because the removed version may be policy-invisible"
     );
-    reader.apply_sync_message(removal).unwrap();
+    reader.apply_sync_message_settled(removal).unwrap();
     assert!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -233,7 +233,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
             .unwrap()
             .is_empty()
     );
-    reader.apply_sync_message(removal).unwrap();
+    reader.apply_sync_message_settled(removal).unwrap();
     assert!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -262,17 +262,17 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
     let binding_view_key = BindingViewKey::from_canonical_subscription_key(canonical_subscription);
 
     let (_tx_id, visible_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("shared")),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = visible_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
-        .apply_sync_message(core.view_update_for_current_rows("todos").unwrap())
+        .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
         .unwrap();
     assert_eq!(
         reader
@@ -290,7 +290,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
         read_view: Default::default(),
     };
     reader
-        .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+        .apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
             shape_id: shape.shape_id(),
             subscription: duplicate_subscription,
             values: Vec::new(),
@@ -305,7 +305,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
     );
 
     reader
-        .apply_sync_message(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate {
             subscription: duplicate_subscription,
             settled_through: GlobalTime(2),
             reset_result_set: true,
@@ -346,14 +346,14 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
     register_shape_binding(&mut reader, &shape, &binding);
 
     let (_tx_id, commit_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("known")),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
         .ingest_known_transaction(
@@ -437,7 +437,7 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     register_shape_binding(&mut reader, &shape, &binding);
 
     let (tx_a, unit_a) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row_a, 10).cells(title_cells("known")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row_a, 10).cells(title_cells("known")))
         .unwrap();
     let SyncMessage::CommitUnit {
         tx: commit_a,
@@ -446,14 +446,14 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(commit_a, versions_a, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(commit_a, versions_a, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
-        .apply_sync_message(core.view_update_for_current_rows("todos").unwrap())
+        .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
         .unwrap();
 
     let (tx_b, unit_b) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row_b, 20).cells(title_cells("new")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row_b, 20).cells(title_cells("new")))
         .unwrap();
     let SyncMessage::CommitUnit {
         tx: commit_b,
@@ -462,7 +462,7 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(commit_b, versions_b, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(commit_b, versions_b, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
     let mut peer = PeerState::relay();
@@ -516,7 +516,7 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
             .unwrap()
             .is_empty()
     );
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .current_rows("todos", DurabilityTier::Local)
@@ -539,14 +539,14 @@ fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
     let subscription = core.whole_table_subscription_key("todos").unwrap();
 
     let (tx_id, commit_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("known")),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
     let mut peer = PeerState::relay();
@@ -589,17 +589,17 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
     let subscription = core.whole_table_subscription_key("todos").unwrap();
 
     let (_tx_id, commit_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("known")),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
-        .apply_sync_message(core.view_update_for_current_rows("todos").unwrap())
+        .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
         .unwrap();
 
     let mut peer = PeerState::relay();
@@ -635,7 +635,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
     assert!(result_member_removes.is_empty());
     assert!(version_bundles.is_empty());
 
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .current_rows("todos", DurabilityTier::Local)
@@ -657,17 +657,17 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     let subscription = core.whole_table_subscription_key("todos").unwrap();
 
     let (_tx_id, commit_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("known")),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
-        .apply_sync_message(core.view_update_for_current_rows("todos").unwrap())
+        .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
         .unwrap();
     assert_eq!(
         reader
@@ -724,7 +724,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     assert!(result_member_removes.is_empty());
     assert!(version_bundles.is_empty());
 
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -747,14 +747,14 @@ fn exact_known_state_rehydrate_repairs_missing_payload() {
     register_shape_binding(&mut reader, &shape, &binding);
 
     let (tx_id, commit_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("known")),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
         .ingest_known_transaction(
@@ -807,7 +807,7 @@ fn exact_known_state_rehydrate_repairs_missing_payload() {
     reader
         .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
         .unwrap();
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .current_rows("todos", DurabilityTier::Local)
@@ -832,7 +832,7 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     let values = Vec::new();
 
     let (tx_a, unit_a) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row_a, 10).cells(title_cells("local")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row_a, 10).cells(title_cells("local")))
         .unwrap();
     let SyncMessage::CommitUnit {
         tx: tx_a_record,
@@ -841,7 +841,7 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(
+    core.ingest_commit_unit_settled(
         tx_a_record.clone(),
         versions_a.clone(),
         u64::MAX - SKEW_TOLERANCE_MS,
@@ -871,11 +871,11 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     );
 
     let (tx_b, unit_b) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_b, 11).cells(title_cells("remote")),
         )
         .unwrap();
-    core.apply_sync_message(unit_b).unwrap();
+    core.apply_sync_message_settled(unit_b).unwrap();
 
     let declaration = reader
         .known_state_declaration_for_subscription(
@@ -943,7 +943,7 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             .unwrap()
             .is_empty()
     );
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .current_rows("todos", DurabilityTier::Local)
@@ -1036,7 +1036,7 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
 
     let mut reopened = reader.reopen_in_place().unwrap();
     let declaration = reopened
@@ -1096,7 +1096,7 @@ fn fast_known_state_fact_survives_storage_reopen() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     drop(reader);
 
     let mut reopened = open_node_at(&reader_dir, schema());
@@ -1135,7 +1135,7 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     };
 
     let (tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("unfated")),
         )
         .unwrap();

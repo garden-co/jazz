@@ -34,9 +34,9 @@ fn cold_reset_bulk_ingest_matches_incremental_ingest() {
     };
     *reset_result_set = false;
 
-    bulk_reader.apply_sync_message(update).unwrap();
+    bulk_reader.apply_sync_message_settled(update).unwrap();
     incremental_reader
-        .apply_sync_message(incremental_update)
+        .apply_sync_message_settled(incremental_update)
         .unwrap();
 
     assert_eq!(
@@ -142,7 +142,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
 
     let row_uuid = row(1);
     let (tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")),
         )
         .unwrap();
@@ -150,7 +150,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
         panic!("expected commit unit");
     };
     let [fate] = core
-        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap()
         .try_into()
         .unwrap();
@@ -336,7 +336,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
     let (_reader_dir, mut reader) = open_node_with_schema(node(3), projection_schema.clone());
     let row_uuid = row(1);
     let (tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("visible title".to_owned())),
                 ("body".to_owned(), Value::String("visible body".to_owned())),
@@ -347,7 +347,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         panic!("expected commit unit");
     };
     let [fate] = core
-        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap()
         .try_into()
         .unwrap();
@@ -639,7 +639,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
     let row_uuid = row(1);
 
     let (_old_tx, old_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("old")),
         )
         .unwrap();
@@ -651,7 +651,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
         panic!("expected commit unit");
     };
     let [old_fate]: [SyncMessage; 1] = core
-        .ingest_commit_unit(old.clone(), old_versions.clone(), 0)
+        .ingest_commit_unit_settled(old.clone(), old_versions.clone(), 0)
         .unwrap()
         .try_into()
         .unwrap();
@@ -665,7 +665,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
     };
 
     let (new_tx, new_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("new")),
         )
         .unwrap();
@@ -677,7 +677,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
         panic!("expected commit unit");
     };
     let [new_fate]: [SyncMessage; 1] = core
-        .ingest_commit_unit(new.clone(), new_versions.clone(), 1)
+        .ingest_commit_unit_settled(new.clone(), new_versions.clone(), 1)
         .unwrap()
         .try_into()
         .unwrap();
@@ -766,7 +766,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     redacted_tx.n_total_writes = 1;
 
     reader
-        .apply_sync_message(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate {
             subscription,
             settled_through: GlobalTime(0),
             reset_result_set: false,
@@ -802,7 +802,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     );
 
     reader
-        .apply_sync_message(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate {
             subscription,
             settled_through: GlobalTime(0),
             reset_result_set: false,

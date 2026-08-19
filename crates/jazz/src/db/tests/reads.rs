@@ -1839,7 +1839,7 @@ fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
         .node
         .node
         .borrow_mut()
-        .apply_sync_message(SyncMessage::CommitUnit {
+        .apply_sync_message_settled(SyncMessage::CommitUnit {
             tx: tx.clone(),
             versions: versions.clone(),
         })
@@ -1848,7 +1848,7 @@ fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
         .node
         .node
         .borrow_mut()
-        .apply_sync_message(SyncMessage::CommitUnit { tx, versions })
+        .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
         .unwrap();
 
     assert_eq!(

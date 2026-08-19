@@ -7,7 +7,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     let shared_row = row(0x4e);
 
     let old_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([
             ("title".to_owned(), v("old-title")),
         ])))
         .unwrap();
@@ -37,7 +37,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -47,7 +47,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     .unwrap();
 
     let new_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", shared_row, 11).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("todos", shared_row, 11).cells(BTreeMap::from([
             ("name".to_owned(), v("new-name")),
             ("body".to_owned(), v("new-body")),
         ])))
@@ -128,7 +128,7 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
     let shared_row = row(0x5e);
 
     let old_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([
             ("title".to_owned(), v("old-title")),
         ])))
         .unwrap();
@@ -152,7 +152,7 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -240,7 +240,7 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
         None,
     )
     .unwrap();
-    let (collision_tx, _) = core.commit_exclusive(open, AuthorId::SYSTEM, 10).unwrap();
+    let (collision_tx, _) = core.commit_exclusive_settled(open, AuthorId::SYSTEM, 10).unwrap();
     core.accept_global_for_test(collision_tx).unwrap();
 
     publish_schema_lineage(
@@ -262,7 +262,7 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
         ["tasks"],
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,

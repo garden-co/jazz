@@ -450,7 +450,7 @@ fn accept_churn_with_parent<S: OrderedKvStorage>(
     if let Some(parent) = parents.get(&row_uuid).copied() {
         commit = commit.parents(vec![parent]);
     }
-    let tx_id = core.commit_mergeable(commit).unwrap();
+    let tx_id = core.commit_mergeable_settled(commit).unwrap();
     core.accept_global_for_test(tx_id).unwrap();
     parents.insert(row_uuid, tx_id);
 }
@@ -463,7 +463,7 @@ fn delete_churn_with_parent<S: OrderedKvStorage>(
 ) {
     let parent = parents[&row_uuid];
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("docs", row_uuid, made_at)
                 .parents(vec![parent])
                 .deletion(DeletionEvent::Deleted),
@@ -762,7 +762,7 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let mut maintained_rows = BTreeSet::new();
     apply_result_members(&mut maintained_rows, &initial, shape.query().table.as_str());
-    reader.apply_sync_message(initial).unwrap();
+    reader.apply_sync_message_settled(initial).unwrap();
     assert!(!maintained_rows.is_empty());
 
     for row_uuid in [row(0x11), row(0x12), row(0x14)] {
@@ -777,7 +777,7 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
     }
     let reset = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     apply_result_members(&mut maintained_rows, &reset, shape.query().table.as_str());
-    reader.apply_sync_message(reset).unwrap();
+    reader.apply_sync_message_settled(reset).unwrap();
     assert!(
         one_shot_rows(&mut core, &shape, &binding, identity).is_empty(),
         "fixture must make the serving node one-shot result genuinely empty"

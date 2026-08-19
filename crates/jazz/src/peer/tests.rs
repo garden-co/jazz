@@ -1,5 +1,7 @@
 use super::*;
-use crate::legacy_test_future::{OptionFutureExt as _, ResultFutureExt as _};
+use crate::legacy_test_future::{
+    OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+};
 
 use std::collections::BTreeMap;
 
@@ -178,7 +180,7 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     let (_dir, mut core) = open_node_with_uuid(node(0x91));
     let live = row(0x31);
     let live_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", live, 1_000).cells(title_cells("live")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", live, 1_000).cells(title_cells("live")))
         .unwrap();
     accept_global(&mut core, live_tx, 1);
     let shape = Query::from("todos").validate(&schema()).unwrap();
@@ -256,7 +258,7 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     );
 
     let deleted_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", live, 2_000).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -737,7 +739,7 @@ fn resource_commit_unit(
     row_uuid: RowUuid,
 ) -> (Transaction, Vec<VersionRecord>) {
     let (_, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("resources", row_uuid, 10)
                 .made_by(author)
                 .cells(BTreeMap::from([(
@@ -781,7 +783,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
         BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.0))]),
     );
     let prior = bound_edge
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("resources", row(0xa8), 1)
                 .made_by(AuthorId::SYSTEM)
                 .cells(BTreeMap::from([(
@@ -1073,7 +1075,7 @@ fn register_shape_binding_for_receiver_with_opts(
     binding: &Binding,
     opts: RegisterShapeOptions,
 ) {
-    node.apply_sync_message(SyncMessage::RegisterShape {
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
         ast: crate::protocol::ShapeAst::from_validated(shape),
         opts: opts.clone(),
@@ -1084,7 +1086,7 @@ fn register_shape_binding_for_receiver_with_opts(
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+    node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
         subscription: subscription_key_with_opts(shape, binding, &opts),
         values,
@@ -1268,7 +1270,7 @@ fn assert_view_update_row_order(
 fn maintained_subscription_view_default_rehydrate_installs_subscription() {
     let (_dir, mut core) = open_node_with_uuid(node(0x90));
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x10), 1_000).cells(title_cells("match")),
         )
         .unwrap();
@@ -1296,7 +1298,7 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     let (_dir, mut core) = open_node_with_schema(node(0x93), schema.clone());
     let user = row(0xa1);
     let user_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("users", user, 1_000).cells(BTreeMap::from([(
                 "name".to_owned(),
                 Value::String("owner".to_owned()),
@@ -1318,7 +1320,7 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
     let child_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0xb1), 1_001).cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("child".to_owned())),
                 ("owner_id".to_owned(), Value::Uuid(user.0)),
@@ -1328,7 +1330,7 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     accept_global(&mut core, child_tx, 2);
     peer.query_update(&mut core, &shape, &binding).unwrap();
     let child_update_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0xb1), 1_002).cells(BTreeMap::from([(
                 "title".to_owned(),
                 Value::String("updated child".to_owned()),
@@ -1373,7 +1375,7 @@ fn maintained_rehydrate_run_emission_matches_forced_singleton_receiver_results()
     let (_core_dir, mut core) = open_node_with_uuid(node(0x91));
     for idx in 0..4 {
         let tx_id = core
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row_from_u64(idx), 1_000 + idx)
                     .cells(title_cells("match")),
             )
@@ -1381,7 +1383,7 @@ fn maintained_rehydrate_run_emission_matches_forced_singleton_receiver_results()
         accept_global(&mut core, tx_id, idx + 1);
     }
     let ignored = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(100), 2_000).cells(title_cells("other")),
         )
         .unwrap();
@@ -1418,9 +1420,9 @@ fn maintained_rehydrate_run_emission_matches_forced_singleton_receiver_results()
     register_shape_binding_for_receiver(&mut singleton_reader, &shape, &binding);
     register_shape_binding_for_receiver(&mut run_reader, &shape, &binding);
     singleton_reader
-        .apply_sync_message(singleton_update)
+        .apply_sync_message_settled(singleton_update)
         .unwrap();
-    run_reader.apply_sync_message(run_update).unwrap();
+    run_reader.apply_sync_message_settled(run_update).unwrap();
 
     let singleton_rows = singleton_reader
         .query_rows(&shape, &binding, DurabilityTier::Global)
@@ -1464,12 +1466,12 @@ fn maintained_rehydrate_run_emission_matches_forced_singleton_receiver_results()
 fn maintained_subscription_view_limit_one_installs_subscription() {
     let (_dir, mut core) = open_node_with_uuid(node(0x90));
     let higher_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(20), 1_000).cells(title_cells("higher")),
         )
         .unwrap();
     let lower_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(10), 1_001).cells(title_cells("lower")),
         )
         .unwrap();
@@ -1509,11 +1511,11 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x93));
     let row_uuid = row_from_u64(10);
     let original_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")))
         .unwrap();
     accept_global(&mut core, original_tx, 1);
     let delete_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001)
                 .parents(vec![original_tx])
                 .deletion(DeletionEvent::Deleted),
@@ -1521,7 +1523,7 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
         .unwrap();
     accept_global(&mut core, delete_tx, 2);
     let restored_content_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
                 .parents(vec![delete_tx])
                 .cells(title_cells("restored")),
@@ -1529,7 +1531,7 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
         .unwrap();
     accept_global(&mut core, restored_content_tx, 3);
     let restore_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
                 .parents(vec![restored_content_tx])
                 .deletion(DeletionEvent::Restored),
@@ -1567,7 +1569,7 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
         "rehydrate must ship the restored content version, not the pre-delete content"
     );
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .query_rows(&shape, &binding, DurabilityTier::Global)
@@ -1593,11 +1595,11 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x95));
     let row_uuid = row_from_u64(10);
     let original_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")))
         .unwrap();
     accept_edge(&mut core, original_tx);
     let delete_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001)
                 .parents(vec![original_tx])
                 .deletion(DeletionEvent::Deleted),
@@ -1605,7 +1607,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
         .unwrap();
     accept_edge(&mut core, delete_tx);
     let restored_content_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
                 .parents(vec![delete_tx])
                 .cells(title_cells("restored")),
@@ -1613,7 +1615,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
         .unwrap();
     accept_edge(&mut core, restored_content_tx);
     let restore_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
                 .parents(vec![restored_content_tx])
                 .deletion(DeletionEvent::Restored),
@@ -1651,7 +1653,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
                 .iter()
                 .any(|version| version.deletion() == Some(DeletionEvent::Restored))
     }));
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Local)
@@ -1677,11 +1679,11 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x97));
     let row_uuid = row_from_u64(10);
     let original_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")))
         .unwrap();
     accept_edge(&mut core, original_tx);
     let delete_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001)
                 .parents(vec![original_tx])
                 .deletion(DeletionEvent::Deleted),
@@ -1689,7 +1691,7 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
         .unwrap();
     accept_edge(&mut core, delete_tx);
     let restore_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", row_uuid, 1_002).cells(title_cells("restored")),
             MergeableCommit::new("todos", row_uuid, 1_003).deletion(DeletionEvent::Restored),
         ])
@@ -1730,7 +1732,7 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
                 .iter()
                 .any(|version| version.deletion().is_none())
     }));
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Local)
@@ -1756,12 +1758,12 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
     let first_row = row_from_u64(10);
     let second_row = row_from_u64(20);
     let first_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", first_row, 1_000).cells(title_cells("first")),
         )
         .unwrap();
     let second_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", second_row, 1_001).cells(title_cells("second")),
         )
         .unwrap();
@@ -1776,7 +1778,7 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let delete_first_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", first_row, 1_002).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -1801,7 +1803,7 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
 
     let new_first_row = row_from_u64(5);
     let new_first_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", new_first_row, 1_003).cells(title_cells("new first")),
         )
         .unwrap();
@@ -1830,19 +1832,19 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
 fn maintained_subscription_view_order_by_asc_limit_two_initial_hydration() {
     let (_dir, mut core) = open_node_with_schema(node(0x92), priority_schema());
     let charlie_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(30), 1_000)
                 .cells(priority_cells("charlie", 30)),
         )
         .unwrap();
     let alpha_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(10), 1_001)
                 .cells(priority_cells("alpha", 10)),
         )
         .unwrap();
     let bravo_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(20), 1_002)
                 .cells(priority_cells("bravo", 20)),
         )
@@ -1881,17 +1883,17 @@ fn maintained_subscription_view_order_by_asc_limit_two_boundary_insert_delete_up
     let bravo = row_from_u64(20);
     let charlie = row_from_u64(30);
     let alpha_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", alpha, 1_000).cells(priority_cells("alpha", 10)),
         )
         .unwrap();
     let bravo_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", bravo, 1_001).cells(priority_cells("bravo", 20)),
         )
         .unwrap();
     let charlie_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", charlie, 1_002).cells(priority_cells("charlie", 30)),
         )
         .unwrap();
@@ -1910,7 +1912,7 @@ fn maintained_subscription_view_order_by_asc_limit_two_boundary_insert_delete_up
 
     let aardvark = row_from_u64(5);
     let aardvark_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", aardvark, 1_003).cells(priority_cells("aardvark", 5)),
         )
         .unwrap();
@@ -1923,7 +1925,7 @@ fn maintained_subscription_view_order_by_asc_limit_two_boundary_insert_delete_up
     );
 
     let delete_alpha_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", alpha, 1_004).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -1943,17 +1945,17 @@ fn maintained_subscription_view_order_by_limit_updates_move_rows_across_boundary
     let bravo = row_from_u64(20);
     let charlie = row_from_u64(30);
     let alpha_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", alpha, 1_000).cells(priority_cells("alpha", 10)),
         )
         .unwrap();
     let bravo_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", bravo, 1_001).cells(priority_cells("bravo", 20)),
         )
         .unwrap();
     let charlie_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", charlie, 1_002).cells(priority_cells("charlie", 30)),
         )
         .unwrap();
@@ -1971,7 +1973,7 @@ fn maintained_subscription_view_order_by_limit_updates_move_rows_across_boundary
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
     let charlie_promoted_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", charlie, 1_003).cells(priority_cells("charlie", 5)),
         )
         .unwrap();
@@ -1984,7 +1986,7 @@ fn maintained_subscription_view_order_by_limit_updates_move_rows_across_boundary
     );
 
     let charlie_demoted_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", charlie, 1_004).cells(priority_cells("charlie", 35)),
         )
         .unwrap();
@@ -2001,19 +2003,19 @@ fn maintained_subscription_view_order_by_limit_updates_move_rows_across_boundary
 fn maintained_subscription_view_order_by_desc_limit_two_initial_hydration() {
     let (_dir, mut core) = open_node_with_schema(node(0x94), priority_schema());
     let alpha_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(10), 1_000)
                 .cells(priority_cells("alpha", 10)),
         )
         .unwrap();
     let delta_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(40), 1_001)
                 .cells(priority_cells("delta", 40)),
         )
         .unwrap();
     let charlie_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(30), 1_002)
                 .cells(priority_cells("charlie", 30)),
         )
@@ -2050,19 +2052,19 @@ fn maintained_subscription_view_order_by_desc_limit_two_initial_hydration() {
 fn maintained_subscription_view_order_by_limit_two_ties_are_stable_by_row_uuid() {
     let (_dir, mut core) = open_node_with_schema(node(0x95), priority_schema());
     let third_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(30), 1_000)
                 .cells(priority_cells("third", 7)),
         )
         .unwrap();
     let first_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(10), 1_001)
                 .cells(priority_cells("first", 7)),
         )
         .unwrap();
     let second_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(20), 1_002)
                 .cells(priority_cells("second", 7)),
         )
@@ -2091,7 +2093,7 @@ fn maintained_subscription_view_order_by_limit_two_ties_are_stable_by_row_uuid()
 
     let replacement = row_from_u64(5);
     let replacement_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", replacement, 1_003).cells(priority_cells("zeroth", 7)),
         )
         .unwrap();
@@ -2108,19 +2110,19 @@ fn maintained_subscription_view_order_by_limit_two_ties_are_stable_by_row_uuid()
 fn maintained_subscription_view_order_by_offset_limit_uses_top_by_window() {
     let (_dir, mut core) = open_node_with_schema(node(0x96), priority_schema());
     let first_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(10), 1_000)
                 .cells(priority_cells("first", 10)),
         )
         .unwrap();
     let second_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(20), 1_001)
                 .cells(priority_cells("second", 20)),
         )
         .unwrap();
     let third_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(30), 1_002)
                 .cells(priority_cells("third", 30)),
         )
@@ -2145,7 +2147,7 @@ fn maintained_subscription_view_order_by_offset_limit_uses_top_by_window() {
 
     let zeroth = row_from_u64(5);
     let zeroth_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", zeroth, 1_003).cells(priority_cells("zeroth", 5)),
         )
         .unwrap();
@@ -2162,19 +2164,19 @@ fn maintained_subscription_view_order_by_offset_limit_uses_top_by_window() {
 fn maintained_subscription_view_order_by_without_limit_matches_one_shot_order() {
     let (_dir, mut core) = open_node_with_schema(node(0x97), priority_schema());
     let charlie_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(30), 1_000)
                 .cells(priority_cells("charlie", 30)),
         )
         .unwrap();
     let alpha_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(10), 1_001)
                 .cells(priority_cells("alpha", 10)),
         )
         .unwrap();
     let bravo_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(20), 1_002)
                 .cells(priority_cells("bravo", 20)),
         )
@@ -2218,19 +2220,19 @@ fn maintained_subscription_view_order_by_without_limit_matches_one_shot_order() 
 fn maintained_subscription_view_order_by_offset_without_limit_matches_one_shot_window() {
     let (_dir, mut core) = open_node_with_schema(node(0x98), priority_schema());
     let first_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(10), 1_000)
                 .cells(priority_cells("first", 10)),
         )
         .unwrap();
     let second_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(20), 1_001)
                 .cells(priority_cells("second", 20)),
         )
         .unwrap();
     let third_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(30), 1_002)
                 .cells(priority_cells("third", 30)),
         )
@@ -2268,7 +2270,7 @@ fn maintained_subscription_view_order_by_offset_without_limit_matches_one_shot_w
 
     let zeroth = row_from_u64(5);
     let zeroth_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", zeroth, 1_003).cells(priority_cells("zeroth", 5)),
         )
         .unwrap();
@@ -2277,7 +2279,7 @@ fn maintained_subscription_view_order_by_offset_without_limit_matches_one_shot_w
     assert_view_update_row_order(update, vec![("todos", row_from_u64(10), first_tx)], vec![]);
 
     let delete_first_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(10), 1_004).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -2292,12 +2294,12 @@ fn maintained_subscription_view_order_by_limit_handles_emptying_below_limit_and_
     let alpha = row_from_u64(10);
     let bravo = row_from_u64(20);
     let alpha_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", alpha, 1_000).cells(priority_cells("alpha", 10)),
         )
         .unwrap();
     let bravo_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", bravo, 1_001).cells(priority_cells("bravo", 20)),
         )
         .unwrap();
@@ -2314,7 +2316,7 @@ fn maintained_subscription_view_order_by_limit_handles_emptying_below_limit_and_
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
     let delete_alpha_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", alpha, 1_002).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -2323,7 +2325,7 @@ fn maintained_subscription_view_order_by_limit_handles_emptying_below_limit_and_
     assert_view_update_rows(update, vec![], vec![("todos", alpha, alpha_tx)]);
 
     let delete_bravo_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", bravo, 1_003).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -2333,7 +2335,7 @@ fn maintained_subscription_view_order_by_limit_handles_emptying_below_limit_and_
 
     let charlie = row_from_u64(30);
     let charlie_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", charlie, 1_004).cells(priority_cells("charlie", 30)),
         )
         .unwrap();
@@ -2346,17 +2348,17 @@ fn maintained_subscription_view_order_by_limit_handles_emptying_below_limit_and_
 fn maintained_subscription_view_without_order_by_matches_one_shot_row_id_order() {
     let (_dir, mut core) = open_node_with_uuid(node(0x99));
     let third_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(30), 1_000).cells(title_cells("third")),
         )
         .unwrap();
     let first_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(10), 1_001).cells(title_cells("first")),
         )
         .unwrap();
     let second_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_from_u64(20), 1_002).cells(title_cells("second")),
         )
         .unwrap();
@@ -2396,12 +2398,12 @@ fn maintained_subscription_view_without_order_by_matches_one_shot_row_id_order()
 fn maintained_subscription_view_default_order_limited_variants_are_supported() {
     let (_dir, mut core) = open_node_with_uuid(node(0x90));
     let first_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x10), 1_000).cells(title_cells("alpha")),
         )
         .unwrap();
     let second_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x11), 1_001).cells(title_cells("beta")),
         )
         .unwrap();
@@ -2443,12 +2445,12 @@ fn maintained_subscription_view_default_order_limited_variants_are_supported() {
 fn maintained_subscription_view_aggregate_rehydrate_ships_payload_fact() {
     let (_dir, mut core) = open_node_with_uuid(node(0x90));
     let first_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x10), 1_000).cells(title_cells("alpha")),
         )
         .unwrap();
     let second_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x11), 1_001).cells(title_cells("beta")),
         )
         .unwrap();
@@ -2493,7 +2495,7 @@ fn maintained_subscription_view_aggregate_updates_incrementally() {
     let (_dir, mut core) = open_node_with_uuid(node(0x90));
     for (idx, title) in [(0x10, "alpha"), (0x11, "beta")] {
         let tx = core
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(idx), 1_000 + idx as u64)
                     .cells(title_cells(title)),
             )
@@ -2518,7 +2520,7 @@ fn maintained_subscription_view_aggregate_updates_incrementally() {
     );
 
     let tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x12), 2_000).cells(title_cells("gamma")),
         )
         .unwrap();
@@ -2563,7 +2565,7 @@ fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
     let mut seq = 1;
     for (doc, title, score, readers) in docs {
         let tx = core
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("docs", doc, 1_000 + seq)
                     .cells(scored_doc_cells(title, score)),
             )
@@ -2572,7 +2574,7 @@ fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
         seq += 1;
         for reader in readers {
             let tx = core
-                .commit_mergeable(
+                .commit_mergeable_settled(
                     MergeableCommit::new("docAccess", row(seq as u8), 2_000 + seq)
                         .cells(access_cells(doc, reader)),
                 )
@@ -2626,7 +2628,7 @@ fn maintained_subscription_view_forget_with_node_unsubscribes_and_drops_state() 
     let (_dir, mut core) = open_node_with_uuid(node(0x91));
     let row_uuid = row(0x11);
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("match")),
         )
         .unwrap();
@@ -2668,7 +2670,7 @@ fn maintained_subscription_view_forget_query_binding_with_node_unsubscribes() {
     let (_dir, mut core) = open_node_with_uuid(node(0x94));
     let row_uuid = row(0x41);
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("match")),
         )
         .unwrap();
@@ -2689,7 +2691,7 @@ fn maintained_subscription_view_forget_query_binding_with_node_unsubscribes() {
 fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     let (_dir, mut core) = open_node_with_uuid(node(0x95));
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x51), 1_000).cells(title_cells("match")),
         )
         .unwrap();
@@ -2709,13 +2711,13 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
 fn maintained_subscription_view_contains_literal_stays_maintained() {
     let (_dir, mut core) = open_node_with_uuid(node(0x9a));
     let initial = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x5a), 1_000).cells(title_cells("api docs")),
         )
         .unwrap();
     accept_global(&mut core, initial, 1);
     let excluded = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x5b), 1_001).cells(title_cells("notes")),
         )
         .unwrap();
@@ -2728,7 +2730,7 @@ fn maintained_subscription_view_contains_literal_stays_maintained() {
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x5c), 1_002).cells(title_cells("api reference")),
         )
         .unwrap();
@@ -2755,13 +2757,13 @@ fn maintained_subscription_view_contains_literal_stays_maintained() {
 fn maintained_subscription_view_contains_param_stays_maintained() {
     let (_dir, mut core) = open_node_with_uuid(node(0x9b));
     let initial = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x6a), 1_000).cells(title_cells("api docs")),
         )
         .unwrap();
     accept_global(&mut core, initial, 1);
     let excluded = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x6b), 1_001).cells(title_cells("notes")),
         )
         .unwrap();
@@ -2774,7 +2776,7 @@ fn maintained_subscription_view_contains_param_stays_maintained() {
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x6c), 1_002).cells(title_cells("api reference")),
         )
         .unwrap();
@@ -2801,13 +2803,13 @@ fn maintained_subscription_view_contains_param_stays_maintained() {
 fn maintained_subscription_view_eq_param_left_stays_maintained() {
     let (_dir, mut core) = open_node_with_uuid(node(0x9f));
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x6f), 1_000).cells(title_cells("match")),
         )
         .unwrap();
     accept_global(&mut core, tx_id, 1);
     let excluded = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x70), 1_001).cells(title_cells("other")),
         )
         .unwrap();
@@ -2833,13 +2835,13 @@ fn maintained_subscription_view_eq_param_left_stays_maintained() {
 fn maintained_subscription_view_ne_param_stays_maintained() {
     let (_dir, mut core) = open_node_with_uuid(node(0x9c));
     let initial = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x7a), 1_000).cells(title_cells("ship it")),
         )
         .unwrap();
     accept_global(&mut core, initial, 1);
     let excluded = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x7b), 1_001).cells(title_cells("skip")),
         )
         .unwrap();
@@ -2852,13 +2854,13 @@ fn maintained_subscription_view_ne_param_stays_maintained() {
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x7c), 1_002).cells(title_cells("done")),
         )
         .unwrap();
     accept_global(&mut core, added, 3);
     let still_excluded = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x7d), 1_003).cells(title_cells("skip")),
         )
         .unwrap();
@@ -2885,13 +2887,13 @@ fn maintained_subscription_view_ne_param_stays_maintained() {
 fn maintained_subscription_view_range_literal_stays_maintained() {
     let (_dir, mut core) = open_node_with_uuid(node(0xa1));
     let initial = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x81), 1_000).cells(title_cells("omega")),
         )
         .unwrap();
     accept_global(&mut core, initial, 1);
     let excluded = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x82), 1_001).cells(title_cells("alpha")),
         )
         .unwrap();
@@ -2904,13 +2906,13 @@ fn maintained_subscription_view_range_literal_stays_maintained() {
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x83), 1_002).cells(title_cells("zeta")),
         )
         .unwrap();
     accept_global(&mut core, added, 3);
     let still_excluded = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x84), 1_003).cells(title_cells("beta")),
         )
         .unwrap();
@@ -2925,13 +2927,13 @@ fn maintained_subscription_view_range_literal_stays_maintained() {
 fn maintained_subscription_view_reversed_range_literal_stays_maintained() {
     let (_dir, mut core) = open_node_with_uuid(node(0xa2));
     let initial = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x85), 1_000).cells(title_cells("alpha")),
         )
         .unwrap();
     accept_global(&mut core, initial, 1);
     let excluded = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x86), 1_001).cells(title_cells("omega")),
         )
         .unwrap();
@@ -2944,13 +2946,13 @@ fn maintained_subscription_view_reversed_range_literal_stays_maintained() {
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x87), 1_002).cells(title_cells("beta")),
         )
         .unwrap();
     accept_global(&mut core, added, 3);
     let still_excluded = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x88), 1_003).cells(title_cells("zeta")),
         )
         .unwrap();
@@ -2965,7 +2967,7 @@ fn maintained_subscription_view_reversed_range_literal_stays_maintained() {
 fn maintained_subscription_view_any_literal_stays_maintained() {
     let (_dir, mut core) = open_node_with_uuid(node(0xa4));
     let initial = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x89), 1_000).cells(title_cells("alpha")),
         )
         .unwrap();
@@ -2978,7 +2980,7 @@ fn maintained_subscription_view_any_literal_stays_maintained() {
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x8a), 1_001).cells(title_cells("beta")),
         )
         .unwrap();
@@ -2993,7 +2995,7 @@ fn maintained_subscription_view_any_literal_stays_maintained() {
 fn maintained_subscription_view_in_literal_stays_maintained() {
     let (_dir, mut core) = open_node_with_uuid(node(0xa5));
     let initial = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x8b), 1_000).cells(title_cells("alpha")),
         )
         .unwrap();
@@ -3006,7 +3008,7 @@ fn maintained_subscription_view_in_literal_stays_maintained() {
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x8c), 1_001).cells(title_cells("beta")),
         )
         .unwrap();
@@ -3021,7 +3023,7 @@ fn maintained_subscription_view_in_literal_stays_maintained() {
 fn maintained_subscription_view_empty_in_and_any_are_false() {
     let (_dir, mut core) = open_node_with_uuid(node(0xa6));
     let existing = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x8d), 1_000).cells(title_cells("alpha")),
         )
         .unwrap();
@@ -3066,13 +3068,13 @@ fn maintained_subscription_view_any_with_bound_param_stays_maintained() {
 
     let matched_row = row(0xa8);
     let matched = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", matched_row, 1_000).cells(title_cells("beta")),
         )
         .unwrap();
     accept_global(&mut core, matched, 1);
     let excluded = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0xa9), 1_001).cells(title_cells("gamma")),
         )
         .unwrap();
@@ -3090,13 +3092,13 @@ fn maintained_subscription_view_null_predicates_stay_maintained() {
     for (case, non_null) in [(0xa3, false), (0xa4, true)] {
         let (_dir, mut core) = open_node_with_schema(node(case), nullable_title_schema());
         let initial = core
-            .commit_mergeable(MergeableCommit::new("todos", row(case), 1_000).cells(
+            .commit_mergeable_settled(MergeableCommit::new("todos", row(case), 1_000).cells(
                 maybe_title_cells(if non_null { Some("present") } else { None }),
             ))
             .unwrap();
         accept_global(&mut core, initial, 1);
         let excluded = core
-            .commit_mergeable(MergeableCommit::new("todos", row(case + 1), 1_001).cells(
+            .commit_mergeable_settled(MergeableCommit::new("todos", row(case + 1), 1_001).cells(
                 maybe_title_cells(if non_null { None } else { Some("present") }),
             ))
             .unwrap();
@@ -3110,7 +3112,7 @@ fn maintained_subscription_view_null_predicates_stay_maintained() {
 
         let added_row = row(case + 2);
         let added = core
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", added_row, 1_002)
                     .cells(maybe_title_cells(if non_null { Some("new") } else { None })),
             )
@@ -3118,7 +3120,7 @@ fn maintained_subscription_view_null_predicates_stay_maintained() {
         accept_global(&mut core, added, 3);
         if !non_null {
             let still_excluded = core
-                .commit_mergeable(
+                .commit_mergeable_settled(
                     MergeableCommit::new("todos", row(case + 3), 1_003)
                         .cells(maybe_title_cells(Some("new"))),
                 )
@@ -3143,7 +3145,7 @@ fn maintained_subscription_view_exclusive_delta_stays_maintained() {
     core.open_exclusive(tx).unwrap();
     core.tx_write(tx, "todos", row(0x61), title_cells("match"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 1_000).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -3180,7 +3182,7 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
         .unwrap();
     core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 1_000).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -3232,7 +3234,7 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
         .unwrap();
     core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 1_000).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -3270,7 +3272,7 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
     );
 
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .current_rows("todos", DurabilityTier::Global)
@@ -3311,21 +3313,21 @@ fn maintained_subscription_view_tags_terminal_columns_by_table() {
     let stock = row(0x81);
     let line = row(0x82);
     let warehouse_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("warehouses", warehouse, 10)
                 .cells(BTreeMap::from([("ytd".to_owned(), Value::F64(1.5))])),
         )
         .unwrap();
     accept_global(&mut core, warehouse_tx, 1);
     let stock_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("stock", stock, 11)
                 .cells(BTreeMap::from([("ytd".to_owned(), Value::U64(2))])),
         )
         .unwrap();
     accept_global(&mut core, stock_tx, 2);
     let line_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("orderLines", line, 12).cells(BTreeMap::from([
                 ("warehouse".to_owned(), Value::Uuid(warehouse.0)),
                 ("stock".to_owned(), Value::Uuid(stock.0)),
@@ -3367,16 +3369,16 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
         .unwrap();
     core.tx_write(tx, "docs", doc_b, doc_cells("b", project), None)
         .unwrap();
-    let (docs_tx, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 10).unwrap();
+    let (docs_tx, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
     accept_global(&mut core, docs_tx, 1);
     let grant_a = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("docAccess", row(0x84), 11).cells(access_cells(doc_a, user_a)),
         )
         .unwrap();
     accept_global(&mut core, grant_a, 2);
     let grant_b = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("docAccess", row(0x85), 12).cells(access_cells(doc_b, user_b)),
         )
         .unwrap();
@@ -3428,7 +3430,7 @@ fn maintained_subscription_view_rehydrate_replaces_subscription_and_fresh_indexe
     let first = row(0x21);
     let second = row(0x22);
     let first_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", first, 1_000).cells(title_cells("match")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", first, 1_000).cells(title_cells("match")))
         .unwrap();
     accept_global(&mut core, first_tx, 1);
     let (shape, binding) = title_shape_binding("match");
@@ -3441,7 +3443,7 @@ fn maintained_subscription_view_rehydrate_replaces_subscription_and_fresh_indexe
         .expect("initial maintained subscription missing");
 
     let second_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", second, 2_000).cells(title_cells("match")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", second, 2_000).cells(title_cells("match")))
         .unwrap();
     accept_global(&mut core, second_tx, 2);
     let tick = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -3470,13 +3472,13 @@ fn maintained_subscription_view_rehydrate_replaces_subscription_and_fresh_indexe
 fn maintained_subscription_view_new_binding_after_forget_has_no_stale_state() {
     let (_dir, mut core) = open_node_with_uuid(node(0x93));
     let match_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x31), 1_000).cells(title_cells("match")),
         )
         .unwrap();
     accept_global(&mut core, match_tx, 1);
     let other_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x32), 1_001).cells(title_cells("other")),
         )
         .unwrap();
@@ -3528,7 +3530,7 @@ fn peer_state_dedups_version_payloads_across_subscription_views() {
     let (_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(1);
     let tx_id = core
-        .commit_mergeable(MergeableCommit::new("todos", row, 10).cells(title_cells("shared")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("shared")))
         .unwrap();
     accept_global(&mut core, tx_id, 1);
     let mut peer = PeerState::new();
@@ -3592,13 +3594,13 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     let doc = row(0x41);
     let grant = row(0x42);
     let doc_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("docs", doc, 10).cells(doc_cells("visible", project)),
         )
         .unwrap();
     accept_global(&mut core, doc_tx, 1);
     let grant_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("docAccess", grant, 11).cells(access_cells(doc, owner)),
         )
         .unwrap();
@@ -3649,8 +3651,8 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     writer
         .tx_write(tx, "docs", doc_two, doc_cells("two", project), None)
         .unwrap();
-    let (docs_tx, unit) = writer.commit_exclusive(tx, AuthorId::SYSTEM, 10).unwrap();
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let (docs_tx, unit) = writer.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
+    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {
@@ -3660,7 +3662,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     ));
 
     let first_grant = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("docAccess", row(11), 11).cells(access_cells(doc_one, user)),
         )
         .unwrap();
@@ -3692,7 +3694,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_one);
     assert!(peer.shipped_complete_tx_payloads().is_empty());
-    reader.apply_sync_message(first_update).unwrap();
+    reader.apply_sync_message_settled(first_update).unwrap();
     assert_eq!(
         reader
             .subscription_current_rows("docs", DurabilityTier::Global)
@@ -3704,7 +3706,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     );
 
     let second_grant = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("docAccess", row(12), 12).cells(access_cells(doc_two, user)),
         )
         .unwrap();
@@ -3737,7 +3739,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_two);
 
-    reader.apply_sync_message(grant_update).unwrap();
+    reader.apply_sync_message_settled(grant_update).unwrap();
     assert_eq!(
         reader
             .subscription_current_rows("docs", DurabilityTier::Global)
@@ -3776,7 +3778,7 @@ fn all_exclusive_never_gated_stays_incremental() {
         .unwrap();
     core.tx_write(tx, "todos", row_two, title_cells("two"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 10).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
@@ -3811,7 +3813,7 @@ fn peer_state_records_current_result_set_and_can_rehydrate() {
     let (_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(1);
     let tx_id = core
-        .commit_mergeable(MergeableCommit::new("todos", row, 10).cells(title_cells("task")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("task")))
         .unwrap();
     accept_global(&mut core, tx_id, 1);
     let mut peer = PeerState::new();
@@ -3859,19 +3861,19 @@ fn rehydrate_keeps_peer_payload_dedup_but_resends_result_set() {
     let deleted_row = row(1);
     let live_row = row(2);
     let deleted_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", deleted_row, 10).cells(title_cells("deleted")),
         )
         .unwrap();
     accept_global(&mut core, deleted_tx, 1);
     let live_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", live_row, 11).cells(title_cells("live")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", live_row, 11).cells(title_cells("live")))
         .unwrap();
     accept_global(&mut core, live_tx, 2);
     let mut peer = PeerState::new();
 
     let initial = peer.current_rows_update(&mut core, "todos").unwrap();
-    reader.apply_sync_message(initial).unwrap();
+    reader.apply_sync_message_settled(initial).unwrap();
     assert_eq!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Local)
@@ -3881,7 +3883,7 @@ fn rehydrate_keeps_peer_payload_dedup_but_resends_result_set() {
     );
 
     let deletion_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", deleted_row, 12).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -3931,7 +3933,7 @@ fn rehydrate_keeps_peer_payload_dedup_but_resends_result_set() {
                 .all(|bundle| bundle.tx.tx_id != deleted_tx),
         "rehydrate should resend the live view-scoped payload without reviving deleted rows"
     );
-    reader.apply_sync_message(rehydrated).unwrap();
+    reader.apply_sync_message_settled(rehydrated).unwrap();
     assert_eq!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -3949,13 +3951,13 @@ fn peer_state_sends_result_removes_after_deletes() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let row = row(1);
     let tx_id = core
-        .commit_mergeable(MergeableCommit::new("todos", row, 10).cells(title_cells("task")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("task")))
         .unwrap();
     accept_global(&mut core, tx_id, 1);
     let mut peer = PeerState::new();
 
     let initial = peer.current_rows_update(&mut core, "todos").unwrap();
-    reader.apply_sync_message(initial).unwrap();
+    reader.apply_sync_message_settled(initial).unwrap();
     assert_eq!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Local)
@@ -3965,7 +3967,7 @@ fn peer_state_sends_result_removes_after_deletes() {
     );
 
     let deletion_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted))
         .unwrap();
     accept_global(&mut core, deletion_tx, 2);
     let removed = peer.current_rows_update(&mut core, "todos").unwrap();
@@ -3982,7 +3984,7 @@ fn peer_state_sends_result_removes_after_deletes() {
         result_member_removes,
         &vec![("todos".to_owned().into(), row, tx_id)]
     );
-    reader.apply_sync_message(removed).unwrap();
+    reader.apply_sync_message_settled(removed).unwrap();
     assert!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Local)
@@ -3998,20 +4000,20 @@ fn whole_table_incremental_delta_ships_restore_register_witness() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let row = row(1);
     let content_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row, 10).cells(title_cells("task")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("task")))
         .unwrap();
     accept_global(&mut core, content_tx, 1);
     let mut peer = PeerState::new();
 
     reader
-        .apply_sync_message(peer.current_rows_update(&mut core, "todos").unwrap())
+        .apply_sync_message_settled(peer.current_rows_update(&mut core, "todos").unwrap())
         .unwrap();
     let deletion_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted))
         .unwrap();
     accept_global(&mut core, deletion_tx, 2);
     reader
-        .apply_sync_message(peer.current_rows_update(&mut core, "todos").unwrap())
+        .apply_sync_message_settled(peer.current_rows_update(&mut core, "todos").unwrap())
         .unwrap();
     assert!(
         reader
@@ -4021,7 +4023,7 @@ fn whole_table_incremental_delta_ships_restore_register_witness() {
     );
 
     let restore_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Restored))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Restored))
         .unwrap();
     accept_global(&mut core, restore_tx, 3);
     let restored = peer.current_rows_update(&mut core, "todos").unwrap();
@@ -4051,7 +4053,7 @@ fn whole_table_incremental_delta_ships_restore_register_witness() {
             || complete_tx_payload_refs.contains(&restore_tx),
         "restore register must ship as negative knowledge with the result add"
     );
-    reader.apply_sync_message(restored).unwrap();
+    reader.apply_sync_message_settled(restored).unwrap();
     assert_eq!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -4068,7 +4070,7 @@ fn incremental_query_result_set_tracks_identical_cell_rewrite_tx_id() {
     let (_dir, mut core) = open_node_with_uuid(node(9));
     let row_uuid = row(1);
     let first_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("same")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("same")))
         .unwrap();
     accept_global(&mut core, first_tx, 1);
     let shape = Query::from("todos")
@@ -4098,7 +4100,7 @@ fn incremental_query_result_set_tracks_identical_cell_rewrite_tx_id() {
     );
 
     let second_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("same")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("same")))
         .unwrap();
     accept_global(&mut core, second_tx, 2);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -4139,15 +4141,15 @@ fn incremental_query_result_set_drops_enter_then_leave_same_drain_cycle() {
 
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     reader
-        .apply_sync_message(peer.rehydrate_query(&mut core, &shape, &binding).unwrap())
+        .apply_sync_message_settled(peer.rehydrate_query(&mut core, &shape, &binding).unwrap())
         .unwrap();
 
     let match_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("match")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("match")))
         .unwrap();
     accept_global(&mut core, match_tx, 1);
     let unmatch_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 11)
                 .parents(vec![match_tx])
                 .cells(title_cells("other")),
@@ -4170,7 +4172,7 @@ fn incremental_query_result_set_drops_enter_then_leave_same_drain_cycle() {
     );
     assert!(result_member_removes.is_empty());
     assert!(row_result_set(&peer, subscription).is_none_or(|set| set.is_empty()));
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert!(
         reader
             .query_rows(&shape, &binding, DurabilityTier::Global)
@@ -4185,7 +4187,7 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let row_uuid = row(1);
     let first_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("match")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("match")))
         .unwrap();
     accept_global(&mut core, first_tx, 1);
     let (shape, binding) = title_shape_binding("match");
@@ -4194,7 +4196,7 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
 
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     reader
-        .apply_sync_message(peer.rehydrate_query(&mut core, &shape, &binding).unwrap())
+        .apply_sync_message_settled(peer.rehydrate_query(&mut core, &shape, &binding).unwrap())
         .unwrap();
     assert_eq!(
         row_result_set(&peer, subscription),
@@ -4206,7 +4208,7 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
     );
 
     let unmatch_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 11)
                 .parents(vec![first_tx])
                 .cells(title_cells("other")),
@@ -4214,7 +4216,7 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
         .unwrap();
     accept_global(&mut core, unmatch_tx, 2);
     let second_match_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 12)
                 .parents(vec![unmatch_tx])
                 .cells(title_cells("match")),
@@ -4247,7 +4249,7 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
             second_match_tx
         )]))
     );
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .query_rows(&shape, &binding, DurabilityTier::Global)
@@ -4274,14 +4276,14 @@ fn incremental_query_result_set_rebuilds_stale_closure_rows() {
     let first_line_row = row(2);
     let second_line_row = row(3);
     let stock_v1 = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("stock", stock_row, 10)
                 .cells(BTreeMap::from([("quantity".to_owned(), Value::U64(10))])),
         )
         .unwrap();
     accept_global(&mut core, stock_v1, 1);
     let first_line_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("orderLines", first_line_row, 11).cells(BTreeMap::from([(
                 "stock".to_owned(),
                 Value::Uuid(stock_row.0),
@@ -4308,7 +4310,7 @@ fn incremental_query_result_set_rebuilds_stale_closure_rows() {
     );
 
     let stock_v2 = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("stock", stock_row, 12)
                 .parents(vec![stock_v1])
                 .cells(BTreeMap::from([("quantity".to_owned(), Value::U64(9))])),
@@ -4316,7 +4318,7 @@ fn incremental_query_result_set_rebuilds_stale_closure_rows() {
         .unwrap();
     accept_global(&mut core, stock_v2, 3);
     let second_line_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("orderLines", second_line_row, 13).cells(BTreeMap::from([(
                 "stock".to_owned(),
                 Value::Uuid(stock_row.0),
@@ -4374,7 +4376,7 @@ fn incremental_query_result_sets_match_full_rehydrate_after_seeded_commits() {
     let mut seq = 1;
     for (title, row_uuid) in initial {
         let tx_id = core
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row_uuid, 10 + seq).cells(title_cells(title)),
             )
             .unwrap();
@@ -4421,7 +4423,7 @@ fn incremental_query_result_sets_match_full_rehydrate_after_seeded_commits() {
         }
         current_titles[row_idx] = title;
         let tx_id = core
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row_uuid, 100 + step as u64)
                     .cells(title_cells(title)),
             )

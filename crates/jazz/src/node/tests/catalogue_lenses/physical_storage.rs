@@ -70,7 +70,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -89,8 +89,8 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
         None,
     )
     .unwrap();
-    let (rejected, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 10).unwrap();
-    core.apply_sync_message(SyncMessage::FateUpdate {
+    let (rejected, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
+    core.apply_sync_message_settled(SyncMessage::FateUpdate {
         tx_id: rejected,
         fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
         global_time: None,
@@ -159,9 +159,9 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
     let renamed = SchemaVersion::new(renamed_schema.clone());
     let (dir, mut core) = open_node_with_schema(node(0x2b), base.clone());
     let row_uuid = row(0x4b);
-    core.commit_mergeable(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("shared")))
+    core.commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("shared")))
         .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 11).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
@@ -191,7 +191,7 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -199,7 +199,7 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
         },
     })
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("tasks", row_uuid, 12).deletion(DeletionEvent::Restored),
     )
     .unwrap();
@@ -279,7 +279,7 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
     // Recovery must include the shared deletion history in HLC reconstruction:
     // a post-reopen deletion is a new version, not a stale-key collision.
     reopened
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("tasks", row_uuid, 13).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -308,7 +308,7 @@ fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
     let row_uuid = row(0x6e);
 
     let old_delete = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10).deletion(DeletionEvent::Deleted),
         )
         .expect("stage v1 deletion before its fate");
@@ -337,7 +337,7 @@ fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
         Vec::<String>::new(),
     )
     .expect("publish rename");
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -351,7 +351,7 @@ fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
     core.catalogue.schema = renamed_schema;
 
     let new_delete = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("tasks", row_uuid, 20).deletion(DeletionEvent::Deleted),
         )
         .expect("stage newer v2 deletion");
@@ -389,14 +389,14 @@ fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
     let schema = todos_notes_schema();
     let (dir, mut core) = open_node_with_schema(node(0x2c), schema.clone());
     let shared_row = row(0x4c);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([(
             "title".to_owned(),
             v("todo"),
         )])),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("notes", shared_row, 11).cells(BTreeMap::from([(
             "body".to_owned(),
             v("note"),
@@ -404,7 +404,7 @@ fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
     )
     .unwrap();
     let deletion_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", shared_row, 12).deletion(DeletionEvent::Deleted),
             MergeableCommit::new("notes", shared_row, 13).deletion(DeletionEvent::Deleted),
         ])

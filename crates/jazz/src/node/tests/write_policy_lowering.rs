@@ -235,13 +235,13 @@ fn lowered_write_policy_operation_matrix() {
     let parent = row(0xd3);
     let old_child = row(0xd4);
     let access = row(0xd5);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("grandparents", grandparent, 1)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.0))])),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("parents", parent, 2)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([
@@ -251,7 +251,7 @@ fn lowered_write_policy_operation_matrix() {
             ])),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("access", access, 3)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([
@@ -265,7 +265,7 @@ fn lowered_write_policy_operation_matrix() {
         "optional_owner".to_owned(),
         Value::Nullable(Some(Box::new(Value::Uuid(owner.0)))),
     );
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("children", old_child, 4)
             .made_by(AuthorId::SYSTEM)
             .cells(old_cells.clone()),
@@ -729,7 +729,7 @@ fn lowered_write_policy_covers_deep_inherited_write_chains() {
     let grandparent = row(0xf4);
     let parent = row(0xf5);
     let child = row(0xf6);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("grandparents", grandparent, 1)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([(
@@ -738,7 +738,7 @@ fn lowered_write_policy_covers_deep_inherited_write_chains() {
             )])),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("parents", parent, 2)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([(
@@ -748,7 +748,7 @@ fn lowered_write_policy_covers_deep_inherited_write_chains() {
     )
     .unwrap();
     let cells = BTreeMap::from([("parent_id".to_owned(), Value::Uuid(parent.0))]);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("children", child, 3)
             .made_by(AuthorId::SYSTEM)
             .cells(cells.clone()),
@@ -844,7 +844,7 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -920,7 +920,7 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
 
     let existing = row(0xe5);
     let existing_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("tasks", existing, 2)
                 .made_by(AuthorId::SYSTEM)
                 .cells(candidate.clone()),

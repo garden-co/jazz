@@ -178,7 +178,7 @@ fn relation_edge_target_projects_old_witness_into_read_schema() {
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe4; 16]), base.clone());
     let todo = row(0xe5);
     let tx_id = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", todo, 0xe6).cells(BTreeMap::from([(
                 "title".to_owned(),
                 Value::String("written-by-alice".to_owned()),
@@ -195,7 +195,7 @@ fn relation_edge_target_projects_old_witness_into_read_schema() {
     );
     let evolved_table = evolved_schema.tables[0].clone();
     let evolved = SchemaVersion::new(evolved_schema);
-    node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
@@ -250,13 +250,10 @@ fn authoritative_reset_relation_target_projects_old_renamed_witness() {
     );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe7; 16]), base.clone());
     let user = row(0xe8);
-    let tx_id = node
-        .commit_mergeable(
-            MergeableCommit::new("users", user, 0xe9).cells(BTreeMap::from([(
-                "name".to_owned(),
-                Value::String("alice".to_owned()),
-            )])),
-        )
+    let tx_id =
+        node.commit_mergeable_settled(MergeableCommit::new("users", user, 0xe9).cells(
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        ))
         .expect("commit v1 user");
 
     let evolved_schema = public_query_eval_schema(
@@ -268,7 +265,7 @@ fn authoritative_reset_relation_target_projects_old_renamed_witness() {
     );
     let people = evolved_schema.tables[0].clone();
     let evolved = SchemaVersion::new(evolved_schema);
-    node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
@@ -360,19 +357,16 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
     );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf0; 16]), v1.clone());
     let user = row(0xf1);
-    let tx_id = node
-        .commit_mergeable(
-            MergeableCommit::new("users", user, 0xf2).cells(BTreeMap::from([(
-                "name".to_owned(),
-                Value::String("alice".to_owned()),
-            )])),
-        )
+    let tx_id =
+        node.commit_mergeable_settled(MergeableCommit::new("users", user, 0xf2).cells(
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        ))
         .expect("commit v1 user");
 
     let v2 = SchemaVersion::new(public_query_eval_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("people").column("name", PublicColumnType::Text),
     )));
-    node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
@@ -404,7 +398,7 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
     );
     let members = v3_schema.tables[0].clone();
     let v3 = SchemaVersion::new(v3_schema);
-    node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 2,
         publication: Box::new(SchemaLineagePublication::new(
@@ -547,7 +541,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     let mismatched_author_id = row(0xfa);
     let mismatched_post = row(0xfb);
     let author_tx = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("users", author, 1).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(author.0)),
                 ("name".to_owned(), Value::String("alice".to_owned())),
@@ -562,7 +556,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     )
     .expect("settle v1 author");
     let post_tx = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("posts", post, 2).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(post.0)),
                 ("author_id".to_owned(), Value::Uuid(author.0)),
@@ -578,7 +572,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     )
     .expect("settle v1 post");
     let mismatched_author_tx = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("users", mismatched_author_row, 3).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(mismatched_author_id.0)),
                 ("name".to_owned(), Value::String("unmatched".to_owned())),
@@ -593,16 +587,16 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     )
     .expect("settle mismatched v1 author");
     let mismatched_post_tx = node
-        .commit_mergeable(
-            MergeableCommit::new("posts", mismatched_post, 4).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("posts", mismatched_post, 4).cells(
+            BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(mismatched_post.0)),
                 ("author_id".to_owned(), Value::Uuid(mismatched_author_id.0)),
                 (
                     "title".to_owned(),
                     Value::String("must not join".to_owned()),
                 ),
-            ])),
-        )
+            ]),
+        ))
         .expect("commit v1 post whose foreign key is not the author row identity");
     node.apply_fate_update(
         mismatched_post_tx,
@@ -611,7 +605,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         Some(DurabilityTier::Global),
     )
     .expect("settle mismatched v1 post");
-    node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
@@ -641,7 +635,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     })
     .expect("publish users to people lens");
     client
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
@@ -670,7 +664,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
             )),
         })
         .expect("publish users to people lens to client");
-    node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -679,7 +673,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     })
     .expect("activate v2 read schema");
     client
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -758,7 +752,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
         .expect("apply canonical contributor repair");
     client
-        .apply_sync_message(update.clone())
+        .apply_sync_message_settled(update.clone())
         .expect("apply maintained v2 flat join on client");
     let SyncMessage::ViewUpdate {
         reset_result_set,
@@ -791,7 +785,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     );
 
     let updated_author_tx = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("people", author, 5).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(author.0)),
                 ("name".to_owned(), Value::String("alice".to_owned())),
@@ -908,7 +902,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         )
     }));
     client
-        .apply_sync_message(replacement)
+        .apply_sync_message_settled(replacement)
         .expect("apply flat tuple replacement");
     let active_contributors = client
         .query

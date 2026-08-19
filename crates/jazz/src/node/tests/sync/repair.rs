@@ -72,14 +72,14 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     register_shape_binding(&mut reader, &shape, &binding);
 
     let (tx_id, commit_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("repair me")),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
         .ingest_known_transaction(
@@ -166,7 +166,7 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
             .is_empty()
     );
 
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .current_rows("todos", DurabilityTier::Local)
@@ -229,7 +229,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -330,7 +330,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         "the pending update resumes only after the canonical witness arrives"
     );
     let pending_update = update.clone();
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .query_rows(&shape, &binding, DurabilityTier::Global)
@@ -472,7 +472,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
     )
     .unwrap();
     receiver
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 2,

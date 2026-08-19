@@ -11,7 +11,7 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
     {
         let mut node = open_node_at(&temp_dir, schema.clone());
         first_tx = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(9), 10).cells(BTreeMap::from([(
                     "title".to_owned(),
                     "persisted".to_owned(),
@@ -39,7 +39,7 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
         (Fate::Pending, None, DurabilityTier::Local)
     );
     let next_tx = reopened
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(10), 11).cells(BTreeMap::from([(
                 "title".to_owned(),
                 "after restart".to_owned(),
@@ -117,7 +117,7 @@ fn open_receipt_counts_physical_recovery_scans_exactly() {
     {
         let mut node = open_node_at(&temp_dir, schema.clone());
         for (id, time) in [(1, 10), (2, 11)] {
-            node.commit_mergeable(
+            node.commit_mergeable_settled(
                 MergeableCommit::new("todos", row(id), time).cells(title_cells("persisted")),
             )
             .unwrap();
@@ -179,7 +179,7 @@ fn opening_defers_malformed_current_row_to_read() {
     {
         let mut node = open_node_at(&temp_dir, schema.clone());
         let tx_id = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(0xff), 10).cells(title_cells("persisted")),
             )
             .unwrap();
@@ -250,7 +250,7 @@ fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
     {
         let mut node = open_node_at(&temp_dir, schema.clone());
         tx_id = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(12), 10).cells(title_cells("crash window")),
             )
             .unwrap();
@@ -303,7 +303,7 @@ fn clean_close_reopen_skips_fated_ahead_current_sweep() {
     {
         let mut node = open_node_at(&temp_dir, schema.clone());
         let tx_id = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(13), 10).cells(title_cells("clean close")),
             )
             .unwrap();
@@ -346,7 +346,7 @@ fn unclean_reopen_skips_fated_sweep_through_consistency_marker() {
     {
         let mut node = open_node_at(&temp_dir, schema.clone());
         let tx_id = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(14), 10)
                     .cells(title_cells("periodic marker")),
             )
@@ -389,7 +389,7 @@ fn unclean_reopen_sweeps_only_transactions_after_consistency_marker() {
         let mut node = open_node_at(&temp_dir, schema.clone());
         for offset in 0_u8..20 {
             let tx_id = node
-                .commit_mergeable(
+                .commit_mergeable_settled(
                     MergeableCommit::new("todos", row(100 + offset), 10 + u64::from(offset))
                         .cells(title_cells("before marker")),
                 )
@@ -405,7 +405,7 @@ fn unclean_reopen_sweeps_only_transactions_after_consistency_marker() {
         assert_eq!(ahead_current_row_count(&mut node, "todos"), 0);
 
         let crash_tx = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(200), 1000)
                     .cells(title_cells("after marker crash window")),
             )
@@ -446,10 +446,10 @@ fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
         node.open_exclusive(tx).unwrap();
         node.tx_write(tx, "todos", row(1), title_cells("parent"), None)
             .unwrap();
-        let (parent_tx, _unit) = node.commit_exclusive(tx, AuthorId::SYSTEM, 10).unwrap();
+        let (parent_tx, _unit) = node.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
         parent = parent_tx;
         child = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(2), 11)
                     .parents(vec![parent])
                     .cells(title_cells("child")),
@@ -509,7 +509,7 @@ fn recovery_rebuilds_global_clock_from_accepted_transactions() {
     {
         let mut node = open_history_complete_node_at(&temp_dir, schema.clone());
         let first = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(1), 10).cells(title_cells("first")),
             )
             .unwrap();
@@ -522,7 +522,7 @@ fn recovery_rebuilds_global_clock_from_accepted_transactions() {
         )
         .unwrap();
         let second = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(2), 11).cells(title_cells("second")),
             )
             .unwrap();
@@ -558,11 +558,11 @@ fn global_time_allocates_max_once_then_stays_exhausted() {
     node.clock.global_time_register = GlobalTime(u64::MAX - 1);
 
     let last_tx = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(22), 22).cells(title_cells("last sequence")),
         )
         .unwrap();
-    node.finalize_local_mergeable_commit(last_tx).unwrap();
+    node.finalize_local_mergeable_commit_settled(last_tx).unwrap();
     assert_eq!(
         node.transaction_state(last_tx).unwrap(),
         (
@@ -574,12 +574,12 @@ fn global_time_allocates_max_once_then_stays_exhausted() {
     assert_eq!(node.clock.global_time_register, GlobalTime(u64::MAX));
 
     let after_exhaustion = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(23), 23).cells(title_cells("after exhaustion")),
         )
         .unwrap();
     assert!(matches!(
-        node.finalize_local_mergeable_commit(after_exhaustion),
+        node.finalize_local_mergeable_commit_settled(after_exhaustion),
         Err(Error::InvalidStoredValue("global HLC exhausted"))
     ));
     assert_eq!(
@@ -597,7 +597,7 @@ fn recovery_rejects_global_time_allocation_after_max() {
     {
         let mut node = open_node_at(&temp_dir, schema.clone());
         let tx_id = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(24), 24).cells(title_cells("last sequence")),
             )
             .unwrap();
@@ -612,12 +612,12 @@ fn recovery_rejects_global_time_allocation_after_max() {
     assert_eq!(reopened.clock.global_time_register, GlobalTime(u64::MAX));
 
     let next_tx = reopened
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(25), 25).cells(title_cells("after exhaustion")),
         )
         .unwrap();
     assert!(matches!(
-        reopened.finalize_local_mergeable_commit(next_tx),
+        reopened.finalize_local_mergeable_commit_settled(next_tx),
         Err(Error::InvalidStoredValue("global HLC exhausted"))
     ));
 }
@@ -632,7 +632,7 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
     {
         let mut node = open_node_at(&temp_dir, schema.clone());
         let tx_id = node
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(3), 10).cells(title_cells("persisted")),
             )
             .unwrap();
@@ -811,7 +811,7 @@ fn pending_replay_index_scan_failure_is_not_treated_as_empty() {
     let storage = FailReplayScanStorage::new(&column_family_refs);
     let mut node_under_test = NodeState::new(node(1), schema, storage.clone()).unwrap();
     let tx_id = node_under_test
-        .commit_mergeable(MergeableCommit::new("todos", row(4), 10).cells(title_cells("pending")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(4), 10).cells(title_cells("pending")))
         .unwrap();
 
     storage.fail_scans.set(true);
@@ -963,7 +963,7 @@ fn reopen_replay_lookup_keeps_local_pending_write() {
     let schema = schema();
     let (node_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let tx_id = writer
-        .commit_mergeable(MergeableCommit::new("todos", row(4), 10).cells(title_cells("keep me")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(4), 10).cells(title_cells("keep me")))
         .unwrap();
     drop(writer);
 
@@ -988,7 +988,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     let (_dir, mut core) = open_node_with_uuid(node(0x3a));
     let mut peer = PeerState::new();
     let accepted = core
-        .commit_mergeable(MergeableCommit::new("todos", row(3), 9).cells(title_cells("accepted")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(3), 9).cells(title_cells("accepted")))
         .unwrap();
     core.apply_fate_update(
         accepted,
@@ -1002,10 +1002,10 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     core.tx_write(parent_tx, "todos", row(1), title_cells("parent"), None)
         .unwrap();
     let (parent, _unit) = core
-        .commit_exclusive(parent_tx, AuthorId::SYSTEM, 10)
+        .commit_exclusive_settled(parent_tx, AuthorId::SYSTEM, 10)
         .unwrap();
     let child = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(2), 11)
                 .parents(vec![parent])
                 .cells(title_cells("child")),
@@ -1044,12 +1044,12 @@ fn empty_string_cells_and_absent_cells_survive_restart() {
     let absent_row = row(2);
 
     local_node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", empty_row, 10).cells(title_cells(String::new())),
         )
         .unwrap();
     local_node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", absent_row, 11)
                 .cells(BTreeMap::from([("body".to_owned(), "body".to_owned())])),
         )
@@ -1089,20 +1089,20 @@ fn empty_string_cells_survive_restart_in_core_merge_version() {
     let merged_row = row(7);
 
     let left = writer_a
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", merged_row, 10).cells(title_cells(String::new())),
         )
         .unwrap()
         .1;
     let right = writer_b
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", merged_row, 11)
                 .cells(BTreeMap::from([("body".to_owned(), "body".to_owned())])),
         )
         .unwrap()
         .1;
-    core.apply_sync_message(left).unwrap();
-    core.apply_sync_message(right).unwrap();
+    core.apply_sync_message_settled(left).unwrap();
+    core.apply_sync_message_settled(right).unwrap();
 
     let expected = vec![(
         merged_row,
@@ -1134,20 +1134,20 @@ fn persisted_currency_tables_match_history_rows_after_reopen() {
     let merged_row = row(7);
 
     let left = writer_a
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", merged_row, 10).cells(title_cells(String::new())),
         )
         .unwrap()
         .1;
     let right = writer_b
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", merged_row, 11)
                 .cells(BTreeMap::from([("body".to_owned(), "body".to_owned())])),
         )
         .unwrap()
         .1;
-    core.apply_sync_message(left).unwrap();
-    core.apply_sync_message(right).unwrap();
+    core.apply_sync_message_settled(left).unwrap();
+    core.apply_sync_message_settled(right).unwrap();
     assert_currency_tables_match_storage(&mut core, "todos");
 
     drop(core);
@@ -1159,7 +1159,7 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
     let schema = schema();
     let (node_dir, mut node_a) = open_node_with_schema(node(1), schema.clone());
     let own = node_a
-        .commit_mergeable(MergeableCommit::new("todos", row(1), 10).cells(title_cells("own")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(1), 10).cells(title_cells("own")))
         .unwrap();
     assert_eq!(own.time, TxTime::from(10));
 
@@ -1191,7 +1191,7 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
     drop(node_a);
     let mut reopened = reopen_node_at(&node_dir, node(1), schema);
     let next_own = reopened
-        .commit_mergeable(MergeableCommit::new("todos", row(3), 12).cells(title_cells("next")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(3), 12).cells(title_cells("next")))
         .unwrap();
     assert_eq!(next_own.time, TxTime::new(500, 1));
 }
@@ -1228,7 +1228,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     core.tx_read(tx_id, "todos", row).unwrap();
     core.tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
-    let (exclusive, _unit) = core.commit_exclusive(tx_id, AuthorId::SYSTEM, 30).unwrap();
+    let (exclusive, _unit) = core.commit_exclusive_settled(tx_id, AuthorId::SYSTEM, 30).unwrap();
     let exclusive_global_time = core.allocate_global_time_for_test();
     core.apply_fate_update(
         exclusive,
@@ -1254,9 +1254,9 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
         .tx_write(rejected_tx, "todos", row, title_cells("rejected"), None)
         .unwrap();
     let (rejected, unit) = writer_b
-        .commit_exclusive(rejected_tx, AuthorId::SYSTEM, 41)
+        .commit_exclusive_settled(rejected_tx, AuthorId::SYSTEM, 41)
         .unwrap();
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -1323,7 +1323,7 @@ fn transaction_metadata_round_trips_through_recovery() {
     let (dir, mut local_node) = open_node_with_uuid(node(1));
     let row = row(7);
     let merge = local_node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row, 10)
                 .cells(title_cells("merge"))
                 .user_metadata(r#"{"source":"merge"}"#.to_owned()),
@@ -1339,7 +1339,7 @@ fn transaction_metadata_round_trips_through_recovery() {
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
     let (exclusive, _) = local_node
-        .commit_exclusive(tx_id, AuthorId::SYSTEM, 11)
+        .commit_exclusive_settled(tx_id, AuthorId::SYSTEM, 11)
         .unwrap();
 
     assert_eq!(

@@ -32,14 +32,14 @@ fn commit_arrival_preserves_known_noncurrent_authored_variant() {
 
     let row = row(0x5c);
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([
                 ("title".to_owned(), v("newer-client")),
                 ("body".to_owned(), v("authored-v2")),
             ])),
         )
         .unwrap();
-    core.apply_sync_message(unit).unwrap();
+    core.apply_sync_message_settled(unit).unwrap();
 
     assert_eq!(core.current_write_schema().unwrap().schema, base.version_id());
     let stored = core.query_table_versions("todos").unwrap();
@@ -79,7 +79,7 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
@@ -90,7 +90,7 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     assert_eq!(core.current_write_schema().unwrap().revision, 2);
     assert_eq!(core.current_write_schema().unwrap().schema, evolved_payload.id);
 
-    let stale = core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    let stale = core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -107,7 +107,7 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     ));
     assert_eq!(core.current_write_schema().unwrap().revision, 2);
 
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 3,
@@ -144,7 +144,7 @@ fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 4,
@@ -191,7 +191,7 @@ fn shape_registration_parks_until_schema_version_catalogue_arrives() {
     let shape = Query::from("todos").validate(&evolved).unwrap();
     let (dir, mut core) = open_node_with_schema(node(0x3c), base.clone());
 
-    core.apply_sync_message(SyncMessage::RegisterShape {
+    core.apply_sync_message_settled(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
         ast: crate::protocol::ShapeAst::from_validated(&shape),
         opts: crate::protocol::RegisterShapeOptions::default(),
@@ -259,7 +259,7 @@ fn publishing_schema_registers_new_physical_tables_live() {
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
     assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -294,7 +294,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -312,7 +312,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
         .unwrap()
     );
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("notes", note, 10).cells(BTreeMap::from([(
                 "body".to_owned(),
                 v("live add-table write"),
@@ -387,7 +387,7 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -396,7 +396,7 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
     })
     .unwrap();
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("notes", row(0x3f), 10)
                 .cells(BTreeMap::from([("body".to_owned(), v("mapped scan"))])),
         )

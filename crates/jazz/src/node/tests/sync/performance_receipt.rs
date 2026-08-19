@@ -230,7 +230,7 @@ where
         std::env::set_var("GROOVE_TRACE_INDEX_BY", "1");
         std::env::set_var("JAZZ_SKIP_BULK_INGEST_ASSERTS", "1");
     }
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     unsafe {
         std::env::remove_var("GROOVE_TRACE_INDEX_BY");
         std::env::remove_var("JAZZ_SKIP_BULK_INGEST_ASSERTS");

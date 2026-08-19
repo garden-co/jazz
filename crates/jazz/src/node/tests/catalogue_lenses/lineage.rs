@@ -73,7 +73,7 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
     );
     let (dir, mut core) = open_node_with_schema(node(0x2e), base.clone());
 
-    let standalone = core.apply_trusted_catalogue_message(SyncMessage::PublishSchema {
+    let standalone = core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
         author: AuthorId::SYSTEM,
         schema: Box::new(target.clone()),
     });
@@ -86,7 +86,7 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
     assert!(!core.catalogue_schemas().contains_key(&target.id));
 
     let ack = core
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication.clone()),
@@ -107,7 +107,7 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
     assert_eq!(activated.columns["title"], source.columns["title"]);
 
     let duplicate = core
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
@@ -189,7 +189,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
     let (_dir, mut core) = open_node_with_schema(node(0x2b), base);
 
     assert!(
-        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(publication.clone()),
@@ -213,7 +213,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
         Err(Error::UnauthorizedCatalogueUpdate)
     ));
     assert!(matches!(
-        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(conflict.clone()),
@@ -223,7 +223,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
         ))
     ));
     assert!(matches!(
-        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 3,
             publication: Box::new(conflict),
@@ -258,7 +258,7 @@ fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging(
     let next_column = core.catalogue.next_physical_column_id;
 
     assert!(matches!(
-        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
@@ -289,7 +289,7 @@ fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging(
         Vec::<String>::new(),
         Vec::<String>::new(),
     );
-    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(correction),
@@ -342,7 +342,7 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
     let (dir, mut core) = open_node_with_schema(node(0x2c), v1.clone());
 
     let parked = core
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(publication_2),
@@ -356,7 +356,7 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
     let mut reopened = reopen_node_at(&dir, node(0x2c), v1);
     assert!(!reopened.catalogue_schemas().contains_key(&v3.id));
     let drained = reopened
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication_1),
@@ -442,7 +442,7 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
     let (dir, mut core) = open_node_with_schema(node(0x2d), v1.clone());
 
     assert!(
-        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(malformed),
@@ -450,7 +450,7 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
         .unwrap()
         .is_empty()
     );
-    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(parent),
@@ -464,7 +464,7 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
     let mut core = reopen_node_at(&dir, node(0x2d), v1);
     assert!(!core.catalogue.pending_lineages.contains_key(&2));
 
-    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 2,
         publication: Box::new(valid),
@@ -503,7 +503,7 @@ fn staged_lineage_resumes_after_each_activation_crash_boundary() {
         core.set_catalogue_activation_failpoint(failpoint);
 
         assert!(matches!(
-            core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
                 author: AuthorId::SYSTEM,
                 catalogue_seq: 1,
                 publication: Box::new(publication),
@@ -512,7 +512,7 @@ fn staged_lineage_resumes_after_each_activation_crash_boundary() {
         ));
         assert!(!core.catalogue_schemas().contains_key(&target.id));
         assert!(matches!(
-            core.apply_trusted_catalogue_message(SyncMessage::PublishSchema {
+            core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
                 author: AuthorId::SYSTEM,
                 schema: Box::new(target.clone()),
             }),
@@ -605,7 +605,7 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
     let (dir, mut core) = open_node_with_schema(node(0x2e), base.clone());
     let subscription = core.subscribe_history("todos").unwrap();
     assert!(subscription.recv().unwrap().is_empty());
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x44), 900).cells(title_cells("old-title")),
     )
     .unwrap();
@@ -639,7 +639,7 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -653,7 +653,7 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
         "widening a shared current-row descriptor invalidates prepared graphs"
     );
 
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x45), 1_000).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("new-title".to_owned())),
             ("body".to_owned(), Value::String("new-body".to_owned())),
@@ -710,7 +710,7 @@ fn dropped_history_receiver_allows_cold_registry_rebuild() {
     let evolved = SchemaVersion::new(schema(&["open", "archived"]));
     let evolved_id = evolved.id;
     let (_dir, mut core) = open_node_with_schema(node(0x6c), base.clone());
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", row(0x6c), 900).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("before".to_owned())),
             ("status".to_owned(), Value::EnumTag(0)),
@@ -723,7 +723,7 @@ fn dropped_history_receiver_allows_cold_registry_rebuild() {
     assert_eq!(core.runtime_stats_for_test().active_subscriptions, 1);
     let runtime = core.groove_runtime_token();
 
-    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
@@ -748,7 +748,7 @@ fn dropped_history_receiver_allows_cold_registry_rebuild() {
 
     assert_eq!(core.runtime_stats_for_test().active_subscriptions, 0);
     assert_ne!(core.groove_runtime_token(), runtime);
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -756,7 +756,7 @@ fn dropped_history_receiver_allows_cold_registry_rebuild() {
         },
     })
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", row(0x6d), 1_000).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("after".to_owned())),
             ("status".to_owned(), Value::EnumTag(1)),

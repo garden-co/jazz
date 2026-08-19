@@ -42,7 +42,7 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
     let declared_chat_id = row(0xaa);
     let membership = row(0xd1);
     let tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("chats", physical_chat, 10).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(declared_chat_id.0)),
                 ("title".to_owned(), v("declared-id chat")),
@@ -94,7 +94,7 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
     let physical_row = row(0xc1);
     let declared_id = row(0xd1);
     let tx = core
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("documents", physical_row, 10).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(declared_id.0)),
                 ("owner".to_owned(), Value::Uuid(alice.0)),
@@ -139,7 +139,7 @@ fn required_include_rows(
 fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_owner: AuthorId) {
     let unreadable_owner = user(0xb2);
     let target_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("targets", row(0xc1), 10)
                 .cells(owner_cells(unreadable_owner, "hidden target")),
             MergeableCommit::new("targets", row(0xc2), 10)
@@ -149,7 +149,7 @@ fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_
     core.accept_global_for_test(target_tx).unwrap();
 
     let root_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("roots", row(0xd1), 20).cells(BTreeMap::from([
                 ("title".to_owned(), v("references hidden")),
                 ("target".to_owned(), Value::Uuid(row(0xc1).0)),
@@ -165,7 +165,7 @@ fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_
 
 fn seed_missing_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
     let root_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("roots", row(0xd1), 20).cells(BTreeMap::from([
                 ("title".to_owned(), v("references missing")),
                 ("target".to_owned(), Value::Uuid(row(0xcf).0)),
@@ -183,7 +183,7 @@ fn seed_missing_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
 
 fn seed_null_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
     let root_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("roots", row(0xd1), 20)
                 .cells(BTreeMap::from([("title".to_owned(), v("references null"))])),
             MergeableCommit::new("roots", row(0xd2), 20).cells(BTreeMap::from([
@@ -230,7 +230,7 @@ fn seed_multi_segment_include_fixture(
 ) {
     let unreadable_owner = user(0xb2);
     let tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("orgs", row(0xe1), 10)
                 .cells(owner_cells(unreadable_owner, "hidden org")),
             MergeableCommit::new("orgs", row(0xe2), 10)
@@ -444,7 +444,7 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
     let update_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("roots", row(0xd2), 40)
                 .parents(vec![TxId::new(TxTime(10), node(9))])
                 .cells(BTreeMap::from([
