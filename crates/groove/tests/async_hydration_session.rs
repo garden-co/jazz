@@ -33,6 +33,7 @@ fn cancelled_hydration_publishes_no_subscription_or_partial_session() {
         vec![Value::U64(1), Value::String("Kind of Blue".into())],
     );
     block_on(database.commit_batch(batch)).unwrap();
+    let before = database.runtime_stats();
 
     control.take_observed();
     control.pause();
@@ -46,7 +47,9 @@ fn cancelled_hydration_publishes_no_subscription_or_partial_session() {
     assert!(control.observed().contains(&TestStorageOperation::ScanOpen));
     drop(install);
 
-    assert_eq!(database.runtime_stats().active_subscriptions, 0);
+    let after = database.runtime_stats();
+    assert_eq!(after.graph_nodes, before.graph_nodes);
+    assert_eq!(after.active_subscriptions, before.active_subscriptions);
     control.resume();
     let subscription =
         block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
