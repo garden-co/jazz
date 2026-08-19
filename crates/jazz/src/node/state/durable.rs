@@ -134,7 +134,7 @@ where
     /// offline writers can settle in an order that disagrees with transaction
     /// HLC time, so this convenience address is best-effort under clock skew.
     pub fn at_time(&mut self, time: TxTime) -> Result<HistoricalRead<'_, S>, Error> {
-        let position = self.resolve_time_travel_position(time)?;
+        let position = crate::db::block_on(self.resolve_time_travel_position(time))?;
         Ok(self.at(position))
     }
 
@@ -161,8 +161,8 @@ where
         let table_schema = self.table(table)?.clone();
         let subscription = self.whole_table_subscription_key(table)?;
         match settled {
-            DurabilityTier::None | DurabilityTier::Local => self.current_rows(table, settled),
-            DurabilityTier::Edge => self.current_rows(table, settled),
+            DurabilityTier::None | DurabilityTier::Local => self.current_rows(table, settled).await,
+            DurabilityTier::Edge => self.current_rows(table, settled).await,
             DurabilityTier::Global => {
                 let binding_view_key =
                     BindingViewKey::from_canonical_subscription_key(subscription);
@@ -285,7 +285,7 @@ where
         }
         let mut tx_ids = Vec::with_capacity(candidates.len());
         for (alias, time) in candidates {
-            let Some(node) = self.resolve_node_alias(alias)? else {
+            let Some(node) = self.resolve_node_alias(alias).await? else {
                 continue;
             };
             tx_ids.push(TxId::new(time, node));
@@ -366,7 +366,7 @@ where
         let (time, alias) = row.projected_tx_alias()?;
         Some(TxId::new(
             time,
-            self.resolve_node_alias(alias).ok()??,
+            self.resolve_node_alias(alias).await.ok()??,
         ))
     }
 

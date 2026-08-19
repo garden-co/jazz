@@ -17,7 +17,7 @@ where
         tier: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
         if read_schema_version == self.catalogue.current_schema_version_id {
-            return self.current_rows(table, tier);
+            return self.current_rows(table, tier).await;
         }
         let read_table = self.table_in_schema(table, read_schema_version)?;
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();

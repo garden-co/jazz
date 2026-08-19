@@ -1237,11 +1237,8 @@ where
             let base_rows = if read_schema_version == self.catalogue.current_schema_version_id {
                 self.current_rows_at(table, base.global_base).await?
             } else {
-                self.projected_historical_current_rows(
-                    table,
-                    read_schema_version,
-                    base.global_base,
-                )?
+                self.projected_historical_current_rows(table, read_schema_version, base.global_base)
+                    .await?
             };
             for row in base_rows {
                 if !overlay_row_ids.contains(&row.row_uuid()) {
@@ -1279,6 +1276,7 @@ where
             self.current_rows_at(table, base.global_base).await
         } else {
             self.projected_historical_current_rows(table, read_schema_version, base.global_base)
+                .await
         }
     }
 

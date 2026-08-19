@@ -503,6 +503,7 @@ where
                     self.read_view.read_schema,
                     tier,
                 )
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
             let base = inline_include_deleted_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
@@ -880,6 +881,7 @@ where
                 self.read_view.read_schema,
                 position,
             )
+            .await
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
         inline_current_graph(table, rows)
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))

@@ -328,7 +328,8 @@ where
         }
         let table = self.table(table_name)?.clone();
         let Some(row) = self
-            .current_rows(table_name, DurabilityTier::Local)?
+            .current_rows(table_name, DurabilityTier::Local)
+            .await?
             .into_iter()
             .find(|row| row.row_uuid() == row_uuid)
         else {
@@ -352,7 +353,8 @@ where
         }
         let table = self.table(table_name)?.clone();
         let Some(row) = self
-            .current_rows(table_name, DurabilityTier::Local)?
+            .current_rows(table_name, DurabilityTier::Local)
+            .await?
             .into_iter()
             .find(|row| row.row_uuid() == row_uuid)
         else {
