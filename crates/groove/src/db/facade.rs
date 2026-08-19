@@ -59,7 +59,7 @@ where
             durable_publication_frontier: None,
             resident_publications: BTreeMap::new(),
             persisted_publications: BTreeSet::new(),
-            resident_writes: RefCell::new(StagedWriteState::default()),
+            resident_writes: Rc::new(RefCell::new(StagedWriteState::default())),
             publication_persistence: Rc::new(RefCell::new(PublicationPersistenceOrder {
                 next: 1,
                 waiters: BTreeMap::new(),

@@ -60,7 +60,7 @@ pub struct Database<S> {
     durable_publication_frontier: Option<PublicationId>,
     resident_publications: BTreeMap<PublicationId, Vec<OwnedWriteOperation>>,
     persisted_publications: BTreeSet<PublicationId>,
-    resident_writes: RefCell<StagedWriteState>,
+    resident_writes: Rc<RefCell<StagedWriteState>>,
     publication_persistence: Rc<RefCell<PublicationPersistenceOrder>>,
     poisoned: bool,
 }

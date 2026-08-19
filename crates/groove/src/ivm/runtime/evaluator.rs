@@ -131,6 +131,7 @@ pub(super) struct TickEvaluator<'a, S> {
     pub(super) memo_use_clock: &'a mut u64,
     pub(super) node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     pub(super) storage: Option<&'a S>,
+    pub(super) evaluation_inputs: Option<&'a mut super::evaluation_session::EvaluationInputs>,
     pub(super) context: EvalContext,
     pub(super) metrics: &'a mut TickMetrics,
     pub(super) terminal_deltas: HashMap<NodeId, TerminalDeltas>,
@@ -234,6 +235,7 @@ where
             memo_use_clock: self.memo_use_clock,
             node_meta: self.node_meta,
             storage: Some(self.storage),
+            evaluation_inputs: None,
             context: EvalContext::with_binding(self.scope, sub_tick, binding, deltas),
             metrics: self.metrics,
             terminal_deltas: HashMap::default(),
@@ -272,6 +274,7 @@ where
             memo_use_clock: self.memo_use_clock,
             node_meta: self.node_meta,
             storage: Some(self.storage),
+            evaluation_inputs: None,
             context: EvalContext::with_binding_and_arrangement_mode(
                 self.scope,
                 sub_tick,
@@ -315,6 +318,7 @@ where
             memo_use_clock: self.memo_use_clock,
             node_meta: self.node_meta,
             storage: Some(self.storage),
+            evaluation_inputs: None,
             context: EvalContext {
                 scope: self.scope,
                 sub_tick: 0,
@@ -562,6 +566,18 @@ where
                     &output_desc,
                     self.table_deltas,
                 ),
+                OpType::IndexSource(input)
+                    if self.context.eval_mode == EvalMode::Hydrate
+                        && self.evaluation_inputs.is_some() =>
+                {
+                    NodeState::update_index_source_from_inputs(
+                        input,
+                        &output_desc,
+                        self.evaluation_inputs
+                            .as_deref_mut()
+                            .expect("guarded evaluation inputs"),
+                    )
+                }
                 OpType::IndexSource(input) => {
                     NodeState::update_index_source(
                         input,
