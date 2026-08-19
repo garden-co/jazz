@@ -68,6 +68,10 @@ impl<'a> OwnedStorage<'a> {
         Self(storage)
     }
 
+    pub(crate) fn as_ref(&self) -> &(dyn OrderedKvStorage + 'a) {
+        self.0.as_ref()
+    }
+
     pub(crate) fn get(
         &self,
         cf: String,
