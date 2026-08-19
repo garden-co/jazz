@@ -38,7 +38,6 @@ export function useLocalFirstAuth(options: UseLocalFirstAuthOptions = {}) {
     inherited !== null &&
     options.appId === inherited.appId &&
     options.key === undefined &&
-    options.authSecretStorageKey === undefined &&
     options.userId === undefined &&
     options.sessionId === undefined;
   const store = hasCustomOptions
