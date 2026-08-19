@@ -1,14 +1,14 @@
 <!-- #region provider-svelte -->
 <script lang="ts">
-  import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+  import { JazzSvelteProvider } from 'jazz-tools/svelte';
   import TodoList from './TodoList.svelte';
 
-  const client = createJazzClient({
+  const config = {
     appId: '<your-app-id>',
-  });
+  };
 </script>
 
-<JazzSvelteProvider {client}>
+<JazzSvelteProvider {config}>
   {#snippet children()}
     <h1>Todos</h1>
     <TodoList />

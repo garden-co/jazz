@@ -13,7 +13,7 @@ full details.
 
 | Concept            | React / Expo                     | Vue                               | Svelte                          | Solid                         |
 | ------------------ | -------------------------------- | --------------------------------- | ------------------------------- | ----------------------------- |
-| Provider           | `<JazzProvider config={config}>` | `<JazzProvider :client="client">` | `<JazzSvelteProvider {client}>` | `<JazzProvider client={...}>` |
+| Provider           | `<JazzProvider config={config}>` | `<JazzProvider :client="client">` | `<JazzSvelteProvider {config}>` | `<JazzProvider client={...}>` |
 | Query subscription | `useAll(query)`                  | `useAll(query)`                   | `new QuerySubscription(query)`  | `useAll(() => ({ query }))`   |
 | DB access          | `useDb()`                        | `useDb()`                         | `getDb()`                       | `useDb()`                     |
 | Session            | `useSession()`                   | `useSession()`                    | `getSession()`                  | `useSession()`                |
