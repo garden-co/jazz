@@ -236,7 +236,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
     let expected_tx = expected.commit_mergeable_many_settled(expected_commits).unwrap();
     let mut fallback_now_ms = 200;
     let actual_tx = actual
-        .commit_mergeable_open(open_tx, || {
+        .commit_mergeable_open_settled(open_tx, || {
             let now_ms = fallback_now_ms;
             fallback_now_ms += 1;
             now_ms
@@ -279,7 +279,7 @@ fn mergeable_open_patch_commit_uses_point_reads_not_table_scans() {
     }
 
     core.reset_storage_read_metrics();
-    core.commit_mergeable_open(batch, || 2_000).unwrap();
+    core.commit_mergeable_open_settled(batch, || 2_000).unwrap();
     let reads = core.take_storage_read_metrics();
     assert!(
         reads.total.reads < 256,
@@ -317,7 +317,7 @@ fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation
             .is_empty()
     );
     assert!(matches!(
-        core.commit_mergeable_open(open_tx, || 51).unwrap_err(),
+        core.commit_mergeable_open_settled(open_tx, || 51).unwrap_err(),
         Error::MissingOpenBatch(missing) if missing == open_tx
     ));
 }

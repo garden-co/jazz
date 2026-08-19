@@ -13,13 +13,14 @@ fn edge_accept_mergeable_unit(
     unit: SyncMessage,
 ) -> (Transaction, Vec<VersionRecord>, Vec<SyncMessage>) {
     let (tx, versions) = split_commit_unit(unit);
-    let updates = edge
+    let outcome = edge
         .ingest_edge_authority_mergeable_commit_unit(
             tx.clone(),
             versions.clone(),
             u64::MAX - SKEW_TOLERANCE_MS,
         )
         .unwrap();
+    let updates = settle_outcome(edge, outcome).unwrap();
     assert_eq!(
         updates,
         vec![SyncMessage::FateUpdate {
@@ -67,12 +68,14 @@ fn global_promote_edge_unit(
     tx: Transaction,
     versions: Vec<VersionRecord>,
 ) -> SyncMessage {
-    let [fate] = core
+    let outcome = core
         .finalize_edge_accepted_mergeable_commit_unit_once(
             tx.clone(),
             versions,
             u64::MAX - SKEW_TOLERANCE_MS,
         )
+        .unwrap();
+    let [fate] = settle_outcome(core, outcome)
         .unwrap()
         .try_into()
         .unwrap();
@@ -119,7 +122,7 @@ fn edge_accepted_mergeable_promotes_to_global_without_revalidating_write_policy(
         "edge-visible",
     );
     assert_eq!(
-        edge.transaction_state(tx.tx_id).unwrap().2,
+        edge.transaction_state_settled(tx.tx_id).unwrap().2,
         DurabilityTier::Global
     );
 }
@@ -253,7 +256,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
                 None
             )],
             u64::MAX - SKEW_TOLERANCE_MS,
-        ),
+        ).resolve(),
         Err(Error::UnsupportedCommitUnit(
             "edge authority only supports mergeable commit units"
         ))

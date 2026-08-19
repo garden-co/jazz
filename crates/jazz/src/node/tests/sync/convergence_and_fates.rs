@@ -98,11 +98,11 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
 
     for lost in [lost_a, lost_b] {
         assert_eq!(
-            client.transaction_state(lost),
+            client.transaction_state_settled(lost),
             Some((Fate::Pending, None, DurabilityTier::Local))
         );
-        assert!(core.transaction_state(lost).is_none());
-        assert!(reader.transaction_state(lost).is_none());
+        assert!(core.transaction_state_settled(lost).is_none());
+        assert!(reader.transaction_state_settled(lost).is_none());
     }
     assert!(
         client
@@ -139,11 +139,11 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
     reader.apply_sync_message_settled(update).unwrap();
 
     for lost in [lost_a, lost_b] {
-        assert!(core.transaction_state(lost).is_none());
-        assert!(reader.transaction_state(lost).is_none());
+        assert!(core.transaction_state_settled(lost).is_none());
+        assert!(reader.transaction_state_settled(lost).is_none());
     }
     assert_eq!(
-        replacement.transaction_state(kept),
+        replacement.transaction_state_settled(kept),
         Some((Fate::Accepted, Some(GlobalTime::new(12, 0).unwrap()), DurabilityTier::Global))
     );
     assert_eq!(
@@ -259,7 +259,7 @@ fn originating_causality_rejection_retains_child_payload() {
     )
     .unwrap();
     let child = writer
-        .commit_mergeable_at(
+        .commit_mergeable_at_settled(
             MergeableCommit::new("todos", row, 101)
                 .parents(vec![parent])
                 .cells(title_cells("child")),
@@ -362,7 +362,7 @@ fn commit_units_sync_upstream_and_fates_flow_back() {
         .unwrap();
 
     assert_eq!(
-        client.transaction_state(tx_id).unwrap(),
+        client.transaction_state_settled(tx_id).unwrap(),
         (Fate::Pending, None, DurabilityTier::Local)
     );
 
@@ -405,7 +405,7 @@ fn commit_units_sync_upstream_and_fates_flow_back() {
         .apply_fate_update(fate_tx, accepted, global_time, durability)
         .unwrap();
     assert_eq!(
-        client.transaction_state(tx_id).unwrap(),
+        client.transaction_state_settled(tx_id).unwrap(),
         (Fate::Accepted, Some(GlobalTime::new(10, 0).unwrap()), DurabilityTier::Global)
     );
 }
@@ -452,11 +452,11 @@ fn fate_update_rejects_backward_global_time_and_keeps_durability_monotone() {
             Fate::Accepted,
             Some(GlobalTime(4)),
             Some(DurabilityTier::Global),
-        ),
+        ).resolve(),
         Err(Error::NonMonotoneState("global seq cannot move backwards"))
     ));
     assert_eq!(
-        node.transaction_state(tx_id).unwrap(),
+        node.transaction_state_settled(tx_id).unwrap(),
         (Fate::Accepted, Some(GlobalTime(5)), DurabilityTier::Global)
     );
 
@@ -468,7 +468,7 @@ fn fate_update_rejects_backward_global_time_and_keeps_durability_monotone() {
     )
     .unwrap();
     assert_eq!(
-        node.transaction_state(tx_id).unwrap(),
+        node.transaction_state_settled(tx_id).unwrap(),
         (Fate::Accepted, Some(GlobalTime(6)), DurabilityTier::Global)
     );
 }
@@ -496,7 +496,7 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
         ))
     ));
     assert_eq!(
-        node.transaction_state(tx_id),
+        node.transaction_state_settled(tx_id),
         Some((Fate::Pending, None, DurabilityTier::Local))
     );
 
@@ -508,7 +508,7 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
     })
     .unwrap();
     assert_eq!(
-        node.transaction_state(tx_id),
+        node.transaction_state_settled(tx_id),
         Some((Fate::Accepted, Some(GlobalTime(7)), DurabilityTier::Global))
     );
 }
@@ -585,7 +585,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             "global timestamp requires Global durability"
         ))
     ));
-    assert!(receiver.transaction_state(bad_tx).is_none());
+    assert!(receiver.transaction_state_settled(bad_tx).is_none());
     assert!(receiver.opening_pending_for_binding_view(binding_view));
     assert_eq!(
         receiver.applied_view_update_generation(binding_view),
@@ -633,6 +633,7 @@ fn internal_sequenced_non_global_fate_trips_the_debug_assertion() {
             Some(GlobalTime(7)),
             Some(DurabilityTier::Edge),
         )
+        .resolve()
     }));
     assert!(result.is_err());
 }

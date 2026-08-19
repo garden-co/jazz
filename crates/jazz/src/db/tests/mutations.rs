@@ -1230,11 +1230,14 @@ fn client_attributed_insert_to_different_user_is_rejected() {
     let attributed_user = AuthorId::from_bytes([0xa1; 16]);
     let client = open_db(0xc1, client_author, &schema);
 
-    let err = match client.insert_attributed(
-        attributed_user,
-        "todos",
-        cells("forged", false, client_author),
-    ) {
+    let err = match client
+        .insert_attributed(
+            attributed_user,
+            "todos",
+            cells("forged", false, client_author),
+        )
+        .resolve()
+    {
         Ok(_) => panic!("client attribution should be rejected"),
         Err(err) => err,
     };

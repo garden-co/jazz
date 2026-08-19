@@ -86,7 +86,7 @@ fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
         }
     );
     assert_eq!(
-        core.transaction_state(child).unwrap().0,
+        core.transaction_state_settled(child).unwrap().0,
         Fate::Rejected(RejectionReason::Cascade { root })
     );
     assert!(
@@ -229,11 +229,11 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         .unwrap();
     client.apply_sync_message_settled(exclusive_fate).unwrap();
     assert_eq!(
-        client.transaction_state(exclusive).unwrap().0,
+        client.transaction_state_settled(exclusive).unwrap().0,
         Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
     );
     assert_eq!(
-        client.transaction_state(dependent).unwrap().0,
+        client.transaction_state_settled(dependent).unwrap().0,
         Fate::Rejected(RejectionReason::Cascade { root: exclusive })
     );
     assert_eq!(
@@ -265,7 +265,7 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
     );
     client.apply_sync_message_settled(dependent_fate).unwrap();
     assert_eq!(
-        client.transaction_state(dependent).unwrap().0,
+        client.transaction_state_settled(dependent).unwrap().0,
         Fate::Rejected(RejectionReason::Cascade { root: exclusive })
     );
 }

@@ -137,7 +137,7 @@ fn durable_genesis_rejects_reopen_with_a_different_schema() {
     let cfs = different.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let reopened = NodeState::new(node(0x2a), different, storage);
+    let reopened = NodeState::new(node(0x2a), different, storage).resolve();
     assert!(matches!(
         reopened,
         Err(Error::InvalidStoredValue(
@@ -209,7 +209,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
                 trust: CommitUnitTrust::Session,
                 edge_authority: false,
             }),
-        ),
+        ).resolve(),
         Err(Error::UnauthorizedCatalogueUpdate)
     ));
     assert!(matches!(

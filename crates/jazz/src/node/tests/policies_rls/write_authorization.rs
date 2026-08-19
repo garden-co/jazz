@@ -113,7 +113,7 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
         .unwrap();
 
     assert!(matches!(
-        core.transaction_state(tx_id),
+        core.transaction_state_settled(tx_id),
         Some((Fate::Pending, None, DurabilityTier::Local))
     ));
     // The finalizer reads its pending transaction and the policy evaluator reads
@@ -122,7 +122,7 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
     storage.fail_after_transaction_reads(2);
     let error = core.finalize_local_mergeable_commit_settled(tx_id).unwrap_err();
     assert!(error.to_string().contains("injected transaction read failure"));
-    let pending_state = core.transaction_state(tx_id);
+    let pending_state = core.transaction_state_settled(tx_id);
     assert!(matches!(
         pending_state,
         Some((Fate::Pending, None, DurabilityTier::Local))
@@ -133,7 +133,7 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
     // The retry must still use the trusted backend as its authenticated subject.
     // `made_by` owns the row and would incorrectly accept this transaction.
     assert!(matches!(
-        core.transaction_state(tx_id),
+        core.transaction_state_settled(tx_id),
         Some((
             Fate::Rejected(RejectionReason::AuthorizationDenied),
             None,
@@ -173,7 +173,7 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
     storage.fail_after_transaction_reads(6);
     let error = core.finalize_local_mergeable_commit_settled(tx_id).unwrap_err();
     assert!(error.to_string().contains("injected transaction read failure"));
-    let terminal_state = core.transaction_state(tx_id);
+    let terminal_state = core.transaction_state_settled(tx_id);
     assert!(matches!(
         terminal_state,
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
@@ -644,7 +644,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         }
     ));
     assert!(matches!(
-        core.transaction_state(accepted_id),
+        core.transaction_state_settled(accepted_id),
         Some((Fate::Accepted, _, DurabilityTier::Global))
     ));
 

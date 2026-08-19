@@ -113,11 +113,12 @@
 pub(crate) mod legacy_test_future {
     use std::future::Future;
 
-    use crate::ids::{AuthorId, BranchId};
+    use crate::ids::{AuthorId, BranchId, SchemaVersionId};
     use crate::node::{Error, MergeableCommit, NodeState};
-    use crate::protocol::{SyncMessage, VersionRecord};
+    use crate::protocol::{CatalogueSnapshot, SyncMessage, VersionRecord};
+    use crate::time::{GlobalSeq, TxTime};
     use crate::tools::OpenTransactionId;
-    use crate::tx::{BranchLineage, Fate, Transaction, TxId};
+    use crate::tx::{BranchLineage, DurabilityTier, Fate, Transaction, TxId};
     use groove::storage::{OrderedKvStorage, ReopenableStorage};
 
     pub(crate) trait ResultFutureExt<T, E>: Future<Output = Result<T, E>> {
@@ -168,6 +169,13 @@ pub(crate) mod legacy_test_future {
             crate::db::block_on(self).is_err()
         }
 
+        fn is_ok(self) -> bool
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self).is_ok()
+        }
+
         fn map_err<F, O>(self, op: F) -> Result<T, O>
         where
             Self: Sized,
@@ -204,6 +212,17 @@ pub(crate) mod legacy_test_future {
 
     impl<F, T> OptionFutureExt<T> for F where F: Future<Output = Option<T>> {}
 
+    pub(crate) trait FutureResolveExt: Future {
+        fn resolve(self) -> Self::Output
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self)
+        }
+    }
+
+    impl<F> FutureResolveExt for F where F: Future {}
+
     pub(crate) trait SettledNodeTestExt {
         fn commit_mergeable_settled(&mut self, commit: MergeableCommit) -> Result<TxId, Error>;
         fn commit_mergeable_unit_settled(
@@ -213,6 +232,16 @@ pub(crate) mod legacy_test_future {
         fn commit_mergeable_many_settled(
             &mut self,
             commits: Vec<MergeableCommit>,
+        ) -> Result<TxId, Error>;
+        fn commit_mergeable_in_schema_settled(
+            &mut self,
+            schema: SchemaVersionId,
+            commit: MergeableCommit,
+        ) -> Result<TxId, Error>;
+        fn commit_mergeable_at_settled(
+            &mut self,
+            commit: MergeableCommit,
+            made_at: TxTime,
         ) -> Result<TxId, Error>;
         fn commit_mergeable_on_branch_settled(
             &mut self,
@@ -235,6 +264,17 @@ pub(crate) mod legacy_test_future {
             source: BranchLineage,
             target: BranchLineage,
         ) -> Result<TxId, Error>;
+        fn commit_mergeable_open_settled<F>(
+            &mut self,
+            open: OpenTransactionId,
+            next_now_ms: F,
+        ) -> Result<TxId, Error>
+        where
+            F: FnMut() -> u64;
+        fn apply_trusted_catalogue_snapshot_settled(
+            &mut self,
+            snapshot: CatalogueSnapshot,
+        ) -> Result<(), Error>;
         fn commit_exclusive_settled(
             &mut self,
             tx_id: OpenTransactionId,
@@ -261,6 +301,10 @@ pub(crate) mod legacy_test_future {
             tx: Transaction,
             versions: Vec<VersionRecord>,
         ) -> Result<Fate, Error>;
+        fn transaction_state_settled(
+            &mut self,
+            tx_id: TxId,
+        ) -> Option<(Fate, Option<GlobalSeq>, DurabilityTier)>;
     }
 
     impl<S> SettledNodeTestExt for NodeState<S>
@@ -291,6 +335,28 @@ pub(crate) mod legacy_test_future {
         ) -> Result<TxId, Error> {
             crate::db::block_on(async {
                 let published = self.commit_mergeable_many(commits).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn commit_mergeable_in_schema_settled(
+            &mut self,
+            schema: SchemaVersionId,
+            commit: MergeableCommit,
+        ) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable_in_schema(schema, commit).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn commit_mergeable_at_settled(
+            &mut self,
+            commit: MergeableCommit,
+            made_at: TxTime,
+        ) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable_at(commit, made_at).await?;
                 self.persist_and_settle_transaction(published).await
             })
         }
@@ -345,6 +411,30 @@ pub(crate) mod legacy_test_future {
             crate::db::block_on(async {
                 let published = self.merge_lineage_into(source, target).await?;
                 self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn commit_mergeable_open_settled<F>(
+            &mut self,
+            open: OpenTransactionId,
+            next_now_ms: F,
+        ) -> Result<TxId, Error>
+        where
+            F: FnMut() -> u64,
+        {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable_open(open, next_now_ms).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn apply_trusted_catalogue_snapshot_settled(
+            &mut self,
+            snapshot: CatalogueSnapshot,
+        ) -> Result<(), Error> {
+            crate::db::block_on(async {
+                let outcome = self.apply_trusted_catalogue_snapshot(snapshot).await?;
+                self.persist_and_settle_outcome(outcome).await
             })
         }
 
@@ -409,6 +499,13 @@ pub(crate) mod legacy_test_future {
                 let outcome = self.finalize_local_exclusive_commit(tx, versions).await?;
                 self.persist_and_settle_outcome(outcome).await
             })
+        }
+
+        fn transaction_state_settled(
+            &mut self,
+            tx_id: TxId,
+        ) -> Option<(Fate, Option<GlobalSeq>, DurabilityTier)> {
+            crate::db::block_on(self.transaction_state(tx_id))
         }
     }
 }

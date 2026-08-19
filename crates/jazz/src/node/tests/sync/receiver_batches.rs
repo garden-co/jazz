@@ -418,7 +418,8 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
                 durability,
                 Vec::new(),
             ),
-        ]),
+        ])
+        .resolve(),
         Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
     ));
 
@@ -480,7 +481,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         )])
         .unwrap();
     assert_eq!(
-        reader.transaction_state(tx_id).unwrap(),
+        reader.transaction_state_settled(tx_id).unwrap(),
         (Fate::Accepted, Some(global_time), DurabilityTier::Global),
     );
 
@@ -491,7 +492,8 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             Some(global_time),
             durability,
             Vec::new(),
-        )]),
+        )])
+        .resolve(),
         Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
     ));
 }
@@ -578,7 +580,8 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
             conflicting_tx,
             row(2),
             version_record(row(2), Vec::new(), title_cells("two"), None),
-        )),
+        ))
+        .resolve(),
         Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
     ));
     assert_eq!(

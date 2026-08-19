@@ -60,12 +60,12 @@ fn open_batch_identity_is_unique_and_terminal() {
     let rolled_back = OpenTransactionId::new();
     node.open_exclusive(rolled_back).unwrap();
     assert!(matches!(
-        node.open_exclusive(rolled_back),
+        node.open_exclusive(rolled_back).resolve(),
         Err(Error::DuplicateOpenBatch(id)) if id == rolled_back
     ));
     node.abandon_tx(rolled_back).unwrap();
     assert!(matches!(
-        node.open_exclusive(rolled_back),
+        node.open_exclusive(rolled_back).resolve(),
         Err(Error::DuplicateOpenBatch(id)) if id == rolled_back
     ));
 
@@ -81,7 +81,7 @@ fn open_batch_identity_is_unique_and_terminal() {
     .unwrap();
     node.commit_exclusive_settled(committed, user(1), 10).unwrap();
     assert!(matches!(
-        node.open_exclusive(committed),
+        node.open_exclusive(committed).resolve(),
         Err(Error::DuplicateOpenBatch(id)) if id == committed
     ));
 }
@@ -530,7 +530,7 @@ fn exclusive_commit_accepts_clean_end_to_end() {
     assert_eq!(*global_time, Some(GlobalTime::new(11, 0).unwrap()));
     client.apply_sync_message_settled(fate).unwrap();
     assert_eq!(
-        client.transaction_state(tx_id).unwrap(),
+        client.transaction_state_settled(tx_id).unwrap(),
         (Fate::Accepted, Some(GlobalTime::new(11, 0).unwrap()), DurabilityTier::Global)
     );
     assert_eq!(
@@ -1030,7 +1030,7 @@ fn commit_unit_forward_skew_rejects_and_client_cleans_up() {
         &Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
     );
     assert_eq!(
-        core.transaction_state(tx_id).unwrap().0,
+        core.transaction_state_settled(tx_id).unwrap().0,
         Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
     );
     assert!(core
@@ -1040,7 +1040,7 @@ fn commit_unit_forward_skew_rejects_and_client_cleans_up() {
 
     client.apply_sync_message_settled(fate).unwrap();
     assert_eq!(
-        client.transaction_state(tx_id).unwrap().0,
+        client.transaction_state_settled(tx_id).unwrap().0,
         Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
     );
     assert!(client
@@ -1109,11 +1109,11 @@ fn authority_parks_child_until_unknown_exclusive_parent_rejects() {
         client.apply_sync_message_settled(update).unwrap();
     }
     assert_eq!(
-        client.transaction_state(exclusive).unwrap().0,
+        client.transaction_state_settled(exclusive).unwrap().0,
         Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
     );
     assert_eq!(
-        client.transaction_state(child).unwrap().0,
+        client.transaction_state_settled(child).unwrap().0,
         Fate::Rejected(RejectionReason::Cascade { root: exclusive })
     );
     assert_eq!(

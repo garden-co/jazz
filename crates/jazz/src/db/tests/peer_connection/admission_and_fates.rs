@@ -752,7 +752,11 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
             "a physically distinct authority context must not reach Alice"
         );
         assert_eq!(
-            edge.node().borrow_mut().transaction_state(tx_id).unwrap().0,
+            edge.node()
+                .borrow_mut()
+                .transaction_state_settled(tx_id)
+                .unwrap()
+                .0,
             Fate::Pending,
             "a rejected fate from a different physical link must not alter edge state"
         );
@@ -842,7 +846,11 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
         .unwrap();
     edge.server.tick().unwrap();
     assert!(matches!(
-        edge.node().borrow_mut().transaction_state(tx_id).unwrap().0,
+        edge.node()
+            .borrow_mut()
+            .transaction_state_settled(tx_id)
+            .unwrap()
+            .0,
         Fate::Pending
     ));
     assert!(downstream.borrow().is_empty());
@@ -856,7 +864,11 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
         .unwrap();
     edge.server.tick().unwrap();
     assert!(matches!(
-        edge.node().borrow_mut().transaction_state(tx_id).unwrap().0,
+        edge.node()
+            .borrow_mut()
+            .transaction_state_settled(tx_id)
+            .unwrap()
+            .0,
         Fate::Accepted
     ));
     assert_eq!(downstream.borrow().len(), 1);

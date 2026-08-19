@@ -1,6 +1,6 @@
 use super::*;
 use crate::legacy_test_future::{
-    OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
 };
 
 use std::collections::BTreeMap;
@@ -768,9 +768,12 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     // error. The edge parks the first hydration turn by design.
     let (_missing_dir, mut missing_edge) = open_node_with_schema(node(0xa5), schema.clone());
     let mut missing_peer = PeerState::edge_client(writer);
-    let missing_updates = missing_peer
+    let missing_outcome = missing_peer
         .ingest_edge_mergeable_commit_unit(&mut missing_edge, tx.clone(), versions.clone(), 10)
         .expect("missing policy claim must fail closed, not abort edge ingest");
+    let missing_updates = missing_edge
+        .persist_and_settle_outcome(missing_outcome)
+        .unwrap();
     assert!(missing_updates.is_empty(), "{missing_updates:?}");
     assert_eq!(missing_peer.deferred_edge_fate_count(), 1);
 
@@ -842,9 +845,10 @@ fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
     let (_edge_dir, mut edge) = open_node_with_schema(node(0xb4), schema);
     let mut peer = PeerState::edge_client(writer);
 
-    let updates = peer
+    let outcome = peer
         .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, 10)
         .expect("missing prepared seed claim must be a deferred empty support proof");
+    let updates = edge.persist_and_settle_outcome(outcome).unwrap();
     assert!(updates.is_empty());
     assert_eq!(peer.deferred_edge_fate_count(), 1);
 }
@@ -1455,8 +1459,8 @@ fn maintained_rehydrate_run_emission_matches_forced_singleton_receiver_results()
             .expect("singleton reader should have content winner");
         assert_eq!(run_tx, singleton_tx);
         assert_eq!(
-            run_reader.transaction_state(run_tx),
-            singleton_reader.transaction_state(singleton_tx),
+            run_reader.transaction_state_settled(run_tx),
+            singleton_reader.transaction_state_settled(singleton_tx),
             "run receiver apply should preserve transaction state"
         );
     }
@@ -2644,7 +2648,7 @@ fn maintained_subscription_view_forget_with_node_unsubscribes_and_drops_state() 
     assert!(peer.forget_subscription_with_node(&mut core, subscription));
     assert!(maintained_subscription_id(&peer, subscription).is_none());
     assert!(row_result_set(&peer, subscription).is_none());
-    assert!(!core.unsubscribe_groove_subscription(maintained_id));
+    assert!(!core.unsubscribe_groove_subscription(maintained_id).resolve());
 
     let stale_tick = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
@@ -2684,7 +2688,7 @@ fn maintained_subscription_view_forget_query_binding_with_node_unsubscribes() {
 
     assert!(peer.forget_query_binding_with_node(&mut core, &shape, &binding));
     assert!(maintained_subscription_id(&peer, subscription).is_none());
-    assert!(!core.unsubscribe_groove_subscription(maintained_id));
+    assert!(!core.unsubscribe_groove_subscription(maintained_id).resolve());
 }
 
 #[test]
@@ -3453,7 +3457,7 @@ fn maintained_subscription_view_rehydrate_replaces_subscription_and_fresh_indexe
     let new_id = maintained_subscription_id(&peer, subscription)
         .expect("replacement maintained subscription missing");
     assert_ne!(old_id, new_id);
-    assert!(!core.unsubscribe_groove_subscription(old_id));
+    assert!(!core.unsubscribe_groove_subscription(old_id).resolve());
     let SyncMessage::ViewUpdate {
         reset_result_set, ..
     } = &rehydrate

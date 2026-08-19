@@ -1,7 +1,7 @@
 // Shared accepted-write, priority, recursion, and maintained-view assertions.
 
 fn accept_global(core: &mut NodeState<RocksDbStorage>, commit: MergeableCommit) -> TxId {
-    let tx_id = core.commit_mergeable(commit).unwrap();
+    let tx_id = core.commit_mergeable_settled(commit).unwrap();
     core.accept_global_for_test(tx_id).unwrap();
     tx_id
 }

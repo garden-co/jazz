@@ -215,7 +215,7 @@ where
         Ok(())
     }
 
-    async fn commit_mergeable_at(
+    pub(crate) async fn commit_mergeable_at(
         &mut self,
         commit: MergeableCommit,
         made_at: TxTime,
