@@ -208,8 +208,8 @@ fn recursive_hydration_reuses_the_sessions_table_snapshot() {
             .iter()
             .filter(|operation| **operation == TestStorageOperation::ScanOpen)
             .count(),
-        2,
-        "recursive seed and fixpoint steps share one session snapshot; arrangement seeding currently uses one separately scoped snapshot: {:?}",
+        1,
+        "recursive seed, fixpoint, and arrangement seeding must reuse the session request: {:?}",
         control.observed()
     );
 }

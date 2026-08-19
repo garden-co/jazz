@@ -160,6 +160,7 @@ pub(super) struct GraphRuntimeView<'a, S> {
     pub(super) memo_use_clock: &'a mut u64,
     pub(super) node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     pub(super) storage: &'a S,
+    pub(super) evaluation_inputs: Option<&'a mut super::evaluation_session::EvaluationInputs>,
     pub(super) scope: ScopeId,
     pub(super) metrics: &'a mut TickMetrics,
 }
@@ -182,6 +183,7 @@ fn graph_runtime_view<'a, S>(
     memo_use_clock: &'a mut u64,
     node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     storage: &'a S,
+    evaluation_inputs: Option<&'a mut super::evaluation_session::EvaluationInputs>,
     scope: ScopeId,
     metrics: &'a mut TickMetrics,
 ) -> GraphRuntimeView<'a, S> {
@@ -202,6 +204,7 @@ fn graph_runtime_view<'a, S>(
         memo_use_clock,
         node_meta,
         storage,
+        evaluation_inputs,
         scope,
         metrics,
     }
@@ -257,6 +260,16 @@ where
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut isolated_memo = HashMap::default();
         let mut isolated_memo_bytes = 0usize;
+        let mut context = EvalContext::with_binding_and_arrangement_mode(
+            self.scope,
+            sub_tick,
+            binding,
+            deltas,
+            ArrangementUpdateMode::Replace,
+        );
+        if self.evaluation_inputs.is_some() {
+            context.eval_mode = EvalMode::Hydrate;
+        }
         let mut evaluator = TickEvaluator {
             schema: self.schema,
             graph: self.graph,
@@ -274,14 +287,8 @@ where
             memo_use_clock: self.memo_use_clock,
             node_meta: self.node_meta,
             storage: Some(self.storage),
-            evaluation_inputs: None,
-            context: EvalContext::with_binding_and_arrangement_mode(
-                self.scope,
-                sub_tick,
-                binding,
-                deltas,
-                ArrangementUpdateMode::Replace,
-            ),
+            evaluation_inputs: self.evaluation_inputs.as_deref_mut(),
+            context,
             metrics: self.metrics,
             terminal_deltas: HashMap::default(),
             root_ordering_windows: HashMap::default(),
@@ -2080,6 +2087,7 @@ where
                 self.memo_use_clock,
                 self.node_meta,
                 storage,
+                self.evaluation_inputs.as_deref_mut(),
                 scope,
                 self.metrics,
             );
@@ -2111,6 +2119,7 @@ where
                 self.memo_use_clock,
                 self.node_meta,
                 storage,
+                self.evaluation_inputs.as_deref_mut(),
                 self.context.scope.child(node),
                 self.metrics,
             ),
