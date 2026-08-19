@@ -41,7 +41,8 @@ use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
-    QueryReadProfile, RelationEdge, RelationSnapshot, RowProvenance, ViewUpdateParts,
+    PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot, RowProvenance,
+    ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;

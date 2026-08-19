@@ -411,12 +411,13 @@ where
             });
     }
 
-    pub(super) fn refresh_subscriptions(&self) -> Result<usize, Error> {
+    pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
         refresh_subscriptions_in(
             &self.node,
             &self.subscriptions,
             &self.active_authority_view_receipts,
         )
+        .await
     }
 
     /// Attach this node to an upstream peer over a binding-supplied transport.
@@ -1048,7 +1049,7 @@ where
 /// for any whose rows changed. Shared by local writes
 /// ([`Db::refresh_subscriptions`]) and by inbound sync application
 /// ([`PeerConnection::tick`]).
-pub(super) fn refresh_subscriptions_in<S>(
+pub(super) async fn refresh_subscriptions_in<S>(
     node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
     active_authority_view_receipts: &ActiveAuthorityViewReceipts,
@@ -1060,10 +1061,11 @@ where
     let mut changed = 0;
     let mut optimistic_row_keys_by_author = BTreeMap::new();
     let pending_authoritative_resets = node
-        .borrow_mut()
+        .lock()
+        .await
         .take_pending_authoritative_reset_binding_views();
     let mut consumed_authoritative_resets = BTreeSet::new();
-    node.borrow_mut().flush_query_runtime()?;
+    node.lock().await.flush_query_runtime().await?;
     for weak in subscriptions.borrow().iter() {
         let Some(state) = weak.upgrade() else {
             continue;

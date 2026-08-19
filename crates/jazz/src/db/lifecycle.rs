@@ -619,8 +619,8 @@ where
         self.node.tick().await
     }
 
-    pub(super) fn refresh_subscriptions(&self) -> Result<usize, Error> {
-        let refreshed = self.node.refresh_subscriptions()?;
+    pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        let refreshed = self.node.refresh_subscriptions().await?;
         if refreshed > 0 {
             self.node.mark_subscriber_connections_dirty();
         }
