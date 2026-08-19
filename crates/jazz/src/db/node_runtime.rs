@@ -1016,7 +1016,8 @@ where
             self.node
                 .lock()
                 .await
-                .enforce_edge_cache_budget(&pins, budget)?;
+                .enforce_edge_cache_budget(&pins, budget)
+                .await?;
         }
         self.prune_settled_outbox_uploads();
         Ok(stats)
