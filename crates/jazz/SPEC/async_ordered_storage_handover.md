@@ -11,6 +11,14 @@ clarify the synchronous architecture first, make its operation boundaries
 explicit and owned, and introduce suspension only after those boundaries are
 covered by black-box tests.
 
+The active reimplementation intentionally completes Groove in isolation before
+adapting Jazz. Jazz is allowed to remain compile-red while `OrderedKvStorage`,
+Groove database operations, IVM interruption, and terminal installation are
+made coherent. The normative Groove design and migration boundary live in
+`crates/groove/SPEC/8_async_storage_and_evaluation.md`. This document describes
+the later cross-layer destination; it must not be used to justify a Jazz-side
+loading or compatibility path during the Groove phase.
+
 ## Non-negotiable properties
 
 1. There is one query and IVM implementation. Immediate and suspending storage
