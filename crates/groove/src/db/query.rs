@@ -17,6 +17,7 @@ where
             });
         }
         if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
+            self.poisoned = true;
             return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
         }
         subscription.poll_next_event(cx).map(|event| match event {
@@ -46,6 +47,7 @@ where
             });
         }
         if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
+            self.poisoned = true;
             return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
         }
         subscription.poll_next_event(cx).map(|event| match event {
@@ -75,6 +77,7 @@ where
             });
         }
         if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
+            self.poisoned = true;
             return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
         }
         subscription.poll_next_event(cx).map(|event| match event {
@@ -104,6 +107,7 @@ where
             });
         }
         if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
+            self.poisoned = true;
             return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
         }
         subscription.poll_next_event(cx).map(|event| match event {
@@ -161,10 +165,11 @@ where
     /// ```
     pub async fn subscribe_one_sink(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new_owned(
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
-            Rc::clone(&self.storage_read_metrics),
-        );
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = MeteredStorage::new_owned(overlay, Rc::clone(&self.storage_read_metrics));
         self.ivm_runtime
             .subscribe_one_sink(graph, &storage)
             .await
@@ -181,10 +186,11 @@ where
         K: Into<String>,
     {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new_owned(
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
-            Rc::clone(&self.storage_read_metrics),
-        );
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = MeteredStorage::new_owned(overlay, Rc::clone(&self.storage_read_metrics));
         self.ivm_runtime
             .subscribe(sinks, &storage)
             .await
@@ -358,7 +364,8 @@ where
                 return Err(Error::UnknownParameter((*name).to_owned()));
             }
         }
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink_with_output(prepared.id, &values, prepared.output, &storage)
             .await
@@ -381,7 +388,8 @@ where
         output_key_fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<crate::ivm::PreparedShape, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .prepare_one_sink(
                 graph,
@@ -411,7 +419,8 @@ where
         routing_key_fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<crate::ivm::PreparedShape, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .prepare_one_sink_with_routing(
                 output_graph,
@@ -438,7 +447,8 @@ where
         binding_descriptor: RecordDescriptor,
     ) -> Result<crate::ivm::PreparedShape, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .prepare(
                 terminals,
@@ -495,7 +505,8 @@ where
         binding_values: &[Value],
     ) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink(shape, binding_values, &storage)
             .await
@@ -516,7 +527,8 @@ where
         public_output: RecordDescriptor,
     ) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink_with_output(shape, binding_values, public_output, &storage)
             .await
@@ -530,7 +542,8 @@ where
         binding_values: &[Value],
     ) -> Result<MultisinkSubscription, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape(shape, binding_values, &storage)
             .await
@@ -627,7 +640,8 @@ where
         K: Into<String>,
     {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .query_snapshots(sinks, &storage)
             .await
