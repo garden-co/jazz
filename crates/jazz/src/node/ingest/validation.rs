@@ -2,7 +2,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn ingest_transaction_and_versions(
+    pub(super) async fn ingest_transaction_and_versions(
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
@@ -13,9 +13,10 @@ where
         self.ingest_transaction_and_versions_with_current_indexes(
             tx, versions, fate, global_time, durability, true, false,
         )
+        .await
     }
 
-    pub(super) fn ingest_transaction_fragment_without_current_indexes(
+    pub(super) async fn ingest_transaction_fragment_without_current_indexes(
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
@@ -39,9 +40,10 @@ where
         self.ingest_transaction_and_versions_with_current_indexes(
             tx, versions, fate, global_time, durability, true, true,
         )
+        .await
     }
 
-    fn ingest_transaction_and_versions_with_current_indexes(
+    async fn ingest_transaction_and_versions_with_current_indexes(
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
@@ -53,7 +55,7 @@ where
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
         let publication_scope = self.database.begin_durable_publication_scope()?;
-        let result = (|| {
+        let result = async {
             let mut batch = self.database.open_batch();
             self.stage_transaction_and_versions_with_current_indexes(
                 &mut batch,
@@ -65,8 +67,9 @@ where
                 update_current_indexes,
                 view_scoped_cardinality,
                 None,
-            )?;
-            self.database.commit_batch(batch)?;
+            )
+            .await?;
+            self.database.commit_batch(batch).await?;
             let mut staged_global_times = Vec::new();
             let mut cleanup_batch = self.database.open_batch();
             self.finalize_staged_transaction_ingest(
@@ -75,13 +78,16 @@ where
                 fate,
                 global_time,
                 &mut staged_global_times,
-            )?;
+            )
+            .await?;
             if !cleanup_batch.is_empty() {
-                self.database.commit_batch(cleanup_batch)?;
-                self.persist_storage_consistency_marker_through(tx_id.time)?;
+                self.database.commit_batch(cleanup_batch).await?;
+                self.persist_storage_consistency_marker_through(tx_id.time)
+                    .await?;
             }
             Ok(())
-        })();
+        }
+        .await;
         match result {
             Ok(()) => {
                 publication_scope.finish(&mut self.database);
@@ -94,7 +100,7 @@ where
         }
     }
 
-    fn stage_transaction_and_versions_with_current_indexes(
+    async fn stage_transaction_and_versions_with_current_indexes(
         &mut self,
         batch: &mut DatabaseBatch,
         tx: Transaction,
@@ -107,8 +113,8 @@ where
         staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<(), Error> {
         self.merge_tx_time(tx.tx_id.time);
-        let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
-        let stored_tx = self.query_transaction(tx.tx_id)?;
+        let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
+        let stored_tx = self.query_transaction(tx.tx_id).await?;
         let tx_already_known = stored_tx.is_some();
         let preserve_authoritative_cardinality = view_scoped_cardinality
             && stored_tx
@@ -158,7 +164,7 @@ where
             let author_schema = version.schema_version();
             let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
             let table_schema = source_table_schema;
-            let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
+            let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
             let stored = VersionRow::from_wire_with_schema_version(
                 &table_schema,
                 &version,
@@ -170,7 +176,7 @@ where
             )?;
             let table_id = self.physical_table_id_for_schema(author_schema, &table_schema.name)?;
             for parent in stored.parents() {
-                let parent_versions = self.query_versions_for_tx(parent)?;
+                let parent_versions = self.query_versions_for_tx(parent).await?;
                 let same_row = parent_versions.iter().filter(|candidate| {
                     candidate.row_uuid() == stored.row_uuid()
                         && self.physical_table_id_for_version(candidate).ok() == Some(table_id)
@@ -191,7 +197,7 @@ where
                 stored.branch_key(),
                 version.row_uuid(),
                 layer,
-            )?;
+            ).await?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 let previous_tx_id = self.version_tx_id(previous)?;
                 let previous_made_at = if previous_tx_id == tx.tx_id {
@@ -259,7 +265,8 @@ where
                     batch,
                     history_table.as_ref(),
                     &self.version_storage_primary_key_values(&stored)?,
-                )?;
+                )
+                .await?;
                 if let Some(existing) = existing {
                     if existing.record().raw() != groove_record.record().raw() {
                         return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -303,13 +310,13 @@ where
             self.rejections.child_txs_by_parent.remove(&tx.tx_id);
             self.prune_child_edges(tx.tx_id);
         } else if matches!(fate, Fate::Pending) {
-            self.record_child_edges(tx.tx_id, parent_edges);
+            self.record_child_edges(tx.tx_id, parent_edges).await;
         }
         self.cache_tx_versions(tx.tx_id, stored_versions);
         Ok(())
     }
 
-    fn finalize_staged_transaction_ingest(
+    async fn finalize_staged_transaction_ingest(
         &mut self,
         batch: &mut DatabaseBatch,
         tx_id: TxId,
@@ -471,13 +478,14 @@ where
         Ok(())
     }
 
-    fn reject_malformed_commit(
+    async fn reject_malformed_commit(
         &mut self,
         tx: Transaction,
         reason: String,
     ) -> Result<Vec<SyncMessage>, Error> {
         let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
-        self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
+        self.ingest_rejected_transaction(tx.clone(), fate.clone())
+            .await?;
         let mut updates = vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
@@ -491,7 +499,7 @@ where
     /// Ensure every known authored schema named by an arriving commit has a
     /// local alias and registered shared-storage variant. Unknown schemas stay
     /// parked until their catalogue lineage arrives and re-enters this path.
-    fn prepare_authored_schema_variants_for_commit(
+    async fn prepare_authored_schema_variants_for_commit(
         &mut self,
         versions: &[VersionRecord],
     ) -> Result<(), Error> {
@@ -524,23 +532,23 @@ where
                     .catalogue
                     .physical_mappings
                     .contains_key(&schema_version);
-            self.ensure_schema_version_alias(schema_version)?;
+            self.ensure_schema_version_alias(schema_version).await?;
         }
         if registered_mapping {
-            self.synchronize_physical_version_tables()?;
+            self.synchronize_physical_version_tables().await?;
         }
         Ok(())
     }
 
-    pub(super) fn ingest_rejected_transaction(
+    pub(super) async fn ingest_rejected_transaction(
         &mut self,
         tx: Transaction,
         fate: Fate,
     ) -> Result<(), Error> {
-        if self.query_transaction(tx.tx_id)?.is_some() {
+        if self.query_transaction(tx.tx_id).await?.is_some() {
             return self.apply_fate_update(tx.tx_id, fate, None, None);
         }
-        let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
+        let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",
@@ -552,7 +560,7 @@ where
                 DurabilityTier::Local,
             ),
         );
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         Ok(())
     }
 }
