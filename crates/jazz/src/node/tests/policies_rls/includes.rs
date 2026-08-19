@@ -78,6 +78,56 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
 
 }
 
+/// A serving authority's internal point-read authorization must select the
+/// physical target row even when `id` is declared user data. Alice owns the
+/// row, while its declared id deliberately differs from its storage identity.
+#[test]
+fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
+    let alice = user(0xa1);
+    let schema = JazzSchema::new([TableSchema::new(
+        "documents",
+        [
+            ColumnSchema::new("id", ColumnType::Uuid),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("documents", "owner"))
+    .with_write_policy(Some(Query::from("documents")))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(0xa9), schema);
+    let physical_row = row(0xc1);
+    let declared_id = row(0xd1);
+    let tx = core
+        .commit_mergeable_unit(
+            MergeableCommit::new("documents", physical_row, 10).cells(BTreeMap::from([
+                ("id".to_owned(), Value::Uuid(declared_id.0)),
+                ("owner".to_owned(), Value::Uuid(alice.0)),
+            ])),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        tx.0,
+        Fate::Accepted,
+        Some(core.clock.next_global_seq),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    core.reset_query_engine_read_metrics();
+    assert!(
+        core.dry_run_read_current_allows("documents", physical_row, alice)
+            .unwrap()
+    );
+    assert_eq!(
+        core.query_engine_read_metrics().source_primary_key_scans,
+        1,
+        "the authorization probe must point-scan the physical row"
+    );
+    assert!(
+        core.dry_run_write_current_allows("documents", physical_row, alice)
+            .unwrap()
+    );
+}
+
 fn required_include_shape(core: &NodeState<RocksDbStorage>, include: Include) -> ValidatedQuery {
     Query::from("roots")
         .include_with(include)
