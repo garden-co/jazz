@@ -153,7 +153,7 @@ where
     }
 
     /// Return current rows for a subscription at the requested tier.
-    pub fn subscription_current_rows(
+    pub async fn subscription_current_rows(
         &mut self,
         table: &str,
         settled: DurabilityTier,
@@ -191,7 +191,8 @@ where
                             VersionLayer::Content,
                             tx_id.time,
                             tx_node_alias,
-                        )?
+                        )
+                        .await?
                         .ok_or(Error::MissingTransaction(tx_id))?;
                     rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
                 }
@@ -301,7 +302,7 @@ where
         let mut row_keys = BTreeSet::new();
         for tx_id in tx_ids {
             row_keys.extend(
-                self.query_versions_for_tx(*tx_id)?
+                self.query_versions_for_tx(*tx_id).await?
                     .into_iter()
                     .map(|version| (version.table().to_owned(), version.row_uuid())),
             );
@@ -811,14 +812,15 @@ where
         row_uuid: RowUuid,
     ) -> Result<Vec<HistoryEntry>, Error> {
         let mut entries = Vec::new();
-        for version in self.query_row_versions(table, row_uuid)? {
+        for version in self.query_row_versions(table, row_uuid).await? {
             let tx_id = self.version_tx_id(&version)?;
             let tx = self
                 .query_transaction(tx_id)
                 .await?
                 .ok_or(Error::MissingTransaction(tx_id))?;
             let local_current = self
-                .query_local_layer_winner(table, row_uuid, version.layer())?
+                .query_local_layer_winner(table, row_uuid, version.layer())
+                .await?
                 .as_ref()
                 .map(|winner| {
                     self.version_tx_id(winner)
@@ -826,7 +828,8 @@ where
                 })
                 .unwrap_or(false);
             let global_current = self
-                .query_global_layer_winner(table, row_uuid, version.layer())?
+                .query_global_layer_winner(table, row_uuid, version.layer())
+                .await?
                 .as_ref()
                 .map(|winner| {
                     self.version_tx_id(winner)

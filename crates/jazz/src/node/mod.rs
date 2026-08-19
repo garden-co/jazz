@@ -16,7 +16,8 @@ use web_time::Instant;
 
 use groove::db::{
     CommitMetrics, Database, DatabaseBatch, DirectRecordStoreWrite, Error as GrooveDbError,
-    GraphBuilder, PredicateExpr, PrimaryKeyValue, Subscription,
+    GraphBuilder, PredicateExpr, PrimaryKeyValue, PublicationPersistence, PublishedBatch,
+    Subscription,
 };
 use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
@@ -1470,6 +1471,19 @@ pub(crate) struct ViewUpdateParts {
 struct IngestMemo {
     tx_exists: BTreeMap<TxId, bool>,
     tx_made_at: BTreeMap<TxId, Option<TxTime>>,
+}
+
+/// A Jazz transaction whose resident Groove publication is visible while its
+/// owned durable write is still pending.
+pub(crate) struct PublishedTransaction {
+    pub(crate) tx_id: TxId,
+    persistence: PublishedBatch,
+}
+
+impl PublishedTransaction {
+    pub(crate) async fn persist(&self) -> PublicationPersistence {
+        self.persistence.persist().await
+    }
 }
 
 struct CatalogueOpenState {
