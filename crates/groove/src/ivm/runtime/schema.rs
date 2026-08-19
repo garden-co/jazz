@@ -181,8 +181,28 @@ impl IvmRuntime {
         }
         let persist = self.add_dedup_schema_index(&table_schema, &index)?;
         self.invalidate_table_inputs(table);
-        self.hydration_snapshot(persist, storage, HydrationMode::Ordinary)
+        let persist_node = self
+            .graph
+            .node(persist)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(persist))?;
+        let OpType::Persist(persist_op) = persist_node.descriptor.operator.clone() else {
+            return Err(IvmRuntimeError::UnsupportedOperator);
+        };
+        let [input] = persist_node.descriptor.inputs.as_slice() else {
+            return Err(IvmRuntimeError::GraphInputArityMismatch(persist));
+        };
+        let input = *input;
+        let snapshot = self
+            .hydration_snapshot(input, storage, HydrationMode::Ordinary)
             .await?;
+        apply_persist_delta(
+            storage,
+            &persist_op.storage,
+            &persist_op.key_fields,
+            persist_op.unique,
+            &snapshot,
+        )
+        .await?;
         Ok(())
     }
 
