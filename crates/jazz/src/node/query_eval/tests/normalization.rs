@@ -161,6 +161,82 @@ fn declared_id_join_types_and_flat_join_physical_alias_validate() {
     assert!(flat.validate(&schema).is_ok());
 }
 
+/// Lookup and reachability policies must reject declared ID joins whose
+/// authored types disagree, while a matching declared-ID reachability path
+/// remains valid.
+#[test]
+fn declared_id_lookup_and_reachable_types_validate() {
+    let lookup_schema = JazzSchema::new([
+        TableSchema::new("roots", [ColumnSchema::new("lookup", ColumnType::Uuid)])
+            .with_reference("lookup", "lookups"),
+        TableSchema::new("lookups", [ColumnSchema::new("id", ColumnType::String)]),
+        TableSchema::new("children", [ColumnSchema::new("lookup", ColumnType::Uuid)])
+            .with_reference("lookup", "lookups"),
+    ]);
+    assert!(
+        Query::from("roots")
+            .join_via_source_lookup(
+                "children",
+                "lookup",
+                JoinSourceLookup {
+                    table: "lookups".to_owned(),
+                    row_id_source_column: "lookup".to_owned(),
+                    value_column: "id".to_owned(),
+                },
+                [],
+            )
+            .validate(&lookup_schema)
+            .is_err()
+    );
+
+    let reachable_schema = |root_id_type| {
+        JazzSchema::new([
+            TableSchema::new("roots", [ColumnSchema::new("id", root_id_type)]),
+            TableSchema::new(
+                "access",
+                [
+                    ColumnSchema::new("id", ColumnType::String),
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("id", "roots")
+            .with_reference("team", "teams"),
+            TableSchema::new("teams", [ColumnSchema::new("label", ColumnType::String)]),
+            TableSchema::new(
+                "edges",
+                [
+                    ColumnSchema::new("member", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("member", "teams")
+            .with_reference("parent", "teams"),
+        ])
+    };
+    let reachable = || {
+        Query::from("roots").reachable_via(
+            "access",
+            "id",
+            "team",
+            lit(Value::Uuid(uuid::Uuid::nil())),
+            "edges",
+            "member",
+            "parent",
+            [],
+        )
+    };
+    assert!(
+        reachable()
+            .validate(&reachable_schema(ColumnType::Uuid))
+            .is_err()
+    );
+    assert!(
+        reachable()
+            .validate(&reachable_schema(ColumnType::String))
+            .is_ok()
+    );
+}
+
 #[test]
 fn join_read_tables_include_source_lookups_and_nested_joins() {
     let nested = crate::query::JoinVia {

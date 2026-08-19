@@ -402,6 +402,13 @@ fn validate_join(
             }
         }
         planner_column_type(&lookup_table, &lookup.value_column)?;
+        if lookup.value_column == "id"
+            && has_declared_id(&lookup_table)
+            && planner_column_type(&lookup_table, &lookup.value_column)?
+                != planner_column_type(&join_table, &join.on_column)?
+        {
+            return Err(QueryError::OperandTypeMismatch);
+        }
         if join.source_column.as_deref() != Some(lookup.value_column.as_str()) {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: lookup.table.clone(),
@@ -697,6 +704,11 @@ fn validate_reachable(
     let access = table(schema, &reachable.access_table)?;
     planner_column_type(&access, &reachable.access_row_column)?;
     planner_column_type(&access, &reachable.access_team_column)?;
+    let root_key_type = if has_declared_id(root) {
+        planner_column_type(root, "id")?
+    } else {
+        &ColumnType::Uuid
+    };
     if reachable.access_row_column == "id" && !has_declared_id(&access) {
         if access.name != root.name {
             return Err(QueryError::JoinNotRefCompatible {
@@ -707,8 +719,7 @@ fn validate_reachable(
         }
     } else if access.name == root.name {
         let access_column_type = planner_column_type(&access, &reachable.access_row_column)?;
-        let root_column_type = planner_column_type(root, &reachable.access_row_column)?;
-        if !column_types_comparable(access_column_type, root_column_type) {
+        if !column_types_comparable(access_column_type, root_key_type) {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: reachable.access_table.clone(),
                 column: reachable.access_row_column.clone(),
@@ -725,6 +736,12 @@ fn validate_reachable(
                     target_table: root.name.clone(),
                 });
             }
+        }
+        if !column_types_comparable(
+            planner_column_type(&access, &reachable.access_row_column)?,
+            root_key_type,
+        ) {
+            return Err(QueryError::OperandTypeMismatch);
         }
     }
     let team_table = match reachable.access_team_target {
