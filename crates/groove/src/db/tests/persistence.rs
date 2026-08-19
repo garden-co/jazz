@@ -353,7 +353,7 @@ async fn run_graph_subscription_oracle(mut seed: u64) {
 }
 
 async fn table_pairs_from_query(
-    database: &mut Database<TestBtreeStorage>,
+    database: &mut Database,
     table: &str,
 ) -> std::collections::BTreeMap<u64, (u64, u64)> {
     let result = database

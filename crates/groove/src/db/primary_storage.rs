@@ -1,9 +1,6 @@
 use super::*;
 
-impl<S> Database<S>
-where
-    S: OrderedKvStorage,
-{
+impl Database {
     /// Return decoded records whose explicit schema index exactly matches the
     /// supplied index-column key.
     ///

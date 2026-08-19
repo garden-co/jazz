@@ -1,10 +1,7 @@
 use super::*;
 use crate::storage::WriteManyOutcome;
 
-impl<S> Database<S>
-where
-    S: OrderedKvStorage,
-{
+impl Database {
     /// Run one IVM tick without base-table writes.
     ///
     /// Commiting a batch ticks automatically; `flush` is useful after creating
@@ -105,10 +102,7 @@ where
     /// Publish resident rows and unblocked terminal deltas before ordered
     /// persistence. The returned handle owns persistence and no longer borrows
     /// this database, so resident queries may continue while storage suspends.
-    pub async fn publish_batch(&mut self, batch: DatabaseBatch) -> Result<PublishedBatch<S>, Error>
-    where
-        S: 'static,
-    {
+    pub async fn publish_batch(&mut self, batch: DatabaseBatch) -> Result<PublishedBatch, Error> {
         self.ensure_not_poisoned()?;
         let pending_writes = self.pending_writes_from_batch(batch)?;
         let descriptors = pending_writes

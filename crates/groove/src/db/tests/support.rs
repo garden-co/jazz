@@ -905,7 +905,7 @@ pub(super) fn prepared_reachability_graph(
 }
 
 pub(super) async fn prepared_reachability_shape(
-    database: &mut Database<TestBtreeStorage>,
+    database: &mut Database,
 ) -> crate::ivm::PreparedShape {
     database
         .prepare_one_sink(
@@ -919,7 +919,7 @@ pub(super) async fn prepared_reachability_shape(
 }
 
 pub(super) async fn prepared_reachability_with_antijoin_shape(
-    database: &mut Database<TestBtreeStorage>,
+    database: &mut Database,
 ) -> crate::ivm::PreparedShape {
     let unblocked = GraphBuilder::anti_join(
         GraphBuilder::table("edges"),
@@ -1057,9 +1057,7 @@ pub(super) fn grant_shape_graph() -> GraphBuilder {
     ])
 }
 
-pub(super) async fn prepare_grant_shape(
-    database: &mut Database<MemoryStorage>,
-) -> crate::ivm::PreparedShape {
+pub(super) async fn prepare_grant_shape(database: &mut Database) -> crate::ivm::PreparedShape {
     database
         .prepare_one_sink(
             grant_shape_graph(),

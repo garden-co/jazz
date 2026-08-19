@@ -35,7 +35,7 @@ fn schema() -> DatabaseSchema {
     ])
 }
 
-async fn open_db() -> (tempfile::TempDir, Database<RocksDbStorage>) {
+async fn open_db() -> (tempfile::TempDir, Database) {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open_with_durability(
         temp_dir.path(),

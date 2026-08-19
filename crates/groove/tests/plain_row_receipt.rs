@@ -155,14 +155,16 @@ async fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn s
     })?;
     assert_eq!(scan_checksum, checksum_before);
 
-    let storage = db.into_storage();
+    db.close().await?;
+    drop(db);
+    let storage = RocksDbStorage::open(dir.path(), &column_families)?;
     let before = storage.metrics()?;
 
     let reopen_started = Instant::now();
     let (storage, fresh_open_attempts) =
         fresh_open_after_exclusive_drop(storage, dir.path(), &column_families).await?;
     assert_eq!(fresh_open_attempts, 1);
-    let reopened = Database::new(schema, storage).await?;
+    let reopened = Database::new(schema.clone(), storage).await?;
     let reopen = reopen_started.elapsed();
     let disk_bytes = recursive_disk_bytes(dir.path())?;
     let mut checksum_after = 0u64;
@@ -178,7 +180,11 @@ async fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn s
         checksum_after = checksum_after.wrapping_add(checksum_record(&record)?);
     }
     assert_eq!(checksum_after, checksum_before);
-    let after = reopened.into_storage().metrics()?;
+    reopened.close().await?;
+    drop(reopened);
+    let storage = RocksDbStorage::open(dir.path(), &column_families)?;
+    let after = storage.metrics()?;
+    storage.close().await?;
 
     println!(
         "{}",
