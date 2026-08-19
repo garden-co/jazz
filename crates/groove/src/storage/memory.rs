@@ -145,7 +145,7 @@ impl OrderedKvStorage for MemoryStorage {
         cf: String,
         start: Vec<u8>,
         end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
             let values = self.with_cf(&cf, |values| {
                 values
@@ -153,7 +153,7 @@ impl OrderedKvStorage for MemoryStorage {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
             })?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan)
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
         })
     }
 
@@ -161,7 +161,7 @@ impl OrderedKvStorage for MemoryStorage {
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
             let values = self.with_cf(&cf, |values| {
                 values
@@ -170,7 +170,7 @@ impl OrderedKvStorage for MemoryStorage {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
             })?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan)
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
         })
     }
 

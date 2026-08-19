@@ -47,7 +47,7 @@ pub type KeyValue = (Vec<u8>, Vec<u8>);
 /// Storage is permitted to be executor-local (notably in browsers), so this
 /// deliberately does not impose `Send`.
 pub type StorageFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
-pub type StorageScan = Box<dyn StorageCursor>;
+pub type StorageScan<'a> = Box<dyn StorageCursor + 'a>;
 
 /// Owned, executor-local cursor over an ordered scan.
 ///
@@ -78,7 +78,7 @@ impl StorageCursor for ReadyStorageCursor {
     }
 }
 
-async fn collect_scan(mut scan: StorageScan) -> Result<Vec<KeyValue>, Error> {
+async fn collect_scan(mut scan: StorageScan<'_>) -> Result<Vec<KeyValue>, Error> {
     let mut values = Vec::new();
     while let Some(batch) = scan.next_batch().await? {
         values.extend(batch);
@@ -294,21 +294,21 @@ pub trait OrderedKvStorage {
         cf: String,
         start: Vec<u8>,
         end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>>;
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>>;
     fn scan_prefix(
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>>;
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>>;
     fn scan_prefix_reverse(
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
             let mut values = collect_scan(self.scan_prefix(cf, prefix).await?).await?;
             values.reverse();
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan)
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
         })
     }
     fn last_with_prefix(
@@ -509,12 +509,12 @@ struct PhysicalCf<'a> {
     logical_prefix: Option<&'a str>,
 }
 
-struct MappedStorageCursor {
-    inner: StorageScan,
+struct MappedStorageCursor<'a> {
+    inner: StorageScan<'a>,
     strip_len: usize,
 }
 
-impl StorageCursor for MappedStorageCursor {
+impl StorageCursor for MappedStorageCursor<'_> {
     fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
         Box::pin(async move {
             let Some(batch) = self.inner.next_batch().await? else {
@@ -730,7 +730,7 @@ where
         cf: String,
         start: Vec<u8>,
         end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         let (physical_cf, physical_start, strip_len) = self.physical_prefix(&cf, &start);
         let (_, physical_end, _) = self.physical_prefix(&cf, &end);
         Box::pin(async move {
@@ -738,7 +738,7 @@ where
                 .inner
                 .scan_range(physical_cf, physical_start, physical_end)
                 .await?;
-            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan)
+            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
         })
     }
 
@@ -746,11 +746,11 @@ where
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
         Box::pin(async move {
             let inner = self.inner.scan_prefix(physical_cf, physical_prefix).await?;
-            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan)
+            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
         })
     }
 
@@ -758,14 +758,14 @@ where
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
         Box::pin(async move {
             let inner = self
                 .inner
                 .scan_prefix_reverse(physical_cf, physical_prefix)
                 .await?;
-            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan)
+            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
         })
     }
 
@@ -968,7 +968,7 @@ impl OrderedKvStorage for BoxedStorage {
         cf: String,
         start: Vec<u8>,
         end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.inner.scan_range(cf, start, end)
     }
 
@@ -976,7 +976,7 @@ impl OrderedKvStorage for BoxedStorage {
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.inner.scan_prefix(cf, prefix)
     }
 
@@ -984,7 +984,7 @@ impl OrderedKvStorage for BoxedStorage {
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.inner.scan_prefix_reverse(cf, prefix)
     }
 
@@ -1069,25 +1069,32 @@ where
         self.column_family
     }
 
-    pub fn get_raw(&self, key: &Key) -> Result<Option<Vec<u8>>, Error> {
-        self.storage.get(self.column_family, key)
+    pub async fn get_raw(&self, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+        self.storage
+            .get(self.column_family.to_owned(), key.to_vec())
+            .await
     }
 
-    pub fn get(&self, key: &Key) -> Result<Option<Record<'_>>, Error> {
+    pub async fn get(&self, key: &Key) -> Result<Option<Record<'_>>, Error> {
         self.get_raw(key)
+            .await
             .map(|record| record.map(|record| self.descriptor.bind_owned(record)))
     }
 
-    pub fn range(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
-        self.storage.range(self.column_family, start, end)
+    pub async fn range(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
+        self.storage
+            .range(self.column_family.to_owned(), start.to_vec(), end.to_vec())
+            .await
     }
 
-    pub fn prefix(&self, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
-        self.storage.prefix(self.column_family, prefix)
+    pub async fn prefix(&self, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
+        self.storage
+            .prefix(self.column_family.to_owned(), prefix.to_vec())
+            .await
     }
 
-    pub fn range_reverse(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
-        let mut records = self.range(start, end)?;
+    pub async fn range_reverse(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
+        let mut records = self.range(start, end).await?;
         records.reverse();
         Ok(records)
     }
@@ -1096,51 +1103,71 @@ where
         &self,
         start: &Key,
         end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.storage
-            .scan_range(self.column_family, start, end, visit)
+            .scan_range(self.column_family.to_owned(), start.to_vec(), end.to_vec())
     }
 
-    pub fn scan_prefix(&self, prefix: &Key, visit: &mut ScanVisitor<'_>) -> Result<(), Error> {
-        self.storage.scan_prefix(self.column_family, prefix, visit)
+    pub fn scan_prefix(&self, prefix: &Key) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.storage
+            .scan_prefix(self.column_family.to_owned(), prefix.to_vec())
     }
 
     pub fn scan_prefix_reverse(
         &self,
         prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.storage
-            .scan_prefix_reverse(self.column_family, prefix, visit)
+            .scan_prefix_reverse(self.column_family.to_owned(), prefix.to_vec())
     }
 
-    pub fn last_with_prefix(&self, prefix: &Key) -> Result<Option<KeyValue>, Error> {
-        self.storage.last_with_prefix(self.column_family, prefix)
+    pub async fn last_with_prefix(&self, prefix: &Key) -> Result<Option<KeyValue>, Error> {
+        self.storage
+            .last_with_prefix(self.column_family.to_owned(), prefix.to_vec())
+            .await
     }
 
-    pub fn last_with_prefix_before_or_at(
+    pub async fn last_with_prefix_before_or_at(
         &self,
         prefix: &Key,
         upper: &Key,
     ) -> Result<Option<KeyValue>, Error> {
         self.storage
-            .last_with_prefix_before_or_at(self.column_family, prefix, upper)
+            .last_with_prefix_before_or_at(
+                self.column_family.to_owned(),
+                prefix.to_vec(),
+                upper.to_vec(),
+            )
+            .await
     }
 
-    pub fn set<'op>(&'op self, key: &'op Key, record: &'op [u8]) -> WriteOperation<'op> {
-        WriteOperation::set(self.column_family, key, record)
+    pub fn set(&self, key: &Key, record: &[u8]) -> OwnedWriteOperation {
+        OwnedWriteOperation::Set {
+            cf: self.column_family.to_owned(),
+            key: key.to_vec(),
+            value: record.to_vec(),
+        }
     }
 
-    pub fn delete<'op>(&'op self, key: &'op Key) -> WriteOperation<'op> {
-        WriteOperation::delete(self.column_family, key)
+    pub fn delete(&self, key: &Key) -> OwnedWriteOperation {
+        OwnedWriteOperation::Delete {
+            cf: self.column_family.to_owned(),
+            key: key.to_vec(),
+        }
     }
 
-    pub fn delta<'op>(&'op self, key: &'op Key, delta: &'op StorageDelta) -> WriteOperation<'op> {
-        WriteOperation::delta(self.column_family, key, delta)
+    pub fn delta(&self, key: &Key, delta: &StorageDelta) -> OwnedWriteOperation {
+        OwnedWriteOperation::Delta {
+            cf: self.column_family.to_owned(),
+            key: key.to_vec(),
+            delta: delta.clone(),
+        }
     }
 
-    pub fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+    pub fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
         self.storage.write_many(operations)
     }
 }
