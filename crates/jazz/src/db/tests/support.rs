@@ -1652,7 +1652,7 @@ pub(super) fn open_core(node_byte: u8, author: AuthorId, schema: &JazzSchema) ->
 }
 
 impl CoreDb {
-    pub(super) fn node(&self) -> Rc<RefCell<NodeState<RocksDbStorage>>> {
+    pub(super) fn node(&self) -> SharedNodeState<RocksDbStorage> {
         self.server.node()
     }
 
@@ -1669,11 +1669,12 @@ impl CoreDb {
     pub(super) fn read(&self, query: &Query) -> Result<Vec<CurrentRow>, Error> {
         let shape = query.validate(&self.schema)?;
         let binding = shape.bind(BTreeMap::new())?;
-        self.server
-            .node()
-            .borrow_mut()
-            .query_rows(&shape, &binding, DurabilityTier::Local)
-            .map_err(Into::into)
+        block_on(self.server.node().borrow_mut().query_rows(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+        ))
+        .map_err(Into::into)
     }
 
     pub(super) fn one(&self, query: &Query) -> Result<Option<CurrentRow>, Error> {
@@ -1683,12 +1684,14 @@ impl CoreDb {
     pub(super) fn at(&self, position: GlobalTime, query: &Query) -> Result<Vec<CurrentRow>, Error> {
         let shape = query.validate(&self.schema)?;
         let binding = shape.bind(BTreeMap::new())?;
-        self.server
-            .node()
-            .borrow_mut()
-            .at(position)
-            .read(&shape, &binding)
-            .map_err(Into::into)
+        block_on(
+            self.server
+                .node()
+                .borrow_mut()
+                .at(position)
+                .read(&shape, &binding),
+        )
+        .map_err(Into::into)
     }
 
     pub(super) fn insert(
@@ -1707,12 +1710,16 @@ impl CoreDb {
         cells: RowCells,
     ) -> Result<WriteHandle<RocksDbStorage>, Error> {
         let node = self.server.node();
-        let tx_id = node.borrow_mut().commit_mergeable(
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(self.author)
-                .cells(cells),
+        let published = block_on(
+            node.borrow_mut().commit_mergeable(
+                MergeableCommit::new(table, row, self.next_now_ms())
+                    .made_by(self.author)
+                    .cells(cells),
+            ),
         )?;
-        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        let tx_id = block_on(node.borrow_mut().persist_and_settle_transaction(published))?;
+        let outcome = block_on(node.borrow_mut().finalize_local_mergeable_commit(tx_id))?;
+        block_on(node.borrow_mut().persist_and_settle_outcome(outcome))?;
         self.server.mark_subscriber_connections_dirty();
         Ok(WriteHandle {
             node: Rc::downgrade(&node),
@@ -1777,13 +1784,17 @@ impl CoreDb {
     ) -> Result<WriteHandle<RocksDbStorage>, Error> {
         let row = self.id_source.borrow_mut().next_row_id();
         let node = self.server.node();
-        let tx_id = node.borrow_mut().commit_mergeable(
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(made_by)
-                .permission_subject(self.author)
-                .cells(cells),
+        let published = block_on(
+            node.borrow_mut().commit_mergeable(
+                MergeableCommit::new(table, row, self.next_now_ms())
+                    .made_by(made_by)
+                    .permission_subject(self.author)
+                    .cells(cells),
+            ),
         )?;
-        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        let tx_id = block_on(node.borrow_mut().persist_and_settle_transaction(published))?;
+        let outcome = block_on(node.borrow_mut().finalize_local_mergeable_commit(tx_id))?;
+        block_on(node.borrow_mut().persist_and_settle_outcome(outcome))?;
         self.server.mark_subscriber_connections_dirty();
         Ok(WriteHandle {
             node: Rc::downgrade(&node),
@@ -1828,7 +1839,7 @@ impl CoreDb {
                     cells.insert(column.name.clone(), value);
                 }
             }
-            parent = self.server.node().borrow_mut().current_row_tx_id(&existing);
+            parent = block_on(self.server.node().borrow_mut().current_row_tx_id(&existing));
         }
         cells.extend(patch);
         let node = self.server.node();
@@ -1839,8 +1850,10 @@ impl CoreDb {
         if let Some(parent) = parent {
             commit = commit.parents(vec![parent]);
         }
-        let tx_id = node.borrow_mut().commit_mergeable(commit)?;
-        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        let published = block_on(node.borrow_mut().commit_mergeable(commit))?;
+        let tx_id = block_on(node.borrow_mut().persist_and_settle_transaction(published))?;
+        let outcome = block_on(node.borrow_mut().finalize_local_mergeable_commit(tx_id))?;
+        block_on(node.borrow_mut().persist_and_settle_outcome(outcome))?;
         self.server.mark_subscriber_connections_dirty();
         Ok(WriteHandle {
             node: Rc::downgrade(&node),
@@ -1854,7 +1867,7 @@ impl CoreDb {
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorId,
-    ) -> Rc<RefCell<PeerConnection<RocksDbStorage>>> {
+    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server.accept_subscriber(transport, identity)
     }
 
@@ -1863,7 +1876,7 @@ impl CoreDb {
         transport: Box<dyn Transport>,
         identity: AuthorId,
         trust: CommitUnitTrust,
-    ) -> Rc<RefCell<PeerConnection<RocksDbStorage>>> {
+    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server
             .accept_subscriber_with_trust(transport, identity, trust)
     }
@@ -1873,7 +1886,7 @@ impl CoreDb {
         transport: Box<dyn Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<RocksDbStorage>>> {
+    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server
             .accept_subscriber_with_claims(transport, identity, claims)
     }
@@ -1883,18 +1896,18 @@ impl CoreDb {
         transport: Box<dyn Transport>,
         identity: AuthorId,
         cursor: ResumeCursor,
-    ) -> Rc<RefCell<PeerConnection<RocksDbStorage>>> {
+    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server
             .accept_subscriber_with_resume(transport, identity, cursor)
     }
 
     pub(super) fn tick(&self) -> Result<(), Error> {
-        self.server.tick().map(|_| ())
+        block_on(self.server.tick()).map(|_| ())
     }
 
     pub(super) fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
         let tx_id = OpenTransactionId::new();
-        self.server.node().borrow_mut().open_exclusive(tx_id)?;
+        block_on(self.server.node().borrow_mut().open_exclusive(tx_id))?;
         Ok(CoreExclusiveTx {
             core: self,
             tx_id,
@@ -1903,14 +1916,14 @@ impl CoreDb {
     }
 
     pub(super) fn publish_schema(&self, schema: SchemaVersion) -> Result<Vec<SyncMessage>, Error> {
-        self.server
-            .node()
-            .borrow_mut()
-            .apply_trusted_catalogue_message(SyncMessage::PublishSchema {
+        let node = self.server.node();
+        let outcome = block_on(node.borrow_mut().apply_trusted_catalogue_message(
+            SyncMessage::PublishSchema {
                 author: self.author,
                 schema: Box::new(schema),
-            })
-            .map_err(Into::into)
+            },
+        ))?;
+        block_on(node.borrow_mut().persist_and_settle_outcome(outcome)).map_err(Into::into)
     }
 
     pub(super) fn publish_schema_with_lens(
@@ -1918,29 +1931,29 @@ impl CoreDb {
         catalogue_seq: u64,
         publication: SchemaLineagePublication,
     ) -> Result<Vec<SyncMessage>, Error> {
-        self.server
-            .node()
-            .borrow_mut()
-            .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        let node = self.server.node();
+        let outcome = block_on(node.borrow_mut().apply_trusted_catalogue_message(
+            SyncMessage::PublishSchemaWithLens {
                 author: self.author,
                 catalogue_seq,
                 publication: Box::new(publication),
-            })
-            .map_err(Into::into)
+            },
+        ))?;
+        block_on(node.borrow_mut().persist_and_settle_outcome(outcome)).map_err(Into::into)
     }
 
     pub(super) fn set_current_write_schema(
         &self,
         pointer: CurrentWriteSchema,
     ) -> Result<Vec<SyncMessage>, Error> {
-        self.server
-            .node()
-            .borrow_mut()
-            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        let node = self.server.node();
+        let outcome = block_on(node.borrow_mut().apply_trusted_catalogue_message(
+            SyncMessage::SetCurrentWriteSchema {
                 author: self.author,
                 pointer,
-            })
-            .map_err(Into::into)
+            },
+        ))?;
+        block_on(node.borrow_mut().persist_and_settle_outcome(outcome)).map_err(Into::into)
     }
 }
 
@@ -1953,12 +1966,14 @@ pub(super) struct CoreExclusiveTx<'a> {
 impl CoreExclusiveTx<'_> {
     pub(super) fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
         self.has_reads.set(true);
-        self.core
-            .server
-            .node()
-            .borrow_mut()
-            .tx_read(self.tx_id, table, row)
-            .map_err(Into::into)
+        block_on(
+            self.core
+                .server
+                .node()
+                .borrow_mut()
+                .tx_read(self.tx_id, table, row),
+        )
+        .map_err(Into::into)
     }
 
     pub(super) fn insert_with_id(
@@ -1967,12 +1982,14 @@ impl CoreExclusiveTx<'_> {
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
-        self.core
-            .server
-            .node()
-            .borrow_mut()
-            .tx_write(self.tx_id, table, row, cells, None)
-            .map_err(Into::into)
+        block_on(
+            self.core
+                .server
+                .node()
+                .borrow_mut()
+                .tx_write(self.tx_id, table, row, cells, None),
+        )
+        .map_err(Into::into)
     }
 
     pub(super) fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
@@ -1990,20 +2007,23 @@ impl CoreExclusiveTx<'_> {
                 RejectionReason::ExclusiveConflict,
             ));
         }
-        let (tx_id, unit) = node.borrow_mut().commit_exclusive(
+        let (published, unit) = block_on(node.borrow_mut().commit_exclusive(
             self.tx_id,
             self.core.author,
             self.core.next_now_ms(),
-        )?;
+        ))?;
+        let tx_id = block_on(node.borrow_mut().persist_and_settle_transaction(published))?;
         let SyncMessage::CommitUnit { tx, versions } = unit else {
             return Err(Error::new(
                 ErrorCode::Protocol,
                 "commit_exclusive must yield a CommitUnit",
             ));
         };
-        let fate = node
-            .borrow_mut()
-            .finalize_local_exclusive_commit(tx, versions)?;
+        let outcome = block_on(
+            node.borrow_mut()
+                .finalize_local_exclusive_commit(tx, versions),
+        )?;
+        let fate = block_on(node.borrow_mut().persist_and_settle_outcome(outcome))?;
         if let Fate::Rejected(reason) = fate {
             return Err(write_rejected(tx_id, reason));
         }
