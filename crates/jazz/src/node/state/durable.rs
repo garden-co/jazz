@@ -241,6 +241,21 @@ where
         &mut self,
         author: AuthorId,
     ) -> Result<Vec<TxId>, Error> {
+        self.below_global_transaction_ids_for_author(author, true)
+    }
+
+    pub(crate) fn unresolved_transaction_ids_for_author(
+        &mut self,
+        author: AuthorId,
+    ) -> Result<Vec<TxId>, Error> {
+        self.below_global_transaction_ids_for_author(author, false)
+    }
+
+    fn below_global_transaction_ids_for_author(
+        &mut self,
+        author: AuthorId,
+        include_accepted: bool,
+    ) -> Result<Vec<TxId>, Error> {
         let mut candidates = Vec::new();
         for raw in self.database.index_scan_raw(
             "jazz_transactions",
@@ -248,11 +263,9 @@ where
             &[Value::Nullable(None)],
         )? {
             let record = raw.record();
+            let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
             if AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?) != author
-                || !matches!(
-                    record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?,
-                    0 | 1
-                )
+                || !(fate == 0 || (include_accepted && fate == 1))
                 || durability_from_discriminant(
                     record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
                 )? >= DurabilityTier::Global
@@ -274,6 +287,21 @@ where
         tx_ids.sort();
         tx_ids.dedup();
         Ok(tx_ids)
+    }
+
+    pub(crate) fn transaction_row_keys(
+        &mut self,
+        tx_ids: &[TxId],
+    ) -> Result<BTreeSet<(String, RowUuid)>, Error> {
+        let mut row_keys = BTreeSet::new();
+        for tx_id in tx_ids {
+            row_keys.extend(
+                self.query_versions_for_tx(*tx_id)?
+                    .into_iter()
+                    .map(|version| (version.table().to_owned(), version.row_uuid())),
+            );
+        }
+        Ok(row_keys)
     }
 
     /// Find replayable local transactions in the null slice of

@@ -1416,6 +1416,19 @@ where
         Some(tables)
     }
 
+    pub(crate) fn transaction_row_keys_for_query(
+        &self,
+        shape: &ValidatedQuery,
+        row_keys: &BTreeSet<(String, RowUuid)>,
+    ) -> BTreeSet<(String, RowUuid)> {
+        let query_tables = self.query_storage_read_tables(shape);
+        let mut row_keys = row_keys.clone();
+        if let Some(query_tables) = query_tables {
+            row_keys.retain(|(table, _)| query_tables.contains(table));
+        }
+        row_keys
+    }
+
     fn collect_include_read_tables(
         &self,
         root_table: &str,

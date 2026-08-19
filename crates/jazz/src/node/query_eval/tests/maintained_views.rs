@@ -59,7 +59,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         )
         .expect("open client-local maintained issues query");
     assert_eq!(initial_snapshot.root_count, 1);
-    client.seed_local_maintained_authoritative_result_membership(&mut local, binding_view);
+    client.seed_local_maintained_authoritative_generation(&mut local, binding_view);
 
     let updated_tx = client
         .commit_mergeable(
