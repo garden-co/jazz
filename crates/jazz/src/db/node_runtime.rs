@@ -143,10 +143,10 @@ where
     /// Restore locally originated, unsettled durable writes into the
     /// process-local upload queue after reopening client storage.
     pub(super) fn restore_pending_uploads(&self, identity: DbIdentity) -> Result<(), Error> {
-        let pending = self
-            .node
-            .borrow_mut()
-            .pending_transaction_ids_for(identity.node, identity.author)?;
+        let mut node = self.node.borrow_mut();
+        let pending = node.pending_transaction_ids_for(identity.node, identity.author);
+        let pending = crate::db::block_on(pending)?;
+        drop(node);
         let mut restored = HashSet::new();
         for tx_id in pending {
             if restored.insert(tx_id) {
@@ -161,22 +161,22 @@ where
         author: AuthorId,
         downstream_fates: &PendingDownstreamFates,
     ) -> Result<(), Error> {
-        let pending = self
-            .node
-            .borrow_mut()
-            .pending_transaction_ids_for_author(author)?;
+        let mut node = self.node.borrow_mut();
+        let pending = node.pending_transaction_ids_for_author(author);
+        let pending = crate::db::block_on(pending)?;
+        drop(node);
         let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
         let mut replay_units = Vec::new();
         let mut visited = BTreeSet::new();
         {
             let mut node = self.node.borrow_mut();
             for tx_id in &pending {
-                collect_local_replay_commit_units(
+                crate::db::block_on(collect_local_replay_commit_units(
                     &mut node,
                     *tx_id,
                     &mut visited,
                     &mut replay_units,
-                )?;
+                ))?;
             }
         }
         for (tx_id, unit) in replay_units {
@@ -272,7 +272,7 @@ where
         let pending = self.mutation_errors.borrow_mut().pending.remove(&tx_id);
         let retained = self.node.borrow().rejected_transaction(tx_id).is_some();
         if retained {
-            self.node.borrow_mut().discard_rejection(tx_id)?;
+            crate::db::block_on(self.node.borrow_mut().discard_rejection(tx_id))?;
         }
         Ok(pending.is_some() || retained)
     }
@@ -282,7 +282,8 @@ where
         tx_id: TxId,
         tier: DurabilityTier,
     ) -> Option<Result<TxId, Error>> {
-        let Some((fate, _, durability)) = self.node.borrow_mut().transaction_state(tx_id) else {
+        let state = crate::db::block_on(self.node.borrow_mut().transaction_state(tx_id));
+        let Some((fate, _, durability)) = state else {
             return Some(Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("transaction {tx_id:?} is not known locally"),
@@ -323,7 +324,8 @@ where
             return;
         };
         for (tx_id, event) in events {
-            if let Err(error) = self.node.borrow_mut().discard_rejection(tx_id) {
+            if let Err(error) = crate::db::block_on(self.node.borrow_mut().discard_rejection(tx_id))
+            {
                 tracing::warn!(?tx_id, %error, "failed to acknowledge delivered mutation error");
             }
             callback(&event);
@@ -490,7 +492,10 @@ where
                     if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
                         outbox.push(PendingUpload {
                             tx_id,
-                            unit: self.node.borrow_mut().commit_unit_for(tx_id).ok(),
+                            unit: crate::db::block_on(
+                                self.node.borrow_mut().commit_unit_for(tx_id),
+                            )
+                            .ok(),
                         });
                     }
                 }
@@ -934,7 +939,10 @@ where
                             if !outbox.iter().any(|pending| pending.tx_id == *tx_id) {
                                 outbox.push(PendingUpload {
                                     tx_id: *tx_id,
-                                    unit: self.node.borrow_mut().commit_unit_for(*tx_id).ok(),
+                                    unit: crate::db::block_on(
+                                        self.node.borrow_mut().commit_unit_for(*tx_id),
+                                    )
+                                    .ok(),
                                 });
                             }
                         }
@@ -999,7 +1007,8 @@ where
                 pins.extend(connection.lock().await.eviction_pins());
             }
             self.node
-                .borrow_mut()
+                .lock()
+                .await
                 .enforce_edge_cache_budget(&pins, budget)?;
         }
         self.prune_settled_outbox_uploads();
@@ -1013,7 +1022,8 @@ where
         }
         let mut node = self.node.borrow_mut();
         outbox.retain(|pending| {
-            let Some((fate, _, durability)) = node.transaction_state(pending.tx_id) else {
+            let state = crate::db::block_on(node.transaction_state(pending.tx_id));
+            let Some((fate, _, durability)) = state else {
                 return true;
             };
             matches!(fate, Fate::Pending | Fate::Accepted) && durability < DurabilityTier::Global
@@ -1021,7 +1031,7 @@ where
     }
 }
 
-fn optimistic_transaction_row_keys_for_query<S>(
+async fn optimistic_transaction_row_keys_for_query<S>(
     node: &SharedNodeState<S>,
     cache: &mut BTreeMap<AuthorId, BTreeSet<(String, RowUuid)>>,
     shape: &ValidatedQuery,
@@ -1034,9 +1044,15 @@ where
         std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
         std::collections::btree_map::Entry::Vacant(entry) => {
             let transactions = node
-                .borrow_mut()
-                .unresolved_transaction_ids_for_author(author)?;
-            let row_keys = node.borrow_mut().transaction_row_keys(&transactions)?;
+                .lock()
+                .await
+                .unresolved_transaction_ids_for_author(author)
+                .await?;
+            let row_keys = node
+                .lock()
+                .await
+                .transaction_row_keys(&transactions)
+                .await?;
             entry.insert(row_keys)
         }
     };
@@ -1122,24 +1138,29 @@ where
             // handle before installing its replacement so two descriptor
             // generations cannot consume the next physical delta.
             if let Some(subscription_id) = stale_subscription_id {
-                node.borrow_mut()
-                    .unsubscribe_groove_subscription(subscription_id);
+                node.lock()
+                    .await
+                    .unsubscribe_groove_subscription(subscription_id)
+                    .await;
             }
             let (shape, binding, prepared_plan) = node
-                .borrow_mut()
+                .lock()
+                .await
                 .prepare_query_binding_for_link_in_authorization_mode(
                     &shape,
                     &binding,
                     read_tier,
                     author,
                     authorization_mode,
-                )?;
+                )
+                .await?;
             let (previous_snapshot, previous_snapshot_index) = {
                 let state_ref = state.borrow();
                 (state_ref.snapshot.clone(), state_ref.snapshot_index.clone())
             };
             let (maintained, mut snapshot) = node
-                .borrow_mut()
+                .lock()
+                .await
                 .open_maintained_view_subscription_in_authorization_mode(
                     &shape,
                     &binding,
@@ -1148,7 +1169,8 @@ where
                     &read_view,
                     Some(prepared_plan),
                     authorization_mode,
-                )?;
+                )
+                .await?;
             let delivered_binding_view = BindingViewKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
@@ -1207,7 +1229,8 @@ where
                     &mut optimistic_row_keys_by_author,
                     &shape,
                     author,
-                )?
+                )
+                .await?
             } else {
                 BTreeSet::new()
             };
@@ -1258,12 +1281,14 @@ where
                         .as_mut()
                         .expect("replacement maintained subscription installed");
                     let (update, suppressed) = node
-                        .borrow_mut()
+                        .lock()
+                        .await
                         .drain_local_maintained_view_subscription_preserving_rows(
                             maintained,
                             Some(binding_view),
                             &local_overlay_row_keys,
-                        )?;
+                        )
+                        .await?;
                     debug_assert!(suppressed);
                     if let Some(update) = update {
                         let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
@@ -1279,8 +1304,10 @@ where
                     consumed_authoritative_resets.insert(binding_view);
                 } else {
                     let authoritative = node
-                        .borrow_mut()
-                        .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)?;
+                        .lock()
+                        .await
+                        .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)
+                        .await?;
                     if let Some(authoritative) = authoritative {
                         let mut state_ref = state.borrow_mut();
                         let SubscriptionKind::Prepared {
@@ -1290,11 +1317,13 @@ where
                         let maintained = maintained_subscription
                             .as_mut()
                             .expect("replacement maintained subscription installed");
-                        node.borrow_mut()
+                        node.lock()
+                            .await
                             .reset_local_maintained_view_subscription_from_binding_view(
                                 maintained,
                                 binding_view,
-                            )?;
+                            )
+                            .await?;
                         snapshot = authoritative;
                         consumed_authoritative_resets.insert(binding_view);
                     }
@@ -1453,7 +1482,8 @@ where
                             &mut optimistic_row_keys_by_author,
                             &shape,
                             author,
-                        )?
+                        )
+                        .await?
                     } else {
                         BTreeSet::new()
                     };
@@ -1522,7 +1552,8 @@ where
                         // reset is a fresh complete value and subsequent FIFO
                         // patches are relative to exactly that value.
                         let (replacement, snapshot) = node
-                            .borrow_mut()
+                            .lock()
+                            .await
                             .open_maintained_view_subscription_in_authorization_mode(
                                 &shape,
                                 &binding,
@@ -1531,7 +1562,8 @@ where
                                 &read_view,
                                 None,
                                 authorization_mode,
-                            )?;
+                            )
+                            .await?;
                         *maintained = replacement;
                         let settled = subscription_is_settled(
                             &node.borrow(),
@@ -1552,11 +1584,14 @@ where
                         )
                     } else if authoritative_reset {
                         let authoritative_snapshot = {
-                            let mut node_ref = node.borrow_mut();
-                            match node_ref.authoritative_reset_snapshot_for_binding_view(
-                                &shape,
-                                authoritative_reset_binding_view,
-                            ) {
+                            let mut node_ref = node.lock().await;
+                            match node_ref
+                                .authoritative_reset_snapshot_for_binding_view(
+                                    &shape,
+                                    authoritative_reset_binding_view,
+                                )
+                                .await
+                            {
                                 Ok(snapshot) => snapshot,
                                 Err(crate::node::Error::MissingTransaction(_)) => {
                                     node_ref.record_authoritative_reset_missing_payload_fallback();
@@ -1572,17 +1607,20 @@ where
                         let maintained_update = if let Some(maintained) =
                             maintained_subscription.as_mut()
                         {
-                            let mut node_ref = node.borrow_mut();
+                            let mut node_ref = node.lock().await;
                             if authoritative_snapshot_available {
-                                match node_ref.drain_local_maintained_view_subscription_state(
-                                    maintained, None,
-                                ) {
+                                match node_ref
+                                    .drain_local_maintained_view_subscription_state(
+                                        maintained, None,
+                                    )
+                                    .await
+                                {
                                     Ok(_) => {
                                         node_ref
                                             .reset_local_maintained_view_subscription_from_binding_view(
                                                 maintained,
                                                 authoritative_reset_binding_view,
-                                            )?;
+                                            ).await?;
                                         None
                                     }
                                     Err(error) => return Err(error.into()),
@@ -1590,6 +1628,7 @@ where
                             } else {
                                 match node_ref
                                     .drain_local_maintained_view_subscription(maintained, None)
+                                    .await
                                 {
                                     Ok(update) => update,
                                     Err(crate::node::Error::MissingTransaction(_)) => {
@@ -1612,15 +1651,18 @@ where
                                 (snapshot, true)
                             } else {
                                 let fallback = {
-                                    let mut node_ref = node.borrow_mut();
-                                    match node_ref.subscription_snapshot_in_authorization_mode(
-                                        &shape,
-                                        &binding,
-                                        snapshot_tier,
-                                        author,
-                                        &read_view,
-                                        authorization_mode,
-                                    ) {
+                                    let mut node_ref = node.lock().await;
+                                    match node_ref
+                                        .subscription_snapshot_in_authorization_mode(
+                                            &shape,
+                                            &binding,
+                                            snapshot_tier,
+                                            author,
+                                            &read_view,
+                                            authorization_mode,
+                                        )
+                                        .await
+                                    {
                                         Ok(snapshot) => snapshot,
                                         Err(crate::node::Error::MissingTransaction(_)) => {
                                             node_ref
@@ -1675,10 +1717,12 @@ where
                                 // structural publication. Advance the local
                                 // Groove mirror for future resets without
                                 // publishing its redundant reconstruction.
-                                node.borrow_mut()
+                                node.lock()
+                                    .await
                                     .drain_local_maintained_view_subscription_state(
                                         maintained, None,
-                                    )?;
+                                    )
+                                    .await?;
                             }
                             let settled = subscription_is_settled(
                                 &node.borrow(),
@@ -1711,7 +1755,7 @@ where
                         }
                         let (maintained_update, suppressed_authoritative_change) =
                             if let Some(maintained) = maintained_subscription.as_mut() {
-                                let mut node_ref = node.borrow_mut();
+                                let mut node_ref = node.lock().await;
                                 // Every client-local remote subscription must
                                 // drain against the authority's binding view. The
                                 // non-durable browser runtime additionally uses
@@ -1729,7 +1773,9 @@ where
                                         maintained,
                                         authoritative_binding_view,
                                         &local_overlay_row_keys,
-                                    ) {
+                                    )
+                                    .await
+                                {
                                     Ok(update) => update,
                                     Err(crate::node::Error::MissingTransaction(_)) => {
                                         node_ref
@@ -1784,10 +1830,12 @@ where
                                     ));
                                 };
                                 let materialized = node
-                                    .borrow_mut()
+                                    .lock()
+                                    .await
                                     .materialize_local_maintained_relation_snapshot_with_occurrences(
                                         maintained,
-                                    )?;
+                                    )
+                                    .await?;
                                 let snapshot = materialized.snapshot;
                                 let current_root_occurrences = materialized.root_occurrence_ids;
                                 let settled = subscription_is_settled(
@@ -1916,11 +1964,14 @@ where
                                     .has_settled_result_set(authoritative_reset_binding_view)
                             {
                                 let authoritative_snapshot = {
-                                    let mut node_ref = node.borrow_mut();
-                                    match node_ref.authoritative_reset_snapshot_for_binding_view(
-                                        &shape,
-                                        authoritative_reset_binding_view,
-                                    ) {
+                                    let mut node_ref = node.lock().await;
+                                    match node_ref
+                                        .authoritative_reset_snapshot_for_binding_view(
+                                            &shape,
+                                            authoritative_reset_binding_view,
+                                        )
+                                        .await
+                                    {
                                         Ok(snapshot) => snapshot,
                                         Err(crate::node::Error::MissingTransaction(_)) => {
                                             node_ref
@@ -1937,15 +1988,18 @@ where
                                     (snapshot, SubscriptionSnapshotSource::LinkSnapshot)
                                 } else {
                                     let fallback = {
-                                        let mut node_ref = node.borrow_mut();
-                                        match node_ref.subscription_snapshot_in_authorization_mode(
-                                            &shape,
-                                            &binding,
-                                            snapshot_tier,
-                                            author,
-                                            &read_view,
-                                            authorization_mode,
-                                        ) {
+                                        let mut node_ref = node.lock().await;
+                                        match node_ref
+                                            .subscription_snapshot_in_authorization_mode(
+                                                &shape,
+                                                &binding,
+                                                snapshot_tier,
+                                                author,
+                                                &read_view,
+                                                authorization_mode,
+                                            )
+                                            .await
+                                        {
                                             Ok(snapshot) => snapshot,
                                             Err(crate::node::Error::MissingTransaction(_)) => {
                                                 node_ref
@@ -1964,15 +2018,18 @@ where
                                 }
                             } else {
                                 let remote_snapshot = {
-                                    let mut node_ref = node.borrow_mut();
-                                    match node_ref.subscription_snapshot_in_authorization_mode(
-                                        &shape,
-                                        &binding,
-                                        snapshot_tier,
-                                        author,
-                                        &read_view,
-                                        authorization_mode,
-                                    ) {
+                                    let mut node_ref = node.lock().await;
+                                    match node_ref
+                                        .subscription_snapshot_in_authorization_mode(
+                                            &shape,
+                                            &binding,
+                                            snapshot_tier,
+                                            author,
+                                            &read_view,
+                                            authorization_mode,
+                                        )
+                                        .await
+                                    {
                                         Ok(snapshot) => snapshot,
                                         Err(crate::node::Error::MissingTransaction(_)) => {
                                             node_ref
@@ -1993,7 +2050,8 @@ where
                             (previous.clone(), previous_source)
                         } else {
                             (
-                                node.borrow_mut()
+                                node.lock()
+                                    .await
                                     .subscription_snapshot_in_authorization_mode(
                                         &shape,
                                         &binding,
@@ -2001,7 +2059,8 @@ where
                                         author,
                                         &read_view,
                                         authorization_mode,
-                                    )?,
+                                    )
+                                    .await?,
                                 SubscriptionSnapshotSource::LinkSnapshot,
                             )
                         };
@@ -2059,8 +2118,10 @@ where
                 else {
                     unreachable!("checked maintained subscription above");
                 };
-                node.borrow_mut()
-                    .materialize_local_maintained_relation_snapshot_with_occurrences(maintained)?
+                node.lock()
+                    .await
+                    .materialize_local_maintained_relation_snapshot_with_occurrences(maintained)
+                    .await?
             };
             snapshot = materialized.snapshot;
             snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
