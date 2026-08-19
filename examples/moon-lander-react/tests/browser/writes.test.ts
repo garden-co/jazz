@@ -138,7 +138,8 @@ function makeDeposit(overrides: Partial<FuelDeposit> & { fuelType: string }): Fu
 /**
  * Minimal db mock that captures insert and update calls.
  *
- * reconcileDeposits only uses these two methods, both returning a promise.
+ * reconcileDeposits only uses these two methods, both returning a write handle
+ * whose `wait` method records the requested durability tier.
  */
 function mockDb() {
   const inserts: Array<{ table: unknown; data: Record<string, unknown>; tier: string }> = [];
@@ -151,26 +152,53 @@ function mockDb() {
 
   return {
     db: {
-      insertDurable: vi.fn(
-        async (table: unknown, data: Record<string, unknown>, options?: { tier?: string }) => {
+      insert: vi.fn((table: unknown, data: Record<string, unknown>) => ({
+        wait: vi.fn(async (options?: { tier?: string }) => {
           const id = `new-${inserts.length}`;
           inserts.push({ table, data, tier: options?.tier ?? "edge" });
           return { id, ...data };
-        },
-      ),
-      updateDurable: vi.fn(
-        async (
-          table: unknown,
-          id: string,
-          data: Record<string, unknown>,
-          options?: { tier?: string },
-        ) => {
+        }),
+      })),
+      update: vi.fn((table: unknown, id: string, data: Record<string, unknown>) => ({
+        wait: vi.fn(async (options?: { tier?: string }) => {
           updates.push({ table, id, data, tier: options?.tier ?? "edge" });
-        },
-      ),
+        }),
+      })),
     } as any,
     inserts,
     updates,
+  };
+}
+
+type DeferredWait = {
+  resolve: () => void;
+  reject: (error: unknown) => void;
+};
+
+/**
+ * A db mock whose write handles stay pending until the test settles them.
+ *
+ * This makes the reconciliation promise observable independently from when
+ * the insert/update calls themselves are issued.
+ */
+function mockDbWithDeferredWaits() {
+  const waits: DeferredWait[] = [];
+
+  const write = () => ({
+    wait: vi.fn(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          waits.push({ resolve, reject });
+        }),
+    ),
+  });
+
+  return {
+    db: {
+      insert: vi.fn(write),
+      update: vi.fn(write),
+    } as any,
+    waits,
   };
 }
 
@@ -374,5 +402,40 @@ describe("reconcileDeposits", () => {
 
     expect(inserts.length).toBe(0);
     expect(updates.length).toBe(0);
+  });
+
+  it("does not resolve until every write handle has reached edge durability", async () => {
+    const { db, waits } = mockDbWithDeferredWaits();
+    const limits = FUEL_TYPES.map((fuelType) => (fuelType === "circle" ? 2 : 0));
+    let settled = false;
+
+    const reconciliation = reconcileDeposits(db, [], limits).then(() => {
+      settled = true;
+    });
+
+    expect(waits).toHaveLength(2);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    waits[0].resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    waits[1].resolve();
+    await reconciliation;
+    expect(settled).toBe(true);
+  });
+
+  it("propagates a rejection from any write-handle wait", async () => {
+    const { db, waits } = mockDbWithDeferredWaits();
+    const limits = FUEL_TYPES.map((fuelType) => (fuelType === "circle" ? 2 : 0));
+    const error = new Error("edge durability rejected");
+    const reconciliation = reconcileDeposits(db, [], limits);
+
+    expect(waits).toHaveLength(2);
+    waits[0].resolve();
+    waits[1].reject(error);
+
+    await expect(reconciliation).rejects.toBe(error);
   });
 });
