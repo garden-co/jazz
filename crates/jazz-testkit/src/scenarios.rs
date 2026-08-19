@@ -562,8 +562,20 @@ pub async fn collect_stream_deltas(
 }
 
 #[allow(dead_code)]
+/// Returns true if any logged add contains every expected named field value.
+pub fn has_added(log: &[OrderedRowDelta], expected: &[(&str, Value)]) -> bool {
+    log.iter().any(|delta| {
+        delta.added.iter().any(|change| {
+            expected
+                .iter()
+                .all(|(name, value)| change.row.get(name) == Some(value))
+        })
+    })
+}
+
+#[allow(dead_code)]
 /// Returns true if any logged subscription delta contains `id` in its added set.
-pub fn has_added(log: &[OrderedRowDelta], id: ObjectId) -> bool {
+pub fn has_added_id(log: &[OrderedRowDelta], id: ObjectId) -> bool {
     log.iter()
         .any(|delta| delta.added.iter().any(|change| change.id == id))
 }
@@ -586,7 +598,7 @@ pub fn has_updated(log: &[OrderedRowDelta], id: ObjectId) -> bool {
 /// Returns true if any logged subscription delta references `id` as an add,
 /// update, or removal.
 pub fn has_any_change(log: &[OrderedRowDelta], id: ObjectId) -> bool {
-    has_added(log, id) || has_updated(log, id) || has_removed(log, id)
+    has_added_id(log, id) || has_updated(log, id) || has_removed(log, id)
 }
 
 #[allow(dead_code)]

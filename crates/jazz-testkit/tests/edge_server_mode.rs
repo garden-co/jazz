@@ -18,7 +18,7 @@ use jazz::tools::{
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
-    TestingClient, has_added, has_removed, publish_permissions, wait_for_edge_query_ready,
+    TestingClient, has_added_id, has_removed, publish_permissions, wait_for_edge_query_ready,
     wait_for_query, wait_for_subscription_update,
 };
 use tempfile::TempDir;
@@ -208,7 +208,7 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
                 &mut log,
                 Duration::from_secs(10),
                 "edge-tier public subscription receives inserted row",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
         })
@@ -431,12 +431,12 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 &mut updates,
                 Duration::from_secs(10),
                 "promoted row enters maintained window",
-                |deltas| has_added(deltas, promoted) && has_removed(deltas, tied[1]),
+                |deltas| has_added_id(deltas, promoted) && has_removed(deltas, tied[1]),
             )
             .await;
             let promotion = updates
                 .iter()
-                .find(|delta| has_added(std::slice::from_ref(delta), promoted))
+                .find(|delta| has_added_id(std::slice::from_ref(delta), promoted))
                 .expect("promotion delta is recorded");
             assert_eq!(
                 promotion
@@ -477,7 +477,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 &mut updates,
                 Duration::from_secs(10),
                 "demoted row leaves maintained window",
-                |deltas| has_removed(deltas, promoted) && has_added(deltas, tied[1]),
+                |deltas| has_removed(deltas, promoted) && has_added_id(deltas, tied[1]),
             )
             .await;
 
@@ -1343,7 +1343,7 @@ async fn core_write_reaches_clients_on_both_edges() {
                 &mut alice_log,
                 Duration::from_secs(30),
                 "alice receives the core write through edge_us",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
             wait_for_subscription_update(
@@ -1351,7 +1351,7 @@ async fn core_write_reaches_clients_on_both_edges() {
                 &mut bob_log,
                 Duration::from_secs(30),
                 "bob receives the core write through edge_eu",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
             wait_for_row(
@@ -1444,7 +1444,7 @@ async fn edge_write_reaches_client_on_peer_edge() {
                 &mut bob_log,
                 Duration::from_secs(30),
                 "bob receives edge_us write through edge_eu",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
             wait_for_row(

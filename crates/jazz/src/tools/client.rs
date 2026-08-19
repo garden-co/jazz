@@ -116,8 +116,6 @@ pub struct JazzClient {
     write_context: Option<WriteContext>,
     /// Shared core database handle backing the public client facade.
     db: Rc<ClientDb>,
-    /// Public schema retained for the current public API surface.
-    public_schema: Schema,
 }
 
 impl Clone for JazzClient {
@@ -126,13 +124,18 @@ impl Clone for JazzClient {
             default_session: self.default_session.clone(),
             write_context: self.write_context.clone(),
             db: self.db.clone(),
-            public_schema: self.public_schema.clone(),
         }
     }
 }
 
 struct ClientDb {
     inner: Rc<RefCell<ClientDbInner>>,
+    query_decoder: PublicQueryDecoder,
+}
+
+#[derive(Clone)]
+struct PublicQueryDecoder {
+    schema: Rc<Schema>,
 }
 
 struct ClientDbInner {
@@ -520,6 +523,7 @@ impl TickScheduler for TickSchedulerImpl {
 impl ClientDb {
     async fn open(
         schema: crate::schema::JazzSchema,
+        public_schema: Schema,
         storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
@@ -544,7 +548,12 @@ impl ClientDb {
         if has_upstream {
             Self::spawn_local_tick_driver(Rc::downgrade(&inner), Rc::clone(&scheduler));
         }
-        Ok(Rc::new(Self { inner }))
+        Ok(Rc::new(Self {
+            inner,
+            query_decoder: PublicQueryDecoder {
+                schema: Rc::new(public_schema),
+            },
+        }))
     }
 
     async fn query_rows(
@@ -593,7 +602,15 @@ impl ClientDb {
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
     ) -> Result<()> {
         self.ensure_tick_driver_running()?;
-        ClientDbInner::handle_subscribe(&self.inner, query, opts, table, tx).await
+        ClientDbInner::handle_subscribe(
+            &self.inner,
+            self.query_decoder.clone(),
+            query,
+            opts,
+            table,
+            tx,
+        )
+        .await
     }
 
     fn insert(
@@ -1178,6 +1195,7 @@ impl ClientDbInner {
 
     async fn handle_subscribe(
         inner: &Rc<RefCell<Self>>,
+        query_decoder: PublicQueryDecoder,
         query: crate::query::Query,
         opts: CoreReadOpts,
         table: String,
@@ -1253,7 +1271,7 @@ impl ClientDbInner {
                         let terminal_changes;
                         let (delta_added, delta_updated, delta_removed, delta_moved) =
                             if terminal_operations.is_empty() {
-                                JazzClient::apply_core_subscription_rows(
+                                PublicQueryDecoder::apply_core_subscription_rows(
                                     &mut current_rows,
                                     &effective_added,
                                     &effective_updated,
@@ -1265,7 +1283,7 @@ impl ClientDbInner {
                                     break;
                                 };
                                 let Ok(changes) =
-                                    JazzClient::apply_core_subscription_terminal_operations(
+                                    PublicQueryDecoder::apply_core_subscription_terminal_operations(
                                         &mut current_rows,
                                         &terminal_operations,
                                         layout,
@@ -1288,14 +1306,16 @@ impl ClientDbInner {
                             .collect::<Vec<_>>();
                         inner.borrow_mut().remember_rows(&table, &rows_for_cache);
                         let delta = if reset_replaces_initial_view {
-                            JazzClient::core_subscription_reset_delta(
+                            query_decoder.core_subscription_reset_delta(
                                 &db,
+                                &query,
                                 &previous_rows,
                                 &current_rows,
                             )
                         } else {
-                            JazzClient::core_subscription_change_delta(
+                            query_decoder.core_subscription_change_delta(
                                 &db,
+                                &query,
                                 &previous_rows,
                                 &current_rows,
                                 delta_added,
@@ -2052,13 +2072,17 @@ impl JazzClient {
             read_view: CoreReadViewSpec::default(),
         }
     }
+}
+
+impl PublicQueryDecoder {
     fn core_rows_to_public(
         &self,
+        db: &Backend,
         query: &Query,
         rows: Vec<crate::node::CurrentRow>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let table = query.table.as_str();
-        let schema = self.schema()?;
+        let schema = self.schema.as_ref();
         let table_schema = schema
             .get(&TableName::new(table))
             .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
@@ -2133,7 +2157,7 @@ impl JazzClient {
                     .iter()
                     .map(|column| {
                         if let Some(value) =
-                            self.core_magic_value(table, core_row_id, &row, column)?
+                            self.core_magic_value(db, table, core_row_id, &row, column)?
                         {
                             return Ok(value);
                         }
@@ -2183,6 +2207,7 @@ impl JazzClient {
 
     fn core_rows_to_query_results(
         &self,
+        db: &Backend,
         query: &Query,
         rows: Vec<crate::node::CurrentRow>,
     ) -> Result<Vec<QueryResult>> {
@@ -2191,7 +2216,7 @@ impl JazzClient {
             .map(|row| ResultKey::from_occurrence(crate::db::subscription_row_occurrence_id(row)))
             .collect::<Vec<_>>();
         let names = self.query_result_column_names(query)?;
-        let values = self.core_rows_to_public(query, rows)?;
+        let values = self.core_rows_to_public(db, query, rows)?;
         keys.into_iter()
             .zip(values)
             .map(|(key, (_, values))| {
@@ -2214,7 +2239,7 @@ impl JazzClient {
     }
 
     fn query_result_column_names(&self, query: &Query) -> Result<Vec<String>> {
-        let schema = self.schema()?;
+        let schema = self.schema.as_ref();
         let table = query.table.as_str();
         let table_schema = schema
             .get(&TableName::new(table))
@@ -2271,9 +2296,13 @@ impl JazzClient {
         );
         Ok(names)
     }
+}
 
+impl PublicQueryDecoder {
     fn core_subscription_row_to_public(
+        &self,
         db: &Backend,
+        query: &Query,
         row: &CoreSubscriptionOutputRow,
     ) -> Result<Row> {
         let (_, encoded) = row.row.encoded_record();
@@ -2284,23 +2313,36 @@ impl JazzClient {
             .unwrap_or_else(|| {
                 crate::tools::metadata::RowProvenance::for_insert("jazz:unknown", 0)
             });
-        Ok(Row::new(
+        let public = Row::new(
             ResultKey::from_occurrence(row.occurrence_id.clone()),
             encoded.to_vec(),
             TransactionId([0; 16]),
             provenance,
-        ))
+        );
+        #[cfg(feature = "testing")]
+        let public = {
+            let fields = self
+                .core_rows_to_query_results(db, query, vec![row.row.clone()])
+                .ok()
+                .and_then(|mut results| results.pop())
+                .map(|result| result.fields)
+                .unwrap_or_default();
+            public.with_fields(fields)
+        };
+        Ok(public)
     }
 
     fn core_subscription_snapshot_delta(
+        &self,
         db: &Backend,
+        query: &Query,
         rows: &[CoreSubscriptionOutputRow],
     ) -> Result<OrderedRowDelta> {
         let added = rows
             .iter()
             .enumerate()
             .map(|(index, row)| {
-                let public = Self::core_subscription_row_to_public(db, row)?;
+                let public = self.core_subscription_row_to_public(db, query, row)?;
                 Ok(OrderedAdded {
                     id: public.id.clone(),
                     index,
@@ -2315,7 +2357,9 @@ impl JazzClient {
     }
 
     fn core_subscription_reset_delta(
+        &self,
         db: &Backend,
+        query: &Query,
         previous_rows: &[OutputOccurrenceId],
         rows: &[CoreSubscriptionOutputRow],
     ) -> Result<OrderedRowDelta> {
@@ -2328,7 +2372,7 @@ impl JazzClient {
                 index,
             })
             .collect();
-        let mut delta = Self::core_subscription_snapshot_delta(db, rows)?;
+        let mut delta = self.core_subscription_snapshot_delta(db, query, rows)?;
         delta.removed = removed;
         Ok(delta)
     }
@@ -2475,7 +2519,9 @@ impl JazzClient {
     }
 
     fn core_subscription_change_delta(
+        &self,
         db: &Backend,
+        query: &Query,
         previous_rows: &[OutputOccurrenceId],
         current_rows: &[CoreSubscriptionOutputRow],
         added_rows: &[CoreSubscriptionOutputRow],
@@ -2492,7 +2538,7 @@ impl JazzClient {
         let added = added_rows
             .iter()
             .map(|row| {
-                let public = Self::core_subscription_row_to_public(db, row)?;
+                let public = self.core_subscription_row_to_public(db, query, row)?;
                 let index = index_of(public.id.as_occurrence());
                 Ok(OrderedAdded {
                     id: public.id.clone(),
@@ -2504,7 +2550,7 @@ impl JazzClient {
         let updated = updated_rows
             .iter()
             .map(|row| {
-                let public = Self::core_subscription_row_to_public(db, row)?;
+                let public = self.core_subscription_row_to_public(db, query, row)?;
                 let new_index = index_of(public.id.as_occurrence());
                 let old_index = previous_rows
                     .iter()
@@ -2563,9 +2609,12 @@ impl JazzClient {
             pending: false,
         })
     }
+}
 
+impl PublicQueryDecoder {
     fn core_magic_value(
         &self,
+        db: &Backend,
         table: &str,
         _row_id: CoreRowUuid,
         row: &crate::node::CurrentRow,
@@ -2578,11 +2627,7 @@ impl JazzClient {
                 )));
             }
             "$createdAt" | "$updatedAt" | "$createdBy" | "$updatedBy" => {
-                let provenance = self
-                    .db
-                    .inner
-                    .borrow()
-                    .db
+                let provenance = db
                     .row_provenance(row)
                     .map_err(|error| JazzError::Query(error.to_string()))?;
                 let Some(provenance) = provenance else {
@@ -2602,6 +2647,9 @@ impl JazzClient {
         };
         Ok(Some(value))
     }
+}
+
+impl JazzClient {
     fn core_cells(
         &self,
         table: &str,
@@ -2688,6 +2736,7 @@ impl JazzClient {
             });
             let db = ClientDb::open(
                 public_schema_convert,
+                context.schema.clone(),
                 storage,
                 identity,
                 has_server.then(|| context.server_url.clone()),
@@ -2708,7 +2757,6 @@ impl JazzClient {
                 default_session,
                 write_context: None,
                 db,
-                public_schema: context.schema.clone(),
             };
             Ok(client)
         }
@@ -2811,7 +2859,10 @@ impl JazzClient {
                 .query_rows(query.clone(), opts, table, wait_for_coverage)
                 .await?
         };
-        self.core_rows_to_query_results(&query, rows)
+        let db = self.db.inner.borrow().db.clone();
+        self.db
+            .query_decoder
+            .core_rows_to_query_results(&db, &query, rows)
     }
 
     /// Create a new row in a table.
@@ -2979,7 +3030,7 @@ impl JazzClient {
 
     /// Get the current schema.
     pub fn schema(&self) -> Result<Schema> {
-        Ok(self.public_schema.clone())
+        Ok(self.db.query_decoder.schema.as_ref().clone())
     }
 
     /// Check if connected to server.
@@ -2993,7 +3044,6 @@ impl JazzClient {
             default_session: self.default_session.clone(),
             write_context: Some(write_context),
             db: self.db.clone(),
-            public_schema: self.public_schema.clone(),
         }
     }
 

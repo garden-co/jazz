@@ -8,8 +8,8 @@ use crate::common::{
     subscription_schema,
 };
 use crate::support::{
-    TestingClient, collect_stream_deltas, has_added, has_any_change, wait_for_query, wait_for_rows,
-    wait_for_subscription_update,
+    TestingClient, collect_stream_deltas, has_added_id, has_any_change, wait_for_query,
+    wait_for_rows, wait_for_subscription_update,
 };
 
 macro_rules! local_tokio_test {
@@ -126,7 +126,7 @@ async fn subscribe_all_cold_ordered_subscription_supports_offset_and_limit() {
         QUERY_TIMEOUT,
         "cold paginated subscription receives requested row",
         |log| {
-            has_added(log, c_id)
+            has_added_id(log, c_id)
                 && !has_any_change(log, a_id)
                 && !has_any_change(log, b_id)
                 && !has_any_change(log, d_id)
@@ -246,8 +246,8 @@ async fn subscribe_all_cold_ordered_subscription_supports_offset_without_limit()
         QUERY_TIMEOUT,
         "cold offset-only subscription receives trailing rows",
         |log| {
-            has_added(log, c_id)
-                && has_added(log, d_id)
+            has_added_id(log, c_id)
+                && has_added_id(log, d_id)
                 && !has_any_change(log, a_id)
                 && !has_any_change(log, b_id)
         },

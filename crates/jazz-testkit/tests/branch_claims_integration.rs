@@ -15,7 +15,7 @@ use jazz::tools::{
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
-    TestingClient, has_added, has_removed, wait_for_query, wait_for_subscription_update,
+    TestingClient, has_added_id, has_removed, wait_for_query, wait_for_subscription_update,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -533,7 +533,7 @@ async fn subscription_matches_claims_select_query() {
                 &mut alice_log,
                 QUERY_TIMEOUT,
                 "matching claim subscription sees row",
-                |updates| has_added(updates, room_id),
+                |updates| has_added_id(updates, room_id),
             )
             .await;
             wait_for_query(
@@ -568,7 +568,7 @@ async fn subscription_matches_claims_select_query() {
             )
             .await;
             assert!(
-                !has_added(&bob_log, room_id),
+                !has_added_id(&bob_log, room_id),
                 "wrong claim subscription should not see row: {bob_log:?}"
             );
             let bob_rows = bob
@@ -602,7 +602,7 @@ async fn subscription_matches_claims_select_query() {
             )
             .await;
             assert!(
-                !has_added(&carol_log, room_id),
+                !has_added_id(&carol_log, room_id),
                 "missing claim subscription should not see row: {carol_log:?}"
             );
             let carol_rows = carol
@@ -670,7 +670,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
                 &mut stream_log,
                 QUERY_TIMEOUT,
                 "authorized subscription receives its initial room",
-                |updates| has_added(updates, initial_id),
+                |updates| has_added_id(updates, initial_id),
             )
             .await;
 
@@ -707,7 +707,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
                 &mut stream_log,
                 QUERY_TIMEOUT,
                 "the original authorized session receives later authorized rows",
-                |updates| has_added(updates, future_id),
+                |updates| has_added_id(updates, future_id),
             )
             .await;
             assert!(
@@ -792,11 +792,11 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 &mut simple_log,
                 QUERY_TIMEOUT,
                 "simple subscription sees only alpha",
-                |updates| has_added(updates, alpha_id),
+                |updates| has_added_id(updates, alpha_id),
             )
             .await;
             assert!(
-                !has_added(&simple_log, beta_id),
+                !has_added_id(&simple_log, beta_id),
                 "simple claim route must not receive beta row: {simple_log:?}"
             );
             let simple_rows = simple
@@ -831,7 +831,7 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 &mut admin_log,
                 QUERY_TIMEOUT,
                 "admin subscription sees all rooms",
-                |updates| has_added(updates, alpha_id) && has_added(updates, beta_id),
+                |updates| has_added_id(updates, alpha_id) && has_added_id(updates, beta_id),
             )
             .await;
             let admin_rows = admin_reader
@@ -866,7 +866,7 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
             )
             .await;
             assert!(
-                !has_added(&spy_log, alpha_id) && !has_added(&spy_log, beta_id),
+                !has_added_id(&spy_log, alpha_id) && !has_added_id(&spy_log, beta_id),
                 "spy subscription must not receive rows: {spy_log:?}"
             );
             let spy_rows = spy
@@ -1050,7 +1050,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 &mut updates,
                 QUERY_TIMEOUT,
                 "branch subscription sees branch-local row",
-                |updates| has_added(updates, jazz::tools::ObjectId::from_uuid(branch_row.0)),
+                |updates| has_added_id(updates, jazz::tools::ObjectId::from_uuid(branch_row.0)),
             )
             .await;
 
@@ -1086,7 +1086,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
             )
             .await;
             assert!(
-                !has_added(&denied_log, jazz::tools::ObjectId::from_uuid(branch_row.0)),
+                !has_added_id(&denied_log, jazz::tools::ObjectId::from_uuid(branch_row.0)),
                 "branch subscription must retain ordinary select policy: {denied_log:?}"
             );
             let mut lazy_denied_stream = partition_probe
@@ -1103,7 +1103,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
             )
             .await;
             assert!(
-                !has_added(&lazy_denied_log, jazz::tools::ObjectId::from_uuid(empty_row.0)),
+                !has_added_id(&lazy_denied_log, jazz::tools::ObjectId::from_uuid(empty_row.0)),
                 "a denied subscription must not reveal lazily partitioned branch rows: {lazy_denied_log:?}"
             );
 

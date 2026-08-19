@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::support::{
-    QueryRows, TestingClient, has_added, has_any_change, wait_for_rows,
+    QueryRows, TestingClient, has_added_id, has_any_change, wait_for_rows,
     wait_for_subscription_update,
 };
 use jazz::query::{ArraySubquery, ArraySubqueryRequirement, OrderDirection, Query, col, eq, lit};
@@ -248,7 +248,7 @@ async fn array_subquery_subscription_adds_parent_with_empty_array() {
         &mut log,
         QUERY_TIMEOUT,
         "include query add delta",
-        |log| has_added(log, user_id),
+        |log| has_added_id(log, user_id),
     )
     .await;
 
@@ -438,7 +438,7 @@ async fn array_subquery_subscription_changes_parent_when_inner_row_is_inserted()
         &mut log,
         QUERY_TIMEOUT,
         "initial Alice add",
-        |log| has_added(log, user_id),
+        |log| has_added_id(log, user_id),
     )
     .await;
 
@@ -496,7 +496,7 @@ async fn array_subquery_preserves_parent_columns_when_inner_row_arrives() {
         &mut log,
         QUERY_TIMEOUT,
         "Alice add with empty posts",
-        |log| has_added(log, user_id),
+        |log| has_added_id(log, user_id),
     )
     .await;
     wait_for_rows(
@@ -580,7 +580,7 @@ async fn array_subquery_subscription_adds_parent_with_existing_inner_rows() {
         &mut log,
         QUERY_TIMEOUT,
         "Bob is added with existing post",
-        |log| has_added(log, user_id),
+        |log| has_added_id(log, user_id),
     )
     .await;
 

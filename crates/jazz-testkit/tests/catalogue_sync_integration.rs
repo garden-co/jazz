@@ -20,9 +20,9 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
 use support::{
-    PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added, has_removed,
-    publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory, wait_for,
-    wait_for_edge_query_ready, wait_for_query, wait_for_query_results,
+    PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added_id,
+    has_removed, publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory,
+    wait_for, wait_for_edge_query_ready, wait_for_query, wait_for_query_results,
     wait_for_subscription_update,
 };
 use tempfile::TempDir;
@@ -1101,7 +1101,7 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         &mut alice_log,
         Duration::from_secs(30),
         "alice receives row through edge_us before retightening",
-        |log| has_added(log, row_id),
+        |log| has_added_id(log, row_id),
     )
     .await;
     wait_for_subscription_update(
@@ -1109,7 +1109,7 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         &mut bob_log,
         Duration::from_secs(30),
         "bob receives row through edge_eu before retightening",
-        |log| has_added(log, row_id),
+        |log| has_added_id(log, row_id),
     )
     .await;
 
@@ -1729,7 +1729,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
         &mut log,
         Duration::from_secs(25),
         "subscription add after first permissions head",
-        |updates| has_added(updates, user_obj_id),
+        |updates| has_added_id(updates, user_obj_id),
     )
     .await;
 
@@ -2510,7 +2510,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
         &mut log,
         Duration::from_secs(25),
         "bob subscription sees alice row through table rename",
-        |updates| has_added(updates, row_id),
+        |updates| has_added_id(updates, row_id),
     )
     .await;
     let added = log
@@ -2654,7 +2654,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
         &mut log,
         Duration::from_secs(25),
         "alice subscription sees bob row through table rename",
-        |updates| has_added(updates, row_id),
+        |updates| has_added_id(updates, row_id),
     )
     .await;
 

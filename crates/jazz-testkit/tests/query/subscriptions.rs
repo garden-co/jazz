@@ -11,8 +11,8 @@ use crate::common::{
     todo_subscription_record_descriptor,
 };
 use crate::support::{
-    TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
-    wait_for_query, wait_for_rows, wait_for_subscription_update,
+    TestingClient, collect_stream_deltas, has_added, has_added_id, has_any_change, has_removed,
+    has_updated, wait_for_query, wait_for_rows, wait_for_subscription_update,
 };
 
 macro_rules! local_tokio_test {
@@ -71,7 +71,15 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
         &mut log,
         QUERY_TIMEOUT,
         "todo add delta",
-        |log| has_added(log, todo_id),
+        |log| {
+            has_added(
+                log,
+                &[
+                    ("title", Value::Text("watch-me".to_owned())),
+                    ("done", Value::Boolean(false)),
+                ],
+            )
+        },
     )
     .await;
 
@@ -206,7 +214,7 @@ async fn subscribe_all_only_returns_rows_that_match_query() {
         QUERY_TIMEOUT,
         "cold filtered subscription receives existing matching rows",
         |log| {
-            has_added(log, alice_id) && has_added(log, charlie_id) && !has_any_change(log, bob_id)
+            has_added_id(log, alice_id) && has_added_id(log, charlie_id) && !has_any_change(log, bob_id)
         },
     )
     .await;
@@ -264,7 +272,7 @@ async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
         &mut log,
         QUERY_TIMEOUT,
         "initial add before rapid updates",
-        |log| has_added(log, todo_id),
+        |log| has_added_id(log, todo_id),
     )
     .await;
     log.clear();
@@ -506,7 +514,7 @@ async fn subscribe_all_supports_condition_filters() {
             &mut log,
             QUERY_TIMEOUT,
             format!("condition {} add delta", case.name),
-            |log| has_added(log, inserted_id),
+            |log| has_added_id(log, inserted_id),
         )
         .await;
 
@@ -574,7 +582,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
         &mut log,
         QUERY_TIMEOUT,
         "initial local add before rapid updates",
-        |log| has_added(log, todo_id),
+        |log| has_added_id(log, todo_id),
     )
     .await;
     log.clear();
@@ -670,7 +678,7 @@ async fn subscribe_all_preserves_bytea_values() {
         &mut log,
         QUERY_TIMEOUT,
         "bytea add delta",
-        |log| has_added(log, todo_id),
+        |log| has_added_id(log, todo_id),
     )
     .await;
 
@@ -737,7 +745,7 @@ async fn subscribe_all_does_not_emit_add_for_non_matching_contains_query() {
     collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
 
     assert!(
-        !has_added(&log, inserted_id),
+        !has_added_id(&log, inserted_id),
         "non-matching text contains insert should not emit an add delta"
     );
 

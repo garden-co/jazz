@@ -13,7 +13,7 @@ use jazz::tools::{
     AppContext, ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, TableSchema, Value,
 };
 use jazz_server::JazzServer;
-use support::{TestingClient, has_added, wait_for_query, wait_for_subscription_update};
+use support::{TestingClient, has_added_id, wait_for_query, wait_for_subscription_update};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
@@ -606,7 +606,7 @@ async fn subscription_reflects_concurrent_update_impl() {
         &mut log,
         QUERY_TIMEOUT,
         "alice subscription receives initial todo before concurrent update",
-        |log| has_added(log, todo_id),
+        |log| has_added_id(log, todo_id),
     )
     .await;
 

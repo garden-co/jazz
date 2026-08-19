@@ -1,12 +1,15 @@
 use std::time::Duration;
 
 use crate::support::{
-    QueryRows, TestingClient, collect_stream_deltas, has_added, wait_for_rows,
-    wait_for_subscription_update,
+    QueryRows, TestingClient, collect_stream_deltas, has_added, has_added_id,
+    wait_for_query_results, wait_for_rows, wait_for_subscription_update,
 };
 use jazz::query::{Gather, Query, col, eq, lit};
 use jazz::row_input;
-use jazz::tools::{ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value};
+use jazz::tools::{
+    ColumnType, DurabilityTier, JazzClient, ObjectId, QueryResult, Schema, SchemaBuilder,
+    TableSchema, Value,
+};
 use jazz_server::JazzServer;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -45,8 +48,8 @@ fn team_graph_schema() -> Schema {
         )
         .table(
             TableSchema::builder("team_edges")
-                .column("child_team", ColumnType::Uuid)
-                .column("parent_team", ColumnType::Uuid),
+                .fk_column("child_team", "teams")
+                .fk_column("parent_team", "teams"),
         )
         .build()
 }
@@ -144,6 +147,18 @@ fn sorted_team_names(rows: &QueryRows) -> Vec<String> {
     names
 }
 
+fn sorted_team_result_names(rows: &[QueryResult]) -> Vec<String> {
+    let mut names = rows
+        .iter()
+        .filter_map(|result| match result.get("name") {
+            Some(Value::Text(name)) => Some(name.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
 local_tokio_test! {
 /// Verifies that a recursive gather query seeds on a matching row and
 /// transitively reaches all ancestor rows by following the edge table.
@@ -152,7 +167,7 @@ local_tokio_test! {
 ///
 /// alice writes leaf -> mid -> root in `team_edges`
 /// bob subscribes to the recursive query from leaf and sees all three teams
-#[ignore = "canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
+#[ignore = "recursive gather subscription rows omit the gathered teams' user fields"]
 async fn recursive_gather_query_returns_seed_and_ancestors_from_edge_table() {
     let clients = Clients::start(team_graph_schema()).await;
     let query = Query::from("teams")
@@ -182,15 +197,29 @@ async fn recursive_gather_query_returns_seed_and_ancestors_from_edge_table() {
         &mut log,
         QUERY_TIMEOUT,
         "recursive gather add delta",
-        |log| has_added(log, leaf_id),
+        |log| {
+            ["leaf", "mid", "root"].into_iter().all(|name| {
+                has_added(log, &[("name", Value::Text(name.to_owned()))])
+            })
+        },
     )
     .await;
 
-    let rows = wait_for_rows(&clients.bob, query, "recursive gather rows", |rows| {
-        (sorted_team_names(&rows) == vec!["leaf", "mid", "root"]).then_some(rows)
-    })
+    let rows = wait_for_query_results(
+        &clients.bob,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "recursive gather rows",
+        |rows| {
+            (sorted_team_result_names(&rows) == vec!["leaf", "mid", "root"]).then_some(rows)
+        },
+    )
     .await;
-    assert_eq!(sorted_team_names(&rows), vec!["leaf", "mid", "root"]);
+    assert_eq!(
+        sorted_team_result_names(&rows),
+        vec!["leaf", "mid", "root"]
+    );
 
     clients.shutdown().await;
 }
@@ -283,7 +312,7 @@ async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
         &mut log,
         QUERY_TIMEOUT,
         "initial recursive closure add",
-        |log| has_added(log, team2),
+        |log| has_added_id(log, team2),
     )
     .await;
     collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
@@ -296,7 +325,7 @@ async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
         &mut log,
         QUERY_TIMEOUT,
         "team-3 add after recursive edge insert",
-        |log| has_added(log, team3),
+        |log| has_added_id(log, team3),
     )
     .await;
 

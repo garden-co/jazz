@@ -7,7 +7,7 @@ use jazz::row_input;
 use jazz::tools::{ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use support::{
-    TestingClient, has_added, wait_for_edge_query_ready, wait_for_query,
+    TestingClient, has_added_id, wait_for_edge_query_ready, wait_for_query,
     wait_for_subscription_update,
 };
 
@@ -143,7 +143,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                 &mut log,
                 QUERY_TIMEOUT,
                 "BIGINT subscription predicate receives inserted row",
-                |log| has_added(log, late_id),
+                |log| has_added_id(log, late_id),
             )
             .await;
 
