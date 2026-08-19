@@ -370,24 +370,24 @@ where
         self.local_layer_winner_tx_id(table, row_uuid, VersionLayer::Deletion)
     }
 
-    fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
+    async fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
         #[cfg(feature = "testing")]
         {
-            self.rebuild_ahead_current_keys_inner(None)
+            self.rebuild_ahead_current_keys_inner(None).await
         }
         #[cfg(not(feature = "testing"))]
-        self.rebuild_ahead_current_keys_inner()
+        self.rebuild_ahead_current_keys_inner().await
     }
 
     #[cfg(feature = "testing")]
-    fn rebuild_ahead_current_keys_with_receipt(
+    async fn rebuild_ahead_current_keys_with_receipt(
         &mut self,
         receipt: &mut NodeOpenReceipt,
     ) -> Result<(), Error> {
-        self.rebuild_ahead_current_keys_inner(Some(receipt))
+        self.rebuild_ahead_current_keys_inner(Some(receipt)).await
     }
 
-    fn rebuild_ahead_current_keys_inner(
+    async fn rebuild_ahead_current_keys_inner(
         &mut self,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<(), Error> {
@@ -403,7 +403,8 @@ where
         for table_id in physical_table_ids {
             let content_rows = self
                 .database
-                .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &[])?
+                .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &[])
+                .await?
                 .into_iter()
                 .map(|raw| {
                     let record = raw.record();
@@ -432,7 +433,8 @@ where
             }
             let deletion_rows = self
                 .database
-                .primary_key_scan_raw(&physical_register_ahead_current_table_name(table_id), &[])?
+                .primary_key_scan_raw(&physical_register_ahead_current_table_name(table_id), &[])
+                .await?
                 .into_iter()
                 .map(|raw| {
                     let record = raw.record();

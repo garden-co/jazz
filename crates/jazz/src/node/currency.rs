@@ -580,17 +580,21 @@ where
         })
     }
 
-    pub(super) fn query_transaction(
+    pub(super) async fn query_transaction(
         &mut self,
         tx_id: TxId,
     ) -> Result<Option<StoredTransaction>, Error> {
         if let Some(alias) = self.node_aliases.get(&tx_id.node).copied()
-            && let Some(tx) = self.query_transaction_by_alias(tx_id, alias)?
+            && let Some(tx) = self.query_transaction_by_alias(tx_id, alias).await?
         {
             return Ok(Some(tx));
         }
         let mut aliases = Vec::new();
-        for raw in self.database.primary_key_scan_raw("jazz_nodes", &[])? {
+        for raw in self
+            .database
+            .primary_key_scan_raw("jazz_nodes", &[])
+            .await?
+        {
             let record = raw.record();
             if record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)? == tx_id.node.0 {
                 let alias = NodeAlias(record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?);
@@ -598,7 +602,10 @@ where
             }
         }
         for expected_alias in aliases {
-            if let Some(tx) = self.query_transaction_by_alias(tx_id, expected_alias)? {
+            if let Some(tx) = self
+                .query_transaction_by_alias(tx_id, expected_alias)
+                .await?
+            {
                 self.node_aliases.insert(tx_id.node, expected_alias);
                 return Ok(Some(tx));
             }
@@ -669,15 +676,18 @@ where
         Ok(())
     }
 
-    fn query_transaction_by_alias(
+    async fn query_transaction_by_alias(
         &self,
         tx_id: TxId,
         expected_alias: NodeAlias,
     ) -> Result<Option<StoredTransaction>, Error> {
-        let Some(raw) = self.database.primary_key_get_raw(
-            "jazz_transactions",
-            &[Value::U64(tx_id.time.0), Value::U64(expected_alias.0)],
-        )?
+        let Some(raw) = self
+            .database
+            .primary_key_get_raw(
+                "jazz_transactions",
+                &[Value::U64(tx_id.time.0), Value::U64(expected_alias.0)],
+            )
+            .await?
         else {
             return Ok(None);
         };

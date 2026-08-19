@@ -1232,14 +1232,15 @@ where
         Ok(())
     }
 
-    pub(super) fn cleanup_settled_ahead_current_leftovers(
+    pub(super) async fn cleanup_settled_ahead_current_leftovers(
         &mut self,
         already_consistent_through: Option<TxTime>,
     ) -> Result<(), Error> {
         let mut tx_ids = Vec::new();
         for raw in self
             .database
-            .primary_key_scan_raw("jazz_transactions", &[])?
+            .primary_key_scan_raw("jazz_transactions", &[])
+            .await?
         {
             let record = raw.record();
             let fate = fate_from_encoded_fields(record)?;
@@ -1266,9 +1267,10 @@ where
         for tx_id in &tx_ids {
             self.cleanup_fated_ahead_current_for_tx(&mut batch, *tx_id)?;
         }
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         if let Some(tx_time) = tx_ids.into_iter().map(|tx_id| tx_id.time).max() {
-            self.persist_storage_consistency_marker_through(tx_time)?;
+            self.persist_storage_consistency_marker_through(tx_time)
+                .await?;
         }
         Ok(())
     }
