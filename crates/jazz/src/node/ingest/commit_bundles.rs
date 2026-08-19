@@ -1202,11 +1202,13 @@ where
                         table,
                         branch_key,
                         *row_uuid,
-                    )?;
+                    )
+                    .await?;
                 }
                 self.assert_global_current_updates_match_history_for_test(
                     &current_update_versions,
-                )?;
+                )
+                .await?;
             }
         }
         for tx_id in &loaded_tx_ids {

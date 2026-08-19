@@ -887,7 +887,7 @@ where
     }
 
     #[cfg(test)]
-    fn recomputed_merge_heads_from_history_for_test(
+    async fn recomputed_merge_heads_from_history_for_test(
         &mut self,
         table: &str,
         branch_key: &BranchKey,
@@ -899,14 +899,15 @@ where
             table,
             branch_key,
             row_uuid,
-        )?;
+        )
+        .await?;
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             if version.layer() != VersionLayer::Content {
                 continue;
             }
             let tx_id = self.version_tx_id(version)?;
-            let Some(tx) = self.query_transaction(tx_id)? else {
+            let Some(tx) = self.query_transaction(tx_id).await? else {
                 continue;
             };
             if matches!(tx.fate, Fate::Pending | Fate::Accepted) {
@@ -922,14 +923,15 @@ where
     }
 
     #[cfg(test)]
-    pub(super) fn rebuild_merge_heads_from_history_for_test(
+    pub(super) async fn rebuild_merge_heads_from_history_for_test(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let branch_key = BranchKey::default();
-        let heads =
-            self.recomputed_merge_heads_from_history_for_test(table, &branch_key, row_uuid)?;
+        let heads = self
+            .recomputed_merge_heads_from_history_for_test(table, &branch_key, row_uuid)
+            .await?;
         let table_id = self.physical_table_id_for_authored_test_table(table)?;
         let mut batch = self.database.open_batch();
         Self::write_merge_heads(
@@ -939,12 +941,12 @@ where
             row_uuid,
             &heads,
         )?;
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         Ok(())
     }
 
     #[cfg(test)]
-    pub(super) fn assert_merge_heads_match_history_for_test(
+    pub(super) async fn assert_merge_heads_match_history_for_test(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -954,36 +956,41 @@ where
             &BranchKey::default(),
             row_uuid,
         )
+        .await
     }
 
     #[cfg(test)]
-    fn assert_merge_heads_match_history_in_branch_for_test(
+    async fn assert_merge_heads_match_history_in_branch_for_test(
         &mut self,
         table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
-        let expected =
-            self.recomputed_merge_heads_from_history_for_test(table, branch_key, row_uuid)?;
+        let expected = self
+            .recomputed_merge_heads_from_history_for_test(table, branch_key, row_uuid)
+            .await?;
         let table_id = self.physical_table_id_for_authored_test_table(table)?;
-        let actual = self.require_merge_heads(table_id, branch_key, row_uuid)?;
+        let actual = self
+            .require_merge_heads(table_id, branch_key, row_uuid)
+            .await?;
         if actual != expected {
-            let versions = self
-                .query_physical_content_row_versions(table_id, table, branch_key, row_uuid)?
-                .into_iter()
-                .map(|version| {
-                    let tx_id = self.version_tx_id(&version)?;
-                    let fate = self
-                        .query_transaction(tx_id)?
-                        .map(|tx| tx.fate)
-                        .unwrap_or(Fate::Pending);
-                    Ok(format!(
-                        "{tx_id:?} layer={:?} parents={:?} fate={fate:?}",
-                        version.layer(),
-                        version.parents()
-                    ))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
+            let stored_versions = self
+                .query_physical_content_row_versions(table_id, table, branch_key, row_uuid)
+                .await?;
+            let mut versions = Vec::with_capacity(stored_versions.len());
+            for version in stored_versions {
+                let tx_id = self.version_tx_id(&version)?;
+                let fate = self
+                    .query_transaction(tx_id)
+                    .await?
+                    .map(|tx| tx.fate)
+                    .unwrap_or(Fate::Pending);
+                versions.push(format!(
+                    "{tx_id:?} layer={:?} parents={:?} fate={fate:?}",
+                    version.layer(),
+                    version.parents()
+                ));
+            }
             panic!(
                 "stored merge heads diverged from history for {table}/{branch_key:?}/{row_uuid:?}: expected {expected:?}, actual {actual:?}, versions={versions:?}"
             );
@@ -992,7 +999,7 @@ where
     }
 
     #[cfg(test)]
-    fn assert_merge_head_rows_match_history_for_test(
+    async fn assert_merge_head_rows_match_history_for_test(
         &mut self,
         rows: &BTreeSet<(String, BranchKey, RowUuid)>,
     ) -> Result<(), Error> {
@@ -1001,13 +1008,14 @@ where
                 table,
                 branch_key,
                 *row_uuid,
-            )?;
+            )
+            .await?;
         }
         Ok(())
     }
 
     #[cfg(test)]
-    fn recomputed_global_layer_winner_from_history_for_test(
+    async fn recomputed_global_layer_winner_from_history_for_test(
         &mut self,
         table: &str,
         branch_key: &BranchKey,
@@ -1016,18 +1024,19 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         let mut winner = None::<(VersionRow, TxId, TxTime)>;
         for version in self
-            .query_row_versions_in_branch(table, branch_key, row_uuid)?
+            .query_row_versions_in_branch(table, branch_key, row_uuid)
+            .await?
             .into_iter()
             .filter(|version| version.layer() == layer)
         {
             let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id)? else {
+            let Some(tx) = self.query_transaction(tx_id).await? else {
                 continue;
             };
             if !matches!(tx.fate, Fate::Accepted) || tx.global_time.is_none() {
                 continue;
             }
-            let made_at = self.version_made_at(&version)?;
+            let made_at = self.version_made_at(&version).await?;
             let previous = winner
                 .as_ref()
                 .map(|(version, tx_id, made_at)| (version, *tx_id, *made_at));
@@ -1039,7 +1048,7 @@ where
     }
 
     #[cfg(test)]
-    fn assert_global_current_updates_match_history_for_test(
+    async fn assert_global_current_updates_match_history_for_test(
         &mut self,
         updates: &[(VersionRow, GlobalTime)],
     ) -> Result<(), Error> {
@@ -1049,7 +1058,8 @@ where
                 version.branch_key(),
                 version.row_uuid(),
                 version.layer(),
-            )?
+            )
+            .await?
             else {
                 panic!(
                     "global-current update has no accepted history winner for {}/ {:?} {:?}",
@@ -1070,14 +1080,16 @@ where
                     actual_tx
                 );
             }
-            self.assert_global_current_row_matches_version_for_test(version, *global_time)?;
-            self.assert_global_change_row_matches_version_for_test(version, *global_time)?;
+            self.assert_global_current_row_matches_version_for_test(version, *global_time)
+                .await?;
+            self.assert_global_change_row_matches_version_for_test(version, *global_time)
+                .await?;
         }
         Ok(())
     }
 
     #[cfg(test)]
-    fn assert_global_current_row_matches_version_for_test(
+    async fn assert_global_current_row_matches_version_for_test(
         &mut self,
         version: &VersionRow,
         global_time: GlobalTime,
@@ -1138,7 +1150,7 @@ where
     }
 
     #[cfg(test)]
-    fn assert_global_change_row_matches_version_for_test(
+    async fn assert_global_change_row_matches_version_for_test(
         &mut self,
         version: &VersionRow,
         global_time: GlobalTime,
@@ -1156,7 +1168,8 @@ where
                 Value::Bytes(version_layer_string(version.layer()).into_bytes()),
                 Value::U64(global_time.0),
             ],
-        )?;
+        )
+        .await?;
         let Some(row) = rows.first() else {
             panic!(
                 "missing global-change row for {}/{:?} {:?} at {:?}",

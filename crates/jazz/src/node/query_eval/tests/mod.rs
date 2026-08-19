@@ -1,6 +1,7 @@
 //! Query-evaluation tests that exercise several pipeline stages together.
 
 use super::*;
+use crate::legacy_test_future::{OptionFutureExt as _, ResultFutureExt as _};
 
 mod authorization;
 mod bindings;

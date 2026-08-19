@@ -300,6 +300,7 @@ where
             identity,
             DurabilityTier::Global,
         )
+        .await
     }
 
     #[cfg(test)]

@@ -295,12 +295,14 @@ where
         new_tables.into_iter().map(Into::into),
         dropped_tables.into_iter().map(Into::into),
     );
-    let outcome = core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
-        catalogue_seq: core.active_catalogue_seq().saturating_add(1),
-        publication: Box::new(publication),
-    });
-    settle_outcome(core, crate::db::block_on(outcome)?)
+    let outcome = crate::db::block_on(core.apply_trusted_catalogue_message(
+        SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: core.active_catalogue_seq().saturating_add(1),
+            publication: Box::new(publication),
+        },
+    ))?;
+    settle_outcome(core, outcome)
 }
 fn owner_cells(author: AuthorId, title: impl Into<String>) -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -1540,7 +1542,12 @@ fn node_summary(node: &mut NodeState<RocksDbStorage>, tx_ids: &BTreeSet<TxId>) -
         global_rows: node.current_rows("todos", DurabilityTier::Global).unwrap(),
         transaction_records: tx_ids
             .iter()
-            .map(|tx_id| (*tx_id, node.transaction_record(*tx_id)))
+            .map(|tx_id| {
+                (
+                    *tx_id,
+                    crate::db::block_on(node.transaction_record(*tx_id)),
+                )
+            })
             .collect(),
         sync_metrics: node.sync_metrics().clone(),
     }
@@ -1642,10 +1649,15 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let parents = commit.parents.clone();
                 let cells = commit.cells.clone();
                 let deletion = commit.deletion;
-                let (tx_id, message) = if use_writer_a {
+                let (published, message) = if use_writer_a {
                     writer_a.commit_mergeable_unit(commit).unwrap()
                 } else {
                     writer_b.commit_mergeable_unit(commit).unwrap()
+                };
+                let tx_id = if use_writer_a {
+                    settle_published(&mut writer_a, published).unwrap()
+                } else {
+                    settle_published(&mut writer_b, published).unwrap()
                 };
                 if use_writer_a {
                     writer_known_a.record_local_commit(tx_id);
@@ -1721,9 +1733,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                         )
                         .unwrap();
                 }
-                let (tx_id, message) = writer
+                let (published, message) = writer
                     .commit_exclusive(tx_id, made_by, 1_100 + rng.choose(12) as u64)
                     .unwrap();
+                let tx_id = settle_published(writer, published).unwrap();
                 if tx_id.node == node(1) {
                     writer_known_a.record_local_commit(tx_id);
                 } else {
@@ -1764,10 +1777,15 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                         ));
                 commits_started += 1;
                 let use_writer_a = rng.chance(1, 2);
-                let (tx_id, message) = if use_writer_a {
+                let (published, message) = if use_writer_a {
                     writer_a.commit_mergeable_unit(commit).unwrap()
                 } else {
                     writer_b.commit_mergeable_unit(commit).unwrap()
+                };
+                let tx_id = if use_writer_a {
+                    settle_published(&mut writer_a, published).unwrap()
+                } else {
+                    settle_published(&mut writer_b, published).unwrap()
                 };
                 if use_writer_a {
                     writer_known_a.record_local_commit(tx_id);
@@ -1821,9 +1839,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                         None,
                     )
                     .unwrap();
-                let (parent_ref, parent_message) = writer
+                let (parent_publication, parent_message) = writer
                     .commit_exclusive(tx_id, made_by, 1_200 + rng.choose(12) as u64)
                     .unwrap();
+                let parent_ref = settle_published(writer, parent_publication).unwrap();
                 let child_commit = MergeableCommit::new(
                     "todos",
                     rows[rng.choose(rows.len())],
@@ -1835,8 +1854,9 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     owner,
                     format!("child-{commits_started}-{}", rng.next_u64() % 1_000),
                 ));
-                let (child_ref, child_message) =
+                let (child_publication, child_message) =
                     writer.commit_mergeable_unit(child_commit).unwrap();
+                let child_ref = settle_published(writer, child_publication).unwrap();
                 if parent_ref.node == node(1) {
                     writer_known_a.record_local_commit(parent_ref);
                     writer_known_a.record_local_commit(child_ref);
@@ -1885,9 +1905,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let SyncMessage::CommitUnit { tx, versions } = &message else {
                     panic!("upstream should only contain commit units");
                 };
-                let updates = core
+                let outcome = core
                     .ingest_commit_unit(tx.clone(), versions.clone(), now_ms)
                     .unwrap();
+                let updates = settle_outcome(&mut core, outcome).unwrap();
                 for fate in updates {
                     let SyncMessage::FateUpdate { tx_id, .. } = &fate else {
                         panic!("core should only emit fate updates here");

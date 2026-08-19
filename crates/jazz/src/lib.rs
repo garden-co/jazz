@@ -137,6 +137,37 @@ pub(crate) mod legacy_test_future {
         {
             crate::db::block_on(self).unwrap_or_else(op)
         }
+
+        fn unwrap_err(self) -> E
+        where
+            Self: Sized,
+            T: std::fmt::Debug,
+        {
+            crate::db::block_on(self).unwrap_err()
+        }
+
+        fn expect_err(self, message: &str) -> E
+        where
+            Self: Sized,
+            T: std::fmt::Debug,
+        {
+            crate::db::block_on(self).expect_err(message)
+        }
+
+        fn is_err(self) -> bool
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self).is_err()
+        }
+
+        fn map_err<F, O>(self, op: F) -> Result<T, O>
+        where
+            Self: Sized,
+            F: FnOnce(E) -> O,
+        {
+            crate::db::block_on(self).map_err(op)
+        }
     }
 
     impl<F, T, E> ResultFutureExt<T, E> for F where F: Future<Output = Result<T, E>> {}
@@ -154,6 +185,13 @@ pub(crate) mod legacy_test_future {
             Self: Sized,
         {
             crate::db::block_on(self).expect(message)
+        }
+
+        fn is_none(self) -> bool
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self).is_none()
         }
     }
 
