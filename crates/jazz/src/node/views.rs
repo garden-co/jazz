@@ -181,18 +181,19 @@ where
     S: OrderedKvStorage,
 {
     /// Subscribe to the raw history storage table.
-    pub fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
+    pub async fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
         let schema_version = self.catalogue.current_schema_version_id;
         let source = self.physical_history_source_graph(schema_version, table)?;
         self.database
             .subscribe_one_sink(source)
+            .await
             .map_err(Error::Groove)
     }
 
     /// Build a current-row view update for a system-identity peer.
     #[cfg(test)]
-    pub(crate) fn view_update_for_current_rows(
+    pub(crate) async fn view_update_for_current_rows(
         &mut self,
         table: &str,
     ) -> Result<SyncMessage, Error> {
@@ -205,11 +206,12 @@ where
             [],
             AuthorId::SYSTEM,
         )
+        .await
     }
 
     /// Build a current-row view update using the peer's payload inventory.
     #[cfg(test)]
-    pub(crate) fn view_update_for_current_rows_with_peer_payload_inventory(
+    pub(crate) async fn view_update_for_current_rows_with_peer_payload_inventory(
         &mut self,
         table: &str,
         subscription: SubscriptionKey,
@@ -228,12 +230,13 @@ where
             previous_member_result_set,
             identity,
         )
+        .await
     }
 
     /// Build a query-binding view update using the peer's payload inventory.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn view_update_for_query_binding_with_peer_payload_inventory(
+    pub(crate) async fn view_update_for_query_binding_with_peer_payload_inventory(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -252,13 +255,14 @@ where
             previous_member_result_set,
             identity,
         )
+        .await
     }
 
     /// Build a cold maintained query-binding view update using the peer's
     /// payload inventory.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory(
+    pub(crate) async fn seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -281,7 +285,7 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
+    pub(crate) async fn seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -306,7 +310,8 @@ where
                 identity,
                 tier,
                 &Default::default(),
-            )?;
+            )
+            .await?;
         debug_assert!(
             transitions.removes.is_empty(),
             "cold maintained snapshot emitted result removes"
@@ -328,28 +333,30 @@ where
             .difference(&current_member_result_set)
             .cloned()
             .collect::<Vec<_>>();
-        let update = self.view_update_for_maintained_result_members(MaintainedViewBundleInputs {
-            subscription,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds: transitions.program_fact_adds,
-            program_fact_removes: transitions.program_fact_removes,
-            peer_complete_tx_payloads,
-            known_state: None,
-            complete_exclusive_payloads: false,
-            previous_result_set,
-            previous_program_facts: BTreeSet::new(),
-            flat_tuple_source_tables: Vec::new(),
-            identity,
-            tier,
-            maintained_facts: &maintained,
-            allow_storage_witness_fallback: false,
-        });
+        let update = self
+            .view_update_for_maintained_result_members(MaintainedViewBundleInputs {
+                subscription,
+                result_member_adds,
+                result_member_removes,
+                program_fact_adds: transitions.program_fact_adds,
+                program_fact_removes: transitions.program_fact_removes,
+                peer_complete_tx_payloads,
+                known_state: None,
+                complete_exclusive_payloads: false,
+                previous_result_set,
+                previous_program_facts: BTreeSet::new(),
+                flat_tuple_source_tables: Vec::new(),
+                identity,
+                tier,
+                maintained_facts: &maintained,
+                allow_storage_witness_fallback: false,
+            })
+            .await;
         self.unsubscribe_groove_subscription(receiver.id());
         update
     }
 
-    pub(crate) fn view_update_for_maintained_result_members(
+    pub(crate) async fn view_update_for_maintained_result_members(
         &mut self,
         inputs: MaintainedViewBundleInputs<'_>,
     ) -> Result<SyncMessage, Error> {
@@ -377,8 +384,9 @@ where
         );
         let mut desired_tuple_source_facts = BTreeMap::new();
         for (result, source_index, maintained_version) in &tuple_source_versions {
-            let canonical =
-                self.canonical_history_version_for_maintained_witness(&maintained_version)?;
+            let canonical = self
+                .canonical_history_version_for_maintained_witness(&maintained_version)
+                .await?;
             let tx = self.version_tx_id(&canonical)?;
             let schema_version = self
                 .schema_version_for_alias(canonical.schema_version_alias())
@@ -386,7 +394,8 @@ where
                     "flat tuple source witness schema version alias must exist",
                 ))?;
             let stored_tx = self
-                .query_transaction(tx)?
+                .query_transaction(tx)
+                .await?
                 .ok_or(Error::MissingTransaction(tx))?;
             let mut contributor = RealRowMemberEntry::current_content((
                 canonical.table.clone(),
@@ -484,8 +493,9 @@ where
         // bundle bodies (e.g. canonical `users` -> maintained `people`).
         let mut known_tuple_source_bundle_rows = BTreeSet::new();
         for (_, _, maintained_version) in &tuple_source_versions {
-            let canonical =
-                self.canonical_history_version_for_maintained_witness(maintained_version)?;
+            let canonical = self
+                .canonical_history_version_for_maintained_witness(maintained_version)
+                .await?;
             let tx = self.version_tx_id(&canonical)?;
             if known_state_exact_refs.contains(&RowVersionRef::new(
                 canonical.table().to_owned(),
@@ -536,7 +546,8 @@ where
                     by_tx
                 },
             );
-        self.preload_transaction_memo(wanted_add_rows_by_tx.keys().copied(), &mut context)?;
+        self.preload_transaction_memo(wanted_add_rows_by_tx.keys().copied(), &mut context)
+            .await?;
         let mut version_bundles = Vec::with_capacity(row_result_adds.len());
         let mut peer_payload_inventory_refs = Vec::new();
         let mut emitted_versions = BTreeSet::new();
@@ -576,13 +587,14 @@ where
                     .ok_or(Error::MissingTransaction(*tx_id))?;
                 let fallback_versions =
                     if complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive {
-                        self.query_versions_for_tx(*tx_id)?
+                        self.query_versions_for_tx(*tx_id).await?
                     } else {
                         self.query_versions_for_tx_rows_by_alias(
                             *tx_id,
                             stored_tx.node_alias,
                             wanted_rows,
-                        )?
+                        )
+                        .await?
                     };
                 tx_versions_cache.insert(*tx_id, fallback_versions);
             }
@@ -612,10 +624,12 @@ where
                 if filtered_tx_versions.is_empty() {
                     continue;
                 }
-                let bundle = self.version_bundle_for_maintained_view_versions_with_tx(
-                    &stored_tx,
-                    &filtered_tx_versions,
-                )?;
+                let bundle = self
+                    .version_bundle_for_maintained_view_versions_with_tx(
+                        &stored_tx,
+                        &filtered_tx_versions,
+                    )
+                    .await?;
                 version_bundles.push(bundle);
                 record_maintained_view_stream_b_add_bundle();
                 continue;
@@ -649,7 +663,8 @@ where
                         self.version_bundle_for_maintained_view_versions_with_tx(
                             &stored_tx,
                             tx_versions,
-                        )?,
+                        )
+                        .await?,
                     );
                     record_maintained_view_removal_stream_bundle();
                 } else {
@@ -694,10 +709,13 @@ where
                 let stored_tx = self
                     .query_transaction_memo(tx_id, &mut context)?
                     .ok_or(Error::MissingTransaction(tx_id))?;
-                version_bundles.push(self.version_bundle_for_maintained_view_versions_with_tx(
-                    &stored_tx,
-                    tx_versions,
-                )?);
+                version_bundles.push(
+                    self.version_bundle_for_maintained_view_versions_with_tx(
+                        &stored_tx,
+                        tx_versions,
+                    )
+                    .await?,
+                );
                 record_maintained_view_removal_stream_bundle();
             }
         }
@@ -738,13 +756,13 @@ where
     }
 
     /// Apply a downstream current-row view update.
-    pub(super) fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
+    pub(super) async fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
         self.validate_received_view_update_global_seq_durability(&update)?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))?;
-        self.apply_view_update_inner(update, None)
+        self.apply_view_update_inner(update, None).await
     }
 
-    pub(crate) fn apply_view_updates_in_batch(
+    pub(crate) async fn apply_view_updates_in_batch(
         &mut self,
         updates: Vec<ViewUpdateParts>,
     ) -> Result<(), Error> {
@@ -760,7 +778,7 @@ where
         // stage history before a later malformed bundle rejects the frame.
         self.validate_view_update_payloads(&updates)?;
         if updates.iter().any(|update| update.reset_result_set) {
-            self.begin_initial_sync_flush_cadence()?;
+            self.begin_initial_sync_flush_cadence().await?;
         }
         let mut bulk_candidates = Vec::new();
         let mut initial_hydration_binding_views =
@@ -791,7 +809,9 @@ where
                 initial_hydration_binding_views.remove(&binding_view_key);
             }
         }
-        let bulk_loaded_tx_ids = self.ingest_reset_view_bundle_refs_in_bulk(&bulk_candidates)?;
+        let bulk_loaded_tx_ids = self
+            .ingest_reset_view_bundle_refs_in_bulk(&bulk_candidates)
+            .await?;
         let mut receiver_candidates = BTreeMap::<TxId, VersionBundle>::new();
         for update in &updates {
             for bundle in
@@ -808,12 +828,14 @@ where
         let mut receiver_batch_global_seqs = Vec::new();
         let mut receiver_batch_bundle_count = 0u64;
         for bundle in receiver_candidates.values() {
-            let staged = self.stage_view_bundle(
-                &mut receiver_batch,
-                bundle,
-                &mut receiver_batch_tx_ids,
-                &mut receiver_batch_global_seqs,
-            )?;
+            let staged = self
+                .stage_view_bundle(
+                    &mut receiver_batch,
+                    bundle,
+                    &mut receiver_batch_tx_ids,
+                    &mut receiver_batch_global_seqs,
+                )
+                .await?;
             if staged {
                 receiver_batch_bundle_count += 1;
             }
@@ -821,7 +843,7 @@ where
         if !receiver_batch.is_empty() {
             self.sync_metrics.receiver_bulk_ingest_commits += 1;
             self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
-            self.database.commit_batch(receiver_batch)?;
+            self.database.commit_batch(receiver_batch).await?;
             for tx_id in &receiver_batch_tx_ids {
                 self.invalidate_tx_version_tables_cache(*tx_id);
             }
@@ -829,7 +851,8 @@ where
                 self.record_applied_global_seq(global_seq);
             }
             if let Some(tx_time) = receiver_batch_tx_ids.iter().map(|tx_id| tx_id.time).max() {
-                self.persist_storage_consistency_marker_through(tx_time)?;
+                self.persist_storage_consistency_marker_through(tx_time)
+                    .await?;
             }
         }
         let mut preloaded_tx_ids = bulk_loaded_tx_ids;
@@ -839,10 +862,11 @@ where
         // above; per-subscription settled-state mutations still apply in
         // arrival order below.
         for update in updates {
-            self.apply_view_update_inner(update, Some(&preloaded_tx_ids))?;
+            self.apply_view_update_inner(update, Some(&preloaded_tx_ids))
+                .await?;
         }
         if self.initial_sync_flush_active && self.query.initial_hydration_binding_views.is_empty() {
-            self.finish_initial_sync_flush_cadence()?;
+            self.finish_initial_sync_flush_cadence().await?;
         }
         Ok(())
     }
@@ -853,7 +877,7 @@ where
     /// already allowed to name. Keeping this before the batch is essential:
     /// the physical history table must be durable before a ViewUpdate can make
     /// its version witness public to a maintained subscription.
-    pub(crate) fn prepare_view_update_branch_partitions(
+    pub(crate) async fn prepare_view_update_branch_partitions(
         &mut self,
         updates: &[ViewUpdateParts],
     ) -> Result<(), Error>
@@ -883,7 +907,7 @@ where
         Ok(())
     }
 
-    fn apply_view_update_inner(
+    async fn apply_view_update_inner(
         &mut self,
         update: ViewUpdateParts,
         preloaded_tx_ids: Option<&BTreeSet<TxId>>,
@@ -971,7 +995,8 @@ where
             // Empty reset stamps stay orthogonal below: with no bundles there
             // is no payload to bulk ingest and the stamp must not clear shared
             // state that is already more settled.
-            self.ingest_reset_view_bundle_refs_in_bulk(&version_bundle_refs)?
+            self.ingest_reset_view_bundle_refs_in_bulk(&version_bundle_refs)
+                .await?
         } else {
             BTreeSet::new()
         };
@@ -986,7 +1011,7 @@ where
                     continue;
                 }
                 self.sync_metrics.receiver_per_bundle_ingests += 1;
-                self.ingest_view_bundle_ref(*bundle)?;
+                self.ingest_view_bundle_ref(*bundle).await?;
             }
         }
         let mut available_peer_complete_tx_payload_refs = Vec::new();
@@ -995,7 +1020,7 @@ where
                 available_peer_complete_tx_payload_refs.push(*tx_id);
                 continue;
             }
-            if self.query_transaction(*tx_id)?.is_none() {
+            if self.query_transaction(*tx_id).await?.is_none() {
                 self.record_peer_payload_inventory_missing_fallback();
                 continue;
             }
@@ -1005,7 +1030,7 @@ where
             if bulk_loaded_tx_ids.contains(tx_id) {
                 continue;
             }
-            if self.query_transaction(*tx_id)?.is_none() {
+            if self.query_transaction(*tx_id).await?.is_none() {
                 self.sync_metrics.parked_orphans += 1;
                 return Err(Error::MissingTransaction(*tx_id));
             }
@@ -1017,7 +1042,8 @@ where
         self.validate_result_member_adds_are_witnessed(
             &available_peer_complete_tx_payload_refs,
             &row_result_adds,
-        )?;
+        )
+        .await?;
         let empty_reset = reset_result_set
             && version_bundles_is_empty
             && peer_complete_tx_payload_refs.is_empty()
@@ -1156,8 +1182,10 @@ where
                 &persisted_fact_adds,
                 &persisted_fact_removes,
                 fact_rewrite.as_ref(),
-            )?;
-            self.persist_known_state_fact(binding_view_key, settled_through)?;
+            )
+            .await?;
+            self.persist_known_state_fact(binding_view_key, settled_through)
+                .await?;
         }
         if self
             .query
@@ -1194,7 +1222,7 @@ where
         Ok(())
     }
 
-    fn validate_result_member_adds_are_witnessed(
+    async fn validate_result_member_adds_are_witnessed(
         &mut self,
         peer_complete_tx_payload_refs: &[TxId],
         result_member_adds: &[ResultRowEntry],
@@ -1205,7 +1233,7 @@ where
             .collect::<BTreeSet<_>>();
         let mut partial_exclusive_keys = BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new();
         for (table, row_uuid, tx_id) in result_member_adds {
-            let Some(tx) = self.query_transaction(*tx_id)? else {
+            let Some(tx) = self.query_transaction(*tx_id).await? else {
                 continue;
             };
             if tx.tx.kind != TxKind::Exclusive || peer_complete_tx_payload_refs.contains(tx_id) {
@@ -1215,7 +1243,8 @@ where
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     let keys = self
-                        .query_versions_for_tx(*tx_id)?
+                        .query_versions_for_tx(*tx_id)
+                        .await?
                         .into_iter()
                         .filter(|version| version.deletion().is_none())
                         .map(|version| (version.table().to_owned(), version.row_uuid()))
@@ -1232,23 +1261,26 @@ where
         Ok(())
     }
 
-    fn ingest_view_bundle(&mut self, bundle: VersionBundle) -> Result<(), Error> {
+    async fn ingest_view_bundle(&mut self, bundle: VersionBundle) -> Result<(), Error> {
         validate_received_view_bundle_global_seq_durability(bundle.global_seq, bundle.durability)?;
         if bundle.tx.kind != TxKind::Exclusive {
-            return self.ingest_known_transaction(
-                bundle.tx,
-                bundle.versions,
-                bundle.fate,
-                bundle.global_seq,
-                bundle.durability,
-            );
+            return self
+                .ingest_known_transaction(
+                    bundle.tx,
+                    bundle.versions,
+                    bundle.fate,
+                    bundle.global_seq,
+                    bundle.durability,
+                )
+                .await;
         }
         let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
             Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
         })?;
         let tx_id = bundle.tx.tx_id;
-        let mut stored_versions = if self.query_transaction(tx_id)?.is_some() {
-            self.query_versions_for_tx(tx_id)?
+        let mut stored_versions = if self.query_transaction(tx_id).await?.is_some() {
+            self.query_versions_for_tx(tx_id)
+                .await?
                 .iter()
                 .map(|stored| self.version_record_from_row(stored))
                 .collect::<Result<Vec<_>, Error>>()?
@@ -1281,7 +1313,8 @@ where
                 bundle.fate.clone(),
                 bundle.global_seq,
                 bundle.durability,
-            )?;
+            )
+            .await?;
             if matches!(bundle.fate, Fate::Accepted) {
                 // Ingesting only the previously missing versions replaces the
                 // transaction-version cache with that subset. Reload the full
@@ -1293,7 +1326,8 @@ where
                     bundle.fate,
                     bundle.global_seq,
                     Some(bundle.durability),
-                )?;
+                )
+                .await?;
             }
             return Ok(());
         }
@@ -1304,13 +1338,14 @@ where
             bundle.global_seq,
             bundle.durability,
         )
+        .await
     }
 
-    fn ingest_view_bundle_ref(&mut self, bundle: VersionBundleRef<'_>) -> Result<(), Error> {
-        self.ingest_view_bundle(bundle.to_owned_bundle())
+    async fn ingest_view_bundle_ref(&mut self, bundle: VersionBundleRef<'_>) -> Result<(), Error> {
+        self.ingest_view_bundle(bundle.to_owned_bundle()).await
     }
 
-    fn stage_view_bundle(
+    async fn stage_view_bundle(
         &mut self,
         batch: &mut DatabaseBatch,
         bundle: &VersionBundle,
@@ -1325,7 +1360,7 @@ where
             if bundle.versions.len() != complete_len {
                 return Ok(false);
             }
-            if self.query_transaction(bundle.tx.tx_id)?.is_some() {
+            if self.query_transaction(bundle.tx.tx_id).await?.is_some() {
                 return Ok(false);
             }
         }
@@ -1340,7 +1375,8 @@ where
             bundle.global_seq,
             bundle.durability,
             staged_global_seqs,
-        )?;
+        )
+        .await?;
         Ok(true)
     }
 
@@ -1400,7 +1436,7 @@ where
         Ok((shape, binding))
     }
 
-    pub(super) fn version_bundle_for_maintained_view_versions_with_tx(
+    pub(super) async fn version_bundle_for_maintained_view_versions_with_tx(
         &mut self,
         stored_tx: &StoredTransaction,
         tx_versions: &[VersionRow],
@@ -1438,7 +1474,9 @@ where
             // query output. Resolve its identity back to the stored authored
             // row before crossing the wire boundary (INV-DATA-16/18,
             // INV-SYNC-16, and C.3's byte-fidelity rule).
-            let canonical = self.canonical_history_version_for_maintained_witness(version)?;
+            let canonical = self
+                .canonical_history_version_for_maintained_witness(version)
+                .await?;
             versions.push(self.version_record_from_row(&canonical)?);
         }
         Ok(VersionBundle {
@@ -1457,7 +1495,7 @@ where
     /// version under its authored schema. This producer-side normalization is
     /// deliberately before serialization; receivers reject non-identical
     /// duplicate row versions rather than repairing them.
-    pub(super) fn canonical_history_version_for_maintained_witness(
+    pub(super) async fn canonical_history_version_for_maintained_witness(
         &mut self,
         version: &VersionRow,
     ) -> Result<VersionRow, Error> {
@@ -1481,7 +1519,8 @@ where
         let physical_candidates = if logical_candidates.len() == 1 {
             logical_candidates
         } else {
-            self.query_versions_for_tx(witness_tx_id)?
+            self.query_versions_for_tx(witness_tx_id)
+                .await?
                 .into_iter()
                 .filter(|candidate| {
                     candidate.row_uuid() == version.row_uuid()
@@ -1514,7 +1553,8 @@ where
                 // same identity boundary used for repair payloads; reused or
                 // unknown logical names fail closed before history is read.
                 if let Some(canonical) = self
-                    .query_versions_for_tx(witness_tx_id)?
+                    .query_versions_for_tx(witness_tx_id)
+                    .await?
                     .into_iter()
                     .find(|candidate| {
                         candidate.row_uuid() == version.row_uuid()
@@ -1546,13 +1586,15 @@ where
         for storage_table in
             self.version_storage_sources_for_layer(version.table(), version.layer())?
         {
-            let Some(canonical) = self.query_version_by_alias_with_storage(
-                version.table(),
-                &storage_table,
-                version.row_uuid(),
-                version.tx_time(),
-                version.tx_node_alias(),
-            )?
+            let Some(canonical) = self
+                .query_version_by_alias_with_storage(
+                    version.table(),
+                    &storage_table,
+                    version.row_uuid(),
+                    version.tx_time(),
+                    version.tx_node_alias(),
+                )
+                .await?
             else {
                 continue;
             };
