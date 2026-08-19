@@ -2688,12 +2688,13 @@ where
                                     // through the shared authority aggregate
                                     // before NodeState assigns its policy fate.
                                     {
-                                        let mut node = self.node.borrow_mut();
+                                        let mut node = self.node.lock().await;
                                         peer.prove_terminal_commit_authorization(
                                             &mut node,
                                             ingest_context.identity,
                                             &versions,
-                                        )?;
+                                        )
+                                        .await?;
                                     }
                                     self.node
                                         .lock()

@@ -22,7 +22,7 @@ use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
     ResultTransitions,
 };
-use crate::node::{Error, NodeState};
+use crate::node::{Error, NodeState, PublicationOutcome};
 #[cfg(test)]
 use crate::protocol::KnownStateCompleteness;
 #[cfg(test)]

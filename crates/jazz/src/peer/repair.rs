@@ -6,13 +6,13 @@ impl PeerState {
     /// affected tables and writer. If a scope was not settled before this call,
     /// the unit remains pending and can be completed by
     /// [`Self::drain_deferred_edge_fates`] after the registered scope settles.
-    pub fn ingest_edge_mergeable_commit_unit<S>(
+    pub async fn ingest_edge_mergeable_commit_unit<S>(
         &mut self,
         node: &mut NodeState<S>,
         tx: Transaction,
         versions: Vec<VersionRecord>,
         now_ms: u64,
-    ) -> Result<Vec<SyncMessage>, Error>
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: OrderedKvStorage + ReopenableStorage,
     {
@@ -28,8 +28,10 @@ impl PeerState {
             permission_identity,
             &versions,
             true,
-        )? {
-            node.ingest_relay_commit_unit(tx.clone(), versions.clone())?;
+        )
+        .await?
+        {
+            node.ingest_relay_commit_unit(tx.clone(), versions.clone()).await?;
             if !self.deferred_edge_fates.contains_key(&tx.tx_id) {
                 for subscription in &scope_subscriptions {
                     self.retain_edge_scope_subscription(*subscription);
@@ -45,7 +47,7 @@ impl PeerState {
                     },
                 );
             }
-            return Ok(Vec::new());
+            return Ok(PublicationOutcome::settled(Vec::new()));
         }
         node.ingest_edge_authority_mergeable_commit_unit_with_identity(
             tx,
@@ -53,15 +55,16 @@ impl PeerState {
             now_ms,
             permission_identity,
         )
+        .await
     }
 
     /// Assign fates for edge-ingested writes whose permission scopes have now
     /// delivered an initial settled result.
-    pub fn drain_deferred_edge_fates<S>(
+    pub async fn drain_deferred_edge_fates<S>(
         &mut self,
         node: &mut NodeState<S>,
         now_ms: u64,
-    ) -> Result<Vec<SyncMessage>, Error>
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: OrderedKvStorage + ReopenableStorage,
     {
@@ -71,7 +74,7 @@ impl PeerState {
             .iter()
             .map(|(tx_id, fate)| (*tx_id, fate.clone()))
             .collect::<Vec<_>>();
-        let mut updates = Vec::new();
+        let mut updates = PublicationOutcome::settled(Vec::new());
         for (tx_id, fate) in deferred {
             if self
                 .unsettled_authority_scope_subscriptions(
@@ -79,7 +82,8 @@ impl PeerState {
                     fate.permission_identity,
                     &fate.versions,
                     false,
-                )?
+                )
+                .await?
                 .is_some()
             {
                 continue;
@@ -94,7 +98,8 @@ impl PeerState {
                     fate.versions,
                     fate.now_ms,
                     fate.permission_identity,
-                )?,
+                )
+                .await?,
             );
         }
         Ok(updates)
@@ -144,7 +149,7 @@ impl PeerState {
     /// reconstructed by `NodeState` from the actual version records, so
     /// insert, update (including candidate patch), and delete each compile the
     /// correct policy clauses rather than sharing a placeholder update.
-    pub(crate) fn prove_terminal_commit_authorization<S>(
+    pub(crate) async fn prove_terminal_commit_authorization<S>(
         &mut self,
         node: &mut NodeState<S>,
         writer: AuthorId,
@@ -153,7 +158,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        for action in node.authorization_actions_for_versions(versions)? {
+        for action in node.authorization_actions_for_versions(versions).await? {
             let scope = node.authorization_support_scope(writer, &action)?;
             if scope.subscriptions.is_empty() {
                 continue;
@@ -235,7 +240,7 @@ impl PeerState {
     /// admitted upstream authority would send in `AuthorizationScopeView`.
     /// Terminal cores do not put those views on a wire, but they must never
     /// fall back to the historical table-wide permission query.
-    fn unsettled_authority_scope_subscriptions<S>(
+    async fn unsettled_authority_scope_subscriptions<S>(
         &mut self,
         node: &mut NodeState<S>,
         writer: AuthorId,
@@ -246,7 +251,7 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         let mut unsettled = Vec::new();
-        for action in node.authorization_actions_for_versions(versions)? {
+        for action in node.authorization_actions_for_versions(versions).await? {
             let scope = node.authorization_support_scope(writer, &action)?;
             if scope.subscriptions.is_empty() {
                 // A policy with no support clauses is structurally complete;
