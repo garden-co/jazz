@@ -2032,6 +2032,8 @@ where
                 self.schema,
                 self.graph,
                 self.variant_projections,
+                Some(self.table_deltas),
+                self.evaluation_inputs.as_deref_mut(),
                 node,
                 recursive,
                 output_desc,
