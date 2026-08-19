@@ -33,6 +33,7 @@ where
     /// holds an uncommitted [`DatabaseBatch`] observe the pre-batch state.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
@@ -43,16 +44,17 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
-    /// # database.commit_batch(batch)?;
-    /// let rows = database.index_scan("albums", "albums_by_year", &[Value::U64(1959)])?;
+    /// # database.commit_batch(batch).await?;
+    /// let rows = database.index_scan("albums", "albums_by_year", &[Value::U64(1959)]).await?;
     ///
     /// assert_eq!(rows.len(), 1);
     /// assert_eq!(rows[0].get("title")?, Value::String("Kind of Blue".into()));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn index_scan(
         &self,
@@ -80,6 +82,7 @@ where
     /// logical prefix.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
@@ -90,18 +93,18 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
     /// # batch.insert("albums", vec![Value::U64(3), Value::String("A Love Supreme".into()), Value::U64(1965)]);
-    /// # database.commit_batch(batch)?;
+    /// # database.commit_batch(batch).await?;
     /// let rows = database.index_scan_range(
     ///     "albums",
     ///     "albums_by_year",
     ///     &[Value::U64(1957)],
     ///     &[Value::U64(1960)],
-    /// )?;
+    /// ).await?;
     ///
     /// let titles = rows
     ///     .iter()
@@ -112,6 +115,7 @@ where
     ///     vec![Value::String("Blue Train".into()), Value::String("Kind of Blue".into())]
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn index_scan_range(
         &self,

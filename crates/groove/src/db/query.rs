@@ -8,21 +8,22 @@ where
     /// deltas from committed batches.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::{Database, GraphBuilder};
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
     /// # use groove::storage::MemoryStorage;
-    /// # fn db() -> Result<Database<MemoryStorage>, groove::db::Error> {
+    /// # async fn db() -> Result<Database<MemoryStorage>, groove::db::Error> {
     /// #     let schema = DatabaseSchema::new([TableSchema::new("albums", [
     /// #         ColumnSchema::new("id", ColumnType::U64),
     /// #         ColumnSchema::new("title", ColumnType::String),
     /// #         ColumnSchema::new("year", ColumnType::U64),
     /// #     ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #       .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"]))
+    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await
     /// # }
-    /// # let mut database = db()?;
-    /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums"))?;
+    /// # let mut database = db().await?;
+    /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums")).await?;
     /// assert!(subscription.recv()?.is_empty());
     ///
     /// let mut batch = database.open_batch();
@@ -30,13 +31,14 @@ where
     ///     "albums",
     ///     vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)],
     /// );
-    /// database.commit_batch(batch)?;
+    /// database.commit_batch(batch).await?;
     ///
     /// assert_eq!(
     ///     subscription.recv()?.to_values()?,
     ///     vec![(vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)], 1)]
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn subscribe_one_sink(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
@@ -68,25 +70,26 @@ where
     /// graph.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
     /// # use groove::storage::MemoryStorage;
-    /// # fn db() -> Result<Database<MemoryStorage>, groove::db::Error> {
+    /// # async fn db() -> Result<Database<MemoryStorage>, groove::db::Error> {
     /// #     let schema = DatabaseSchema::new([TableSchema::new("albums", [
     /// #         ColumnSchema::new("id", ColumnType::U64),
     /// #         ColumnSchema::new("title", ColumnType::String),
     /// #         ColumnSchema::new("year", ColumnType::U64),
     /// #     ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #       .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"]))
+    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await
     /// # }
-    /// # let mut database = db()?;
+    /// # let mut database = db().await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
-    /// # database.commit_batch(batch)?;
+    /// # database.commit_batch(batch).await?;
     /// let query = Query::Select(Box::new(
     ///     Select::new([SelectItem::expr(Expr::column("title"))])
     ///         .from([TableRef::named("albums")])
@@ -96,13 +99,14 @@ where
     ///             Expr::Literal(Value::U64(1959)),
     ///         )),
     /// ));
-    /// let subscription = database.subscribe_query(query)?;
+    /// let subscription = database.subscribe_query(query).await?;
     ///
     /// assert_eq!(
     ///     subscription.recv()?.to_values()?,
     ///     vec![(vec![Value::String("Kind of Blue".into())], 1)]
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn subscribe_query(&mut self, query: Query) -> Result<Subscription, Error> {
         let planned = plan_query(&query, self.ivm_runtime.schema())?;
@@ -113,6 +117,7 @@ where
     /// concrete parameter sets without replanning.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
     /// # use groove::records::Value;
@@ -124,7 +129,7 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// let query = Query::Select(Box::new(
     ///     Select::new([SelectItem::Wildcard])
     ///         .from([TableRef::named("albums")])
@@ -135,9 +140,10 @@ where
     ///         )),
     /// ));
     ///
-    /// let prepared = database.prepare_query(query)?;
+    /// let prepared = database.prepare_query(query).await?;
     /// assert_eq!(prepared.parameters()[0].name, "year");
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn prepare_query(&mut self, query: Query) -> Result<PreparedShape, Error> {
         self.ensure_not_poisoned()?;
@@ -166,6 +172,7 @@ where
     /// Bind a prepared query shape by named parameter.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
     /// # use groove::records::Value;
@@ -177,13 +184,13 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
-    /// # database.commit_batch(batch)?;
+    /// # database.commit_batch(batch).await?;
     /// # let query = Query::Select(Box::new(Select::new([SelectItem::Wildcard]).from([TableRef::named("albums")]).where_(Expr::binary(Expr::column("year"), BinaryOp::Eq, Expr::parameter("year")))));
-    /// # let prepared = database.prepare_query(query)?;
-    /// let subscription = database.bind(&prepared, &[("year", Value::U64(1959))])?;
+    /// # let prepared = database.prepare_query(query).await?;
+    /// let subscription = database.bind(&prepared, &[("year", Value::U64(1959))]).await?;
     ///
     /// assert_eq!(
     ///     subscription.recv()?.to_values()?,
@@ -197,6 +204,7 @@ where
     ///     )]
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn bind(
         &mut self,
@@ -320,6 +328,7 @@ where
     /// Bind a prepared one-sink graph shape by positional values.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::{Database, GraphBuilder};
     /// # use groove::ivm::ProjectField;
     /// # use groove::records::{RecordDescriptor, Value};
@@ -331,7 +340,7 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// let binding_descriptor = RecordDescriptor::new([("year", ColumnType::U64.clone())]);
     /// let shape = database.prepare_one_sink(
     ///     GraphBuilder::join(
@@ -348,11 +357,12 @@ where
     ///     "year_params",
     ///     binding_descriptor,
     ///     ["id"],
-    /// )?;
+    /// ).await?;
     ///
-    /// let subscription = database.bind_shape_one_sink(shape.id(), &[Value::U64(1959)])?;
+    /// let subscription = database.bind_shape_one_sink(shape.id(), &[Value::U64(1959)]).await?;
     /// assert!(subscription.recv()?.is_empty());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn bind_shape_one_sink(
         &mut self,
@@ -405,6 +415,7 @@ where
     /// Run a one-shot SQL-ish query against the current storage snapshot.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
     /// # use groove::records::Value;
@@ -416,11 +427,11 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
-    /// # database.commit_batch(batch)?;
+    /// # database.commit_batch(batch).await?;
     /// let query = Query::Select(Box::new(
     ///     Select::new([SelectItem::expr(Expr::column("title"))])
     ///         .from([TableRef::named("albums")])
@@ -431,9 +442,10 @@ where
     ///         )),
     /// ));
     ///
-    /// let rows = database.query(query)?;
+    /// let rows = database.query(query).await?;
     /// assert_eq!(rows.to_values()?, vec![(vec![Value::String("Kind of Blue".into())], 1)]);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn query(&mut self, query: Query) -> Result<RecordDeltas, Error> {
         let planned = plan_query(&query, self.ivm_runtime.schema())?;
@@ -446,6 +458,7 @@ where
     /// snapshot-query path.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::{Database, GraphBuilder, PredicateExpr};
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
@@ -456,19 +469,20 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
-    /// # database.commit_batch(batch)?;
+    /// # database.commit_batch(batch).await?;
     /// let rows = database.query_graph(
     ///     GraphBuilder::table("albums").filter(PredicateExpr::eq("year", Value::U64(1959))),
-    /// )?;
+    /// ).await?;
     ///
     /// assert_eq!(
     ///     rows.to_values()?,
     ///     vec![(vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)], 1)]
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn query_graph(&mut self, graph: GraphBuilder) -> Result<RecordDeltas, Error> {
         self.ensure_not_poisoned()?;

@@ -12,6 +12,7 @@ where
     /// and examples.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// use groove::db::Database;
     /// use groove::schema::{
     ///     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType,
@@ -31,9 +32,10 @@ where
     /// .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
     /// let storage = MemoryStorage::new(&["albums", "indices"]);
     ///
-    /// let database = Database::new(schema, storage)?;
+    /// let database = Database::new(schema, storage).await?;
     /// assert!(database.last_commit_metrics().is_none());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn new(schema: DatabaseSchema, storage: S) -> Result<Self, Error> {
         Self::new_with_storage_layout(schema, storage, StorageLayout::Identity).await
@@ -194,6 +196,7 @@ where
     /// IVM ticks.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// use groove::db::Database;
     /// use groove::records::{RecordDescriptor, Value, ValueType};
     /// use groove::schema::{DatabaseSchema, DirectRecordStoreSchema};
@@ -208,17 +211,18 @@ where
     /// );
     /// let column_families = schema.column_families();
     /// let storage = MemoryStorage::new(&column_families);
-    /// let database = Database::new(schema, storage)?;
+    /// let database = Database::new(schema, storage).await?;
     ///
     /// let art = database.direct_record_store("album_art")?;
     /// art.set(
     ///     &[Value::U64(1), Value::String("front".into())],
     ///     &[Value::Bytes(b"front-cover-bytes".to_vec())],
-    /// )?;
+    /// ).await?;
     ///
-    /// let stored = art.get(&[Value::U64(1), Value::String("front".into())])?;
+    /// let stored = art.get(&[Value::U64(1), Value::String("front".into())]).await?;
     /// assert_eq!(stored.unwrap().get("bytes")?, Value::Bytes(b"front-cover-bytes".to_vec()));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub fn direct_record_store(&self, name: &str) -> Result<DirectRecordStore<'_, S>, Error> {
         let schema = self.direct_record_store_schema(name)?;
