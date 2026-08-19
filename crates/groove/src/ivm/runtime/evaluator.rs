@@ -559,6 +559,20 @@ where
                 return Ok(result);
             }
             let result = match &graph_node.descriptor.operator {
+                OpType::TableSource(input)
+                    if self.context.eval_mode == EvalMode::Hydrate
+                        && self.evaluation_inputs.is_some() =>
+                {
+                    NodeState::update_table_source_from_inputs(
+                        input,
+                        self.schema,
+                        self.variant_projections,
+                        &output_desc,
+                        self.evaluation_inputs
+                            .as_deref_mut()
+                            .expect("guarded evaluation inputs"),
+                    )
+                }
                 OpType::TableSource(input) => NodeState::update_table_source(
                     input,
                     self.schema,

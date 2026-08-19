@@ -455,13 +455,6 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
-        let table_deltas_by_root = snapshot_table_deltas_for_roots(
-            &self.schema,
-            &self.graph,
-            storage,
-            roots.iter().copied(),
-        )
-        .await?;
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut metrics = TickMetrics::default();
         let first_root = roots
@@ -482,15 +475,12 @@ impl IvmRuntime {
                     }
                     HydrationMode::Subscription => EvalContext::root_snapshot(),
                 };
-                let table_deltas = table_deltas_by_root
-                    .get(&root)
-                    .ok_or(IvmRuntimeError::GraphNodeNotFound(root))?;
                 let result = {
                     let mut evaluator = TickEvaluator {
                         schema: &self.schema,
                         graph: &self.graph,
                         variant_projections: &self.variant_projections,
-                        table_deltas,
+                        table_deltas: &[],
                         binding_deltas: &[],
                         binding_snapshots: &binding_snapshots,
                         current_tick: self.current_tick,

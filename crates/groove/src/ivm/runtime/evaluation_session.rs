@@ -130,15 +130,12 @@ where
         count
     }
 
+    #[cfg(test)]
     pub(super) fn take(
         &mut self,
         key: &StorageRequestKey,
     ) -> Option<Result<StorageRequestOutput, StorageError>> {
         self.ready.remove(key)
-    }
-
-    pub(super) fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
     }
 
     pub(super) fn drain_ready(

@@ -20,6 +20,73 @@ pub(super) struct NodeRuntimeMeta {
 pub(super) struct NodeState;
 
 impl NodeState {
+    pub(super) fn update_table_source_from_inputs(
+        input: &TableSourceOp,
+        schema: &DatabaseSchema,
+        variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
+        output_desc: &RecordDescriptor,
+        inputs: &mut super::evaluation_session::EvaluationInputs,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let request = match input.scan.as_ref().map(scan_bounds).transpose()? {
+            None => super::evaluation_session::StorageRequestKey::ScanPrefix {
+                family: input.table.clone(),
+                prefix: Vec::new(),
+            },
+            Some(StaticScanBounds::Prefix(prefix)) => {
+                super::evaluation_session::StorageRequestKey::ScanPrefix {
+                    family: input.table.clone(),
+                    prefix,
+                }
+            }
+            Some(StaticScanBounds::Range { start, end }) => {
+                if start >= end {
+                    return Ok(RecordDeltas::empty(*output_desc));
+                }
+                super::evaluation_session::StorageRequestKey::ScanRange {
+                    family: input.table.clone(),
+                    start,
+                    end,
+                }
+            }
+        };
+        let table_schema = schema
+            .table(&input.table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
+        let mut grouped = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
+        for (_, stored) in inputs.rows(request)? {
+            let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
+            let descriptor = table_schema
+                .record_schema_for_variant(variant_tag)
+                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                    table: input.table.clone(),
+                    version: u64::from(variant_tag),
+                })?;
+            grouped
+                .entry((variant_tag, descriptor))
+                .or_default()
+                .push(RecordDelta {
+                    record: Bytes::copy_from_slice(payload),
+                    weight: 1,
+                });
+        }
+        let table_deltas = grouped
+            .into_iter()
+            .map(|((variant_tag, descriptor), deltas)| TableDelta {
+                table: input.table.clone(),
+                variant_tag,
+                descriptor,
+                deltas,
+            })
+            .collect::<Vec<_>>();
+        Self::update_table_source(
+            input,
+            schema,
+            variant_projections,
+            output_desc,
+            &table_deltas,
+        )
+    }
+
     pub(super) fn update_index_source_from_inputs(
         input: &IndexSourceOp,
         output_desc: &RecordDescriptor,
