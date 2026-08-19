@@ -396,6 +396,7 @@ where
             settled_binding_view,
             authorization_mode,
             prepared_claim_binding_mode,
+            false,
         )?;
         self.compile_query_program_request(request)
     }
@@ -423,23 +424,22 @@ where
         self.compile_query_program_request_with_access_paths(request, access_paths)
     }
 
-    fn compile_current_query_program_with_selected_access_paths(
+    fn compile_current_query_program_with_access_paths(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
-        let access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
-        let request = self.current_query_program_request(
+        let request = self.current_query_program_request_with_inline_binding_source(
             shape,
             binding,
             tier,
             identity,
             output,
             &ReadViewSpec::default(),
-            None,
             QueryAuthorizationMode::TrustedServing,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
@@ -703,6 +703,31 @@ where
             settled_binding_view,
             authorization_mode,
             PreparedClaimBindingMode::Strict,
+            false,
+        )
+    }
+
+    fn current_query_program_request_with_inline_binding_source(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<QueryProgramRequest, Error> {
+        self.current_query_program_request_with_prepared_claim_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            None,
+            authorization_mode,
+            PreparedClaimBindingMode::Strict,
+            true,
         )
     }
 
@@ -717,6 +742,7 @@ where
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
+        force_inline_binding_source: bool,
     ) -> Result<QueryProgramRequest, Error> {
         let lowered_shape;
         let lowered_binding;
@@ -726,6 +752,7 @@ where
         // than trying to evaluate a server-maintained binding graph.
         let use_prepared_binding_source = authorization_mode
             == QueryAuthorizationMode::TrustedServing
+            && !force_inline_binding_source
             && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
             && !matches!(output, CurrentQueryProgramOutput::RelationSnapshot);
@@ -2018,6 +2045,41 @@ where
         self.query_rows_with_prepared_plan_for_identity(shape, binding, tier, None, identity)
     }
 
+    /// Execute a serving query with its root constrained to a physical row
+    /// UUID. This is for internal authorization probes: public `id` may be a
+    /// declared user column and must not be used as the storage-row selector.
+    pub(in crate::node) fn query_rows_for_link_physical_row(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let table = self
+            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .clone();
+        let access_paths = BTreeMap::from([(
+            root_source_id(&shape.query().table),
+            CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
+        )]);
+        let program = self.compile_current_query_program_with_access_paths(
+            shape,
+            binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::AppRows,
+            access_paths,
+        )?;
+        let deltas = self
+            .database
+            .query_graph(lowered_materialization_app_rows_graph(&program)?)
+            .map_err(Error::Groove)?;
+        let mut rows = self.materialize_inline_current_query_rows(&table, deltas)?;
+        self.finish_engine_query_rows_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
+        Ok(rows)
+    }
+
     #[cfg(test)]
     pub(crate) fn query_rows_for_link_forced_full_scan_for_test(
         &mut self,
@@ -2862,7 +2924,7 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
 }
 
 fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Option<Value> {
-    if column == "id" {
+    if column == "id" && !table.columns.iter().any(|candidate| candidate.name == "id") {
         return Some(Value::Uuid(row.row_uuid().0));
     }
     if is_magic_current_column(column) {

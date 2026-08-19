@@ -2288,6 +2288,15 @@ fn lower_join_key_ref(
         && value_source == source_id
         && field == "id"
     {
+        let declared_id = user_column_field(field);
+        if source
+            .row_shape
+            .descriptor
+            .field_index(&declared_id)
+            .is_some()
+        {
+            return require_source_field(source, &declared_id);
+        }
         return require_source_field(source, &source.row_shape.row_uuid_field);
     }
     match lower_value_ref(value, source_id, source, request)? {
@@ -2973,10 +2982,18 @@ fn lower_value_ref(
             source: value_source,
             field,
         } if value_source == source_id => {
-            let field = if source.row_shape.descriptor.field_index(field).is_some() {
+            let user_field = user_column_field(field);
+            let field = if source
+                .row_shape
+                .descriptor
+                .field_index(&user_field)
+                .is_some()
+            {
+                user_field
+            } else if source.row_shape.descriptor.field_index(field).is_some() {
                 field.clone()
             } else {
-                user_column_field(field)
+                user_field
             };
             Ok(LoweredValueRef::Field(require_source_field(
                 source, &field,

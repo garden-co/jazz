@@ -714,7 +714,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
             alias: None,
             on: FlatJoinOn {
                 left: "posts.author_id".to_owned(),
-                right: "people.id".to_owned(),
+                right: "people._id".to_owned(),
             },
         }],
     });
@@ -726,7 +726,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     assert_eq!(
         rows.len(),
         1,
-        "flat joins must use the source row identity for `id`, not an arbitrary stored id cell"
+        "flat joins must use the explicit source row identity alias, not an arbitrary stored id cell"
     );
 
     let opts = RegisterShapeOptions {
