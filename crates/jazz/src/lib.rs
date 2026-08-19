@@ -9,7 +9,8 @@
     clippy::manual_unwrap_or_default,
     clippy::needless_borrow,
     clippy::too_many_arguments,
-    clippy::type_complexity
+    clippy::type_complexity,
+    async_fn_in_trait
 )]
 
 //! Jazz is the local-first database layer above groove storage and IVM. The

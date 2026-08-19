@@ -1475,25 +1475,46 @@ struct IngestMemo {
 
 /// A Jazz transaction whose resident Groove publication is visible while its
 /// owned durable write is still pending.
-pub(crate) struct PublishedTransaction {
+/// A transaction that is resident and locally visible, with persistence still
+/// owned by the caller.
+#[must_use = "a published transaction must be persisted and settled"]
+pub struct PublishedTransaction {
     pub(crate) tx_id: TxId,
     persistence: PublishedBatch,
 }
 
 impl PublishedTransaction {
-    pub(crate) async fn persist(&self) -> PublicationPersistence {
+    /// The transaction made resident by this publication.
+    pub fn tx_id(&self) -> TxId {
+        self.tx_id
+    }
+
+    /// Persist the resident publication in storage order.
+    pub async fn persist(&self) -> PublicationPersistence {
         self.persistence.persist().await
     }
 }
 
 /// The logical result of an operation together with every resident write that
 /// must be observed locally before it is persisted and released externally.
-pub(crate) struct PublicationOutcome<T> {
+/// A logical operation result and the resident publications it created.
+#[must_use = "publication outcomes must be persisted and settled"]
+pub struct PublicationOutcome<T> {
     pub(crate) value: T,
     pub(crate) publications: Vec<PublishedTransaction>,
 }
 
 impl<T> PublicationOutcome<T> {
+    /// Borrow the logical operation result without consuming its receipts.
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// Split the logical result from the publications awaiting persistence.
+    pub fn into_parts(self) -> (T, Vec<PublishedTransaction>) {
+        (self.value, self.publications)
+    }
+
     pub(crate) fn settled(value: T) -> Self {
         Self {
             value,
@@ -1506,10 +1527,6 @@ impl<T> PublicationOutcome<T> {
             value,
             publications: vec![publication],
         }
-    }
-
-    pub(crate) fn append(&mut self, mut other: PublicationOutcome<()>) {
-        self.publications.append(&mut other.publications);
     }
 }
 
