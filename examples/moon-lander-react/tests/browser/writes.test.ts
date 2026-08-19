@@ -170,6 +170,38 @@ function mockDb() {
   };
 }
 
+type DeferredWait = {
+  resolve: () => void;
+  reject: (error: unknown) => void;
+};
+
+/**
+ * A db mock whose write handles stay pending until the test settles them.
+ *
+ * This makes the reconciliation promise observable independently from when
+ * the insert/update calls themselves are issued.
+ */
+function mockDbWithDeferredWaits() {
+  const waits: DeferredWait[] = [];
+
+  const write = () => ({
+    wait: vi.fn(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          waits.push({ resolve, reject });
+        }),
+    ),
+  });
+
+  return {
+    db: {
+      insert: vi.fn(write),
+      update: vi.fn(write),
+    } as any,
+    waits,
+  };
+}
+
 describe("reconcileDeposits", () => {
   // =========================================================================
   // 1. Inserts missing deposits when count is below target
@@ -370,5 +402,40 @@ describe("reconcileDeposits", () => {
 
     expect(inserts.length).toBe(0);
     expect(updates.length).toBe(0);
+  });
+
+  it("does not resolve until every write handle has reached edge durability", async () => {
+    const { db, waits } = mockDbWithDeferredWaits();
+    const limits = FUEL_TYPES.map((fuelType) => (fuelType === "circle" ? 2 : 0));
+    let settled = false;
+
+    const reconciliation = reconcileDeposits(db, [], limits).then(() => {
+      settled = true;
+    });
+
+    expect(waits).toHaveLength(2);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    waits[0].resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    waits[1].resolve();
+    await reconciliation;
+    expect(settled).toBe(true);
+  });
+
+  it("propagates a rejection from any write-handle wait", async () => {
+    const { db, waits } = mockDbWithDeferredWaits();
+    const limits = FUEL_TYPES.map((fuelType) => (fuelType === "circle" ? 2 : 0));
+    const error = new Error("edge durability rejected");
+    const reconciliation = reconcileDeposits(db, [], limits);
+
+    expect(waits).toHaveLength(2);
+    waits[0].resolve();
+    waits[1].reject(error);
+
+    await expect(reconciliation).rejects.toBe(error);
   });
 });
