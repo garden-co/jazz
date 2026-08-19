@@ -94,3 +94,34 @@ fn cancelled_prepared_bind_discards_binding_tick_and_subscription_state() {
         block_on(database.bind_shape_one_sink(shape.id(), &[Value::U64(1)])).unwrap();
     assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
 }
+
+#[test]
+fn cancelled_one_shot_query_discards_ephemeral_graph_and_hydration_state() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    block_on(database.commit_batch(batch)).unwrap();
+    let before = database.runtime_stats();
+
+    control.take_observed();
+    control.pause();
+    let mut query = Box::pin(database.query_graph(GraphBuilder::table("albums")));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut query).poll(&mut context),
+        Poll::Pending
+    ));
+    drop(query);
+
+    let after = database.runtime_stats();
+    assert_eq!(after.graph_nodes, before.graph_nodes);
+    assert_eq!(after.active_subscriptions, before.active_subscriptions);
+    control.resume();
+    let records = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
+    assert_eq!(records.deltas.len(), 1);
+}
