@@ -804,6 +804,7 @@ where
                     self.read_view.read_schema,
                     &snapshot,
                 )
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
             let graph = inline_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;

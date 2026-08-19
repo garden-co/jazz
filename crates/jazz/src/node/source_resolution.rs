@@ -355,7 +355,7 @@ where
     }
 
     #[allow(dead_code)]
-    pub(super) fn current_rows_for_schema(
+    pub(super) async fn current_rows_for_schema(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
@@ -367,9 +367,9 @@ where
         let read_table = self.table_in_schema(table, read_schema_version)?;
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
-        for version in self.query_table_versions(table)? {
+        for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id)? else {
+            let Some(tx) = self.query_transaction(tx_id).await? else {
                 continue;
             };
             let visible_at_tier = match tier {
@@ -438,7 +438,7 @@ where
         Ok(rows)
     }
 
-    pub(super) fn projected_historical_current_rows(
+    pub(super) async fn projected_historical_current_rows(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
@@ -448,9 +448,9 @@ where
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
         let mut tx_ids = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
-        for version in self.query_table_versions(table)? {
+        for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id)? else {
+            let Some(tx) = self.query_transaction(tx_id).await? else {
                 continue;
             };
             if !matches!(tx.fate, Fate::Accepted)
@@ -515,7 +515,7 @@ where
         Ok(rows)
     }
 
-    pub(super) fn projected_snapshot_current_rows(
+    pub(super) async fn projected_snapshot_current_rows(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
@@ -525,9 +525,9 @@ where
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
         let mut tx_ids = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
-        for version in self.query_table_versions(table)? {
+        for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
-            if !self.snapshot_covers(tx_id, snapshot) {
+            if !self.snapshot_covers(tx_id, snapshot).await {
                 continue;
             }
             let target = match version.layer() {
@@ -584,7 +584,7 @@ where
         Ok(rows)
     }
 
-    pub(super) fn include_deleted_current_rows_for_schema(
+    pub(super) async fn include_deleted_current_rows_for_schema(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
@@ -593,9 +593,9 @@ where
         let read_table = self.table_in_schema(table, read_schema_version)?.clone();
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
-        for version in self.query_table_versions(table)? {
+        for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id)? else {
+            let Some(tx) = self.query_transaction(tx_id).await? else {
                 continue;
             };
             let visible_at_tier = match tier {
