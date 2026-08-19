@@ -105,7 +105,8 @@ where
         );
         if root_target && !matches!(stored.fate, Fate::Rejected(_)) {
             for version in &content_versions {
-                self.update_merge_heads_for_content_version(&mut batch, version)?;
+                self.update_merge_heads_for_content_version(&mut batch, version)
+                    .await?;
             }
         }
         if let Some(global_seq) = stored.global_seq {
@@ -133,7 +134,8 @@ where
             .copied()
             .filter(|global_seq| Some(*global_seq) != stored.global_seq)
         {
-            self.prune_ahead_current_for_global_seq(&mut batch, global_seq)?;
+            self.prune_ahead_current_for_global_seq(&mut batch, global_seq)
+                .await?;
         }
         let rejected_payload = if root_target && cleanup_rejected_versions {
             self.remove_rejected_local_versions(tx_id, &stored, &mut batch).await?
@@ -566,11 +568,13 @@ where
         Ok(true)
     }
 
-    pub(super) async fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error>
+    pub(super) async fn drain_parked_commit_units(
+        &mut self,
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,
     {
-        let mut updates = Vec::new();
+        let mut updates = PublicationOutcome::settled(Vec::new());
         loop {
             let parked = self
                 .parking
@@ -878,7 +882,8 @@ where
             );
         }
         for (table_id, table, row_uuid) in affected_content_rows {
-            self.rewrite_merge_heads_excluding_tx(batch, table_id, &table, row_uuid, tx_id)?;
+            self.rewrite_merge_heads_excluding_tx(batch, table_id, &table, row_uuid, tx_id)
+                .await?;
         }
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
