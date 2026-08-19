@@ -79,46 +79,83 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
 }
 
 #[test]
-fn global_read_drops_its_pending_local_replica_and_accepts_the_authoritative_winner() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+/// A global whole-table rehydration ignores a newer, unacknowledged local write.
+///
+/// `other` publishes the globally accepted value to `core`; `core` then makes a
+/// higher-HLC local-only write for the same row. `reader` must receive the
+/// authoritative global value and the global settled position, rather than the
+/// local speculative value.
+///
+/// other ──accepted──► core ──Global view──► reader
+///                         ▲
+///                    local pending write
+fn global_read_ignores_a_newer_unacknowledged_local_write() {
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let target = row(0x72);
-
-    let (_pending, pending_unit) = writer
-        .commit_mergeable_unit(
-            MergeableCommit::new("todos", target, 10).cells(title_cells("pending local")),
-        )
-        .unwrap();
-    assert_eq!(writer.current_rows("todos", DurabilityTier::Local).unwrap().len(), 1);
-    assert!(writer
-        .current_rows("todos", DurabilityTier::Global)
-        .unwrap()
-        .is_empty());
-
-    let [pending_fate] = core
-        .apply_sync_message(pending_unit)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    writer.apply_sync_message(pending_fate).unwrap();
 
     let (_, authoritative_unit) = other
         .commit_mergeable_unit(
-            MergeableCommit::new("todos", target, 20).cells(title_cells("authoritative remote")),
+            MergeableCommit::new("todos", target, 20)
+                .cells(title_cells("authoritative remote")),
         )
         .unwrap();
-    core.apply_sync_message(authoritative_unit).unwrap();
+    let [authoritative_fate] = core
+        .apply_sync_message(authoritative_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate {
+        global_seq: Some(authoritative_seq),
+        ..
+    } = authoritative_fate
+    else {
+        panic!("expected globally accepted authoritative fate");
+    };
+
+    let (pending_tx, _pending_unit) = core
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", target, 30).cells(title_cells("pending local")),
+        )
+        .unwrap();
+    assert_eq!(core.transaction_state(pending_tx).unwrap().0, Fate::Pending);
+    assert_eq!(
+        core.current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(target, title_cells("pending local"))])
+    );
+    assert_eq!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(target, title_cells("authoritative remote"))])
+    );
 
     let mut link = PeerState::client_link(AuthorId::SYSTEM);
     let update = link.current_rows_update(&mut core, "todos").unwrap();
-    writer.apply_sync_message(update).unwrap();
+    let SyncMessage::ViewUpdate {
+        settled_through, ..
+    } = &update
+    else {
+        panic!("expected view update");
+    };
+    assert_eq!(*settled_through, authoritative_seq);
+    reader.apply_sync_message(update).unwrap();
 
-    let rows = writer.current_rows("todos", DurabilityTier::Global).unwrap();
-    assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].cell(writer.table("todos").unwrap(), "title"),
-        Some(Value::String("authoritative remote".to_owned()))
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(target, title_cells("authoritative remote"))])
     );
 }
 #[test]
