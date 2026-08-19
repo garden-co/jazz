@@ -4,11 +4,11 @@ use groove::records::{RecordDescriptor, Value, ValueType};
 use groove::schema::DatabaseSchema;
 use groove::storage::MemoryStorage;
 
-#[test]
-fn query_graph_can_filter_project_and_join_inline_values() {
+#[futures_test::test]
+async fn query_graph_can_filter_project_and_join_inline_values() {
     let schema = DatabaseSchema::new([]);
     let storage = MemoryStorage::new(&[]);
-    let mut database = Database::new(schema, storage).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
 
     let album_desc = RecordDescriptor::new([
         ("album_id", ValueType::U64),
@@ -53,7 +53,12 @@ fn query_graph_can_filter_project_and_join_inline_values() {
         ProjectField::renamed("right.name", "artist"),
     ]);
 
-    let rows = database.query_graph(graph).unwrap().to_values().unwrap();
+    let rows = database
+        .query_graph(graph)
+        .await
+        .unwrap()
+        .to_values()
+        .unwrap();
 
     assert_eq!(
         rows,
