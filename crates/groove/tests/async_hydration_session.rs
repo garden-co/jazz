@@ -219,6 +219,181 @@ fn committed_terminal_output_carries_its_durable_publication_identity() {
 }
 
 #[test]
+fn resident_publication_is_queryable_and_tagged_while_persistence_is_suspended() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let subscription =
+        block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    let published = block_on(database.publish_batch(batch)).unwrap();
+    assert_eq!(published.publication(), PublicationId(1));
+    let update = subscription.recv_with_publication().unwrap();
+    assert_eq!(update.publication, Some(PublicationId(1)));
+    assert_eq!(update.deltas.deltas.len(), 1);
+    assert_eq!(database.durable_publication_frontier(), None);
+
+    control.pause_on(TestStorageOperation::WriteMany);
+    let mut persistence = Box::pin(published.persist());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut persistence).poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(
+        control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany)
+    );
+
+    let rows = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
+    assert_eq!(rows.deltas.len(), 1);
+    assert_eq!(database.durable_publication_frontier(), None);
+
+    drop(persistence);
+    let rows = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
+    assert_eq!(rows.deltas.len(), 1);
+    assert_eq!(database.durable_publication_frontier(), None);
+
+    control.resume_operation(TestStorageOperation::WriteMany);
+    let persistence = block_on(published.persist());
+    assert_eq!(
+        database.settle_publication(persistence).unwrap(),
+        PublicationId(1)
+    );
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(PublicationId(1))
+    );
+}
+
+#[test]
+fn durable_frontier_does_not_pass_an_earlier_unsettled_publication() {
+    let (storage, _) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+
+    let mut first = database.open_batch();
+    first.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    let first = block_on(database.publish_batch(first)).unwrap();
+
+    let mut second = database.open_batch();
+    second.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Bitches Brew".into())],
+    );
+    let second = block_on(database.publish_batch(second)).unwrap();
+
+    let first_persistence = block_on(first.persist());
+    let second_persistence = block_on(second.persist());
+    database.settle_publication(second_persistence).unwrap();
+    assert_eq!(database.durable_publication_frontier(), None);
+    let rows = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
+    assert_eq!(rows.deltas.len(), 2);
+
+    database.settle_publication(first_persistence).unwrap();
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(PublicationId(2))
+    );
+}
+
+#[test]
+fn later_same_key_persistence_waits_for_its_predecessor() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+
+    let mut first = database.open_batch();
+    first.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    let first = block_on(database.publish_batch(first)).unwrap();
+
+    let mut second = database.open_batch();
+    second.update(
+        "albums",
+        vec![Value::U64(1), Value::String("Blue in Green".into())],
+    );
+    let second = block_on(database.publish_batch(second)).unwrap();
+
+    control.take_observed();
+    let mut second_persistence = Box::pin(second.persist());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut second_persistence).poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(
+        !control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany)
+    );
+
+    let first_persistence = block_on(first.persist());
+    let second_persistence = block_on(second_persistence);
+    database.settle_publication(second_persistence).unwrap();
+    assert_eq!(database.durable_publication_frontier(), None);
+    database.settle_publication(first_persistence).unwrap();
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(PublicationId(2))
+    );
+
+    let rows = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
+    assert_eq!(
+        rows.to_values().unwrap(),
+        vec![(
+            vec![Value::U64(1), Value::String("Blue in Green".into())],
+            1
+        )]
+    );
+}
+
+#[test]
+fn publishing_an_insert_into_a_resident_table_does_not_wait_for_storage() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let subscription =
+        block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    control.take_observed();
+    control.pause();
+    let mut publication = Box::pin(database.publish_batch(batch));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let published = match Pin::new(&mut publication).poll(&mut context) {
+        Poll::Ready(Ok(published)) => published,
+        Poll::Ready(Err(error)) => panic!("resident publication failed: {error}"),
+        Poll::Pending => panic!(
+            "resident publication suspended on storage: {:?}",
+            control.observed()
+        ),
+    };
+    drop(publication);
+    assert_eq!(published.publication(), PublicationId(1));
+    assert_eq!(
+        subscription.recv_with_publication().unwrap().publication,
+        Some(PublicationId(1))
+    );
+}
+
+#[test]
 fn cancelled_live_index_backfill_publishes_neither_schema_nor_durable_rows() {
     let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
     let mut database = block_on(Database::new(schema(), storage)).unwrap();

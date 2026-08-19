@@ -49,7 +49,7 @@ where
         validate_durable_key_schema(&schema)?;
         let ivm_runtime = IvmRuntime::new(schema)?;
         Ok(Self {
-            storage: LayoutStorage::new(storage, storage_layout).await?,
+            storage: Rc::new(LayoutStorage::new(storage, storage_layout).await?),
             ivm_runtime,
             last_commit_metrics: None,
             last_tick_metrics: None,
@@ -57,6 +57,13 @@ where
             durable_publication_state: Arc::new(Mutex::new(DurablePublicationState::default())),
             next_publication_id: 1,
             durable_publication_frontier: None,
+            resident_publications: BTreeMap::new(),
+            persisted_publications: BTreeSet::new(),
+            resident_writes: RefCell::new(StagedWriteState::default()),
+            publication_persistence: Rc::new(RefCell::new(PublicationPersistenceOrder {
+                next: 1,
+                waiters: BTreeMap::new(),
+            })),
             poisoned: false,
         })
     }
@@ -129,7 +136,9 @@ where
     }
 
     pub fn into_storage(self) -> S {
-        self.storage.into_inner()
+        Rc::try_unwrap(self.storage)
+            .unwrap_or_else(|_| panic!("database storage still has an outstanding operation"))
+            .into_inner()
     }
 
     pub async fn close(&self) -> Result<(), Error> {

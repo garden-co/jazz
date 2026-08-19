@@ -486,7 +486,8 @@ where
     /// ```
     pub async fn query_graph(&mut self, graph: GraphBuilder) -> Result<RecordDeltas, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .query_snapshot(graph, &storage)
             .await

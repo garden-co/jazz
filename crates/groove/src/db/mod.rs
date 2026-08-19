@@ -10,9 +10,11 @@
 //! and how subscriptions are exposed above the engine.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 use std::str;
 use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 
 use web_time::{Duration, Instant};
 
@@ -44,7 +46,7 @@ pub use crate::ivm::{
 
 /// Schema-aware database facade over storage and IVM subscriptions.
 pub struct Database<S> {
-    storage: LayoutStorage<S>,
+    storage: Rc<LayoutStorage<S>>,
     /// Owns query/index maintenance over the storage-backed base tables.
     ivm_runtime: IvmRuntime,
     last_commit_metrics: Option<CommitMetrics>,
@@ -56,7 +58,69 @@ pub struct Database<S> {
     durable_publication_state: Arc<Mutex<DurablePublicationState>>,
     next_publication_id: u64,
     durable_publication_frontier: Option<PublicationId>,
+    resident_publications: BTreeMap<PublicationId, Vec<OwnedWriteOperation>>,
+    persisted_publications: BTreeSet<PublicationId>,
+    resident_writes: RefCell<StagedWriteState>,
+    publication_persistence: Rc<RefCell<PublicationPersistenceOrder>>,
     poisoned: bool,
+}
+
+/// One resident publication whose ordered storage write can progress without
+/// borrowing the database runtime.
+#[must_use = "an immediate publication must be persisted and settled"]
+pub struct PublishedBatch<S> {
+    publication: PublicationId,
+    storage: Rc<LayoutStorage<S>>,
+    operations: Vec<OwnedWriteOperation>,
+    order: Rc<RefCell<PublicationPersistenceOrder>>,
+}
+
+impl<S> PublishedBatch<S>
+where
+    S: OrderedKvStorage,
+{
+    pub fn publication(&self) -> PublicationId {
+        self.publication
+    }
+
+    pub async fn persist(&self) -> PublicationPersistence {
+        std::future::poll_fn(|cx| {
+            let mut order = self.order.borrow_mut();
+            if order.next == self.publication.0 {
+                return Poll::Ready(());
+            }
+            order.waiters.insert(self.publication.0, cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+        let result = self.storage.write_many(self.operations.clone()).await;
+        if result.is_ok() {
+            let waiters = {
+                let mut order = self.order.borrow_mut();
+                order.next = order.next.saturating_add(1);
+                std::mem::take(&mut order.waiters)
+            };
+            for (_, waiter) in waiters {
+                waiter.wake();
+            }
+        }
+        PublicationPersistence {
+            publication: self.publication,
+            result,
+        }
+    }
+}
+
+struct PublicationPersistenceOrder {
+    next: u64,
+    waiters: BTreeMap<u64, Waker>,
+}
+
+/// Completion of one owned publication persistence operation.
+#[must_use = "persistence completion must be settled on its database"]
+pub struct PublicationPersistence {
+    publication: PublicationId,
+    result: Result<(), crate::storage::Error>,
 }
 
 /// Capability token for one host-owned durable publication scope.
@@ -146,6 +210,8 @@ pub use storage_helpers::{
 pub enum Error {
     #[error("database instance is poisoned after a failed atomic commit")]
     DatabasePoisoned,
+    #[error("publication does not belong to this database: {0:?}")]
+    PublicationNotFound(PublicationId),
     #[error("duplicate primary key for table {table}: {key:?}")]
     DuplicatePrimaryKey { table: String, key: Vec<u8> },
     #[error("duplicate schema version {version} for table {table}")]
