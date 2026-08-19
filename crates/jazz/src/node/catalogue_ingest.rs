@@ -26,10 +26,10 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(crate) fn apply_trusted_catalogue_snapshot(
+    pub(crate) async fn apply_trusted_catalogue_snapshot(
         &mut self,
         snapshot: crate::protocol::CatalogueSnapshot,
-    ) -> Result<(), Error>
+    ) -> Result<PublicationOutcome<()>, Error>
     where
         S: ReopenableStorage,
     {
@@ -46,7 +46,7 @@ where
         // restart. Rebuild the live projection registry as part of that
         // semantic transition, not after client traffic begins. An identical
         // trusted prefix is idempotent and must retain maintained/query state.
-        if runtime_semantics_changed && self.rebuild_database_slot().is_err() {
+        if runtime_semantics_changed && self.rebuild_database_slot().await.is_err() {
             self.catalogue = previous_catalogue;
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);
@@ -124,7 +124,7 @@ where
                 ],
             );
         }
-        if self.database.commit_batch(batch).is_err() {
+        if self.database.commit_batch(batch).await.is_err() {
             self.catalogue = previous_catalogue;
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);
@@ -144,10 +144,13 @@ where
         if runtime_semantics_changed {
             self.groove_runtime_token = next_groove_runtime_token();
         }
-        self.drain_parked_commit_units()?;
-        self.drain_parked_relay_commit_units()?;
+        let drained = self.drain_parked_commit_units().await?;
+        self.drain_parked_relay_commit_units().await?;
         self.drain_parked_shape_registrations()?;
-        Ok(())
+        Ok(PublicationOutcome {
+            value: (),
+            publications: drained.publications,
+        })
     }
 
     fn plan_trusted_catalogue_snapshot(

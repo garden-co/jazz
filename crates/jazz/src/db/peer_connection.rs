@@ -796,9 +796,13 @@ where
                                 )
                                 .await?;
                             }
-                            self.node
-                                .borrow_mut()
-                                .apply_trusted_catalogue_snapshot(*snapshot)?;
+                            let outcome = self
+                                .node
+                                .lock()
+                                .await
+                                .apply_trusted_catalogue_snapshot(*snapshot)
+                                .await?;
+                            publications.extend(outcome.publications);
                         }
                         SyncMessage::RowVersionPayloads { version_bundles } => {
                             if !pending_view_updates.is_empty() {

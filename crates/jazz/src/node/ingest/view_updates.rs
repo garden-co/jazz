@@ -117,7 +117,9 @@ where
                     .ok_or(Error::MissingTransaction(*tx_id))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let cells = self.merge_cells_for_heads(&table_schema, &raw_heads, &row_versions_by_tx)?;
+        let cells = self
+            .merge_cells_for_heads(&table_schema, &raw_heads, &row_versions_by_tx)
+            .await?;
         if raw_heads.len() == 1
             && has_gset_column
             && !gset_cells_need_materialization(&table_schema, &raw_heads[0], &cells)?
@@ -127,10 +129,11 @@ where
         if cells.is_empty() {
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
-        let made_at = raw_heads
-            .iter()
-            .map(|version| self.version_made_at(version))
-            .collect::<Result<Vec<_>, Error>>()?
+        let mut head_times = Vec::with_capacity(raw_heads.len());
+        for version in &raw_heads {
+            head_times.push(self.version_made_at(version).await?);
+        }
+        let made_at = head_times
             .into_iter()
             .max_by_key(|made_at| made_at.sort_key(self.node_uuid))
             .map(TxTime::tick_after)
@@ -159,7 +162,7 @@ where
         Ok(PublicationOutcome::published(vec![unit], publication))
     }
 
-    fn merge_cells_for_heads(
+    async fn merge_cells_for_heads(
         &mut self,
         table_schema: &TableSchema,
         heads: &[VersionRow],
@@ -181,7 +184,7 @@ where
                             continue;
                         };
                         let tx_id = self.version_tx_id(version)?;
-                        let made_at = self.version_made_at(version)?;
+                        let made_at = self.version_made_at(version).await?;
                         let key = made_at.sort_key(tx_id.node);
                         if best.as_ref().is_none_or(|(best_key, _)| key > *best_key) {
                             best = Some((key, value));
@@ -200,7 +203,7 @@ where
                                 continue;
                             };
                             let tx_id = self.version_tx_id(version)?;
-                            let made_at = self.version_made_at(version)?;
+                            let made_at = self.version_made_at(version).await?;
                             let key = made_at.sort_key(tx_id.node);
                             if best.as_ref().is_none_or(|(best_key, _)| key > *best_key) {
                                 best = Some((key, value));
