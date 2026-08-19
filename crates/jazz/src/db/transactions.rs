@@ -356,6 +356,7 @@ where
                     &prepared.binding,
                     opts.include_deleted,
                 )
+                .await
                 .map_err(Into::into),
             QueryAuthorizationMode::TrustedServing => node
                 .tx_query_for_identity_with_options(
@@ -365,6 +366,7 @@ where
                     author,
                     opts.include_deleted,
                 )
+                .await
                 .map_err(Into::into),
         }
     }

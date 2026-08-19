@@ -1434,7 +1434,8 @@ where
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
-            )?
+            )
+            .await?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
     }
@@ -1457,7 +1458,8 @@ where
                 DurabilityTier::Local,
                 None,
                 identity,
-            )?
+            )
+            .await?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
     }
