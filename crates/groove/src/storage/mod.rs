@@ -1514,19 +1514,38 @@ where
     S: OrderedKvStorage,
 {
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
-        let operations = self.staged_writes.borrow().operations.clone();
-        Box::pin(async move {
-            if let Some(latest) = operations
-                .iter()
-                .rev()
-                .find(|operation| operation.cf() == cf && operation.key() == key)
-            {
-                match latest {
-                    OwnedWriteOperation::Set { value, .. } => return Ok(Some(value.clone())),
-                    OwnedWriteOperation::Delete { .. } => return Ok(None),
-                    OwnedWriteOperation::Delta { .. } => {}
+        let mut staged_writes = self.staged_writes.borrow_mut();
+        if staged_writes.is_empty() {
+            drop(staged_writes);
+            return self.base.get(cf, key);
+        }
+
+        if let Some(index) = staged_writes.latest_index(&cf, &key) {
+            match &staged_writes.operations[index] {
+                OwnedWriteOperation::Set { value, .. } => {
+                    let value = value.clone();
+                    return Box::pin(async move { Ok(Some(value)) });
                 }
+                OwnedWriteOperation::Delete { .. } => {
+                    return Box::pin(async { Ok(None) });
+                }
+                OwnedWriteOperation::Delta { .. } => {}
             }
+        }
+
+        let operations = staged_writes
+            .operations
+            .iter()
+            .filter(|operation| operation.cf() == cf && operation.key() == key)
+            .cloned()
+            .collect::<Vec<_>>();
+        drop(staged_writes);
+
+        if operations.is_empty() {
+            return self.base.get(cf, key);
+        }
+
+        Box::pin(async move {
             let base = self.base.get(cf.clone(), key.clone()).await?;
             overlay_point_value(base, &operations, &cf, &key)
         })
