@@ -610,7 +610,7 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   return createTransactionMutationResult(
     transaction,
     resolvedValue,
-    await committed.batchId,
+    await committed.transactionId,
     resultClient(),
   );
 }
@@ -662,7 +662,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   commit(): Promise<MutationResult<void, TKind>> {
     const { ownerClient, openBatchId } = this.requireBinding("commit");
     return ownerClient.commitTransaction(openBatchId).then((committed) => {
-      return new MutationResult(undefined, committed.batchId, ownerClient, this.kind);
+      return new MutationResult(undefined, committed.transactionId, ownerClient, this.kind);
     });
   }
 
@@ -1065,7 +1065,7 @@ export class Db {
     value: U,
     client: JazzClient,
   ): MutationResult<U> {
-    const transformed = new MutationResult(value, result.batchId, client, "mergeable");
+    const transformed = new MutationResult(value, result.transactionId, client, "mergeable");
     transformed.wait = async (options: { tier: DurabilityTier }) => {
       await result.wait(options);
       return value;

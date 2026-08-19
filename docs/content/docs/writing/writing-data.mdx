@@ -7,7 +7,7 @@ reviewedAt: "4059cdef"
 ## Local-first writes
 
 All writes execute against the local database first. Each mutation returns a `MutationResult`
-with `value`, `batchId`, and `wait`. Call `wait({ tier: ... })` when you need confirmation that
+with `value`, `transactionId`, and `wait`. Call `wait({ tier: ... })` when you need confirmation that
 the mutation reached a specific [durability tier](#write-durability-tiers).
 
 The value depends on the operation. `insert` and `restore` return the local row in `value`.
@@ -169,7 +169,7 @@ const pending = db.insert(app.todos, {
 });
 
 console.log(pending.value.id);
-console.log(await pending.batchId);
+console.log(await pending.transactionId);
 
 try {
   const row = await pending.wait({ tier: "global" });
@@ -204,7 +204,7 @@ const result = await db.exclusiveTransaction(async (tx) => {
   tx.update(app.todos, todoId, { done: true });
 });
 await result.wait();
-console.log(await result.batchId);
+console.log(await result.transactionId);
 ```
 
 The changes made as part of an exclusive transaction are scoped to it, and will only be
@@ -219,7 +219,7 @@ const result = await db.transaction((tx) => {
   tx.update(app.todos, todoId, { done: true });
 });
 await result.wait({ tier: "edge" });
-console.log(await result.batchId);
+console.log(await result.transactionId);
 ```
 
 Transactions can read their own local writes through `all(...)` and `one(...)` before commit.

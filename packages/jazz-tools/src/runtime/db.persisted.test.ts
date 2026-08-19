@@ -154,7 +154,7 @@ describe("Db write handles", () => {
       undefined,
       undefined,
     );
-    await expect(pending.batchId).resolves.toBe("transaction-insert");
+    await expect(pending.transactionId).resolves.toBe("transaction-insert");
     expect(pending.value).toEqual({
       id: "todo-1",
       title: "Buy milk",

@@ -494,15 +494,15 @@ export class PersistedWriteRejectedError extends Error {
 export class MutationResult<T, TKind extends TransactionKind = "mergeable"> {
   readonly #client: JazzClient;
   readonly #kind: TKind;
-  readonly batchId: Promise<BatchId>;
+  readonly transactionId: Promise<BatchId>;
 
   constructor(
     readonly value: T,
-    batchId: BatchId | Promise<BatchId>,
+    transactionId: BatchId | Promise<BatchId>,
     client: JazzClient,
     kind: TKind,
   ) {
-    this.batchId = Promise.resolve(batchId);
+    this.transactionId = Promise.resolve(transactionId);
     this.#client = client;
     this.#kind = kind;
   }
@@ -519,12 +519,12 @@ export class MutationResult<T, TKind extends TransactionKind = "mergeable"> {
     ...args: [TKind] extends ["exclusive"] ? [] : [options: { tier: DurabilityTier }]
   ): Promise<T> {
     if (this.#kind === "exclusive") {
-      await this.#client.waitForExclusiveTransaction(await this.batchId);
+      await this.#client.waitForExclusiveTransaction(await this.transactionId);
       return this.value;
     }
 
     const [options] = args as [options: { tier: DurabilityTier }];
-    await this.#client.waitForTransaction(this.batchId, options.tier);
+    await this.#client.waitForTransaction(this.transactionId, options.tier);
     return this.value;
   }
 }
