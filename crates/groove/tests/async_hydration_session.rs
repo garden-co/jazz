@@ -49,6 +49,28 @@ fn edges_schema() -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
 }
 
+fn albums_and_edges_schema() -> DatabaseSchema {
+    DatabaseSchema::new([
+        TableSchema::new(
+            "albums",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("title", ColumnType::String),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ])
+}
+
 fn indexed_edges_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
         "edges",
@@ -324,6 +346,48 @@ fn recursive_retraction_loads_before_mutating_the_tick() {
         1,
         "recompute must consume the request retained before tick mutation"
     );
+}
+
+#[test]
+fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked() {
+    let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage)).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    let seeded = block_on(database.publish_batch(seed)).unwrap();
+    let persistence = block_on(seeded.persist());
+    database.settle_publication(persistence).unwrap();
+
+    let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(albums.recv().unwrap().is_empty());
+    let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(reach.recv().unwrap().deltas.len(), 3);
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Speak No Evil".into())],
+    );
+    batch.delete("edges", PrimaryKeyValue::U64(2));
+    let mut publication = Box::pin(database.publish_batch(batch));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        publication.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+
+    assert_eq!(albums.try_recv().unwrap().deltas.len(), 1);
+    assert!(reach.try_recv().is_err());
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    let published = block_on(publication).unwrap();
+    assert_eq!(reach.recv().unwrap().deltas.len(), 2);
+    let persistence = block_on(published.persist());
+    database.settle_publication(persistence).unwrap();
 }
 
 #[test]
