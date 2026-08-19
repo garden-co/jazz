@@ -12,7 +12,7 @@ where
     pub async fn apply_sync_message(
         &mut self,
         message: SyncMessage,
-    ) -> Result<Vec<SyncMessage>, Error>
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,
     {
@@ -24,7 +24,7 @@ where
     pub async fn apply_trusted_catalogue_message(
         &mut self,
         message: SyncMessage,
-    ) -> Result<Vec<SyncMessage>, Error>
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,
     {
@@ -44,7 +44,7 @@ where
         &mut self,
         message: SyncMessage,
         ingest_context: Option<CommitUnitIngestContext>,
-    ) -> Result<Vec<SyncMessage>, Error>
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,
     {
@@ -62,8 +62,8 @@ where
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
             SyncMessage::BranchMetadata(metadata) => {
-                self.admit_branch_metadata(metadata)?;
-                self.drain_parked_commit_units()
+                self.admit_branch_metadata(metadata).await?;
+                self.drain_parked_commit_units().await
             }
             SyncMessage::FetchBranchMetadata { .. } => Err(Error::UnsupportedSyncMessage(
                 "branch metadata repair must be served by peer state",
@@ -74,7 +74,7 @@ where
                 {
                     self.set_session_claims(identity, claims);
                 }
-                Ok(Vec::new())
+                Ok(PublicationOutcome::settled(Vec::new()))
             }
             SyncMessage::CommitUnit { tx, versions } => self.ingest_commit_unit_with_context(
                 tx,
@@ -89,8 +89,9 @@ where
                 durability,
             } => {
                 validate_received_fate_update_global_seq_durability(global_seq, durability)?;
-                self.apply_fate_update(tx_id, fate, global_seq, durability)?;
-                self.drain_parked_commit_units()
+                self.apply_fate_update(tx_id, fate, global_seq, durability)
+                    .await?;
+                self.drain_parked_commit_units().await
             }
             SyncMessage::ViewUpdate {
                 subscription,
@@ -120,8 +121,9 @@ where
                     terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
-                })?;
-                Ok(Vec::new())
+                })
+                .await?;
+                Ok(PublicationOutcome::settled(Vec::new()))
             }
             SyncMessage::RegisterShape {
                 shape_id,
@@ -131,7 +133,7 @@ where
                 validate_shape_ast_size(&ast)
                     .map_err(|_| Error::UnsupportedSyncMessage("shape AST exceeds byte limit"))?;
                 self.register_shape(shape_id, ast)?;
-                Ok(Vec::new())
+                Ok(PublicationOutcome::settled(Vec::new()))
             }
             SyncMessage::FetchRowVersions { .. } => Err(Error::UnsupportedSyncMessage(
                 "row-version repair fetch must be served by peer state",
@@ -147,7 +149,7 @@ where
                     Error::UnsupportedSyncMessage("known-state declaration exceeds limit")
                 })?;
                 self.apply_subscribe(subscribe)?;
-                Ok(Vec::new())
+                Ok(PublicationOutcome::settled(Vec::new()))
             }
             SyncMessage::SubscribeRejected { .. } => Err(Error::UnsupportedSyncMessage(
                 "subscription rejection requires subscription stream context",
@@ -174,13 +176,16 @@ where
                 .await
             }
             SyncMessage::PublishLens { author, lens } => {
-                self.apply_publish_lens(author, ingest_context, lens).await
+                self.apply_publish_lens(author, ingest_context, lens)
+                    .await
+                    .map(PublicationOutcome::settled)
             }
             SyncMessage::SetCurrentWriteSchema { author, pointer } => {
                 self.apply_set_current_write_schema(author, ingest_context, pointer)
                     .await
+                    .map(PublicationOutcome::settled)
             }
-            SyncMessage::CatalogueAck(_) => Ok(Vec::new()),
+            SyncMessage::CatalogueAck(_) => Ok(PublicationOutcome::settled(Vec::new())),
             SyncMessage::PermissionAdviceRequest { .. }
             | SyncMessage::PermissionAdviceResponse { .. }
             | SyncMessage::AuthorizationScopeSubscribe { .. }
@@ -200,7 +205,7 @@ where
         author: AuthorId,
         ingest_context: Option<CommitUnitIngestContext>,
         schema: SchemaVersion,
-    ) -> Result<Vec<SyncMessage>, Error>
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,
     {
@@ -241,17 +246,16 @@ where
             // graph without reopening storage through the old catalogue row.
             self.groove_runtime_token = next_groove_runtime_token();
         }
-        let updates = self.drain_parked_commit_units()?;
-        self.drain_parked_relay_commit_units()?;
+        let mut outcome = self.drain_parked_commit_units().await?;
+        self.drain_parked_relay_commit_units().await?;
         self.drain_parked_shape_registrations()?;
-        let mut out = vec![SyncMessage::CatalogueAck(CatalogueAck {
+        outcome.value.insert(0, SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,
             schema: Some(schema.id),
             lens: None,
             applied: true,
-        })];
-        out.extend(updates);
-        Ok(out)
+        }));
+        Ok(outcome)
     }
 
     async fn apply_publish_schema_with_lens(
@@ -260,7 +264,7 @@ where
         ingest_context: Option<CommitUnitIngestContext>,
         catalogue_seq: u64,
         publication: SchemaLineagePublication,
-    ) -> Result<Vec<SyncMessage>, Error>
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,
     {
