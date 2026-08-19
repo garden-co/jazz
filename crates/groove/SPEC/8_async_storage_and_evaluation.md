@@ -57,22 +57,25 @@ must not accidentally make backend transaction lifecycle a new requirement.
 
 ## Evaluation session
 
-### Migration bridge versus target
+### One evaluator lifecycle
 
-The minimal bridge owns a queue of hydration roots plus private staged
-operator, arrangement, memo, and node metadata. Multiple roots in one terminal
-installation advance through that one session and share its completed-node
-memo; the staged values are installed only after every root succeeds.
-Cancellation or a storage error therefore discards all partial IVM work. Node
-traversal within each root may temporarily use a boxed executor-local future.
-This is a worthwhile intermediate lifecycle and atomicity property, not the
-target scheduler: it neither discovers independent blocked branches eagerly
-nor shares in-flight requests.
+Hydration and incremental maintenance use the same owned evaluation session.
+Hydration is the initial delta from empty state; it is not a second evaluator
+or snapshot-shaped installation path. Incremental input can discover a newly
+needed non-resident source just as hydration can, so interruptibility is a
+property of node evaluation rather than of either caller.
 
-The target remains the explicit owned session below. In particular, a boxed
-recursive future MUST NOT become the durable representation of blocked work or
-be credited with request coalescing, bounded stepping, or in-flight node
-sharing that it does not provide.
+A session reads installed runtime state but does not speculatively mutate it.
+Node work first discovers dependencies, then owns any required storage request,
+then produces a prepared state edit and output delta. Applying that prepared
+edit is non-suspending. There is no whole-runtime clone and no general
+speculative runtime overlay. Cancellation discards the session's private node
+values and prepared edits without requiring rollback.
+
+A boxed recursive future MUST NOT become the durable representation of blocked
+work. Dropping such a future also drops its storage request, and recreating it
+on the next poll is not equivalent to retaining an owned request. Blocked node
+entries and storage requests therefore live explicitly in the session.
 
 An evaluation is owned state advanced by the runtime:
 
@@ -90,6 +93,13 @@ struct EvaluationSession {
     prepared: PreparedEvaluationState,
 }
 ```
+
+Every input publication is driven synchronously to resident quiescence. A
+blocked branch does not prevent independent runnable branches or terminals from
+publishing. Updates for one blocked terminal remain ordered behind its earliest
+blocked publication, while unrelated terminals continue. Work is shared by
+`(node identity, scope/binding, input publication)`; hash-equal consumers join
+the same node entry and the same in-flight storage request.
 
 `EvaluationEntry` distinguishes vacant, runnable, blocked, ready, and failed
 work. `EvaluationKey` includes the shared graph node identity and the semantic
@@ -156,10 +166,13 @@ database, storage, or subscription implementation.
 
 ## Terminal installation
 
-Opening a terminal is itself an evaluation session. Updates that commit while
-the initial value is being prepared must be ordered after the installation
-frontier, either by holding an appropriate frontier or by replaying retained
-deltas. They must never race ahead of the initial value.
+Opening a terminal uses the ordinary evaluation session but installs nothing
+until its initial delta and prepared maintained-state edits are ready. The
+session records frontiers only for dependencies it actually reads. If one of
+those frontiers advances while evaluation is blocked, affected work is
+invalidated and reevaluated; unrelated writes do not restart installation.
+Updates affecting that terminal remain ordered after its installation
+frontier and can never race ahead of the initial value.
 
 After installation the terminal owns exactly:
 
