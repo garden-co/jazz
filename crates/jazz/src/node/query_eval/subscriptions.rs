@@ -577,7 +577,10 @@ where
             }));
         }
         let mut refs = Vec::new();
-        for row in self.query_rows_for_link(shape, binding, DurabilityTier::Local, identity)? {
+        for row in self
+            .query_rows_for_link(shape, binding, DurabilityTier::Local, identity)
+            .await?
+        {
             let Some(tx_id) = self.current_row_tx_id(&row).await else {
                 continue;
             };

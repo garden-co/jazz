@@ -768,16 +768,22 @@ where
                         plan.binding_user_params.clone(),
                         plan.binding_claim_params.clone(),
                     );
-                    self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
-                            policy_request,
-                            base,
-                            &descriptor_field_names(&descriptor).map_err(|_| {
-                                source_resolution_error(request, SourceGap::HistoricalStorageCut)
-                            })?,
-                        )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                    Box::pin(
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                base,
+                                &descriptor_field_names(&descriptor).map_err(|_| {
+                                    source_resolution_error(
+                                        request,
+                                        SourceGap::HistoricalStorageCut,
+                                    )
+                                })?,
+                            ),
+                    )
+                    .await
+                    .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                    .graph
                 }
             };
             (graph, descriptor, metadata, BTreeSet::new())
@@ -864,6 +870,7 @@ where
                     None,
                     Some(source.graph),
                 )
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             } else {
                 let source = self
@@ -899,16 +906,17 @@ where
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
                         );
-                        self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
-                                policy_request,
-                                source.graph,
-                                &current_row_fields(&table),
-                            )
-                            .map_err(|error| {
-                                source_resolution_error_from_policy_proof(request, error)
-                            })?
-                            .graph
+                        Box::pin(
+                            self.node
+                                .policy_filtered_current_source_graph_via_query_engine(
+                                    policy_request,
+                                    source.graph,
+                                    &current_row_fields(&table),
+                                ),
+                        )
+                        .await
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                        .graph
                     }
                 };
                 (graph, source.descriptor, source.metadata, BTreeSet::new())
@@ -956,14 +964,17 @@ where
                         );
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
-                    self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
-                            policy_request,
-                            base.clone(),
-                            &output_fields,
-                        )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                    Box::pin(
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                base.clone(),
+                                &output_fields,
+                            ),
+                    )
+                    .await
+                    .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                    .graph
                 }
             };
             (
@@ -1004,14 +1015,17 @@ where
                         );
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
-                    self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
-                            policy_request,
-                            base,
-                            &output_fields,
-                        )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                    Box::pin(
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                base,
+                                &output_fields,
+                            ),
+                    )
+                    .await
+                    .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                    .graph
                 }
             };
             (
@@ -1042,6 +1056,7 @@ where
                 None,
                 selected_base,
             )
+            .await
             .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
         };
         let deletion_register = self.deletion_register_source_for_request(
@@ -2082,7 +2097,7 @@ pub(super) fn trace_capability_compile(
     );
 }
 
-fn resolved_current_source_graph<S>(
+async fn resolved_current_source_graph<S>(
     node: &mut NodeState<S>,
     table: &TableSchema,
     tier: DurabilityTier,
@@ -2267,11 +2282,13 @@ where
                 Some(selected_base) => selected_base,
                 None => node.maintained_view_content_current_with_version(table, tier)?,
             };
-            let storage_graph = node.policy_filtered_current_source_graph_via_query_engine(
-                policy_request,
-                base.clone(),
-                &output_fields,
-            )?;
+            let storage_graph =
+                Box::pin(node.policy_filtered_current_source_graph_via_query_engine(
+                    policy_request,
+                    base.clone(),
+                    &output_fields,
+                ))
+                .await?;
             let mut canonical_fields = storage_to_canonical_current_source_fields(
                 table,
                 needs_version_witnesses,
