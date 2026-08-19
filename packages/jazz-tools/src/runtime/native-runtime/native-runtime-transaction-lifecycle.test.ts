@@ -327,7 +327,7 @@ it("rejects a duplicate live OpenBatchId without replacing its staged transactio
   );
 
   expect(() => runtime.beginTransaction("mergeable", id)).toThrow(
-    `Begin transaction failed: batch ${id} has already been opened`,
+    `Begin transaction failed: transaction ${id} has already been opened`,
   );
   runtime.insert(
     "todos",
@@ -338,7 +338,7 @@ it("rejects a duplicate live OpenBatchId without replacing its staged transactio
   expect(stagedTransactions).toEqual([["todos", "todos"]]);
 });
 
-it("commits empty exclusive batches, rejects empty mergeable batches, and rejects unknown waits", async () => {
+it("commits empty exclusive transactions, rejects empty mergeable transactions, and rejects unknown waits", async () => {
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () => fakeDb({ exclusiveTx: () => fakeTx() }),
@@ -355,7 +355,7 @@ it("commits empty exclusive batches, rejects empty mergeable batches, and reject
   const emptyMergeable = createOpenBatchId();
   runtime.beginTransaction("mergeable", emptyMergeable);
   expect(() => runtime.commitTransaction(emptyMergeable)).toThrow(
-    "empty mergeable batch has no committed unit; roll it back instead",
+    "empty mergeable transaction has no committed unit; roll it back instead",
   );
   await runtime.rollbackTransaction(emptyMergeable);
 

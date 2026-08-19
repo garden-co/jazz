@@ -871,7 +871,7 @@ impl NapiDb {
         })
     }
 
-    /// Begin one owner-wide batch without creating an owning per-schema Tx.
+    /// Begin one owner-wide transaction without creating an owning per-schema Tx.
     #[napi(js_name = "beginTransaction")]
     pub fn begin_transaction(
         &self,
@@ -887,13 +887,13 @@ impl NapiDb {
             .map(core_author_id_from_bytes)
             .transpose()?;
         if kind != "mergeable" && kind != "exclusive" {
-            return Err(napi::Error::from_reason(format!(
-                "unknown batch kind {kind}"
+            return Err(napi::Error::from_reason(unknown_transaction_kind_message(
+                &kind,
             )));
         }
         if kind == "exclusive" && author.is_some() {
             return Err(napi::Error::from_reason(
-                "exclusive batches do not accept an identity override",
+                "exclusive transactions do not accept an identity override",
             ));
         }
         let db = self.inner.borrow();
@@ -919,7 +919,7 @@ impl NapiDb {
         .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
-    /// Commit an owner-wide batch by id and optional kind.
+    /// Commit an owner-wide transaction by id and optional kind.
     #[napi(js_name = "commitTransaction")]
     pub fn commit_transaction(
         &self,
@@ -946,13 +946,13 @@ impl NapiDb {
             (NapiDbInnerStorage::Persistent(db), "exclusive") => {
                 core_commit_exclusive_tx_persistent(db, open_batch_id)
             }
-            (_, kind) => Err(napi::Error::from_reason(format!(
-                "unknown batch kind {kind}"
+            (_, kind) => Err(napi::Error::from_reason(unknown_transaction_kind_message(
+                kind,
             ))),
         }
     }
 
-    /// Roll back an owner-wide open batch by id.
+    /// Roll back an owner-wide open transaction by id.
     #[napi(js_name = "rollbackTransaction")]
     pub fn rollback_transaction(&self, open_batch_id: String) -> napi::Result<()> {
         let open_batch_id = open_batch_id
@@ -2009,6 +2009,10 @@ impl NapiDb {
     }
 }
 
+fn unknown_transaction_kind_message(kind: &str) -> String {
+    format!("unknown transaction kind {kind}")
+}
+
 fn authority_epoch_from_bigint(value: BigInt, label: &str) -> napi::Result<u64> {
     let (negative, epoch, lossless) = value.get_u64();
     if negative || !lossless {
@@ -3039,7 +3043,16 @@ mod tests {
         NapiDbInnerStorage, NapiTxKind, Tx, authority_epoch_from_bigint, core_block_on,
         core_claim_value_from_json, core_read_opts_from_json, core_subscription_event_to_napi,
         encode_core_subscription_delta, terminal_bytes_to_numbers,
+        unknown_transaction_kind_message,
     };
+
+    #[test]
+    fn transaction_binding_diagnostics_use_transaction_vocabulary() {
+        assert_eq!(
+            unknown_transaction_kind_message("invalid"),
+            "unknown transaction kind invalid"
+        );
+    }
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
         MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,

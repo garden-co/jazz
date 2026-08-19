@@ -1261,13 +1261,13 @@ impl WasmDb {
                 .begin_exclusive(open_batch_id)
                 .map_err(to_js_error),
             "exclusive" => Err(JsValue::from_str(
-                "exclusive batches do not accept an identity override",
+                "exclusive transactions do not accept an identity override",
             )),
-            _ => Err(JsValue::from_str(&format!("unknown batch kind {kind}"))),
+            _ => Err(JsValue::from_str(&unknown_transaction_kind_message(&kind))),
         }
     }
 
-    /// Commit an owner-wide mergeable batch by id.
+    /// Commit an owner-wide mergeable transaction by id.
     #[wasm_bindgen(js_name = commitTransaction)]
     pub fn commit_transaction(
         &self,
@@ -1280,7 +1280,7 @@ impl WasmDb {
         let tx_id = match kind.as_deref().unwrap_or("mergeable") {
             "mergeable" => self.inner.commit_mergeable(open_batch_id),
             "exclusive" => self.inner.commit_exclusive(open_batch_id),
-            kind => return Err(JsValue::from_str(&format!("unknown batch kind {kind}"))),
+            kind => return Err(JsValue::from_str(&unknown_transaction_kind_message(kind))),
         }
         .map_err(to_js_error)?;
         match &self.inner {
@@ -1303,7 +1303,7 @@ impl WasmDb {
         }
     }
 
-    /// Roll back an owner-wide open batch by id.
+    /// Roll back an owner-wide open transaction by id.
     #[wasm_bindgen(js_name = rollbackTransaction)]
     pub fn rollback_transaction(&self, open_batch_id: String) -> Result<(), JsValue> {
         let open_batch_id = open_batch_id
@@ -2917,12 +2917,24 @@ fn to_js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
 
+fn unknown_transaction_kind_message(kind: &str) -> String {
+    format!("unknown transaction kind {kind}")
+}
+
 #[cfg(test)]
 mod dynamic_schema_view_tests {
     use super::*;
     use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps};
     use jazz::groove::schema::ColumnType;
     use jazz::schema::{ColumnSchema, Policy, TableSchema};
+
+    #[test]
+    fn transaction_binding_diagnostics_use_transaction_vocabulary() {
+        assert_eq!(
+            unknown_transaction_kind_message("invalid"),
+            "unknown transaction kind invalid"
+        );
+    }
 
     #[test]
     fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {

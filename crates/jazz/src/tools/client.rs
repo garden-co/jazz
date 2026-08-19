@@ -1352,9 +1352,8 @@ impl ClientDbInner {
                 .write_state(tx_id)
                 .map_err(|error| JazzError::Sync(error.to_string()))?;
             if let CoreFate::Rejected(reason) = state.fate {
-                return Err(JazzError::Sync(format!(
-                    "transaction was rejected before reaching {tier:?} durability: {}",
-                    core_rejection_reason_label(&reason)
+                return Err(JazzError::Sync(transaction_rejected_before_tier_message(
+                    tier, &reason,
                 )));
             }
             if state.durability >= desired {
@@ -1967,6 +1966,16 @@ fn core_rejection_reason_label(reason: &CoreRejectionReason) -> String {
         CoreRejectionReason::Cascade { root } => format!("cascade:{root:?}"),
         CoreRejectionReason::MalformedCommit(reason) => format!("malformed_commit:{reason}"),
     }
+}
+
+fn transaction_rejected_before_tier_message(
+    tier: DurabilityTier,
+    reason: &CoreRejectionReason,
+) -> String {
+    format!(
+        "transaction was rejected before reaching {tier:?} durability: {}",
+        core_rejection_reason_label(reason)
+    )
 }
 
 fn core_array_subquery(
@@ -3450,7 +3459,7 @@ mod tests {
             .wait_for_transaction_with_timeout_for_test(
                 unknown,
                 DurabilityTier::EdgeServer,
-                Duration::from_millis(1),
+                Duration::ZERO,
             )
             .await
             .expect_err("unknown transaction must fail");
@@ -3470,13 +3479,20 @@ mod tests {
             .wait_for_transaction_with_timeout_for_test(
                 transaction_id,
                 DurabilityTier::EdgeServer,
-                Duration::from_millis(1),
+                Duration::ZERO,
             )
             .await
             .expect_err("offline transaction cannot reach edge");
         assert!(
             matches!(timeout_error, JazzError::Sync(ref message) if message == "timed out waiting for transaction to reach EdgeServer"),
             "unexpected transaction timeout error: {timeout_error}"
+        );
+        assert_eq!(
+            transaction_rejected_before_tier_message(
+                DurabilityTier::EdgeServer,
+                &CoreRejectionReason::AuthorizationDenied,
+            ),
+            "transaction was rejected before reaching EdgeServer durability: authorization_denied",
         );
     }
 }
