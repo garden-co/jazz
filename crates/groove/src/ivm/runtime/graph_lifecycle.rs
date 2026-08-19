@@ -156,6 +156,7 @@ impl IvmRuntime {
     pub(super) fn remove_node_runtime(&mut self, node: NodeId) {
         self.operator_states.retain(|key, _| key.node != node);
         self.arrangement_states.retain(|key, _| key.input != node);
+        self.arrangement_keys_by_input.remove(&node);
         self.eval_memo.retain(|key, _| key.node != node);
         self.node_meta.remove(&node);
     }
@@ -250,6 +251,10 @@ impl IvmRuntime {
                     && referenced.fields == key.fields
                     && referenced.descriptor == key.descriptor
             })
+        });
+        self.arrangement_keys_by_input.retain(|_, keys| {
+            keys.retain(|key| self.arrangement_states.contains_key(key));
+            !keys.is_empty()
         });
     }
 

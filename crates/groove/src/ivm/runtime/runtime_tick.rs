@@ -19,6 +19,7 @@ struct EvaluationSession {
     outputs: HashMap<NodeId, RecordDeltas>,
     operator_states: HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
     eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
     eval_memo_bytes: usize,
     memo_use_clock: u64,
@@ -39,18 +40,40 @@ impl EvaluationSession {
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
             pending.extend(graph_node.descriptor.inputs.iter().copied());
         }
-        let operator_states = runtime
-            .operator_states
+        // Installed operator state is root-scoped. Recursive child scopes are
+        // scratch state and are cleared before an evaluation is installed.
+        // Probe by reachable node instead of scanning state owned by unrelated
+        // graphs.
+        let operator_states = relevant_nodes
             .iter()
-            .filter(|(key, _)| relevant_nodes.contains(&key.node))
-            .map(|(key, state)| (key.clone(), state.clone()))
+            .filter_map(|node| {
+                let key = OperatorStateKey {
+                    scope: ScopeId::root(),
+                    node: *node,
+                };
+                runtime
+                    .operator_states
+                    .get(&key)
+                    .cloned()
+                    .map(|state| (key, state))
+            })
             .collect();
-        let arrangement_states = runtime
-            .arrangement_states
-            .iter()
-            .filter(|(key, _)| relevant_nodes.contains(&key.input))
-            .map(|(key, state)| (key.clone(), state.clone()))
-            .collect();
+        let mut arrangement_states = HashMap::default();
+        let mut arrangement_keys_by_input = HashMap::default();
+        for input in &relevant_nodes {
+            let Some(keys) = runtime.arrangement_keys_by_input.get(input) else {
+                continue;
+            };
+            for key in keys {
+                if let Some(state) = runtime.arrangement_states.get(key) {
+                    arrangement_states.insert(key.clone(), state.clone());
+                    arrangement_keys_by_input
+                        .entry(*input)
+                        .or_insert_with(HashSet::default)
+                        .insert(key.clone());
+                }
+            }
+        }
         let eval_memo = runtime
             .eval_memo
             .iter()
@@ -58,11 +81,15 @@ impl EvaluationSession {
             .map(|(key, entry)| (key.clone(), entry.clone()))
             .collect::<HashMap<_, _>>();
         let eval_memo_bytes = eval_memo.values().map(|entry| entry.payload_bytes).sum();
-        let node_meta = runtime
-            .node_meta
+        let node_meta = relevant_nodes
             .iter()
-            .filter(|(node, _)| relevant_nodes.contains(node))
-            .map(|(node, meta)| (*node, meta.clone()))
+            .filter_map(|node| {
+                runtime
+                    .node_meta
+                    .get(node)
+                    .cloned()
+                    .map(|meta| (*node, meta))
+            })
             .collect();
         Ok(Self {
             relevant_nodes,
@@ -70,6 +97,7 @@ impl EvaluationSession {
             outputs: HashMap::default(),
             operator_states,
             arrangement_states,
+            arrangement_keys_by_input,
             eval_memo,
             eval_memo_bytes,
             memo_use_clock: runtime.memo_use_clock,
@@ -86,6 +114,12 @@ impl EvaluationSession {
             .arrangement_states
             .retain(|key, _| !self.relevant_nodes.contains(&key.input));
         runtime.arrangement_states.extend(self.arrangement_states);
+        for node in &self.relevant_nodes {
+            runtime.arrangement_keys_by_input.remove(node);
+        }
+        runtime
+            .arrangement_keys_by_input
+            .extend(self.arrangement_keys_by_input);
         runtime
             .eval_memo
             .retain(|key, _| !self.relevant_nodes.contains(&key.node));
@@ -263,6 +297,7 @@ impl IvmRuntime {
             current_tick,
             operator_states: &mut self.operator_states,
             arrangement_states: &mut self.arrangement_states,
+            arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
             eval_memo: &mut self.eval_memo,
             eval_memo_bytes: &mut self.eval_memo_bytes,
             table_frontiers: &self.table_frontiers,
@@ -660,6 +695,7 @@ impl IvmRuntime {
                         current_tick: self.current_tick,
                         operator_states: &mut session.operator_states,
                         arrangement_states: &mut session.arrangement_states,
+                        arrangement_keys_by_input: &mut session.arrangement_keys_by_input,
                         eval_memo: &mut session.eval_memo,
                         eval_memo_bytes: &mut session.eval_memo_bytes,
                         table_frontiers: &self.table_frontiers,
@@ -825,6 +861,7 @@ impl IvmRuntime {
                     current_tick,
                     operator_states: &mut self.operator_states,
                     arrangement_states: &mut self.arrangement_states,
+                    arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
                     eval_memo: &mut self.eval_memo,
                     eval_memo_bytes: &mut self.eval_memo_bytes,
                     table_frontiers: &self.table_frontiers,
