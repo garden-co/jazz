@@ -9,7 +9,8 @@ where
     /// Publish an immutable schema-version payload through the catalogue lane.
     pub async fn publish_schema(&self, schema: SchemaVersion) -> Result<Vec<SyncMessage>, Error> {
         self.check_catalogue_admin()?;
-        self.node
+        let outcome = self
+            .node
             .node
             .lock()
             .await
@@ -17,8 +18,8 @@ where
                 author: self.identity.author,
                 schema: Box::new(schema),
             })
-            .await
-            .map_err(Into::into)
+            .await?;
+        self.finish_publication_outcome(outcome).await
     }
 
     /// Atomically publish a non-genesis schema and its lineage-defining lens.
@@ -28,7 +29,8 @@ where
         publication: SchemaLineagePublication,
     ) -> Result<Vec<SyncMessage>, Error> {
         self.check_catalogue_admin()?;
-        self.node
+        let outcome = self
+            .node
             .node
             .lock()
             .await
@@ -37,14 +39,15 @@ where
                 catalogue_seq,
                 publication: Box::new(publication),
             })
-            .await
-            .map_err(Into::into)
+            .await?;
+        self.finish_publication_outcome(outcome).await
     }
 
     /// Publish an immutable migration lens through the catalogue lane.
     pub async fn publish_lens(&self, lens: MigrationLens) -> Result<Vec<SyncMessage>, Error> {
         self.check_catalogue_admin()?;
-        self.node
+        let outcome = self
+            .node
             .node
             .lock()
             .await
@@ -52,8 +55,8 @@ where
                 author: self.identity.author,
                 lens,
             })
-            .await
-            .map_err(Into::into)
+            .await?;
+        self.finish_publication_outcome(outcome).await
     }
 
     /// Set the current write-schema pointer through the catalogue lane.
@@ -62,7 +65,8 @@ where
         pointer: CurrentWriteSchema,
     ) -> Result<Vec<SyncMessage>, Error> {
         self.check_catalogue_admin()?;
-        self.node
+        let outcome = self
+            .node
             .node
             .lock()
             .await
@@ -70,8 +74,8 @@ where
                 author: self.identity.author,
                 pointer,
             })
-            .await
-            .map_err(Into::into)
+            .await?;
+        self.finish_publication_outcome(outcome).await
     }
 
     /// Set whether this authority may settle session-scoped reads and writes.
