@@ -60,7 +60,9 @@ export function JazzProvider(props: JazzProviderProps) {
 
 export function useJazzClient(): JazzClientContextValue {
   const ctx = useContext(JazzClientContext);
-  if (!ctx) throw new Error("useJazzClient must be used inside JazzProvider.");
+  if (!ctx) {
+    throw new Error("useJazzClient must be used inside JazzProvider or JazzClientProvider.");
+  }
   return ctx;
 }
 

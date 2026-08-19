@@ -14,6 +14,7 @@ export function createSolidJazzClientInternal(
   clientFactory: JazzClientFactory,
 ) {
   let disposed = false;
+  let previousShutdown: Promise<void> | undefined;
   onCleanup(() => {
     disposed = true;
   });
@@ -45,9 +46,10 @@ export function createSolidJazzClientInternal(
       let rawClient: JazzClient | undefined;
       onCleanup(() => {
         disconnectRunId();
-        void rawClient?.shutdown();
+        if (rawClient) previousShutdown = rawClient.shutdown();
       });
 
+      if (previousShutdown) await previousShutdown;
       rawClient = await clientFactory(nextConfig);
       if (disposed || runId !== activeRunId()) {
         disconnectRunId();
