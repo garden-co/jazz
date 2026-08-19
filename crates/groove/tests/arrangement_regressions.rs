@@ -72,11 +72,13 @@ fn reachability_graph() -> GraphBuilder {
     GraphBuilder::recursive(edge_pairs(), step, "frontier", 16)
 }
 
-#[test]
-fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
+#[futures_test::test]
+async fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
-    let mut db = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut db = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
 
     let join1 = db
         .subscribe_one_sink(GraphBuilder::join(
@@ -85,6 +87,7 @@ fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
     // A second, similar join that shares the artists-by-id arrangement.
     let _join2 = db
@@ -94,6 +97,7 @@ fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
     let _empty_initial = join1.recv().unwrap();
 
@@ -106,7 +110,7 @@ fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
         "albums",
         vec![Value::U64(7), Value::U64(11), Value::from("Blue Train")],
     );
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
     let _tick_one = join1.recv().unwrap();
 
     let mut batch = db.open_batch();
@@ -114,7 +118,7 @@ fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
         "albums",
         vec![Value::U64(8), Value::U64(11), Value::from("Giant Steps")],
     );
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
 
     let deltas = join1.recv().unwrap();
     let weights: Vec<i64> = deltas.iter().map(|(_, weight)| weight).collect();
@@ -125,31 +129,31 @@ fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
     );
 }
 
-#[test]
-fn recursive_incremental_ticks_do_not_inflate_shared_edge_arrangements() {
+#[futures_test::test]
+async fn recursive_incremental_ticks_do_not_inflate_shared_edge_arrangements() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
-    let mut db = Database::new(edges_schema(), storage).unwrap();
-    let sub = db.subscribe_one_sink(reachability_graph()).unwrap();
+    let mut db = Database::new(edges_schema(), storage).await.unwrap();
+    let sub = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let _empty_initial = sub.recv().unwrap();
 
     // Tick 1: edge 1 -> 2 (recompute + arrangement preparation).
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
     let _initial = sub.recv().unwrap();
 
     // Tick 2: edge 2 -> 3 (incremental). The fixpoint loop re-applies this
     // tick's edge delta to the shared arrangement once per sub_tick.
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
     let _tick_two = sub.recv().unwrap();
 
     // Tick 3: edge 0 -> 1 (incremental). Probes the inflated 2->3 entry.
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(3), Value::U64(0), Value::U64(1)]);
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
 
     let mut rows = sub.recv().unwrap().to_values().unwrap();
     rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
@@ -164,16 +168,16 @@ fn recursive_incremental_ticks_do_not_inflate_shared_edge_arrangements() {
     );
 }
 
-#[test]
-fn arrangement_shared_across_sub_ticks_is_applied_once_per_tick() {
+#[futures_test::test]
+async fn arrangement_shared_across_sub_ticks_is_applied_once_per_tick() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
-    let mut db = Database::new(edges_schema(), storage).unwrap();
+    let mut db = Database::new(edges_schema(), storage).await.unwrap();
 
     // The recursive subscription advances the shared edges-by-src arrangement
     // at sub_tick 1; the plain two-hop join advances it at sub_tick 0. Each
     // tick's edge delta must be incorporated exactly once regardless.
-    let _reach = db.subscribe_one_sink(reachability_graph()).unwrap();
+    let _reach = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let two_hop = db
         .subscribe_one_sink(GraphBuilder::join(
             edge_pairs(),
@@ -181,25 +185,26 @@ fn arrangement_shared_across_sub_ticks_is_applied_once_per_tick() {
             ["dst"],
             ["src"],
         ))
+        .await
         .unwrap();
 
     // Tick 1: 1 -> 2 (recursive recompute + arrangement preparation).
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
     let _initial = two_hop.recv().unwrap();
 
     // Tick 2: 2 -> 3 (incremental recursion). Both consumers advance the
     // shared arrangement with this delta at different sub_ticks.
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
     let _tick_two = two_hop.recv().unwrap();
 
     // Tick 3: 9 -> 2. The two-hop join probes the 2 -> 3 entry.
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(3), Value::U64(9), Value::U64(2)]);
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
 
     let deltas = two_hop.recv().unwrap();
     let weights: Vec<i64> = deltas.iter().map(|(_, weight)| weight).collect();
