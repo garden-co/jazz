@@ -256,7 +256,7 @@ where
         self.query.registered_shapes.get(&shape_id).cloned()
     }
 
-    fn compile_current_query_program(
+    async fn compile_current_query_program(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -272,9 +272,10 @@ where
             output,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
-    fn compile_current_query_program_in_authorization_mode(
+    async fn compile_current_query_program_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -293,10 +294,11 @@ where
             None,
             authorization_mode,
         )
+        .await
     }
 
     #[cfg(test)]
-    fn compile_current_query_program_for_read_view(
+    async fn compile_current_query_program_for_read_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -314,9 +316,10 @@ where
             read_view,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
-    fn compile_current_query_program_for_read_view_in_authorization_mode(
+    async fn compile_current_query_program_for_read_view_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -336,9 +339,10 @@ where
             None,
             authorization_mode,
         )
+        .await
     }
 
-    fn compile_current_query_program_with_settled_view(
+    async fn compile_current_query_program_with_settled_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -360,9 +364,10 @@ where
             authorization_mode,
             PreparedClaimBindingMode::Strict,
         )
+        .await
     }
 
-    fn compile_current_query_program_with_settled_view_and_prepared_claim_mode(
+    async fn compile_current_query_program_with_settled_view_and_prepared_claim_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -386,10 +391,10 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_current_query_program_for_one_shot_read(
+    async fn compile_current_query_program_for_one_shot_read(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -410,9 +415,10 @@ where
             authorization_mode,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
-    fn compile_current_query_program_with_access_paths(
+    async fn compile_current_query_program_with_access_paths(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -431,9 +437,10 @@ where
             QueryAuthorizationMode::TrustedServing,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
-    fn compile_historical_query_program(
+    async fn compile_historical_query_program(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -462,10 +469,10 @@ where
             input,
             output: current_query_output_request(output, shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_snapshot_query_program(
+    async fn compile_snapshot_query_program(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -494,10 +501,10 @@ where
             input,
             output: current_query_output_request(output, shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_include_deleted_query_program_in_authorization_mode(
+    async fn compile_include_deleted_query_program_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -540,10 +547,10 @@ where
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_open_tx_query_program(
+    async fn compile_open_tx_query_program(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
@@ -592,7 +599,7 @@ where
             input,
             output: current_query_output_request(output, lowered_shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
     fn current_query_program_request(
