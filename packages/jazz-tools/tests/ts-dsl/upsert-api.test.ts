@@ -19,7 +19,7 @@ describe("TS Upsert API", () => {
 
   it("creates a row with a caller-supplied id", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
-    db.upsert(app.projects, { name: "Test Project" }, { id });
+    db.upsert(app.projects, id, { name: "Test Project" });
 
     const project = await db.one(app.projects.where({ id: { eq: id } }));
     expect(project).toEqual({
@@ -30,7 +30,7 @@ describe("TS Upsert API", () => {
 
   it("can wait for upserts to be persisted up to a specific durability tier", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
-    await db.upsert(app.projects, { name: "Test Project" }, { id }).wait({ tier: "local" });
+    await db.upsert(app.projects, id, { name: "Test Project" }).wait({ tier: "local" });
 
     const project = await db.one(app.projects.where({ id: { eq: id } }), { tier: "local" });
     expect(project).toEqual({
@@ -42,7 +42,7 @@ describe("TS Upsert API", () => {
   it("updates an existing row with the same id", async () => {
     const project = insertProject(db, "Test Project");
 
-    db.upsert(app.projects, { name: "Updated Project" }, { id: project.id });
+    db.upsert(app.projects, project.id, { name: "Updated Project" });
 
     const updatedProject = await db.one(app.projects.where({ id: { eq: project.id } }));
     expect(updatedProject?.name).toBe("Updated Project");
@@ -51,7 +51,7 @@ describe("TS Upsert API", () => {
   it("upserts don't modify the original row", async () => {
     const project = insertProject(db, "Test Project");
 
-    db.upsert(app.projects, { name: "Updated Project" }, { id: project.id });
+    db.upsert(app.projects, project.id, { name: "Updated Project" });
 
     expect(project.name).toBe("Test Project");
   });
@@ -67,15 +67,11 @@ describe("TS Upsert API", () => {
       assigneesIds: [assignee.id],
     });
 
-    db.upsert(
-      app.todos,
-      {
-        title: todo.title,
-        done: true,
-        projectId: todo.projectId,
-      },
-      { id: todo.id },
-    );
+    db.upsert(app.todos, todo.id, {
+      title: todo.title,
+      done: true,
+      projectId: todo.projectId,
+    });
 
     const updatedTodo = await db.one(app.todos.where({ id: { eq: todo.id } }));
     expect(updatedTodo).toEqual({
@@ -88,15 +84,11 @@ describe("TS Upsert API", () => {
     const owner = insertUser(db);
     const todo = insertTodo(db, { ownerId: owner.id });
 
-    db.upsert(
-      app.todos,
-      {
-        title: todo.title,
-        projectId: todo.projectId,
-        ownerId: undefined,
-      },
-      { id: todo.id },
-    );
+    db.upsert(app.todos, todo.id, {
+      title: todo.title,
+      projectId: todo.projectId,
+      ownerId: undefined,
+    });
 
     const updatedTodo = await db.one(app.todos.where({ id: { eq: todo.id } }));
     assert(updatedTodo);
@@ -107,15 +99,11 @@ describe("TS Upsert API", () => {
     const owner = insertUser(db);
     const todo = insertTodo(db, { ownerId: owner.id });
 
-    db.upsert(
-      app.todos,
-      {
-        title: todo.title,
-        projectId: todo.projectId,
-        ownerId: null,
-      },
-      { id: todo.id },
-    );
+    db.upsert(app.todos, todo.id, {
+      title: todo.title,
+      projectId: todo.projectId,
+      ownerId: null,
+    });
 
     const updatedTodo = await db.one(app.todos.where({ id: { eq: todo.id } }));
     assert(updatedTodo);
@@ -127,13 +115,13 @@ describe("TS Upsert API", () => {
 
     expect(() =>
       // @ts-expect-error - null is not a valid value for a required field
-      db.upsert(app.todos, { title: null, projectId: todo.projectId }, { id: todo.id }),
+      db.upsert(app.todos, todo.id, { title: null, projectId: todo.projectId }),
     ).toThrow("Cannot set required field 'title' to null");
   });
 
   it("fails when trying to insert a row with missing required fields", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
-    expect(() => db.upsert(app.todos, { done: true }, { id })).toThrow(
+    expect(() => db.upsert(app.todos, id, { done: true })).toThrow(
       'Upsert failed: WriteError("encoding error: missing required field `title` on table `todos`")',
     );
   });
@@ -143,15 +131,11 @@ describe("TS Upsert API", () => {
     const project = insertProject(db);
     const owner = insertUser(db);
 
-    db.upsert(
-      app.todos,
-      {
-        title: "Test Todo",
-        projectId: project.id,
-        ownerId: owner.id,
-      },
-      { id },
-    );
+    db.upsert(app.todos, id, {
+      title: "Test Todo",
+      projectId: project.id,
+      ownerId: owner.id,
+    });
 
     const todo = await db.one(app.todos.where({ id: { eq: id } }));
     expect(todo).toEqual({
@@ -169,7 +153,7 @@ describe("TS Upsert API", () => {
     const project = insertProject(db);
     db.delete(app.projects, project.id);
 
-    expect(() => db.upsert(app.projects, { name: "Restored Project" }, { id: project.id })).toThrow(
+    expect(() => db.upsert(app.projects, project.id, { name: "Restored Project" })).toThrow(
       `Upsert failed: WriteError("row already deleted: ${project.id}")`,
     );
   });
@@ -177,7 +161,7 @@ describe("TS Upsert API", () => {
   it("can use caller-supplied updatedAt on new-row upsert", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
     const updatedAt = 1_704_067_200_123_000;
-    db.upsert(app.projects, { name: "Backfilled Project" }, { id, updatedAt });
+    db.upsert(app.projects, id, { name: "Backfilled Project" }, { updatedAt });
 
     const project = await db.one(app.projects.select("name", "$updatedAt").where({ id }));
 
@@ -192,7 +176,7 @@ describe("TS Upsert API", () => {
     const updatedAt = 1_704_067_200_123_000;
     const originalProject = insertProject(db, "Test Project");
 
-    db.upsert(app.projects, { name: "Backfilled Project" }, { id: originalProject.id, updatedAt });
+    db.upsert(app.projects, originalProject.id, { name: "Backfilled Project" }, { updatedAt });
 
     const project = await db.one(
       app.projects.select("name", "$updatedAt").where({ id: { eq: originalProject.id } }),

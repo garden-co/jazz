@@ -67,9 +67,9 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
 
   describe("default ordering", () => {
     it("orders one-shot roots and pagination by canonical row id, not insertion order", async () => {
-      db.upsert(app.projects, { name: "High" }, { id: orderedIds.high });
-      db.upsert(app.projects, { name: "Low" }, { id: orderedIds.low });
-      db.upsert(app.projects, { name: "Middle" }, { id: orderedIds.middle });
+      db.upsert(app.projects, orderedIds.high, { name: "High" });
+      db.upsert(app.projects, orderedIds.low, { name: "Low" });
+      db.upsert(app.projects, orderedIds.middle, { name: "Middle" });
 
       const all = await readAll(app.projects);
       expect(all.map((project) => project.id)).toEqual([
@@ -83,9 +83,9 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
     });
 
     it("uses canonical row id as the implicit tie-break for explicit ordering", async () => {
-      db.upsert(app.projects, { name: "Same" }, { id: orderedIds.high });
-      db.upsert(app.projects, { name: "Same" }, { id: orderedIds.low });
-      db.upsert(app.projects, { name: "Same" }, { id: orderedIds.middle });
+      db.upsert(app.projects, orderedIds.high, { name: "Same" });
+      db.upsert(app.projects, orderedIds.low, { name: "Same" });
+      db.upsert(app.projects, orderedIds.middle, { name: "Same" });
 
       const results = await readAll(app.projects.orderBy("name", "asc"));
       expect(results.map((project) => project.id)).toEqual([
@@ -96,38 +96,30 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
     });
 
     it("orders forward-array and reverse-relation payloads by child row id", async () => {
-      db.upsert(app.users, { name: "High", friendsIds: [] }, { id: orderedIds.high });
-      db.upsert(app.users, { name: "Low", friendsIds: [] }, { id: orderedIds.low });
-      db.upsert(app.users, { name: "Middle", friendsIds: [] }, { id: orderedIds.middle });
+      db.upsert(app.users, orderedIds.high, { name: "High", friendsIds: [] });
+      db.upsert(app.users, orderedIds.low, { name: "Low", friendsIds: [] });
+      db.upsert(app.users, orderedIds.middle, { name: "Middle", friendsIds: [] });
       const project = insertProject(db, "Relations");
       const todoIds = {
         low: "00000000-0000-4000-8000-000000000201",
         high: "00000000-0000-4000-8000-000000000203",
       } as const;
-      db.upsert(
-        app.todos,
-        {
-          title: "High",
-          done: false,
-          tags: [],
-          projectId: project.id,
-          ownerId: null,
-          assigneesIds: [orderedIds.high, orderedIds.low, orderedIds.middle],
-        },
-        { id: todoIds.high },
-      );
-      db.upsert(
-        app.todos,
-        {
-          title: "Low",
-          done: false,
-          tags: [],
-          projectId: project.id,
-          ownerId: null,
-          assigneesIds: [],
-        },
-        { id: todoIds.low },
-      );
+      db.upsert(app.todos, todoIds.high, {
+        title: "High",
+        done: false,
+        tags: [],
+        projectId: project.id,
+        ownerId: null,
+        assigneesIds: [orderedIds.high, orderedIds.low, orderedIds.middle],
+      });
+      db.upsert(app.todos, todoIds.low, {
+        title: "Low",
+        done: false,
+        tags: [],
+        projectId: project.id,
+        ownerId: null,
+        assigneesIds: [],
+      });
 
       const todo = await readOne(
         app.todos
