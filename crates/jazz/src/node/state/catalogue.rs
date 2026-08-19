@@ -640,7 +640,7 @@ where
         Ok(source_mapping)
     }
 
-    fn persist_catalogue_schema_lineage(
+    async fn persist_catalogue_schema_lineage(
         &mut self,
         staged: &StagedSchemaLineage,
     ) -> Result<(), Error> {
@@ -653,11 +653,11 @@ where
                 Value::Bytes(serde_json::to_vec(staged)?),
             ],
         );
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         Ok(())
     }
 
-    fn persist_pending_schema_lineage(
+    async fn persist_pending_schema_lineage(
         &mut self,
         pending: &PendingSchemaLineage,
     ) -> Result<(), Error> {
@@ -670,11 +670,11 @@ where
                 Value::Bytes(serde_json::to_vec(pending)?),
             ],
         );
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         Ok(())
     }
 
-    fn remove_pending_schema_lineage(
+    async fn remove_pending_schema_lineage(
         &mut self,
         catalogue_seq: u64,
         publication_id: SchemaLineagePublicationId,
@@ -687,7 +687,7 @@ where
                 PrimaryKeyValue::Uuid(publication_id.0),
             ]),
         );
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         self.catalogue.pending_lineages.remove(&catalogue_seq);
         Ok(())
     }
@@ -791,17 +791,20 @@ where
         Ok(())
     }
 
-    fn persist_catalogue_pointer(&mut self, pointer: CurrentWriteSchema) -> Result<(), Error> {
+    async fn persist_catalogue_pointer(
+        &mut self,
+        pointer: CurrentWriteSchema,
+    ) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue_pointer",
             vec![Value::U64(pointer.revision), Value::Uuid(pointer.schema.0)],
         );
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         Ok(())
     }
 
-    fn persist_pending_catalogue_pointer(
+    async fn persist_pending_catalogue_pointer(
         &mut self,
         pointer: CurrentWriteSchema,
     ) -> Result<(), Error> {
@@ -815,7 +818,7 @@ where
                 Value::Bytes(serde_json::to_vec(&pointer)?),
             ],
         );
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         Ok(())
     }
 

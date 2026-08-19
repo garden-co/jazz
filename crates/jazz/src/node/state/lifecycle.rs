@@ -602,8 +602,8 @@ where
                 .await?;
         }
         node.synchronize_physical_version_tables().await?;
-        node.drain_pending_schema_lineages()?;
-        node.drain_pending_catalogue_pointers()?;
+        node.recover_pending_schema_lineages().await?;
+        node.recover_pending_catalogue_pointers().await?;
         #[cfg(feature = "testing")]
         if let Some(receipt) = receipt.as_deref_mut() {
             let started = Instant::now();
