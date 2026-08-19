@@ -1,3 +1,9 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogueActivationMode {
+    ColdOpen,
+    Live,
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -238,7 +244,7 @@ where
         Ok(out)
     }
 
-    fn apply_publish_schema_with_lens(
+    async fn apply_publish_schema_with_lens(
         &mut self,
         author: AuthorId,
         ingest_context: Option<CommitUnitIngestContext>,
@@ -312,15 +318,37 @@ where
                 catalogue_seq,
                 publication,
             };
-            self.persist_pending_schema_lineage(&pending)?;
+            self.persist_pending_schema_lineage(&pending).await?;
             self.catalogue
                 .pending_lineages
                 .insert(catalogue_seq, pending);
         }
-        self.drain_pending_schema_lineages()
+        self.drain_pending_schema_lineages().await
     }
 
-    pub(super) fn drain_pending_schema_lineages(&mut self) -> Result<Vec<SyncMessage>, Error>
+    pub(super) async fn recover_pending_schema_lineages(&mut self) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.activate_pending_schema_lineages(CatalogueActivationMode::ColdOpen)
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn drain_pending_schema_lineages(
+        &mut self,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.activate_pending_schema_lineages(CatalogueActivationMode::Live)
+            .await
+    }
+
+    async fn activate_pending_schema_lineages(
+        &mut self,
+        mode: CatalogueActivationMode,
+    ) -> Result<Vec<SyncMessage>, Error>
     where
         S: ReopenableStorage,
     {
@@ -354,7 +382,8 @@ where
                 )
             });
             if validation.is_err() {
-                self.remove_pending_schema_lineage(next, publication.id)?;
+                self.remove_pending_schema_lineage(next, publication.id)
+                    .await?;
                 break;
             }
             if self
@@ -390,7 +419,7 @@ where
                     alias: self.next_schema_version_alias()?,
                     mapping,
                 };
-                self.persist_catalogue_schema_lineage(&staged)?;
+                self.persist_catalogue_schema_lineage(&staged).await?;
                 self.catalogue.staged_lineages.insert(next, staged.clone());
                 staged
             };
@@ -431,7 +460,11 @@ where
             // than reopening the database: a reopen drops active history and
             // maintained-subscription receivers even when their output shape
             // remains compatible.
-            if self.synchronize_physical_version_tables().is_err() {
+            if self
+                .synchronize_physical_version_tables()
+                .await
+                .is_err()
+            {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
                 return Err(Error::CatalogueActivationFailed);
@@ -440,13 +473,16 @@ where
             // until a later non-empty notification. Prune them explicitly;
             // then rebuild only when no observable subscription handle would
             // be disconnected. Live handles use the in-place cases above.
-            if self.database.prune_dropped_subscriptions().is_err() {
+            if mode == CatalogueActivationMode::Live
+                && self.database.prune_dropped_subscriptions().await.is_err()
+            {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
                 return Err(Error::CatalogueActivationFailed);
             }
-            let rebuild_cold_runtime = self.database.runtime_stats().active_subscriptions == 0;
-            if rebuild_cold_runtime && self.rebuild_database_slot().is_err() {
+            let rebuild_cold_runtime = mode == CatalogueActivationMode::ColdOpen
+                || self.database.runtime_stats().active_subscriptions == 0;
+            if rebuild_cold_runtime && self.rebuild_database_slot().await.is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
                 return Err(Error::CatalogueActivationFailed);
@@ -470,7 +506,7 @@ where
             }
             let mut batch = self.database.open_batch();
             Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
-            if self.database.commit_batch(batch).is_err() {
+            if self.database.commit_batch(batch).await.is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
                 return Err(Error::CatalogueActivationFailed);
@@ -481,19 +517,21 @@ where
                 .active_lineages_by_target
                 .insert(staged.publication.schema.id, staged.clone());
             self.catalogue.active_catalogue_seq = next;
-            if widens_shared_current_descriptor {
+            if mode == CatalogueActivationMode::Live && widens_shared_current_descriptor {
                 self.groove_runtime_token = next_groove_runtime_token();
             }
-            out.push(SyncMessage::CatalogueAck(CatalogueAck {
-                revision: Some(next),
-                schema: Some(staged.publication.schema.id),
-                lens: Some(staged.publication.lens.id),
-                applied: true,
-            }));
-            out.extend(self.drain_parked_commit_units()?);
-            self.drain_parked_relay_commit_units()?;
-            self.drain_parked_shape_registrations()?;
-            out.extend(self.drain_pending_catalogue_pointers()?);
+            if mode == CatalogueActivationMode::Live {
+                out.push(SyncMessage::CatalogueAck(CatalogueAck {
+                    revision: Some(next),
+                    schema: Some(staged.publication.schema.id),
+                    lens: Some(staged.publication.lens.id),
+                    applied: true,
+                }));
+                out.extend(self.drain_parked_commit_units()?);
+                self.drain_parked_relay_commit_units()?;
+                self.drain_parked_shape_registrations()?;
+                out.extend(self.drain_pending_catalogue_pointers().await?);
+            }
         }
         Ok(out)
     }
@@ -598,7 +636,7 @@ where
         })])
     }
 
-    fn apply_set_current_write_schema(
+    async fn apply_set_current_write_schema(
         &mut self,
         author: AuthorId,
         ingest_context: Option<CommitUnitIngestContext>,
@@ -613,23 +651,23 @@ where
             .catalogue_schemas
             .contains_key(&pointer.schema)
         {
-            self.persist_pending_catalogue_pointer(pointer)?;
+            self.persist_pending_catalogue_pointer(pointer).await?;
             self.catalogue
                 .pending_write_pointers
                 .insert(pointer.revision, pointer);
             return Ok(Vec::new());
         }
-        Ok(vec![self.apply_active_catalogue_pointer(pointer)?])
+        Ok(vec![self.apply_active_catalogue_pointer(pointer).await?])
     }
 
-    fn apply_active_catalogue_pointer(
+    async fn apply_active_catalogue_pointer(
         &mut self,
         pointer: CurrentWriteSchema,
     ) -> Result<SyncMessage, Error> {
         let applied = pointer.revision > self.catalogue.current_write_schema.revision;
         if applied {
             self.catalogue.current_write_schema = pointer;
-            self.persist_catalogue_pointer(pointer)?;
+            self.persist_catalogue_pointer(pointer).await?;
             self.query.version_storage_sources_cache.clear();
             self.query.read_policy_authorization_request_cache.clear();
             self.query.policy_authorization_graph_cache.clear();
@@ -652,7 +690,23 @@ where
         }))
     }
 
-    pub(super) fn drain_pending_catalogue_pointers(&mut self) -> Result<Vec<SyncMessage>, Error> {
+    pub(super) async fn recover_pending_catalogue_pointers(&mut self) -> Result<(), Error> {
+        self.apply_pending_catalogue_pointers(CatalogueActivationMode::ColdOpen)
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn drain_pending_catalogue_pointers(
+        &mut self,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        self.apply_pending_catalogue_pointers(CatalogueActivationMode::Live)
+            .await
+    }
+
+    async fn apply_pending_catalogue_pointers(
+        &mut self,
+        mode: CatalogueActivationMode,
+    ) -> Result<Vec<SyncMessage>, Error> {
         let ready = self
             .catalogue
             .pending_write_pointers
@@ -666,7 +720,10 @@ where
             .collect::<Vec<_>>();
         let mut out = Vec::new();
         for (revision, pointer) in ready {
-            out.push(self.apply_active_catalogue_pointer(pointer)?);
+            let message = self.apply_active_catalogue_pointer(pointer).await?;
+            if mode == CatalogueActivationMode::Live {
+                out.push(message);
+            }
             self.catalogue.pending_write_pointers.remove(&revision);
         }
         Ok(out)
