@@ -12,20 +12,21 @@ where
     S: OrderedKvStorage,
 {
     /// Open an exclusive transaction over the current snapshot.
-    pub fn open_exclusive(&mut self, id: OpenTransactionId) -> Result<(), Error> {
-        self.open_exclusive_for_identity(id, AuthorId::SYSTEM)
+    pub async fn open_exclusive(&mut self, id: OpenTransactionId) -> Result<(), Error> {
+        self.open_exclusive_for_identity(id, AuthorId::SYSTEM).await
     }
 
-    pub(crate) fn open_exclusive_for_identity(
+    pub(crate) async fn open_exclusive_for_identity(
         &mut self,
         id: OpenTransactionId,
         made_by: AuthorId,
     ) -> Result<(), Error> {
         self.open_transaction(id, OpenTransactionKind::Exclusive, made_by)
+            .await
     }
 
     /// Open a mergeable transaction over the current snapshot.
-    pub(crate) fn open_mergeable(
+    pub(crate) async fn open_mergeable(
         &mut self,
         id: OpenTransactionId,
         made_by: AuthorId,
@@ -39,9 +40,10 @@ where
             },
             made_by,
         )
+        .await
     }
 
-    fn open_transaction(
+    async fn open_transaction(
         &mut self,
         id: OpenTransactionId,
         kind: OpenTransactionKind,
@@ -56,7 +58,7 @@ where
         let local_base = self.clock.tx_time;
         let mut dots = Vec::with_capacity(self.clock.applied_global_above_watermark.len());
         for global_seq in self.clock.applied_global_above_watermark.clone() {
-            dots.extend(self.transaction_ids_for_global_seq(global_seq)?);
+            dots.extend(self.transaction_ids_for_global_seq(global_seq).await?);
         }
         let base_snapshot = Snapshot::exclusive_base(
             self.node_uuid,
@@ -83,7 +85,7 @@ where
     }
 
     /// Read a row inside an exclusive transaction.
-    pub fn tx_read(
+    pub async fn tx_read(
         &mut self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -96,10 +98,11 @@ where
             table,
             row_uuid,
         )
+        .await
     }
 
     /// Read a row through an explicit registered schema view.
-    pub fn tx_read_in_schema(
+    pub async fn tx_read_in_schema(
         &mut self,
         tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
@@ -108,9 +111,10 @@ where
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         self.table_in_schema(table, schema_version)?;
         self.tx_read_unchecked(tx_id, schema_version, table, row_uuid)
+            .await
     }
 
-    fn tx_read_unchecked(
+    async fn tx_read_unchecked(
         &mut self,
         tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
@@ -118,8 +122,9 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-        let snapshot_row =
-            self.snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)?;
+        let snapshot_row = self
+            .snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
+            .await?;
         self.open_tx_mut(tx_id)?.base_snapshot_rows.insert(
             (schema_version, table.to_owned(), row_uuid),
             snapshot_row.clone(),
@@ -159,7 +164,7 @@ where
     }
 
     /// Read all current rows inside an exclusive transaction.
-    pub fn tx_current_rows(
+    pub async fn tx_current_rows(
         &mut self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -167,10 +172,11 @@ where
         let schema_version = self.catalogue.current_write_schema.schema;
         let table_schema = self.table(table)?.clone();
         self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
+            .await
     }
 
     /// Read current rows through an explicit registered schema view.
-    pub fn tx_current_rows_in_schema(
+    pub async fn tx_current_rows_in_schema(
         &mut self,
         tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
@@ -178,11 +184,12 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
         self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
+            .await
     }
 
     /// Read transaction rows through a registered schema view, optionally
     /// retaining root rows whose deletion register wins.
-    pub(crate) fn tx_current_rows_in_schema_with_options(
+    pub(crate) async fn tx_current_rows_in_schema_with_options(
         &mut self,
         tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
@@ -191,9 +198,10 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
         self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, include_deleted)
+            .await
     }
 
-    fn tx_current_rows_with_table(
+    async fn tx_current_rows_with_table(
         &mut self,
         tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
@@ -203,7 +211,8 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let rows = self
-            .query_table_versions(table)?
+            .query_table_versions(table)
+            .await?
             .iter()
             .filter(|version| version.table() == table)
             .map(|version| version.row_uuid())
@@ -217,8 +226,9 @@ where
             .collect::<BTreeSet<_>>();
         let mut current = Vec::new();
         for row_uuid in rows {
-            let snapshot_row =
-                self.snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)?;
+            let snapshot_row = self
+                .snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
+                .await?;
             let snapshot_provenance = snapshot_row.provenance.clone();
             let open_tx = self.open_tx(tx_id)?;
             let provisional_author = open_tx.provisional_author;
@@ -305,7 +315,7 @@ where
     }
 
     /// Stage a row write inside an exclusive transaction.
-    pub fn tx_write<V: Into<Value>>(
+    pub async fn tx_write<V: Into<Value>>(
         &mut self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -321,10 +331,11 @@ where
             cells,
             deletion,
         )
+        .await
     }
 
     /// Stage a row write through an explicit registered schema view.
-    pub fn tx_write_in_schema<V: Into<Value>>(
+    pub async fn tx_write_in_schema<V: Into<Value>>(
         &mut self,
         tx_id: OpenTransactionId,
         write_schema_version: SchemaVersionId,
@@ -342,9 +353,10 @@ where
             deletion,
             None,
         )
+        .await
     }
 
-    pub(crate) fn tx_write_in_schema_at_ms<V: Into<Value>>(
+    pub(crate) async fn tx_write_in_schema_at_ms<V: Into<Value>>(
         &mut self,
         tx_id: OpenTransactionId,
         write_schema_version: SchemaVersionId,
@@ -375,7 +387,8 @@ where
             snapshot_row
         } else {
             let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-            self.snapshot_row_in_schema(write_schema_version, table, row_uuid, &snapshot)?
+            self.snapshot_row_in_schema(write_schema_version, table, row_uuid, &snapshot)
+                .await?
         };
         let parent = if snapshot_row.deleted {
             None
@@ -412,7 +425,7 @@ where
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn tx_write_mergeable(
+    pub(crate) async fn tx_write_mergeable(
         &mut self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -434,9 +447,10 @@ where
             now_ms,
             refresh_parents_at_commit,
         )
+        .await
     }
 
-    pub(crate) fn tx_write_mergeable_in_schema(
+    pub(crate) async fn tx_write_mergeable_in_schema(
         &mut self,
         tx_id: OpenTransactionId,
         write_schema_version: SchemaVersionId,
@@ -475,7 +489,7 @@ where
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn tx_patch_mergeable(
+    pub(crate) async fn tx_patch_mergeable(
         &mut self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -491,9 +505,10 @@ where
             patch,
             now_ms,
         )
+        .await
     }
 
-    pub(crate) fn tx_patch_mergeable_in_schema(
+    pub(crate) async fn tx_patch_mergeable_in_schema(
         &mut self,
         tx_id: OpenTransactionId,
         write_schema_version: SchemaVersionId,
@@ -511,7 +526,8 @@ where
             ));
         }
         let mut staged_cells = self
-            .tx_read_in_schema(tx_id, write_schema_version, table, row_uuid)?
+            .tx_read_in_schema(tx_id, write_schema_version, table, row_uuid)
+            .await?
             .unwrap_or_default();
         staged_cells.extend(patch.clone());
         validate_mergeable_write_shape(staged_cells.is_empty(), false)?;
@@ -601,7 +617,10 @@ where
                 "open transaction is not exclusive",
             ));
         }
-        if !self.open_exclusive_is_locally_serializable(open_batch_id)? {
+        if !self
+            .open_exclusive_is_locally_serializable(open_batch_id)
+            .await?
+        {
             return Err(Error::TransactionConflict);
         }
         let open_tx = self
@@ -616,42 +635,41 @@ where
         let made_at = self.mint_tx_time(now_ms);
         let tx_id = TxId::new(made_at, self.node_uuid);
         let provenance_snapshot = open_tx.base_snapshot.clone();
-        let versions = open_tx
-            .writes
-            .into_iter()
-            .map(|write| {
-                let snapshot_content = self.snapshot_layer_winner(
+        let mut versions = Vec::with_capacity(open_tx.writes.len());
+        for write in open_tx.writes {
+            let snapshot_content = self
+                .snapshot_layer_winner(
                     &write.table,
                     write.row_uuid,
                     VersionLayer::Content,
                     &provenance_snapshot,
-                );
-                let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
-                let PendingCells::Replace(cells) = write.cells else {
-                    return Err(Error::InvalidMergeableCommit(
-                        "exclusive transaction cannot contain update patches",
-                    ));
-                };
-                let cells = positional_cells_from_map(&table_schema, &cells)?;
-                let provenance_at = TxTime(write.now_ms.unwrap_or(now_ms));
-                let (created_by, created_at) = snapshot_content
-                    .as_ref()
-                    .map(|version| (version.created_by(), version.created_at()))
-                    .unwrap_or((made_by, provenance_at));
-                Ok(VersionRecord::encode(
-                    &table_schema,
-                    write.schema_version,
-                    write.row_uuid,
-                    write.parents,
-                    created_by,
-                    created_at,
-                    made_by,
-                    provenance_at,
-                    &cells,
-                    write.deletion,
-                )?)
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+                )
+                .await;
+            let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
+            let PendingCells::Replace(cells) = write.cells else {
+                return Err(Error::InvalidMergeableCommit(
+                    "exclusive transaction cannot contain update patches",
+                ));
+            };
+            let cells = positional_cells_from_map(&table_schema, &cells)?;
+            let provenance_at = TxTime(write.now_ms.unwrap_or(now_ms));
+            let (created_by, created_at) = snapshot_content
+                .as_ref()
+                .map(|version| (version.created_by(), version.created_at()))
+                .unwrap_or((made_by, provenance_at));
+            versions.push(VersionRecord::encode(
+                &table_schema,
+                write.schema_version,
+                write.row_uuid,
+                write.parents,
+                created_by,
+                created_at,
+                made_by,
+                provenance_at,
+                &cells,
+                write.deletion,
+            )?);
+        }
         let tx = Transaction {
             tx_id,
             kind: TxKind::Exclusive,
@@ -680,51 +698,61 @@ where
         Ok((publication, SyncMessage::CommitUnit { tx, versions }))
     }
 
-    fn open_exclusive_is_locally_serializable(
+    async fn open_exclusive_is_locally_serializable(
         &mut self,
         open_batch_id: OpenTransactionId,
     ) -> Result<bool, Error> {
         let open_tx = self.open_tx(open_batch_id)?.clone();
         for read in &open_tx.row_reads {
-            for version in self.query_row_versions(&read.table, read.row_uuid)? {
+            for version in self.query_row_versions(&read.table, read.row_uuid).await? {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)?
+                    .query_transaction(tx_id)
+                    .await?
                     .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
-                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot) {
+                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     return Ok(false);
                 }
             }
         }
         for absent in &open_tx.absent_reads {
-            for version in self.query_row_versions(&absent.table, absent.row_uuid)? {
+            for version in self
+                .query_row_versions(&absent.table, absent.row_uuid)
+                .await?
+            {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)?
+                    .query_transaction(tx_id)
+                    .await?
                     .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
-                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot) {
+                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     return Ok(false);
                 }
             }
         }
         for write in &open_tx.writes {
-            for version in self.query_row_versions(&write.table, write.row_uuid)? {
+            for version in self
+                .query_row_versions(&write.table, write.row_uuid)
+                .await?
+            {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)?
+                    .query_transaction(tx_id)
+                    .await?
                     .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
-                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot) {
+                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     return Ok(false);
                 }
             }
         }
         for predicate in &open_tx.predicate_reads {
-            for version in self.query_table_versions(&predicate.table)? {
+            for version in self.query_table_versions(&predicate.table).await? {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)?
+                    .query_transaction(tx_id)
+                    .await?
                     .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
-                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot) {
+                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     return Ok(false);
                 }
             }
@@ -768,9 +796,11 @@ where
             }
             let parents = if write.refresh_parents_at_commit {
                 if write.deletion.is_none() {
-                    self.local_content_winner_tx_id(&write.table, write.row_uuid)?
+                    self.local_content_winner_tx_id(&write.table, write.row_uuid)
+                        .await?
                 } else {
-                    self.local_deletion_winner_tx_id(&write.table, write.row_uuid)?
+                    self.local_deletion_winner_tx_id(&write.table, write.row_uuid)
+                        .await?
                 }
                 .into_iter()
                 .collect()
@@ -782,11 +812,14 @@ where
                 PendingCells::Patch(patch) => {
                     let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
                     let mut cells = BTreeMap::new();
-                    if let Some(existing) = self.local_current_row_in_schema(
-                        &write.table,
-                        write.row_uuid,
-                        write.schema_version,
-                    )? {
+                    if let Some(existing) = self
+                        .local_current_row_in_schema(
+                            &write.table,
+                            write.row_uuid,
+                            write.schema_version,
+                        )
+                        .await?
+                    {
                         for column in &table_schema.columns {
                             if let Some(value) = existing.cell(&table_schema, &column.name) {
                                 cells.insert(column.name.clone(), value);
@@ -892,16 +925,20 @@ where
         advanced
     }
 
-    fn transaction_ids_for_global_seq(
+    async fn transaction_ids_for_global_seq(
         &mut self,
         global_seq: GlobalSeq,
     ) -> Result<Vec<TxId>, Error> {
         let mut tx_ids = Vec::new();
-        for raw in self.database.index_scan_raw(
-            "jazz_transactions",
-            "by_global_seq",
-            &[Value::Nullable(Some(Box::new(Value::U64(global_seq.0))))],
-        )? {
+        for raw in self
+            .database
+            .index_scan_raw(
+                "jazz_transactions",
+                "by_global_seq",
+                &[Value::Nullable(Some(Box::new(Value::U64(global_seq.0))))],
+            )
+            .await?
+        {
             let record = raw.record();
             let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
             let node = self
@@ -917,8 +954,9 @@ where
         Ok(tx_ids)
     }
 
-    pub(super) fn snapshot_covers(&mut self, tx_id: TxId, snapshot: &Snapshot) -> bool {
+    pub(super) async fn snapshot_covers(&mut self, tx_id: TxId, snapshot: &Snapshot) -> bool {
         self.query_transaction(tx_id)
+            .await
             .ok()
             .flatten()
             .is_some_and(|stored| {
@@ -930,16 +968,19 @@ where
             })
     }
 
-    pub(super) fn snapshot_row_in_schema(
+    pub(super) async fn snapshot_row_in_schema(
         &mut self,
         schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         snapshot: &Snapshot,
     ) -> Result<SnapshotRow, Error> {
-        let content = self.snapshot_layer_winner(table, row_uuid, VersionLayer::Content, snapshot);
-        let deletion =
-            self.snapshot_layer_winner(table, row_uuid, VersionLayer::Deletion, snapshot);
+        let content = self
+            .snapshot_layer_winner(table, row_uuid, VersionLayer::Content, snapshot)
+            .await;
+        let deletion = self
+            .snapshot_layer_winner(table, row_uuid, VersionLayer::Deletion, snapshot)
+            .await;
         let deleted = matches!(
             deletion.as_ref().and_then(|version| version.deletion()),
             Some(DeletionEvent::Deleted)
@@ -1006,7 +1047,7 @@ where
         })
     }
 
-    pub(super) fn snapshot_layer_winner(
+    pub(super) async fn snapshot_layer_winner(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -1017,11 +1058,11 @@ where
         // Intervals can REOPEN when a late arrival shifts the DAG winner, so
         // they cannot serve snapshot reads; domination over the fixed member
         // set depends only on immutable payload and is stable by construction.
-        let versions = self.query_row_versions(table, row_uuid).ok()?;
+        let versions = self.query_row_versions(table, row_uuid).await.ok()?;
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             let tx_id = self.version_tx_id(version).ok()?;
-            if version.layer() == layer && self.snapshot_covers(tx_id, snapshot) {
+            if version.layer() == layer && self.snapshot_covers(tx_id, snapshot).await {
                 candidate_indices.push(idx);
             }
         }
