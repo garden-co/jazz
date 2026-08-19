@@ -19,6 +19,8 @@ mod opfs;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::records::{Record, RecordDescriptor};
 use serde::{Deserialize, Serialize};
@@ -36,6 +38,11 @@ pub type ColumnFamilyName = str;
 pub type Key = [u8];
 pub type Value = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
+/// Object-safe future returned by ordered storage operations.
+///
+/// Storage is permitted to be executor-local (notably in browsers), so this
+/// deliberately does not impose `Send`.
+pub type StorageFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 const STAGED_POINT_READS_BEFORE_INDEX: usize = 16;
 const STAGED_OPS_BEFORE_POINT_INDEX: usize = 64;
 /// Callback form used by scans so storage implementations do not have to
@@ -199,25 +206,26 @@ pub trait OrderedKvStorage {
         StorageTransaction::new(self)
     }
 
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error>;
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error>;
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error>;
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>>;
+    fn set(&self, cf: String, key: Vec<u8>, value: Vec<u8>)
+    -> StorageFuture<'_, Result<(), Error>>;
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>>;
     /// Flush and close any backend resources that require an explicit clean
     /// shutdown boundary. Backends without close-time work may keep the default.
-    fn close(&self) -> Result<(), Error> {
-        Ok(())
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async { Ok(()) })
     }
     /// Configure the number of committed write batches between explicit local
     /// durability boundaries. Backends that do not require an explicit boundary
     /// may keep the default no-op implementation.
-    fn set_write_flush_cadence(&self, _every: usize) -> Result<(), Error> {
-        Ok(())
+    fn set_write_flush_cadence(&self, _every: usize) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async { Ok(()) })
     }
     /// Finish any pending write cadence and make all preceding writes locally
     /// durable. Backends that do not require an explicit boundary may keep the
     /// default no-op implementation.
-    fn flush_write_boundary(&self) -> Result<(), Error> {
-        Ok(())
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async { Ok(()) })
     }
     /// Process-local identity for cache partitioning. Backends may override
     /// this when cheap clones should share cache entries.
@@ -233,66 +241,60 @@ pub trait OrderedKvStorage {
     /// Backends that cannot meter a family return `Ok(None)`, allowing higher
     /// layers to leave byte-budget features disabled rather than relying on
     /// invented accounting.
-    fn approximate_class_bytes(&self, _cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
-        Ok(None)
+    fn approximate_class_bytes(
+        &self,
+        _cf: String,
+    ) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        Box::pin(async { Ok(None) })
     }
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error>;
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>>;
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error>;
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>>;
     fn scan_prefix_reverse(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let mut values = Vec::new();
-        self.scan_prefix(cf, prefix, &mut |key, value| {
-            values.push((key.to_vec(), value.to_vec()));
-            Ok(())
-        })?;
-        for (key, value) in values.into_iter().rev() {
-            visit(&key, &value)?;
-        }
-        Ok(())
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
+        Box::pin(async move {
+            let mut values = self.scan_prefix(cf, prefix).await?;
+            values.reverse();
+            Ok(values)
+        })
     }
     fn last_with_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        let mut last = None;
-        self.scan_prefix(cf, prefix, &mut |key, value| {
-            last = Some((key.to_vec(), value.to_vec()));
-            Ok(())
-        })?;
-        Ok(last)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        Box::pin(async move { Ok(self.scan_prefix(cf, prefix).await?.pop()) })
     }
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        let mut last = None;
-        self.scan_prefix(cf, prefix, &mut |key, value| {
-            if key <= upper {
-                last = Some((key.to_vec(), value.to_vec()));
-            }
-            Ok(())
-        })?;
-        Ok(last)
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        Box::pin(async move {
+            Ok(self
+                .scan_prefix(cf, prefix)
+                .await?
+                .into_iter()
+                .take_while(|(key, _)| key <= &upper)
+                .last())
+        })
     }
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error>;
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>>;
 
     /// Return known column-family names when the backend can enumerate them.
     ///
@@ -303,22 +305,21 @@ pub trait OrderedKvStorage {
         None
     }
 
-    fn range(&self, cf: &ColumnFamilyName, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
-        let mut values = Vec::new();
-        self.scan_range(cf, start, end, &mut |key, value| {
-            values.push((key.to_vec(), value.to_vec()));
-            Ok(())
-        })?;
-        Ok(values)
+    fn range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
+        self.scan_range(cf, start, end)
     }
 
-    fn prefix(&self, cf: &ColumnFamilyName, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
-        let mut values = Vec::new();
-        self.scan_prefix(cf, prefix, &mut |key, value| {
-            values.push((key.to_vec(), value.to_vec()));
-            Ok(())
-        })?;
-        Ok(values)
+    fn prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
+        self.scan_prefix(cf, prefix)
     }
 }
 
