@@ -1341,17 +1341,9 @@ where
         }
     }
 
-    pub fn commit(self) -> Result<(), Error> {
-        self.commit_outcome().into_result()
-    }
-
-    pub fn commit_outcome(self) -> WriteManyOutcome {
+    pub async fn commit(self) -> Result<(), Error> {
         let operations = self.staged_writes.into_inner().into_operations();
-        let borrowed = operations
-            .iter()
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        self.base.write_many_outcome(&borrowed)
+        self.base.write_many(operations).await
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1366,6 +1358,7 @@ where
     }
 }
 
+#[cfg(any())]
 impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
     S: OrderedKvStorage,
@@ -1460,6 +1453,220 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
     }
 }
 
+fn overlay_point_value(
+    mut value: Option<Value>,
+    operations: &[OwnedWriteOperation],
+    cf: &str,
+    key: &[u8],
+) -> Result<Option<Value>, Error> {
+    for operation in operations {
+        if operation.cf() != cf || operation.key() != key {
+            continue;
+        }
+        match operation {
+            OwnedWriteOperation::Set { value: set, .. } => value = Some(set.clone()),
+            OwnedWriteOperation::Delete { .. } => value = None,
+            OwnedWriteOperation::Delta { delta, .. } => {
+                value = Some(apply_storage_delta(value.as_deref(), &delta.encode()?)?);
+            }
+        }
+    }
+    Ok(value)
+}
+
+impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        let operations = self.staged_writes.borrow().operations.clone();
+        Box::pin(async move {
+            if let Some(latest) = operations
+                .iter()
+                .rev()
+                .find(|operation| operation.cf() == cf && operation.key() == key)
+            {
+                match latest {
+                    OwnedWriteOperation::Set { value, .. } => return Ok(Some(value.clone())),
+                    OwnedWriteOperation::Delete { .. } => return Ok(None),
+                    OwnedWriteOperation::Delta { .. } => {}
+                }
+            }
+            let base = self.base.get(cf.clone(), key.clone()).await?;
+            overlay_point_value(base, &operations, &cf, &key)
+        })
+    }
+
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.stage(OwnedWriteOperation::Set { cf, key, value });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        self.stage(OwnedWriteOperation::Delete { cf, key });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn scan_range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        let operations = self.staged_writes.borrow().operations.clone();
+        Box::pin(async move {
+            let mut values = collect_scan(
+                self.base
+                    .scan_range(cf.clone(), start.clone(), end.clone())
+                    .await?,
+            )
+            .await?;
+            let staged = RefCell::new(StagedWriteState::from(operations));
+            overlay_values(
+                &mut values,
+                &cf,
+                |key| key >= start.as_slice() && key < end.as_slice(),
+                &staged,
+            )?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
+        })
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        let operations = self.staged_writes.borrow().operations.clone();
+        Box::pin(async move {
+            let mut values =
+                collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
+            let staged = RefCell::new(StagedWriteState::from(operations));
+            overlay_values(&mut values, &cf, |key| key.starts_with(&prefix), &staged)?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
+        })
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            let mut values = collect_scan(self.scan_prefix(cf, prefix).await?).await?;
+            values.reverse();
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
+        })
+    }
+
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.staged_writes.borrow_mut().extend(operations);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        self.base.approximate_class_bytes(cf)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.base.column_family_names()
+    }
+}
+
+impl<S> OrderedKvStorage for StorageTransaction<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async move {
+            StagedWriteOverlay::new(self.base, &self.staged_writes)
+                .get(cf, key)
+                .await
+        })
+    }
+
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.staged_writes
+            .borrow_mut()
+            .stage(OwnedWriteOperation::Set { cf, key, value });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        self.staged_writes
+            .borrow_mut()
+            .stage(OwnedWriteOperation::Delete { cf, key });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn scan_range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            StagedWriteOverlay::new(self.base, &self.staged_writes)
+                .scan_range(cf, start, end)
+                .await
+        })
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            StagedWriteOverlay::new(self.base, &self.staged_writes)
+                .scan_prefix(cf, prefix)
+                .await
+        })
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            StagedWriteOverlay::new(self.base, &self.staged_writes)
+                .scan_prefix_reverse(cf, prefix)
+                .await
+        })
+    }
+
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.staged_writes.borrow_mut().extend(operations);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        self.base.approximate_class_bytes(cf)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.base.column_family_names()
+    }
+}
+
+#[cfg(any())]
 impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
