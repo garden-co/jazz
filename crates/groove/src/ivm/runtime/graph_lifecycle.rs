@@ -117,6 +117,7 @@ impl IvmRuntime {
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
+        self.prune_unreferenced_arrangements();
         removed
     }
 
@@ -155,8 +156,106 @@ impl IvmRuntime {
     pub(super) fn remove_node_runtime(&mut self, node: NodeId) {
         self.operator_states.retain(|key, _| key.node != node);
         self.arrangement_states.retain(|key, _| key.input != node);
+        self.arrangement_keys_by_input.remove(&node);
         self.eval_memo.retain(|key, _| key.node != node);
         self.node_meta.remove(&node);
+    }
+
+    pub(super) fn prune_unreferenced_arrangements(&mut self) {
+        let mut referenced = HashSet::new();
+        for node in self.graph.nodes().values() {
+            match &node.descriptor.operator {
+                OpType::Join(join) | OpType::SemiJoin(join) | OpType::AntiJoin(join) => {
+                    if let [left, right] = node.descriptor.inputs.as_slice() {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *left,
+                            fields: Arc::from(plan_expr_names(&join.left_key)),
+                            descriptor: join.left_descriptor,
+                            comparison: join.comparison,
+                        });
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *right,
+                            fields: Arc::from(plan_expr_names(&join.right_key)),
+                            descriptor: join.right_descriptor,
+                            comparison: join.comparison,
+                        });
+                    }
+                }
+                OpType::ArgMaxBy(arg_by) => {
+                    if let [input] = node.descriptor.inputs.as_slice() {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(arg_by.group_fields.clone()),
+                            descriptor: node.descriptor.output,
+                            comparison: ValueComparison::Exact,
+                        });
+                    }
+                }
+                OpType::ArgMinBy(arg_by) => {
+                    if let [input] = node.descriptor.inputs.as_slice() {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(arg_by.group_fields.clone()),
+                            descriptor: node.descriptor.output,
+                            comparison: ValueComparison::Exact,
+                        });
+                    }
+                }
+                OpType::TopBy(top_by) => {
+                    if let [input] = node.descriptor.inputs.as_slice() {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(top_by.group_fields.clone()),
+                            descriptor: node.descriptor.output,
+                            comparison: ValueComparison::Exact,
+                        });
+                    }
+                }
+                OpType::CollectBy(collect_by) => {
+                    if let [input] = node.descriptor.inputs.as_slice()
+                        && let Some(input_node) = self.graph.node(*input)
+                    {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(collect_by.group_fields.clone()),
+                            descriptor: input_node.descriptor.output,
+                            comparison: ValueComparison::Exact,
+                        });
+                    }
+                }
+                OpType::Aggregate(aggregate) => {
+                    if let [input] = node.descriptor.inputs.as_slice()
+                        && let Some(input_node) = self.graph.node(*input)
+                    {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(plan_expr_names(&aggregate.group_key)),
+                            descriptor: input_node.descriptor.output,
+                            comparison: ValueComparison::Exact,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.arrangement_states.retain(|key, _| {
+            referenced.iter().any(|referenced| {
+                referenced.input == key.input
+                    && referenced.fields == key.fields
+                    && referenced.descriptor == key.descriptor
+            })
+        });
+        self.arrangement_keys_by_input.retain(|_, keys| {
+            keys.retain(|key| self.arrangement_states.contains_key(key));
+            !keys.is_empty()
+        });
     }
 
     pub(super) fn retained_recursive_nodes_are_current(&self, current_tick: u64) -> bool {

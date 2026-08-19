@@ -177,6 +177,7 @@ pub struct IvmRuntime {
     /// fragment, key fields, descriptor, and scope so similar queries can share
     /// expensive context-independent arrangements.
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
     /// Input-owned memoization for pure node evaluation results. Entries are
     /// keyed by node/scope/context inputs and validated against per-input
     /// frontier counters before reuse; operator state remains owned separately.
@@ -217,6 +218,7 @@ impl IvmRuntime {
             defer_subscription_notifications: false,
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
+            arrangement_keys_by_input: HashMap::default(),
             eval_memo: HashMap::default(),
             table_frontiers: HashMap::default(),
             binding_frontiers: HashMap::default(),

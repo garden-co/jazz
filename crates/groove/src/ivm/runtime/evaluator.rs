@@ -124,6 +124,7 @@ pub(super) struct TickEvaluator<'a, S> {
     pub(super) current_tick: u64,
     pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    pub(super) arrangement_keys_by_input: &'a mut HashMap<NodeId, HashSet<ArrangementKey>>,
     pub(super) eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     pub(super) eval_memo_bytes: &'a mut usize,
     pub(super) table_frontiers: &'a HashMap<String, u64>,
@@ -153,6 +154,7 @@ pub(super) struct GraphRuntimeView<'a, S> {
     pub(super) current_tick: u64,
     pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    pub(super) arrangement_keys_by_input: &'a mut HashMap<NodeId, HashSet<ArrangementKey>>,
     pub(super) eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     pub(super) eval_memo_bytes: &'a mut usize,
     pub(super) table_frontiers: &'a HashMap<String, u64>,
@@ -176,6 +178,7 @@ fn graph_runtime_view<'a, S>(
     current_tick: u64,
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    arrangement_keys_by_input: &'a mut HashMap<NodeId, HashSet<ArrangementKey>>,
     eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     eval_memo_bytes: &'a mut usize,
     table_frontiers: &'a HashMap<String, u64>,
@@ -197,6 +200,7 @@ fn graph_runtime_view<'a, S>(
         current_tick,
         operator_states,
         arrangement_states,
+        arrangement_keys_by_input,
         eval_memo,
         eval_memo_bytes,
         table_frontiers,
@@ -231,6 +235,7 @@ where
             current_tick: self.current_tick,
             operator_states: self.operator_states,
             arrangement_states: self.arrangement_states,
+            arrangement_keys_by_input: self.arrangement_keys_by_input,
             eval_memo: self.eval_memo,
             eval_memo_bytes: self.eval_memo_bytes,
             table_frontiers: self.table_frontiers,
@@ -280,6 +285,7 @@ where
             current_tick: self.current_tick,
             operator_states: self.operator_states,
             arrangement_states: self.arrangement_states,
+            arrangement_keys_by_input: self.arrangement_keys_by_input,
             eval_memo: &mut isolated_memo,
             eval_memo_bytes: &mut isolated_memo_bytes,
             table_frontiers: self.table_frontiers,
@@ -318,6 +324,7 @@ where
             current_tick: self.current_tick,
             operator_states: self.operator_states,
             arrangement_states: self.arrangement_states,
+            arrangement_keys_by_input: self.arrangement_keys_by_input,
             eval_memo: self.eval_memo,
             eval_memo_bytes: self.eval_memo_bytes,
             table_frontiers: self.table_frontiers,
@@ -1148,9 +1155,9 @@ where
                 .value_mut()
                 .replace_keys(keys.iter(), right_arrangement.value().clone());
         } else {
-            self.arrangement_states.insert(right_key, right_arrangement);
+            self.insert_arrangement(right_key, right_arrangement);
         }
-        self.arrangement_states.insert(left_key, left_arrangement);
+        self.insert_arrangement(left_key, left_arrangement);
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
@@ -1223,9 +1230,9 @@ where
         if left_key == right_key {
             left_arrangement = right_arrangement;
         } else {
-            self.arrangement_states.insert(right_key, right_arrangement);
+            self.insert_arrangement(right_key, right_arrangement);
         }
-        self.arrangement_states.insert(left_key, left_arrangement);
+        self.insert_arrangement(left_key, left_arrangement);
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
@@ -1298,9 +1305,9 @@ where
         if left_key == right_key {
             left_arrangement = right_arrangement;
         } else {
-            self.arrangement_states.insert(right_key, right_arrangement);
+            self.insert_arrangement(right_key, right_arrangement);
         }
-        self.arrangement_states.insert(left_key, left_arrangement);
+        self.insert_arrangement(left_key, left_arrangement);
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
@@ -1413,7 +1420,7 @@ where
                 output.push(RecordDelta { record, weight: 1 });
             }
         }
-        self.arrangement_states.insert(arrangement_key, arrangement);
+        self.insert_arrangement(arrangement_key, arrangement);
 
         Ok(RecordDeltas {
             descriptor: output_desc,
@@ -1505,7 +1512,7 @@ where
             extend_root_window_positions(output_desc, &after, &mut windows.after)?;
             output.extend(diff_record_windows(before, after));
         }
-        self.arrangement_states.insert(arrangement_key, arrangement);
+        self.insert_arrangement(arrangement_key, arrangement);
 
         Ok(RecordDeltas {
             descriptor: output_desc,
@@ -1715,7 +1722,7 @@ where
                 }
             }
         }
-        self.arrangement_states.insert(arrangement_key, arrangement);
+        self.insert_arrangement(arrangement_key, arrangement);
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas: output,
@@ -1781,7 +1788,7 @@ where
                     ArrangementUpdateMode::Replace,
                 )?;
                 arrangement.mark_forward_as_of(self.arrangement_sub_tick(&arrangement_key))?;
-                self.arrangement_states.insert(arrangement_key, arrangement);
+                self.insert_arrangement(arrangement_key, arrangement);
             }
             let mut output = Vec::new();
             for records in groups.values() {
@@ -1895,7 +1902,7 @@ where
         if should_apply_arrangement {
             match self.context.arrangement_update_mode {
                 ArrangementUpdateMode::Accumulate => {
-                    let arrangement = self.arrangement_states.entry(arrangement_key).or_default();
+                    let arrangement = self.arrangement_entry(arrangement_key);
                     arrangement.mark_forward_as_of(sub_tick)?;
                     arrangement
                         .value_mut()
@@ -1911,7 +1918,7 @@ where
                     } else {
                         arrangement.mark_forward_as_of(sub_tick)?;
                     }
-                    self.arrangement_states.insert(arrangement_key, arrangement);
+                    self.insert_arrangement(arrangement_key, arrangement);
                 }
             }
         }
@@ -2016,6 +2023,22 @@ where
         }
     }
 
+    fn insert_arrangement(&mut self, key: ArrangementKey, state: AsOf<ArrangementState, SubTick>) {
+        self.arrangement_keys_by_input
+            .entry(key.input)
+            .or_default()
+            .insert(key.clone());
+        self.arrangement_states.insert(key, state);
+    }
+
+    fn arrangement_entry(&mut self, key: ArrangementKey) -> &mut AsOf<ArrangementState, SubTick> {
+        self.arrangement_keys_by_input
+            .entry(key.input)
+            .or_default()
+            .insert(key.clone());
+        self.arrangement_states.entry(key).or_default()
+    }
+
     async fn update_recursive(
         &mut self,
         node: NodeId,
@@ -2080,6 +2103,7 @@ where
                 self.current_tick,
                 self.operator_states,
                 self.arrangement_states,
+                self.arrangement_keys_by_input,
                 self.eval_memo,
                 self.eval_memo_bytes,
                 self.table_frontiers,
@@ -2112,6 +2136,7 @@ where
                 self.current_tick,
                 self.operator_states,
                 self.arrangement_states,
+                self.arrangement_keys_by_input,
                 self.eval_memo,
                 self.eval_memo_bytes,
                 self.table_frontiers,
