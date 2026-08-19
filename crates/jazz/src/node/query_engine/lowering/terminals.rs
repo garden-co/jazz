@@ -265,7 +265,7 @@ pub(super) fn lowered_terminals(
                     })?;
                     let output = fact_output_with_terminal(
                         fact,
-                        ProgramFactTerminal::SupportMembership,
+                        ProgramFactTerminal::Primary,
                         plan,
                         resolved_source,
                         resolved_sources,
@@ -301,7 +301,7 @@ pub(super) fn lowered_terminals(
                         })?;
                     let output = fact_output_with_terminal(
                         fact,
-                        ProgramFactTerminal::SupportMembership,
+                        ProgramFactTerminal::Primary,
                         plan,
                         resolved_source,
                         resolved_sources,

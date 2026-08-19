@@ -179,7 +179,6 @@ pub(crate) struct MaintainedTerminalSchemas {
 #[derive(Clone, Debug)]
 enum MaintainedTerminalKind {
     ResultCurrent(ResultMembershipSchema),
-    ResultSupport(ResultMembershipSchema),
     AggregateResult(AggregateResultSchema),
     VersionContent(VersionWitnessSchema),
     VersionDeletion(VersionWitnessSchema),
@@ -924,11 +923,6 @@ impl MaintainedTerminalSchemas {
                 ) => Some(MaintainedTerminalKind::ResultCurrent(schema.clone())),
                 (
                     ProgramFactKey::ResultMembership,
-                    ProgramFactTerminal::SupportMembership,
-                    ProgramFactSchema::ResultMembership(schema),
-                ) => Some(MaintainedTerminalKind::ResultSupport(schema.clone())),
-                (
-                    ProgramFactKey::ResultMembership,
                     ProgramFactTerminal::Primary,
                     ProgramFactSchema::AggregateResult(schema),
                 ) => Some(MaintainedTerminalKind::AggregateResult(schema.clone())),
@@ -1083,9 +1077,7 @@ impl MaintainedTerminalKind {
     fn is_result_terminal(&self) -> bool {
         matches!(
             self,
-            MaintainedTerminalKind::ResultCurrent(_)
-                | MaintainedTerminalKind::ResultSupport(_)
-                | MaintainedTerminalKind::AggregateResult(_)
+            MaintainedTerminalKind::ResultCurrent(_) | MaintainedTerminalKind::AggregateResult(_)
         )
     }
 
@@ -1109,9 +1101,7 @@ fn decode_typed_terminal_record(
         MaintainedTerminalKind::IgnoredAggregateAppRows => {
             unreachable!("ignored aggregate app-row terminals are filtered before record decoding")
         }
-        MaintainedTerminalKind::ResultCurrent(schema)
-        | MaintainedTerminalKind::ResultSupport(schema) => {
-            let supporting = matches!(kind, MaintainedTerminalKind::ResultSupport(_));
+        MaintainedTerminalKind::ResultCurrent(schema) => {
             let table_name = match record.get_idx(field_idx(record, &schema.table_field)?)? {
                 Value::String(value) => value,
                 _ => {
@@ -1203,16 +1193,13 @@ fn decode_typed_terminal_record(
                         })
                 })
                 .transpose()?;
-            let mut member = RealRowMemberEntry::current_content((
+            let member = RealRowMemberEntry::current_content((
                 table.name.clone().into(),
                 row_uuid,
                 TxId::new(tx_time, tx_node),
             ))
             .with_occurrence_id(occurrence_id)
             .with_settle_position(settle_position);
-            if supporting {
-                member.source = member.source.supporting();
-            }
             let member: ResultMemberEntry = match flat_join_digest {
                 Some(digest) => member.with_row_digest(digest),
                 None => member,

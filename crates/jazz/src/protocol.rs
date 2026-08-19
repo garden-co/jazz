@@ -2015,33 +2015,6 @@ pub enum ResultRowSource {
         /// Base source under the overlay.
         base: Box<ResultRowSource>,
     },
-    /// A real row transported to materialize a public result, but which is not
-    /// itself a member of the public result set.
-    Support {
-        /// Source that produced the supporting row.
-        base: Box<ResultRowSource>,
-    },
-}
-
-impl ResultRowSource {
-    pub(crate) fn supporting(self) -> Self {
-        Self::Support {
-            base: Box::new(self),
-        }
-    }
-
-    pub(crate) fn is_supporting(&self) -> bool {
-        match self {
-            Self::Support { .. } => true,
-            Self::LensProjection { base, .. } | Self::Overlay { base, .. } => base.is_supporting(),
-            Self::Merge { inputs } => inputs.iter().any(Self::is_supporting),
-            Self::Current
-            | Self::Branch { .. }
-            | Self::MergedBranches { .. }
-            | Self::Snapshot { .. }
-            | Self::HistoryCut { .. } => false,
-        }
-    }
 }
 
 impl ResultMemberEntry {
@@ -2070,12 +2043,6 @@ impl ResultMemberEntry {
 
     /// Return the stable rendered-output address for a real-row member.
     pub fn output_occurrence_id(&self) -> Option<OutputOccurrenceId> {
-        if self
-            .as_real_row()
-            .is_some_and(|row| row.source.is_supporting())
-        {
-            return None;
-        }
         match self {
             Self::TypedRow { occurrence_key, .. } => Some(occurrence_key.as_occurrence().clone()),
             _ => self
