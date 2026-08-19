@@ -354,6 +354,8 @@ pub enum IvmRuntimeError {
     StorageUnavailable,
     #[error("subscription shape not found: {0:?}")]
     PreparedShapeNotFound(PreparedShapeId),
+    #[error("cannot retire prepared shape {0:?} while it has active bindings")]
+    PreparedShapeHasActiveBindings(PreparedShapeId),
     #[error("runtime state is stale: expected={expected}, actual={actual:?}")]
     StaleRuntimeState {
         expected: String,
