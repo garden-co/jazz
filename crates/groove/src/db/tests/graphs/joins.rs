@@ -6,7 +6,7 @@ use super::*;
 fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
 
     let first = database
@@ -38,7 +38,7 @@ fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
 #[test]
 fn union_subscriptions_receive_deltas_from_multiple_tables() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "archived_albums"],
     )
@@ -78,7 +78,7 @@ fn union_subscriptions_receive_deltas_from_multiple_tables() {
 fn union_all_subscriptions_preserve_duplicate_derivations() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let album_titles = GraphBuilder::table("albums").project(["title"]);
     let subscription_id = database
@@ -105,7 +105,7 @@ fn union_all_subscriptions_preserve_duplicate_derivations() {
 fn filter_subscriptions_emit_only_matching_rows() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription_id = database
         .subscribe_one_sink(
@@ -134,7 +134,7 @@ fn filter_subscriptions_emit_only_matching_rows() {
 fn project_subscriptions_emit_projected_records() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums").project(["title"]))
@@ -156,7 +156,7 @@ fn project_subscriptions_emit_projected_records() {
 fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let graph = GraphBuilder::table("albums")
         .filter(PredicateExpr::eq(
@@ -195,7 +195,7 @@ fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
 #[test]
 fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -637,7 +637,7 @@ fn query_graph_joins_related_tables_through_database_facade() {
 #[test]
 fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -689,7 +689,7 @@ fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
 #[test]
 fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -775,7 +775,7 @@ fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
 #[test]
 fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -810,7 +810,7 @@ fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
 #[test]
 fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -854,7 +854,7 @@ fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
 #[test]
 fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -905,7 +905,7 @@ fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
 #[test]
 fn semi_join_hydration_snapshot_filters_missing_right_matches() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -952,7 +952,7 @@ fn semi_join_hydration_snapshot_filters_missing_right_matches() {
 #[test]
 fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -1002,7 +1002,7 @@ fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
 #[test]
 fn anti_join_only_changes_when_right_count_crosses_zero() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "blocks"],
     )
@@ -1055,7 +1055,7 @@ fn anti_join_only_changes_when_right_count_crosses_zero() {
 #[test]
 fn anti_join_hydration_snapshot_filters_existing_right_matches() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -1105,7 +1105,7 @@ fn anti_join_hydration_snapshot_filters_existing_right_matches() {
 #[test]
 fn anti_join_filters_identical_descriptors_before_projection() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
@@ -1133,7 +1133,7 @@ fn anti_join_filters_identical_descriptors_before_projection() {
 #[test]
 fn anti_join_hydration_snapshot_filters_many_existing_identical_descriptor_blockers() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
@@ -1195,7 +1195,7 @@ fn anti_join_hydration_snapshot_filters_many_existing_identical_descriptor_block
 #[test]
 fn anti_join_retracts_identical_descriptor_projection_when_blocker_arrives() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
@@ -1230,7 +1230,7 @@ fn anti_join_retracts_identical_descriptor_projection_when_blocker_arrives() {
 #[test]
 fn anti_join_remembers_blocker_inserted_before_matching_left_key_exists() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
@@ -1270,7 +1270,7 @@ fn anti_join_remembers_blocker_inserted_before_matching_left_key_exists() {
 #[test]
 fn anti_join_retracts_when_right_update_moves_onto_left_key() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
@@ -1309,7 +1309,7 @@ fn anti_join_retracts_when_right_update_moves_onto_left_key() {
 #[test]
 fn anti_join_resubscribe_hydrates_from_storage_after_unretained_changes() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )

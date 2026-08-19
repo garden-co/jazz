@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn database_creation_dedups_schema_indices_as_durable_nodes() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -31,7 +31,7 @@ fn database_creation_dedups_schema_indices_as_durable_nodes() {
 #[test]
 fn persist_maintains_schema_index_entries() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -83,7 +83,7 @@ fn persist_maintains_schema_index_entries() {
 #[test]
 fn persist_consolidates_same_tick_deltas_and_rejects_unique_conflicts() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -214,7 +214,7 @@ fn public_database_facade_reads_secondary_indexes_with_memory_storage() {
 #[test]
 fn index_reads_track_insert_update_delete_and_prefixes() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
@@ -302,7 +302,7 @@ fn index_reads_track_insert_update_delete_and_prefixes() {
 #[test]
 fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_finite() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "indices"],
     )
@@ -368,7 +368,7 @@ fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_finite(
 #[test]
 fn persisted_index_update_preserves_entry_when_index_key_is_unchanged() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "indices"],
     )
@@ -421,7 +421,7 @@ fn persisted_index_update_preserves_entry_when_index_key_is_unchanged() {
 #[test]
 fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["docs", "indices"],
     )
@@ -517,7 +517,7 @@ fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
 #[test]
 fn index_get_on_unique_index_returns_zero_or_one_record() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
@@ -562,7 +562,7 @@ fn index_get_on_unique_index_returns_zero_or_one_record() {
 #[test]
 fn tuple_columns_work_in_index_keys_and_nullable_columns() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "indices"],
     )
@@ -623,7 +623,7 @@ fn tuple_columns_work_in_index_keys_and_nullable_columns() {
 #[test]
 fn raw_reads_return_encoded_base_records() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
@@ -680,7 +680,7 @@ fn raw_reads_return_encoded_base_records() {
 #[test]
 fn persisted_index_scan_treats_missing_primary_key_record_as_invalid() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -709,7 +709,7 @@ fn persisted_index_scan_treats_missing_primary_key_record_as_invalid() {
 #[test]
 fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "indices"],
     )
@@ -766,7 +766,7 @@ fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
 #[test]
 fn randomized_index_reads_match_full_scan_oracle() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
@@ -813,7 +813,7 @@ fn randomized_index_reads_match_full_scan_oracle() {
 #[test]
 fn persisted_index_keys_sort_by_index_value_then_primary_key() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -851,7 +851,7 @@ fn persisted_index_keys_sort_by_index_value_then_primary_key() {
 #[test]
 fn durable_non_unique_index_keys_append_separator_and_primary_key_suffix() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -884,7 +884,7 @@ fn durable_non_unique_index_keys_append_separator_and_primary_key_suffix() {
 #[test]
 fn unique_indices_use_only_index_columns_as_storage_keys() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -916,7 +916,7 @@ fn unique_indices_use_only_index_columns_as_storage_keys() {
 #[test]
 fn durable_unique_index_keys_omit_primary_key_suffix() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -963,7 +963,7 @@ fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_key() 
     ]))
     .with_index(IndexSchema::new("by_tx", ["stamp", "node", "row"]))]);
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "indices"],
     )
@@ -1025,7 +1025,7 @@ fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_key() 
 #[test]
 fn unique_indices_reject_existing_conflicting_values() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -1061,7 +1061,7 @@ fn unique_indices_reject_existing_conflicting_values() {
 #[test]
 fn durable_unique_indices_reject_positive_delta_for_existing_different_record() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -1090,7 +1090,7 @@ fn durable_unique_indices_reject_positive_delta_for_existing_different_record() 
 #[test]
 fn unique_indices_reject_conflicts_within_one_batch() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -1127,7 +1127,7 @@ fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
     let index_graph = GraphBuilder::index("albums", "albums_by_title");
 
     {
-        let storage = TestStorage::open(
+        let storage = TestBtreeStorage::open(
             temp_dir.path().join("groove-test.btree"),
             &["albums", "indices"],
         )
@@ -1145,7 +1145,7 @@ fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
     }
 
     {
-        let storage = TestStorage::open(
+        let storage = TestBtreeStorage::open(
             temp_dir.path().join("groove-test.btree"),
             &["albums", "indices"],
         )
@@ -1214,7 +1214,7 @@ fn persisted_indices_can_be_deleted_after_restart() {
     let index_graph = GraphBuilder::index("albums", "albums_by_title");
 
     {
-        let storage = TestStorage::open(
+        let storage = TestBtreeStorage::open(
             temp_dir.path().join("groove-test.btree"),
             &["albums", "indices"],
         )
@@ -1232,7 +1232,7 @@ fn persisted_indices_can_be_deleted_after_restart() {
     }
 
     {
-        let storage = TestStorage::open(
+        let storage = TestBtreeStorage::open(
             temp_dir.path().join("groove-test.btree"),
             &["albums", "indices"],
         )

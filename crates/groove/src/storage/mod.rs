@@ -16,6 +16,8 @@
 mod key_codec;
 mod memory;
 mod opfs;
+#[cfg(any(test, feature = "test"))]
+mod test;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,11 +30,13 @@ use thiserror::Error;
 
 pub use memory::MemoryStorage;
 #[cfg(test)]
-pub type TestStorage = NativeBtreeStorage;
+pub type TestBtreeStorage = NativeBtreeStorage;
 #[cfg(target_arch = "wasm32")]
 pub use opfs::OpfsStorage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
+#[cfg(any(test, feature = "test"))]
+pub use test::{TestStorage, TestStorageControl, TestStorageOperation};
 
 pub type ColumnFamilyName = str;
 pub type Key = [u8];
@@ -369,11 +373,15 @@ pub trait OrderedKvStorage {
         cf: String,
         start: Vec<u8>,
         end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
         Box::pin(async move { collect_scan(self.scan_range(cf, start, end).await?).await })
     }
 
-    fn prefix(&self, cf: String, prefix: Vec<u8>) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    fn prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
         Box::pin(async move { collect_scan(self.scan_prefix(cf, prefix).await?).await })
     }
 }
@@ -2254,7 +2262,8 @@ mod tests {
     fn get_set_and_delete_values() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
         storage.set("records", b"a", b"one").unwrap();
         assert_eq!(storage.get("records", b"a").unwrap(), Some(b"one".to_vec()));
@@ -2266,7 +2275,7 @@ mod tests {
     #[test]
     fn native_durable_test_store_keeps_writes_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = TestStorage::open_with_sync_policy(
+        let storage = TestBtreeStorage::open_with_sync_policy(
             temp_dir.path().join("groove-test.btree"),
             &["records"],
             BtreeSyncPolicy::OnClose,
@@ -2282,7 +2291,8 @@ mod tests {
     fn range_returns_ordered_values_between_start_and_end() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
         storage.set("records", b"a", b"one").unwrap();
         storage.set("records", b"b", b"two").unwrap();
@@ -2301,7 +2311,8 @@ mod tests {
     fn prefix_returns_ordered_values_with_matching_prefix() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
         storage.set("records", b"user:1", b"a").unwrap();
         storage.set("records", b"user:2", b"b").unwrap();
@@ -2320,7 +2331,8 @@ mod tests {
     fn prefix_handles_prefixes_without_a_finite_upper_bound() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
         storage.set("records", &[0xfe], b"before").unwrap();
         storage.set("records", &[0xff, 0x00], b"a").unwrap();
@@ -2339,7 +2351,8 @@ mod tests {
     fn direct_operations_report_missing_column_families() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
         assert!(matches!(
             storage.get("missing", b"a"),
@@ -2375,7 +2388,8 @@ mod tests {
     fn scans_visit_ordered_values_without_materializing_in_storage_api() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
         storage.set("records", b"a", b"one").unwrap();
         storage.set("records", b"b", b"two").unwrap();
@@ -2401,7 +2415,7 @@ mod tests {
     #[test]
     fn write_many_writes_all_operations_atomically() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = TestStorage::open(
+        let storage = TestBtreeStorage::open(
             temp_dir.path().join("groove-test.btree"),
             &["records", "indices"],
         )
@@ -2518,7 +2532,8 @@ mod tests {
     fn write_many_fails_without_writing_when_column_family_is_missing() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
         let error = storage
             .write_many(&[
@@ -2709,7 +2724,8 @@ mod tests {
     fn write_many_can_mix_sets_and_deletes_atomically() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
         storage.set("records", b"old", b"value").unwrap();
         storage
@@ -3102,7 +3118,8 @@ mod tests {
     fn record_store_writes_and_reads_typed_records() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
         let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
         let store = RecordStore::new(&storage, "records", &descriptor);
         let key = b"1".as_slice();
@@ -3119,7 +3136,8 @@ mod tests {
     fn native_durable_test_store_conforms_to_delta_append_contract() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
         conformance::delta_append_current_winner_observes_merged_state(storage);
     }
 
@@ -3147,7 +3165,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         {
             let storage =
-                TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+                TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                    .unwrap();
             storage
                 .write_many(&[WriteOperation::delta(
                     "records",
@@ -3164,7 +3183,8 @@ mod tests {
                 .unwrap();
         }
         let reopened =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
         assert_eq!(
             reopened.get("records", b"row").unwrap(),
             Some(record(20, 2, b"newer"))

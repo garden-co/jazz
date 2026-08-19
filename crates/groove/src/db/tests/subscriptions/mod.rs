@@ -6,7 +6,7 @@ use super::*;
 fn subscribe_sends_empty_hydration_snapshot_without_writes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -26,7 +26,8 @@ fn history_rows_remain_plain_across_hydration_post_write_and_reopen() {
 
     {
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &column_families).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &column_families)
+                .unwrap();
         let mut database = Database::new(schema.clone(), storage).unwrap();
         seed_jazz_docs_history(&mut database, 0, 12);
 
@@ -59,7 +60,8 @@ fn history_rows_remain_plain_across_hydration_post_write_and_reopen() {
     }
 
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &column_families).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &column_families)
+            .unwrap();
     let mut database = Database::new(schema, storage).unwrap();
     assert_eq!(
         database
@@ -122,7 +124,7 @@ fn seed_jazz_docs_history<S: OrderedKvStorage>(
 fn rejects_unknown_tables() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let mut batch = database.open_batch();
     batch.insert("missing", vec![Value::U64(1)]);
@@ -137,7 +139,7 @@ fn rejects_unknown_tables() {
 fn invalid_batches_do_not_partially_write_valid_earlier_operations() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let mut batch = database.open_batch();
     batch.insert(
@@ -263,7 +265,7 @@ fn atomic_commit_path_supports_indexed_join_and_recursive_workloads() {
 fn subscriptions_reject_unknown_tables_and_indices() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
 
     assert!(matches!(
@@ -288,7 +290,7 @@ fn rejects_primary_key_type_mismatches_before_writing() {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(schema, storage).unwrap();
     let mut batch = database.open_batch();
     batch.insert(
@@ -311,7 +313,7 @@ fn rejects_primary_key_type_mismatches_before_writing() {
 fn inserts_accept_values_in_table_declaration_order_even_when_storage_order_differs() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let schema = DatabaseSchema::new([TableSchema::new(
         "albums",
         [
@@ -395,7 +397,7 @@ fn record_valued_columns_round_trip_through_table_storage() {
 #[test]
 fn integer_primary_keys_are_stored_with_tagged_order_preserving_keys() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["u8_keys", "u16_keys", "u32_keys", "u64_keys"],
     )
@@ -446,7 +448,7 @@ fn integer_primary_keys_are_stored_with_tagged_order_preserving_keys() {
 fn composite_primary_keys_are_encoded_from_multiple_columns() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["history"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["history"]).unwrap();
     let mut database = Database::new(composite_key_schema(), storage).unwrap();
     let row_uuid = vec![1, 0, 2];
     let key = PrimaryKeyValue::Composite(vec![
@@ -499,7 +501,8 @@ fn composite_primary_keys_are_encoded_from_multiple_columns() {
 #[test]
 fn rejects_tables_without_primary_keys() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["logs"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["logs"]).unwrap();
     let mut database = Database::new(
         DatabaseSchema::new([TableSchema::new(
             "logs",
@@ -521,7 +524,7 @@ fn rejects_tables_without_primary_keys() {
 fn table_subscriptions_receive_insert_update_and_delete_messages() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -565,7 +568,7 @@ fn table_subscriptions_receive_insert_update_and_delete_messages() {
 fn dropping_subscription_receiver_unsubscribes_on_next_message() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -587,7 +590,7 @@ fn dropping_subscription_receiver_unsubscribes_on_next_message() {
 fn dropped_subscription_receiver_can_be_pruned_without_a_later_message() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -605,7 +608,7 @@ fn dropped_subscription_receiver_can_be_pruned_without_a_later_message() {
 fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();
@@ -641,7 +644,7 @@ fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() {
 fn subscription_owns_initial_snapshot_separately_from_incremental_receiver() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();
@@ -681,7 +684,7 @@ fn subscription_owns_initial_snapshot_separately_from_incremental_receiver() {
 fn subscribe_query_filters_current_rows_in_initial_message() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();

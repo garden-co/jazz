@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn arg_max_by_hydrates_and_tracks_winner_changes() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -58,7 +58,7 @@ fn arg_max_by_hydrates_and_tracks_winner_changes() {
 #[test]
 fn arg_max_by_suppresses_non_winner_and_net_zero_deltas() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -90,7 +90,7 @@ fn arg_max_by_suppresses_non_winner_and_net_zero_deltas() {
 #[test]
 fn arg_max_by_handles_multi_delta_same_group_and_tie_by_pk_order() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -113,7 +113,7 @@ fn arg_max_by_handles_multi_delta_same_group_and_tie_by_pk_order() {
 #[test]
 fn arg_min_by_hydrates_initial_snapshot_winner() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -144,7 +144,7 @@ fn arg_min_by_hydrates_initial_snapshot_winner() {
 #[test]
 fn arg_min_by_tracks_lower_insert_and_current_winner_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -187,7 +187,7 @@ fn arg_min_by_tracks_lower_insert_and_current_winner_delete() {
 #[test]
 fn arg_min_by_handles_same_tick_replacement_and_tie_by_pk_order() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -220,7 +220,7 @@ fn arg_min_by_handles_same_tick_replacement_and_tie_by_pk_order() {
 #[test]
 fn top_by_hydrates_limit_two() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -253,7 +253,7 @@ fn top_by_hydrates_limit_two() {
 #[test]
 fn top_by_finite_zero_stays_empty() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -278,7 +278,7 @@ fn top_by_finite_zero_stays_empty() {
 #[test]
 fn top_by_boundary_insert_and_delete_updates_window() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -322,7 +322,7 @@ fn top_by_boundary_insert_and_delete_updates_window() {
 #[test]
 fn top_by_suppresses_outside_window_changes() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -353,7 +353,7 @@ fn top_by_suppresses_outside_window_changes() {
 #[test]
 fn top_by_descending_order_keeps_largest_values() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -386,7 +386,7 @@ fn top_by_descending_order_keeps_largest_values() {
 #[test]
 fn top_by_offset_keeps_requested_window() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -423,7 +423,7 @@ fn top_by_offset_keeps_requested_window() {
 fn top_by_orders_nullable_sort_keys_null_first() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["scores"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["scores"]).unwrap();
     let mut database = Database::new(nullable_scores_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();
@@ -474,7 +474,7 @@ fn top_by_orders_nullable_sort_keys_null_first() {
 #[test]
 fn top_by_uses_stable_tie_field() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -523,7 +523,7 @@ fn union_history_top_by(offset: u64, limit: u64) -> GraphBuilder {
 #[test]
 fn top_by_counts_duplicate_multiplicity_toward_window_occupancy() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "history_shadow"],
     )
@@ -548,7 +548,7 @@ fn top_by_counts_duplicate_multiplicity_toward_window_occupancy() {
 #[test]
 fn top_by_offset_splits_duplicate_copies_across_boundary() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "history_shadow"],
     )
@@ -581,7 +581,7 @@ fn top_by_offset_splits_duplicate_copies_across_boundary() {
 #[test]
 fn top_by_emits_weighted_diff_when_duplicate_copy_enters_window() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "history_shadow"],
     )
@@ -624,7 +624,7 @@ fn top_by_emits_weighted_diff_when_duplicate_copy_enters_window() {
 #[test]
 fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "history_shadow"],
     )
@@ -659,7 +659,7 @@ fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
 #[test]
 fn top_by_maintains_weighted_window_across_duplicate_lifecycle() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "history_shadow"],
     )
