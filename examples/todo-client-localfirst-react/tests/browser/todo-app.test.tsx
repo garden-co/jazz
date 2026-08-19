@@ -95,7 +95,9 @@ describe("React Todo App E2E", () => {
     el.remove();
     mounts.splice(idx, 1);
     // Give OPFS handles time to release
-    await new Promise((r) => setTimeout(r, 200));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 200));
+    });
   }
 
   afterEach(async () => {

@@ -140,7 +140,9 @@ describe("React Todo App core browser canary", () => {
     await act(async () => root.unmount());
     el.remove();
     mounts.splice(idx, 1);
-    await new Promise((r) => setTimeout(r, 200));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 200));
+    });
   }
 
   afterEach(async () => {
