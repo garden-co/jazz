@@ -1250,13 +1250,16 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn test_content_current_with_version(
+    pub(crate) async fn test_content_current_with_version(
         &mut self,
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<groove::ivm::RecordDeltas, Error> {
         let graph = self.maintained_view_content_current_with_version(table, tier)?;
-        self.database.query_graph(graph).map_err(Error::Groove)
+        self.database
+            .query_graph(graph)
+            .await
+            .map_err(Error::Groove)
     }
 
     /// Pick the policy-owning schema for one authorization-support operation.
@@ -1373,6 +1376,7 @@ where
 mod authorization_scope_compiler_tests {
     use super::*;
     use crate::ids::NodeUuid;
+    use crate::legacy_test_future::ResultFutureExt as _;
     use crate::node::NodeState;
     use crate::protocol::TableLens;
     use crate::schema::WritePolicies;

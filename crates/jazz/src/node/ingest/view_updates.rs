@@ -778,23 +778,20 @@ where
         let table_id = self.physical_table_id_for_authored_test_table(table)?;
         let actual = self.require_merge_heads(table_id, row_uuid).await?;
         if actual != expected {
-            let versions = self
-                .query_row_versions(table, row_uuid)
-                .await?
-                .into_iter()
-                .map(|version| {
-                    let tx_id = self.version_tx_id(&version)?;
-                    let fate = self
-                        .query_transaction(tx_id)?
-                        .map(|tx| tx.fate)
-                        .unwrap_or(Fate::Pending);
-                    Ok(format!(
-                        "{tx_id:?} layer={:?} parents={:?} fate={fate:?}",
-                        version.layer(),
-                        version.parents()
-                    ))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
+            let mut versions = Vec::new();
+            for version in self.query_row_versions(table, row_uuid).await? {
+                let tx_id = self.version_tx_id(&version)?;
+                let fate = self
+                    .query_transaction(tx_id)
+                    .await?
+                    .map(|tx| tx.fate)
+                    .unwrap_or(Fate::Pending);
+                versions.push(format!(
+                    "{tx_id:?} layer={:?} parents={:?} fate={fate:?}",
+                    version.layer(),
+                    version.parents()
+                ));
+            }
             panic!(
                 "stored merge heads diverged from history for {table}/{row_uuid:?}: expected {expected:?}, actual {actual:?}, versions={versions:?}"
             );
