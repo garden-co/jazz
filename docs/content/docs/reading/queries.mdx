@@ -139,12 +139,12 @@ magic columns.
 
 Each framework has a reactive binding that re-renders when query results change. See [Framework Patterns](/docs/reference/framework-patterns#query-subscriptions) for side-by-side examples.
 
-| Framework  | API                            | Notes                                               |
-| ---------- | ------------------------------ | --------------------------------------------------- |
-| React/Expo | `useAll(query)`                | Returns `{ data, isLoading, error }`                |
-| Vue        | `useAll(query)`                | Returns `{ data, isLoading, error }` refs           |
-| Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` / `.loading` / `.error` |
-| Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }`                |
+| Framework  | API                            | Notes                                                 |
+| ---------- | ------------------------------ | ----------------------------------------------------- |
+| React/Expo | `useAll(query)`                | Returns `{ data, isLoading, error }`                  |
+| Vue        | `useAll(query)`                | Returns `{ data, isLoading, error }` refs             |
+| Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` / `.isLoading` / `.error` |
+| Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }`                  |
 
 ### The loading state
 

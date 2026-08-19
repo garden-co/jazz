@@ -279,4 +279,44 @@ describe("svelte/QuerySubscription", () => {
     expect(mocks.makeQueryKey).toHaveBeenCalledWith(expect.anything(), { tier: "edge" });
     cleanup();
   });
+
+  it("exposes reactive isLoading state while preserving current", async () => {
+    const query = makeQuery();
+    let callbacks!: {
+      onfulfilled: (data: { id: string }[]) => void;
+      onError: (error: unknown) => void;
+      onReset: () => void;
+    };
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "pending" },
+      subscribe: (next: typeof callbacks) => {
+        callbacks = next;
+        return mocks.unsubscribe;
+      },
+    } as any);
+
+    let ref!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+    const cleanup = $effect.root(() => {
+      ref = new QuerySubscription(query);
+    });
+
+    await settle();
+    expect(ref.isLoading).toBe(true);
+
+    const rows = [{ id: "1" }];
+    callbacks.onfulfilled(rows);
+    await settle();
+    expect(ref.current).toEqual(rows);
+    expect(ref.isLoading).toBe(false);
+
+    callbacks.onReset();
+    await settle();
+    expect(ref.isLoading).toBe(true);
+
+    callbacks.onError("subscription failed");
+    await settle();
+    expect(ref.isLoading).toBe(false);
+
+    cleanup();
+  });
 });
