@@ -97,6 +97,106 @@ where
         self.commit_pending_writes(pending_writes).await
     }
 
+    /// Publish resident rows and unblocked terminal deltas before ordered
+    /// persistence. The returned handle owns persistence and no longer borrows
+    /// this database, so resident queries may continue while storage suspends.
+    pub async fn publish_batch(
+        &mut self,
+        batch: DatabaseBatch,
+    ) -> Result<PublishedBatch<S>, Error> {
+        self.ensure_not_poisoned()?;
+        let pending_writes = self.pending_writes_from_batch(batch)?;
+        let descriptors = pending_writes
+            .iter()
+            .map(PendingTableWrite::descriptor)
+            .collect::<Vec<_>>();
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let stores = pending_writes
+            .iter()
+            .zip(&descriptors)
+            .map(|(write, descriptor)| {
+                let key_descriptor = self
+                    .table(write.table())
+                    .ok()
+                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
+                record_store_for_table(&overlay, write.table(), key_descriptor, descriptor)
+            })
+            .collect::<Vec<_>>();
+        let table_deltas =
+            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
+        let mut staged_operations = pending_writes
+            .iter()
+            .map(|write| match write {
+                PendingTableWrite::Set { key, .. } => OwnedWriteOperation::Set {
+                    cf: write.table().to_owned(),
+                    key: key.clone(),
+                    value: write.stored_record().expect("set has a stored record"),
+                },
+                PendingTableWrite::Delete { key, .. } => OwnedWriteOperation::Delete {
+                    cf: write.table().to_owned(),
+                    key: key.clone(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let storage = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let mut staged_runtime = self.ivm_runtime.clone();
+        staged_runtime
+            .tick_staged(table_deltas, &storage, &mut staged_operations)
+            .await
+            .map_err(Error::IvmRuntime)?;
+
+        let publication = PublicationId(self.next_publication_id);
+        self.next_publication_id = self.next_publication_id.saturating_add(1);
+        staged_runtime.tag_staged_subscription_notifications(publication);
+        self.resident_writes
+            .borrow_mut()
+            .extend(staged_operations.iter().cloned());
+        self.resident_publications
+            .insert(publication, staged_operations.clone());
+        self.ivm_runtime = staged_runtime;
+        self.ivm_runtime.publish_staged_subscription_notifications();
+
+        Ok(PublishedBatch {
+            publication,
+            storage: Rc::clone(&self.storage),
+            operations: staged_operations,
+            order: Rc::clone(&self.publication_persistence),
+        })
+    }
+
+    /// Install one persistence result and advance only the contiguous durable
+    /// publication frontier.
+    pub fn settle_publication(
+        &mut self,
+        persistence: PublicationPersistence,
+    ) -> Result<PublicationId, Error> {
+        if let Err(error) = persistence.result {
+            self.poisoned = true;
+            return Err(Error::from(error));
+        }
+        if !self
+            .resident_publications
+            .contains_key(&persistence.publication)
+        {
+            return Err(Error::PublicationNotFound(persistence.publication));
+        }
+        self.persisted_publications.insert(persistence.publication);
+        let mut frontier = self
+            .durable_publication_frontier
+            .map_or(1, |publication| publication.0.saturating_add(1));
+        while self.persisted_publications.remove(&PublicationId(frontier)) {
+            self.resident_publications.remove(&PublicationId(frontier));
+            self.durable_publication_frontier = Some(PublicationId(frontier));
+            frontier = frontier.saturating_add(1);
+        }
+        let mut resident_writes = StagedWriteState::default();
+        for operations in self.resident_publications.values() {
+            resident_writes.extend(operations.iter().cloned());
+        }
+        *self.resident_writes.borrow_mut() = resident_writes;
+        Ok(persistence.publication)
+    }
+
     pub async fn update_raw(
         &mut self,
         table: &str,

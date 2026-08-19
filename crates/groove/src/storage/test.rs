@@ -1,6 +1,7 @@
 //! Deterministically controlled storage used by async and failure-path tests.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::rc::Rc;
 use std::task::{Poll, Waker};
@@ -10,7 +11,7 @@ use super::{
     StorageCursor, StorageFuture, StorageScan, Value,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TestStorageOperation {
     Get,
     Set,
@@ -28,6 +29,7 @@ pub enum TestStorageOperation {
 #[derive(Default)]
 struct ControlState {
     paused: bool,
+    paused_operations: BTreeSet<TestStorageOperation>,
     permits: usize,
     observed: Vec<TestStorageOperation>,
     waiters: Vec<Waker>,
@@ -43,6 +45,23 @@ impl TestStorageControl {
     /// Make subsequent storage progress require explicit permits.
     pub fn pause(&self) {
         self.state.borrow_mut().paused = true;
+    }
+
+    /// Suspend only the selected operation while all other storage work keeps
+    /// completing immediately.
+    pub fn pause_on(&self, operation: TestStorageOperation) {
+        self.state.borrow_mut().paused_operations.insert(operation);
+    }
+
+    pub fn resume_operation(&self, operation: TestStorageOperation) {
+        let waiters = {
+            let mut state = self.state.borrow_mut();
+            state.paused_operations.remove(&operation);
+            std::mem::take(&mut state.waiters)
+        };
+        for waiter in waiters {
+            waiter.wake();
+        }
     }
 
     /// Allow one pending or future storage suspension point to proceed.
@@ -67,6 +86,7 @@ impl TestStorageControl {
         let waiters = {
             let mut state = self.state.borrow_mut();
             state.paused = false;
+            state.paused_operations.clear();
             state.permits = 0;
             std::mem::take(&mut state.waiters)
         };
@@ -91,7 +111,7 @@ impl TestStorageControl {
                 state.observed.push(operation);
                 recorded = true;
             }
-            if !state.paused {
+            if !state.paused && !state.paused_operations.contains(&operation) {
                 return Poll::Ready(());
             }
             if state.permits > 0 {

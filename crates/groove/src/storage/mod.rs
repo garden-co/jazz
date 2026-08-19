@@ -23,6 +23,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use crate::records::{Record, RecordDescriptor};
 use serde::{Deserialize, Serialize};
@@ -365,6 +366,92 @@ pub trait OrderedKvStorage {
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
         Box::pin(async move { collect_scan(self.scan_prefix(cf, prefix).await?).await })
+    }
+}
+
+impl<S> OrderedKvStorage for Rc<S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        self.as_ref().get(cf, key)
+    }
+
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().set(cf, key, value)
+    }
+
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().delete(cf, key)
+    }
+
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().close()
+    }
+
+    fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().set_write_flush_cadence(every)
+    }
+
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().flush_write_boundary()
+    }
+
+    fn cache_token(&self) -> usize {
+        self.as_ref().cache_token()
+    }
+
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        self.as_ref().approximate_class_bytes(cf)
+    }
+
+    fn scan_range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.as_ref().scan_range(cf, start, end)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.as_ref().scan_prefix(cf, prefix)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.as_ref().scan_prefix_reverse(cf, prefix)
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        self.as_ref().last_with_prefix(cf, prefix)
+    }
+
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.as_ref().column_family_names()
     }
 }
 
