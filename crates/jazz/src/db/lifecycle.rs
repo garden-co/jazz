@@ -321,22 +321,29 @@ where
             new_tables,
             dropped_tables,
         );
-        let mut node = self.node.node.lock().await;
-        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
-            catalogue_seq,
-            publication: Box::new(publication),
-        })
-        .await?;
-        if bootstrap_current {
-            node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        let outcome = {
+            let mut node = self.node.node.lock().await;
+            node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
                 author: AuthorId::SYSTEM,
-                pointer: CurrentWriteSchema {
-                    revision: 1,
-                    schema: target_id,
-                },
+                catalogue_seq,
+                publication: Box::new(publication),
             })
-            .await?;
+            .await?
+        };
+        self.finish_publication_outcome(outcome).await?;
+        if bootstrap_current {
+            let outcome = {
+                let mut node = self.node.node.lock().await;
+                node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+                    author: AuthorId::SYSTEM,
+                    pointer: CurrentWriteSchema {
+                        revision: 1,
+                        schema: target_id,
+                    },
+                })
+                .await?
+            };
+            self.finish_publication_outcome(outcome).await?;
         }
         Ok(())
     }

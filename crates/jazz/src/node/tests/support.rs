@@ -4,6 +4,25 @@ fn node(byte: u8) -> NodeUuid {
 fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])
 }
+fn settle_published<S>(
+    node: &mut NodeState<S>,
+    published: PublishedTransaction,
+) -> Result<TxId, Error>
+where
+    S: OrderedKvStorage,
+{
+    crate::db::block_on(node.persist_and_settle_transaction(published))
+}
+
+fn settle_outcome<S, T>(
+    node: &mut NodeState<S>,
+    outcome: PublicationOutcome<T>,
+) -> Result<T, Error>
+where
+    S: OrderedKvStorage,
+{
+    crate::db::block_on(node.persist_and_settle_outcome(outcome))
+}
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
         SyncMessage::ViewUpdate {
@@ -276,11 +295,12 @@ where
         new_tables.into_iter().map(Into::into),
         dropped_tables.into_iter().map(Into::into),
     );
-    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    let outcome = core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: core.active_catalogue_seq().saturating_add(1),
         publication: Box::new(publication),
-    })
+    });
+    settle_outcome(core, crate::db::block_on(outcome)?)
 }
 fn owner_cells(author: AuthorId, title: impl Into<String>) -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -784,7 +804,8 @@ fn commit_and_oracle(
     let parents = commit.parents.clone();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
-    let tx_id = node.commit_mergeable(commit).unwrap();
+    let published = node.commit_mergeable(commit).unwrap();
+    let tx_id = settle_published(node, published).unwrap();
     let made_at = node.transaction_record(tx_id).unwrap().tx_id.time;
     let mut version = ModelRowVersion::new(row_uuid, tx_id, made_at);
     version.parents = parents;
@@ -803,13 +824,16 @@ fn commit_global_and_oracle(
     let parents = commit.parents.clone();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
-    let (tx_id, unit) = writer.commit_mergeable_unit(commit).unwrap();
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let (published, unit) = writer.commit_mergeable_unit(commit).unwrap();
+    let tx_id = settle_published(writer, published).unwrap();
+    let outcome = core.apply_sync_message(unit).unwrap();
+    let [fate] = settle_outcome(core, outcome).unwrap().try_into().unwrap();
     let SyncMessage::FateUpdate { global_time, .. } = &fate else {
         panic!("expected accepted fate update");
     };
     let global_time = global_time.expect("core commit is globally accepted");
-    writer.apply_sync_message(fate).unwrap();
+    let outcome = writer.apply_sync_message(fate).unwrap();
+    settle_outcome(writer, outcome).unwrap();
     let mut version = ModelRowVersion::new(row_uuid, tx_id, tx_id.time);
     version.parents = parents;
     version.cells = cells;
@@ -1273,9 +1297,12 @@ fn commit_mergeable_global(
     core: &mut NodeState<RocksDbStorage>,
     commit: MergeableCommit,
 ) -> TxId {
-    let (tx_id, unit) = writer.commit_mergeable_unit(commit).unwrap();
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
-    writer.apply_sync_message(fate).unwrap();
+    let (published, unit) = writer.commit_mergeable_unit(commit).unwrap();
+    let tx_id = settle_published(writer, published).unwrap();
+    let outcome = core.apply_sync_message(unit).unwrap();
+    let [fate] = settle_outcome(core, outcome).unwrap().try_into().unwrap();
+    let outcome = writer.apply_sync_message(fate).unwrap();
+    settle_outcome(writer, outcome).unwrap();
     tx_id
 }
 fn ingest_relay_version(
@@ -1359,16 +1386,18 @@ fn commit_owner_policy_global(
     title: &str,
     now_ms: u64,
 ) -> TxId {
-    let (tx_id, unit) = writer
+    let (published, unit) = writer
         .commit_mergeable_unit(
             MergeableCommit::new("todos", row_uuid, now_ms)
                 .made_by(made_by)
                 .cells(owner_cells(owner, title)),
         )
         .unwrap();
+    let tx_id = settle_published(writer, published).unwrap();
     let expected_global_time =
         GlobalTime::tick(core.clock.global_time_register, tx_id.time.physical_ms()).unwrap();
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let outcome = core.apply_sync_message(unit).unwrap();
+    let [fate] = settle_outcome(core, outcome).unwrap().try_into().unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -1378,7 +1407,8 @@ fn commit_owner_policy_global(
             durability: Some(DurabilityTier::Global),
         }
     );
-    writer.apply_sync_message(fate).unwrap();
+    let outcome = writer.apply_sync_message(fate).unwrap();
+    settle_outcome(writer, outcome).unwrap();
     tx_id
 }
 fn commit_core_owner_fixture(
@@ -1388,13 +1418,14 @@ fn commit_core_owner_fixture(
     title: &str,
     now_ms: u64,
 ) -> TxId {
-    let tx_id = core
+    let published = core
         .commit_mergeable(
             MergeableCommit::new("todos", row_uuid, now_ms)
                 .made_by(owner)
                 .cells(owner_cells(owner, title)),
         )
         .unwrap();
+    let tx_id = settle_published(core, published).unwrap();
     core.accept_global_for_test(tx_id).unwrap();
     tx_id
 }

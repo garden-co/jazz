@@ -599,7 +599,8 @@ where
                             let registration_key =
                                 (shape.shape_id(), pending_subscription.opts.read_view_key());
                             if announced_shapes.insert(registration_key) {
-                                self.node
+                                let outcome = self
+                                    .node
                                     .lock()
                                     .await
                                     .apply_sync_message(SyncMessage::RegisterShape {
@@ -608,6 +609,14 @@ where
                                         opts: RegisterShapeOptions::default(),
                                     })
                                     .await?;
+                                let (_, changed) = finish_peer_publication_outcome(
+                                    &self.node,
+                                    &self.subscriptions,
+                                    &self.active_authority_view_receipts,
+                                    outcome,
+                                )
+                                .await?;
+                                stats.subscription_events += changed;
                                 if let Err(error) =
                                     self.transport.send(SyncMessage::RegisterShape {
                                         shape_id: shape.shape_id(),
@@ -650,11 +659,20 @@ where
                                 "upstream send subscribe {}",
                                 summarize_subscription_key(subscribe.subscription)
                             ));
-                            self.node
+                            let outcome = self
+                                .node
                                 .lock()
                                 .await
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe.clone()))
                                 .await?;
+                            let (_, changed) = finish_peer_publication_outcome(
+                                &self.node,
+                                &self.subscriptions,
+                                &self.active_authority_view_receipts,
+                                outcome,
+                            )
+                            .await?;
+                            stats.subscription_events += changed;
                             if let Err(error) =
                                 self.transport.send(SyncMessage::Subscribe(subscribe))
                             {
@@ -1969,11 +1987,20 @@ where
                                     update,
                                 );
                             }
-                            self.node
+                            let outcome = self
+                                .node
                                 .lock()
                                 .await
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe))
                                 .await?;
+                            let (_, changed) = finish_peer_publication_outcome(
+                                &self.node,
+                                &self.subscriptions,
+                                &self.active_authority_view_receipts,
+                                outcome,
+                            )
+                            .await?;
+                            stats.subscription_events += changed;
                             if let Some(purpose) = scope_purpose {
                                 let aggregate = scope_aggregates
                                     .entry(purpose.key.clone())

@@ -478,12 +478,37 @@ where
         Ok((published, unit))
     }
 
-    pub(crate) fn settle_published_transaction(
+    /// Settle a completed persistence receipt and release its storage boundary.
+    pub fn settle_published_transaction(
         &mut self,
         persistence: PublicationPersistence,
     ) -> Result<(), Error> {
         self.database.settle_publication(persistence)?;
         Ok(())
+    }
+
+    /// Persist and settle one resident transaction publication.
+    pub async fn persist_and_settle_transaction(
+        &mut self,
+        published: PublishedTransaction,
+    ) -> Result<TxId, Error> {
+        let tx_id = published.tx_id;
+        let persistence = published.persist().await;
+        self.settle_published_transaction(persistence)?;
+        Ok(tx_id)
+    }
+
+    /// Persist and settle every resident publication attached to an outcome.
+    pub async fn persist_and_settle_outcome<T>(
+        &mut self,
+        outcome: PublicationOutcome<T>,
+    ) -> Result<T, Error> {
+        let (value, publications) = outcome.into_parts();
+        for publication in publications {
+            let persistence = publication.persist().await;
+            self.settle_published_transaction(persistence)?;
+        }
+        Ok(value)
     }
 
     /// Rebuild the sync commit unit for an already-committed local transaction
