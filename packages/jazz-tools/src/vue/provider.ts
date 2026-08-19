@@ -213,7 +213,9 @@ export const JazzProvider = defineComponent({
 export function useJazzClient(): JazzClientContextValue {
   const ctx = inject(JazzContextKey, null);
   if (!ctx?.value) {
-    throw new Error("Jazz Vue composables must be used within <JazzProvider>");
+    throw new Error(
+      "Jazz Vue composables must be used within <JazzProvider> or <JazzClientProvider>",
+    );
   }
   return ctx.value;
 }
@@ -233,7 +235,9 @@ export function useDb(): Db {
 export function useSession(): ComputedRef<Session | null> {
   const ctx = inject(JazzContextKey, null);
   if (!ctx) {
-    throw new Error("Jazz Vue composables must be used within <JazzProvider>");
+    throw new Error(
+      "Jazz Vue composables must be used within <JazzProvider> or <JazzClientProvider>",
+    );
   }
   return computed(() => ctx.value?.session ?? null);
 }
