@@ -294,6 +294,24 @@ pub trait OrderedKvStorage {
     }
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error>;
 
+    /// Classify the result of one storage-atomic batch.
+    ///
+    /// An ordinary [`Self::write_many`] error does not establish whether a
+    /// backend committed the batch before reporting the error (for example, a
+    /// transport can lose its acknowledgement after the remote durable write).
+    /// The conservative default therefore reports it as
+    /// [`WriteManyOutcome::PossiblyCommitted`]. Implementations may override
+    /// this only when they can prove that a particular failure leaves the
+    /// complete batch unapplied. Callers that have already advanced in-memory
+    /// state must never roll it back or retry after a possibly-committed
+    /// outcome; they must fail closed and reopen from durable storage.
+    fn write_many_outcome(&self, operations: &[WriteOperation<'_>]) -> WriteManyOutcome {
+        match self.write_many(operations) {
+            Ok(()) => WriteManyOutcome::Committed,
+            Err(error) => WriteManyOutcome::PossiblyCommitted(error),
+        }
+    }
+
     /// Return known column-family names when the backend can enumerate them.
     ///
     /// This is intentionally optional so the ordered-KV contract stays small.
@@ -319,6 +337,29 @@ pub trait OrderedKvStorage {
             Ok(())
         })?;
         Ok(values)
+    }
+}
+
+/// The durable outcome of one [`OrderedKvStorage::write_many`] batch.
+///
+/// A failed acknowledgement is not necessarily a failed write. This explicit
+/// distinction is the storage contract used by the database commit lifecycle:
+/// only [`Self::DefinitelyNotCommitted`] permits in-process rollback and
+/// retry; [`Self::PossiblyCommitted`] requires fail-stop recovery from a fresh
+/// database instance.
+#[derive(Debug)]
+pub enum WriteManyOutcome {
+    Committed,
+    DefinitelyNotCommitted(Error),
+    PossiblyCommitted(Error),
+}
+
+impl WriteManyOutcome {
+    pub fn into_result(self) -> Result<(), Error> {
+        match self {
+            Self::Committed => Ok(()),
+            Self::DefinitelyNotCommitted(error) | Self::PossiblyCommitted(error) => Err(error),
+        }
     }
 }
 
@@ -705,6 +746,42 @@ where
         self.inner.write_many(&borrowed)
     }
 
+    fn write_many_outcome(&self, operations: &[WriteOperation<'_>]) -> WriteManyOutcome {
+        let translated = operations
+            .iter()
+            .map(|operation| match operation {
+                WriteOperation::Set { cf, key, value } => {
+                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                    OwnedWriteOperation::Set {
+                        cf: physical_cf,
+                        key: physical_key,
+                        value: (*value).to_vec(),
+                    }
+                }
+                WriteOperation::Delete { cf, key } => {
+                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                    OwnedWriteOperation::Delete {
+                        cf: physical_cf,
+                        key: physical_key,
+                    }
+                }
+                WriteOperation::Delta { cf, key, delta } => {
+                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                    OwnedWriteOperation::Delta {
+                        cf: physical_cf,
+                        key: physical_key,
+                        delta: (*delta).clone(),
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let borrowed = translated
+            .iter()
+            .map(OwnedWriteOperation::as_write_operation)
+            .collect::<Vec<_>>();
+        self.inner.write_many_outcome(&borrowed)
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.inner.column_family_names()
     }
@@ -833,6 +910,10 @@ impl OrderedKvStorage for BoxedStorage {
 
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         self.inner.write_many(operations)
+    }
+
+    fn write_many_outcome(&self, operations: &[WriteOperation<'_>]) -> WriteManyOutcome {
+        self.inner.write_many_outcome(operations)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -1129,12 +1210,16 @@ where
     }
 
     pub fn commit(self) -> Result<(), Error> {
+        self.commit_outcome().into_result()
+    }
+
+    pub fn commit_outcome(self) -> WriteManyOutcome {
         let operations = self.staged_writes.into_inner().into_operations();
         let borrowed = operations
             .iter()
             .map(OwnedWriteOperation::as_write_operation)
             .collect::<Vec<_>>();
-        self.base.write_many(&borrowed)
+        self.base.write_many_outcome(&borrowed)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2347,6 +2432,180 @@ mod tests {
 
         assert!(matches!(error, Error::ColumnFamilyNotFound(_)));
         assert_eq!(storage.get("records", b"1").unwrap(), None);
+    }
+
+    #[test]
+    fn memory_write_many_keeps_earlier_sets_private_when_a_later_delta_is_malformed() {
+        let storage = MemoryStorage::new(&["records"]);
+        let malformed_delta = StorageDelta {
+            kind: StorageDeltaKind::CurrentWinnerV1,
+            payload: vec![0xff],
+        };
+
+        let error = storage
+            .write_many(&[
+                WriteOperation::set("records", b"first", b"must not leak"),
+                WriteOperation::delta("records", b"later", &malformed_delta),
+            ])
+            .expect_err("the malformed later delta must reject the whole batch");
+
+        assert!(matches!(error, Error::InvalidStorageDelta(_)));
+        assert_eq!(storage.get("records", b"first").unwrap(), None);
+        assert_eq!(storage.get("records", b"later").unwrap(), None);
+        assert!(matches!(
+            storage.write_many_outcome(&[
+                WriteOperation::set("records", b"first", b"must not leak"),
+                WriteOperation::delta("records", b"later", &malformed_delta),
+            ]),
+            WriteManyOutcome::DefinitelyNotCommitted(Error::InvalidStorageDelta(_))
+        ));
+    }
+
+    fn current_winner_test_record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
+        let mut record = Vec::new();
+        record.extend(time.to_le_bytes());
+        record.extend([node; 16]);
+        record.extend(payload);
+        record
+    }
+
+    fn current_winner_test_delta(time: u64, node: u8, record: Vec<u8>) -> StorageDelta {
+        StorageDelta::current_winner(CurrentWinnerDelta {
+            tx_time: time,
+            tx_node_uuid: [node; 16],
+            parents: Vec::new(),
+            tx_time_offset: 0,
+            tx_node_uuid_offset: 8,
+            record,
+        })
+        .unwrap()
+    }
+
+    /// An explicit delete in a batch is a prospective absence. A following
+    /// delta must use that absence rather than falling through to the durable
+    /// predecessor, otherwise delete→delta resurrects the old winner.
+    #[test]
+    fn memory_write_many_delete_then_delta_uses_post_delete_absence() {
+        let storage = MemoryStorage::new(&["records"]);
+        let old = current_winner_test_record(30, 1, b"old");
+        let candidate = current_winner_test_record(20, 2, b"candidate");
+        let delta = current_winner_test_delta(20, 2, candidate.clone());
+        storage.set("records", b"row", &old).unwrap();
+
+        storage
+            .write_many(&[
+                WriteOperation::delete("records", b"row"),
+                WriteOperation::delta("records", b"row", &delta),
+            ])
+            .unwrap();
+
+        assert_eq!(storage.get("records", b"row").unwrap(), Some(candidate));
+    }
+
+    #[test]
+    fn memory_write_many_same_key_operation_sequences_use_the_prospective_value() {
+        let old = current_winner_test_record(10, 1, b"old");
+        let set = current_winner_test_record(15, 1, b"set");
+        let later_set = current_winner_test_record(25, 1, b"later set");
+        let first_delta_record = current_winner_test_record(20, 2, b"first delta");
+        let second_delta_record = current_winner_test_record(30, 3, b"second delta");
+        let first_delta = current_winner_test_delta(20, 2, first_delta_record.clone());
+        let second_delta = current_winner_test_delta(30, 3, second_delta_record.clone());
+
+        let assert_sequence = |operations: &[WriteOperation<'_>], expected: Option<Vec<u8>>| {
+            let storage = MemoryStorage::new(&["records"]);
+            storage.set("records", b"row", &old).unwrap();
+            storage.write_many(operations).unwrap();
+            assert_eq!(storage.get("records", b"row").unwrap(), expected);
+        };
+
+        assert_sequence(
+            &[
+                WriteOperation::set("records", b"row", &set),
+                WriteOperation::set("records", b"row", &later_set),
+            ],
+            Some(later_set.clone()),
+        );
+        assert_sequence(
+            &[
+                WriteOperation::set("records", b"row", &set),
+                WriteOperation::delete("records", b"row"),
+            ],
+            None,
+        );
+        assert_sequence(
+            &[
+                WriteOperation::delete("records", b"row"),
+                WriteOperation::set("records", b"row", &set),
+            ],
+            Some(set.clone()),
+        );
+        assert_sequence(
+            &[
+                WriteOperation::delete("records", b"row"),
+                WriteOperation::delete("records", b"row"),
+            ],
+            None,
+        );
+        assert_sequence(
+            &[
+                WriteOperation::set("records", b"row", &set),
+                WriteOperation::delta("records", b"row", &first_delta),
+            ],
+            Some(first_delta_record.clone()),
+        );
+        assert_sequence(
+            &[
+                WriteOperation::delta("records", b"row", &first_delta),
+                WriteOperation::set("records", b"row", &later_set),
+            ],
+            Some(later_set.clone()),
+        );
+        assert_sequence(
+            &[
+                WriteOperation::delete("records", b"row"),
+                WriteOperation::delta("records", b"row", &first_delta),
+            ],
+            Some(first_delta_record.clone()),
+        );
+        assert_sequence(
+            &[
+                WriteOperation::delta("records", b"row", &first_delta),
+                WriteOperation::delete("records", b"row"),
+            ],
+            None,
+        );
+        assert_sequence(
+            &[
+                WriteOperation::delta("records", b"row", &first_delta),
+                WriteOperation::delta("records", b"row", &second_delta),
+            ],
+            Some(second_delta_record),
+        );
+    }
+
+    #[test]
+    fn memory_write_many_prospective_overlay_is_isolated_per_key() {
+        let storage = MemoryStorage::new(&["records"]);
+        let old = current_winner_test_record(10, 1, b"old");
+        let candidate = current_winner_test_record(20, 2, b"candidate");
+        let delta = current_winner_test_delta(20, 2, candidate.clone());
+        storage.set("records", b"row-a", &old).unwrap();
+        storage.set("records", b"row-b", b"old-b").unwrap();
+
+        storage
+            .write_many(&[
+                WriteOperation::delete("records", b"row-a"),
+                WriteOperation::set("records", b"row-b", b"new-b"),
+                WriteOperation::delta("records", b"row-a", &delta),
+            ])
+            .unwrap();
+
+        assert_eq!(storage.get("records", b"row-a").unwrap(), Some(candidate));
+        assert_eq!(
+            storage.get("records", b"row-b").unwrap(),
+            Some(b"new-b".to_vec())
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::WriteManyOutcome;
 
 impl<S> Database<S>
 where
@@ -173,18 +174,30 @@ where
         let txn = self.storage.begin_txn();
         drop(operations);
         txn.stage_owned_operations(staged_operations);
-        if let Err(error) = txn.commit() {
-            self.ivm_runtime.discard_staged_subscription_notifications();
-            let mut rollback_operations = Vec::new();
-            if self
-                .ivm_runtime
-                .tick_staged(rollback_deltas, &storage, &mut rollback_operations)
-                .is_err()
-            {
-                self.poisoned = true;
+        match txn.commit_outcome() {
+            WriteManyOutcome::Committed => {}
+            WriteManyOutcome::DefinitelyNotCommitted(error) => {
+                self.ivm_runtime.discard_staged_subscription_notifications();
+                let mut rollback_operations = Vec::new();
+                if self
+                    .ivm_runtime
+                    .tick_staged(rollback_deltas, &storage, &mut rollback_operations)
+                    .is_err()
+                {
+                    self.poisoned = true;
+                }
+                self.ivm_runtime.discard_staged_subscription_notifications();
+                return Err(Error::from(error));
             }
-            self.ivm_runtime.discard_staged_subscription_notifications();
-            return Err(Error::from(error));
+            WriteManyOutcome::PossiblyCommitted(error) => {
+                // The batch might be durable even though its acknowledgement
+                // failed. Replaying or rolling back in-process would split
+                // durable history from IVM/subscription state, so fail closed
+                // until a fresh open reconstructs the runtime from storage.
+                self.ivm_runtime.discard_staged_subscription_notifications();
+                self.poisoned = true;
+                return Err(Error::from(error));
+            }
         }
         if self
             .durable_publication_state
