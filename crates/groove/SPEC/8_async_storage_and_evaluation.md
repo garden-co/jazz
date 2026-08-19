@@ -143,6 +143,13 @@ Only after this contract is coherent and independently green should Jazz be
 adapted to await it. Jazz compile failures during steps 1-7 are expected and
 must not be repaired with Groove compatibility layers.
 
+Groove's `TestStorage` is the deterministic suspension and fault-injection
+harness for these tests. It wraps in-memory storage, implements the production
+contract directly, and is immediate unless its independent controller pauses
+operations. Tests release explicit permits rather than depending on wall-clock
+delays. The persistent B-tree backend used by storage-fidelity tests is named
+`TestBtreeStorage` so the two roles are not conflated.
+
 ## Open questions
 
 - Whether native and browser implementations should expose associated future

@@ -5,7 +5,8 @@ use super::*;
 #[test]
 fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
@@ -33,7 +34,8 @@ fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
 #[test]
 fn recursive_graph_subscriptions_retract_derived_paths_after_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
@@ -80,7 +82,8 @@ fn recursive_graph_subscriptions_retract_derived_paths_after_delete() {
 #[test]
 fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let shape = prepared_reachability_shape(&mut database);
     let subscription = database
@@ -113,7 +116,7 @@ fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete() {
 #[test]
 fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "docs"],
     )
@@ -166,7 +169,8 @@ fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
 #[test]
 fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let shape = prepared_reachability_shape(&mut database);
     let subscription = database
@@ -217,7 +221,8 @@ fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
 #[test]
 fn prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompute() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let shape = prepared_reachability_shape(&mut database);
     let subscription = database
@@ -273,7 +278,8 @@ fn prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompu
 #[test]
 fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let shape = prepared_reachability_shape(&mut database);
     let subscription = database
@@ -307,7 +313,8 @@ fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
 #[test]
 fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let shape = prepared_reachability_shape(&mut database);
     let first = database
@@ -373,7 +380,7 @@ fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
 #[test]
 fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_input() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
@@ -413,7 +420,7 @@ fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_input() {
 #[test]
 fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
@@ -454,7 +461,8 @@ fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
 #[test]
 fn recursive_graph_subscriptions_collapse_duplicate_derivations() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
@@ -472,7 +480,8 @@ fn recursive_graph_subscriptions_collapse_duplicate_derivations() {
 #[test]
 fn recursive_graph_subscriptions_recompute_after_edge_update() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
@@ -502,7 +511,8 @@ fn recursive_graph_subscriptions_recompute_after_edge_update() {
 #[test]
 fn recursive_graph_subscriptions_incrementally_extend_existing_reach_with_new_edge() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
@@ -545,7 +555,8 @@ fn recursive_graph_subscriptions_incrementally_extend_existing_reach_with_new_ed
 #[test]
 fn recursive_graph_subscriptions_incrementally_extend_new_seed_with_existing_edge() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
@@ -572,7 +583,8 @@ fn recursive_graph_subscriptions_incrementally_extend_new_seed_with_existing_edg
 #[test]
 fn recursive_graph_subscriptions_converge_on_self_cycles() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let subscription = database.subscribe_one_sink(reachability_graph(2)).unwrap();
     let _initial = subscription.recv().unwrap();
@@ -588,7 +600,8 @@ fn recursive_graph_subscriptions_converge_on_self_cycles() {
 #[test]
 fn recursive_graphs_reject_seed_and_step_output_descriptor_mismatch() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let frontier = GraphBuilder::frontier_source(
         "frontier",
@@ -614,7 +627,8 @@ fn recursive_graphs_reject_seed_and_step_output_descriptor_mismatch() {
 #[test]
 fn recursive_graphs_reject_nested_recursion_for_v0() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let reach = RecordDescriptor::new([
         ("src", ColumnType::U64.clone()),
@@ -636,7 +650,8 @@ fn recursive_graphs_reject_nested_recursion_for_v0() {
 #[test]
 fn recursive_graphs_fail_when_frontier_exceeds_max_iters() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();

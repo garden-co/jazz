@@ -2,7 +2,7 @@ use super::*;
 use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
 };
-use crate::storage::{RecordStore, TestStorage};
+use crate::storage::{RecordStore, TestBtreeStorage};
 
 #[test]
 fn terminal_collect_canonicalization_emits_net_remove_before_net_insert() {
@@ -760,7 +760,7 @@ fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let albums = schema.table("albums").unwrap().record_schema();
     write_two_album_rows(&storage, &albums);
 
@@ -805,7 +805,7 @@ fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_seed()
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let albums = schema.table("albums").unwrap().record_schema();
     write_two_album_rows(&storage, &albums);
 
@@ -1474,7 +1474,7 @@ fn subscription_retainers_keep_output_ancestors_alive() {
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let subscription = runtime
         .subscribe_one_sink(
             GraphBuilder::table("albums")
@@ -1497,7 +1497,7 @@ fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let subscription = runtime
         .subscribe_one_sink(GraphBuilder::table("albums"), &storage)
         .unwrap();
@@ -1524,7 +1524,7 @@ fn identical_subscriptions_share_one_node_with_multiple_retainers() {
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let graph = || {
         GraphBuilder::table("albums")
             .filter(PredicateExpr::gt("id", Value::U64(10)))
@@ -1651,7 +1651,7 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
     let schema = albums_artists_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -1741,7 +1741,8 @@ fn recursive_recompute_reuses_graph_nodes_without_persisting_contextual_child_st
     let schema = edges_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let first = runtime
         .subscribe_one_sink(recursive_reach_graph(), &storage)
         .unwrap();

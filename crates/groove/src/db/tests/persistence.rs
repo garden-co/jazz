@@ -6,7 +6,7 @@ use super::*;
 fn query_subscription_matches_one_shot_recompute_under_seeded_interleavings() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let query = select_query(
         Select::new([SelectItem::expr(col("title"))])
@@ -108,7 +108,7 @@ fn shape_subscriptions_match_recompute_under_seeded_interleavings() {
 
 fn run_shape_subscription_oracle(mut seed: u64) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
@@ -264,7 +264,7 @@ fn graph_subscriptions_match_recompute_under_seeded_interleavings() {
 
 fn run_graph_subscription_oracle(mut seed: u64) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
@@ -343,7 +343,7 @@ fn run_graph_subscription_oracle(mut seed: u64) {
 }
 
 fn table_pairs_from_query(
-    database: &mut Database<TestStorage>,
+    database: &mut Database<TestBtreeStorage>,
     table: &str,
 ) -> std::collections::BTreeMap<u64, (u64, u64)> {
     let result = database

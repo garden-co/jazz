@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn arg_max_by_feeds_join_and_anti_join() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -70,7 +70,7 @@ fn arg_max_by_feeds_join_and_anti_join() {
 #[test]
 fn arg_max_by_routes_through_prepared_bindings() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -127,7 +127,7 @@ fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
     }
 
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -192,7 +192,7 @@ fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
 #[test]
 fn arg_max_by_tracks_union_of_filtered_sources() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "history_shadow"],
     )
@@ -251,7 +251,7 @@ fn arg_max_by_tracks_union_of_filtered_sources() {
 #[test]
 fn arg_max_by_tracks_join_filter_input() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -317,7 +317,7 @@ fn arg_max_by_tracks_join_filter_input() {
 fn predicate_or_filter_matches_either_branch() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let graph = GraphBuilder::table("albums").filter(
         PredicateExpr::Or(vec![
@@ -365,7 +365,7 @@ fn predicate_or_filter_matches_either_branch() {
 #[test]
 fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
@@ -400,7 +400,7 @@ fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
 #[test]
 fn unwrap_nullable_can_feed_join_key() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "albums", "indices"],
     )
@@ -462,7 +462,7 @@ fn unwrap_nullable_can_feed_join_key() {
 #[test]
 fn unwrap_nullable_can_feed_prepared_binding_join_key() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
@@ -505,7 +505,7 @@ fn unwrap_nullable_can_feed_prepared_binding_join_key() {
 #[test]
 fn prepared_binding_join_hydrates_anti_join_input() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "blockers", "indices"],
     )
@@ -558,7 +558,7 @@ fn prepared_binding_join_hydrates_anti_join_input() {
 #[test]
 fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["items", "blockers", "indices"],
     )

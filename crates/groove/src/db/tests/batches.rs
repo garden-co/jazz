@@ -6,7 +6,7 @@ use super::*;
 fn commits_insert_update_and_delete_batches() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();
@@ -491,7 +491,8 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
     ));
     let column_families = schema.column_families();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &column_families).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &column_families)
+            .unwrap();
     let mut database = Database::new(schema.clone(), storage).unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -650,7 +651,8 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
     drop(database);
     let column_families = schema.column_families();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &column_families).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &column_families)
+            .unwrap();
     let reopened = Database::new(schema, storage).unwrap();
     let store = reopened.direct_record_store("streams").unwrap();
     assert_eq!(
@@ -806,7 +808,7 @@ fn direct_record_store_rejects_record_containing_durable_keys_at_schema_admissio
 fn commit_metrics_split_storage_and_tick_work() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     database.set_tick_runtime_stats_enabled(true);
     let subscription = database
@@ -977,7 +979,7 @@ fn commit_metrics_split_storage_writes_by_jazz_destination() {
 fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -1019,7 +1021,7 @@ fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
 #[test]
 fn inserts_over_existing_primary_keys_are_rejected() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -1067,7 +1069,7 @@ fn inserts_over_existing_primary_keys_are_rejected() {
 #[test]
 fn inserts_over_primary_keys_created_earlier_in_the_same_batch_are_rejected() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
@@ -1099,7 +1101,7 @@ fn inserts_over_primary_keys_created_earlier_in_the_same_batch_are_rejected() {
 fn same_batch_same_key_operations_emit_only_the_consolidated_final_delta() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
