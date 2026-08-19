@@ -33,8 +33,7 @@ function makeClient(id: string, shutdown = vi.fn(async () => undefined)): JazzCl
 }
 
 async function flushMicrotasks(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
 describe("Solid providers", () => {

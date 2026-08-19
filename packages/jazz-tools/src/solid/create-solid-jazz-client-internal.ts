@@ -14,7 +14,7 @@ export function createSolidJazzClientInternal(
   clientFactory: JazzClientFactory,
 ) {
   let disposed = false;
-  let previousShutdown: Promise<void> | undefined;
+  let lifecycle: Promise<void> | undefined;
   onCleanup(() => {
     disposed = true;
   });
@@ -28,7 +28,7 @@ export function createSolidJazzClientInternal(
 
   const [res, { mutate, refetch }] = createResource(
     stableConfig,
-    async (nextConfig): Promise<JazzClient> => {
+    (nextConfig): Promise<JazzClient | undefined> => {
       const runId = activeRunId() + 1;
       setActiveRunId(runId);
 
@@ -46,29 +46,47 @@ export function createSolidJazzClientInternal(
       let rawClient: JazzClient | undefined;
       onCleanup(() => {
         disconnectRunId();
-        if (rawClient) previousShutdown = rawClient.shutdown();
+        if (rawClient) {
+          const client = rawClient;
+          lifecycle = (
+            lifecycle ? lifecycle.then(() => client.shutdown()) : client.shutdown()
+          ).then(
+            () => undefined,
+            () => undefined,
+          );
+        }
       });
 
-      if (previousShutdown) await previousShutdown;
-      rawClient = await clientFactory(nextConfig);
-      if (disposed || runId !== activeRunId()) {
-        disconnectRunId();
-        await rawClient.shutdown();
-        return rawClient;
-      }
-      connectRunId();
+      const run = async () => {
+        if (disposed || runId !== activeRunId()) return undefined;
 
-      const wrappedClient = {
-        ...rawClient,
-        shutdown: () => {
+        const client = await clientFactory(nextConfig);
+        rawClient = client;
+        if (disposed || runId !== activeRunId()) {
           disconnectRunId();
-          return rawClient.shutdown();
-        },
+          await client.shutdown();
+          return undefined;
+        }
+        connectRunId();
+
+        const wrappedClient = {
+          ...client,
+          shutdown: () => {
+            disconnectRunId();
+            return client.shutdown();
+          },
+        };
+        const subscriptionStore = (client as Partial<WithSubscriptionStore>)[subscriptionStoreKey];
+        return subscriptionStore
+          ? attachSubscriptionStore(wrappedClient, subscriptionStore)
+          : wrappedClient;
       };
-      const subscriptionStore = (rawClient as Partial<WithSubscriptionStore>)[subscriptionStoreKey];
-      return subscriptionStore
-        ? attachSubscriptionStore(wrappedClient, subscriptionStore)
-        : wrappedClient;
+      const work = lifecycle ? lifecycle.then(run) : run();
+      lifecycle = work.then(
+        () => undefined,
+        () => undefined,
+      );
+      return work;
     },
     {
       // Disables Hydration

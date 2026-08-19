@@ -19,7 +19,7 @@ function deferred<T>(): Deferred<T> {
 }
 
 async function flushMicrotasks(): Promise<void> {
-  await Promise.resolve();
+  for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
 import {
@@ -74,10 +74,7 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
     setConfig({ appId: "B" });
     await flushMicrotasks();
 
-    expect(defaultClientFactory).toHaveBeenCalledTimes(2);
-    expect(defaultClientFactory).toHaveBeenNthCalledWith(2, {
-      appId: "B",
-    });
+    expect(defaultClientFactory).toHaveBeenCalledTimes(1);
 
     const rawA = makeRawClient("A");
     pendingByAppId.get("A")!.resolve(rawA);
@@ -85,6 +82,10 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
 
     expect(rawA.shutdown).toHaveBeenCalledTimes(1);
     expect(result.loading).toBe(true);
+    expect(defaultClientFactory).toHaveBeenCalledTimes(2);
+    expect(defaultClientFactory).toHaveBeenNthCalledWith(2, {
+      appId: "B",
+    });
 
     const rawB = makeRawClient("B");
     pendingByAppId.get("B")!.resolve(rawB);
