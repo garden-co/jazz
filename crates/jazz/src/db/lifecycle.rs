@@ -345,7 +345,7 @@ where
         if self.schema_view_is_fixed {
             return Ok(());
         }
-        Ok(self.node.node.borrow_mut().close()?)
+        Ok(crate::db::block_on(self.node.node.borrow_mut().close())?)
     }
 
     /// Configure this database as the optimistic, non-durable side of a
@@ -363,11 +363,12 @@ where
         &self,
         cadence: InitialSyncFlushCadence,
     ) -> Result<(), Error> {
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
-            .set_initial_sync_flush_cadence(cadence.writes())?)
+        Ok(crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .set_initial_sync_flush_cadence(cadence.writes()),
+        )?)
     }
 
     /// Seed a settled mergeable row for server bootstrap/import flows.
@@ -384,17 +385,25 @@ where
         cells: RowCells,
     ) -> Result<TxId, Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
-        let tx_id = self.node.node.borrow_mut().commit_mergeable_in_schema(
-            self.schema_version_id,
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(made_by)
-                .cells(cells),
+        let published = crate::db::block_on(
+            self.node.node.borrow_mut().commit_mergeable_in_schema(
+                self.schema_version_id,
+                MergeableCommit::new(table, row, self.next_now_ms())
+                    .made_by(made_by)
+                    .cells(cells),
+            ),
         )?;
-        self.node
-            .node
-            .borrow_mut()
-            .finalize_local_mergeable_commit(tx_id)?;
-        self.refresh_subscriptions()?;
+        let tx_id = published.tx_id;
+        crate::db::block_on(
+            self.finish_publication_outcome(PublicationOutcome::published((), published)),
+        )?;
+        let outcome = crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .finalize_local_mergeable_commit(tx_id),
+        )?;
+        crate::db::block_on(self.finish_publication_outcome(outcome))?;
         self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
@@ -406,18 +415,21 @@ where
     /// before performing the same self-acceptance step as
     /// [`Db::seed_settled_mergeable_for_bootstrap`].
     pub fn finalize_local_mergeable_commit_for_test(&self, tx_id: TxId) -> Result<(), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .finalize_local_mergeable_commit(tx_id)?;
-        self.refresh_subscriptions()?;
+        let outcome = crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .finalize_local_mergeable_commit(tx_id),
+        )?;
+        crate::db::block_on(self.finish_publication_outcome(outcome))?;
         self.node.mark_subscriber_connections_dirty();
         Ok(())
     }
 
     /// Return the locally observed fate and durability for a write transaction.
     pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {
-        let Some((fate, _, durability)) = self.node.node.borrow_mut().transaction_state(tx_id)
+        let Some((fate, _, durability)) =
+            crate::db::block_on(self.node.node.borrow_mut().transaction_state(tx_id))
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
