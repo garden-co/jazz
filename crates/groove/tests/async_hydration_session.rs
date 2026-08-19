@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use futures::executor::block_on;
 use futures::task::noop_waker;
 use groove::db::{Database, GraphBuilder, PrimaryKeyValue};
-use groove::ivm::{ProjectField, PublicationId};
+use groove::ivm::{AggregateExpr, AggregateFunction, PlanExpr, ProjectField, PublicationId};
 use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -60,6 +60,33 @@ fn indexed_edges_schema() -> DatabaseSchema {
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_index(IndexSchema::new("edges_by_src", ["src", "dst"]))])
+}
+
+fn two_metrics_schema() -> DatabaseSchema {
+    DatabaseSchema::new(["left_metrics", "right_metrics"].map(|table| {
+        TableSchema::new(
+            table,
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("bucket", ColumnType::U64),
+                ColumnSchema::new("score", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    }))
+}
+
+fn metric_aggregate(table: &str) -> GraphBuilder {
+    GraphBuilder::aggregate(
+        GraphBuilder::table(table),
+        ["bucket"],
+        [AggregateExpr {
+            function: AggregateFunction::Sum,
+            expression: Some(PlanExpr::Field("score".to_owned())),
+            distinct: false,
+            output_name: Some("sum_score".to_owned()),
+        }],
+    )
 }
 
 fn edge_pairs() -> GraphBuilder {
@@ -297,6 +324,75 @@ fn recursive_retraction_loads_before_mutating_the_tick() {
         1,
         "recompute must consume the request retained before tick mutation"
     );
+}
+
+#[test]
+fn completed_stateful_branch_is_not_reapplied_while_sibling_is_blocked() {
+    let (storage, control) = TestStorage::controlled(&["left_metrics", "right_metrics"]);
+    let mut database = block_on(Database::new(two_metrics_schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "left_metrics",
+        vec![Value::U64(1), Value::U64(10), Value::U64(7)],
+    );
+    batch.insert(
+        "right_metrics",
+        vec![Value::U64(1), Value::U64(20), Value::U64(9)],
+    );
+    block_on(database.commit_batch(batch)).unwrap();
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let graph = GraphBuilder::union([
+        metric_aggregate("left_metrics"),
+        metric_aggregate("right_metrics"),
+    ]);
+    let mut install = Box::pin(database.subscribe_one_sink(graph));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        2,
+        "the work queue discovers both blocked siblings in one pass"
+    );
+
+    control.release_one();
+    assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        2,
+        "resuming one request must not rediscover either sibling"
+    );
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    let subscription = block_on(install).unwrap();
+    let initial = subscription.recv().unwrap().to_values().unwrap();
+    assert_eq!(initial.len(), 2);
+    assert!(initial.iter().any(|(row, weight)| {
+        *weight == 1
+            && row
+                == &vec![
+                    Value::U64(10),
+                    Value::Nullable(Some(Box::new(Value::U64(7)))),
+                ]
+    }));
+    assert!(initial.iter().any(|(row, weight)| {
+        *weight == 1
+            && row
+                == &vec![
+                    Value::U64(20),
+                    Value::Nullable(Some(Box::new(Value::U64(9)))),
+                ]
+    }));
 }
 
 #[test]

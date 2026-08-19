@@ -26,6 +26,48 @@ struct EvaluationSession {
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
 }
 
+/// Discovers storage leaves for all reachable siblings without recursively
+/// evaluating through the first blocked branch. Hash-consed nodes enter the
+/// queue once, so discovery is linear in the reachable graph slice.
+struct SourceWorkQueue {
+    pending: VecDeque<NodeId>,
+    visited: HashSet<NodeId>,
+}
+
+impl SourceWorkQueue {
+    fn new(roots: impl IntoIterator<Item = NodeId>) -> Self {
+        Self {
+            pending: roots.into_iter().collect(),
+            visited: HashSet::default(),
+        }
+    }
+
+    fn discover(
+        mut self,
+        graph: &IvmGraph,
+    ) -> Result<std::collections::BTreeSet<StorageRequestKey>, IvmRuntimeError> {
+        let mut requests = std::collections::BTreeSet::new();
+        while let Some(node_id) = self.pending.pop_front() {
+            if !self.visited.insert(node_id) {
+                continue;
+            }
+            let node = graph
+                .node(node_id)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node_id))?;
+            self.pending.extend(node.descriptor.inputs.iter().copied());
+            let request = match &node.descriptor.operator {
+                OpType::TableSource(source) => NodeState::table_source_request(source)?,
+                OpType::IndexSource(source) => NodeState::index_source_request(source)?,
+                _ => None,
+            };
+            if let Some(request) = request {
+                requests.insert(request);
+            }
+        }
+        Ok(requests)
+    }
+}
+
 impl EvaluationSession {
     fn hydration(runtime: &IvmRuntime, roots: VecDeque<NodeId>) -> Result<Self, IvmRuntimeError> {
         let mut relevant_nodes = HashSet::default();
@@ -681,6 +723,22 @@ impl IvmRuntime {
         let mut session = EvaluationSession::hydration(self, roots)?;
         let mut evaluation_inputs = EvaluationInputs::default();
         let mut storage_requests = StorageRequests::new(OwnedStorage::new(Rc::new(storage)));
+        let source_requests =
+            SourceWorkQueue::new(session.runnable_roots.iter().copied()).discover(&self.graph)?;
+        for request in source_requests {
+            storage_requests.request(request);
+        }
+        if storage_requests.has_pending() {
+            std::future::poll_fn(|cx| {
+                if storage_requests.poll(cx) > 0 {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            evaluation_inputs.install(storage_requests.drain_ready()?);
+        }
         while !session.runnable_roots.is_empty() {
             let mut blocked = VecDeque::new();
             while let Some(root) = session.runnable_roots.pop_front() {
