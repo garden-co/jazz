@@ -593,7 +593,8 @@ where
             }
             if needs_storage_fallback && allow_storage_witness_fallback {
                 let stored_tx = self
-                    .query_transaction_memo(*tx_id, &mut context)?
+                    .query_transaction_memo(*tx_id, &mut context)
+                    .await?
                     .ok_or(Error::MissingTransaction(*tx_id))?;
                 let fallback_versions =
                     if complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive {
@@ -616,7 +617,8 @@ where
                     && wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
             }) {
                 let stored_tx = self
-                    .query_transaction_memo(*tx_id, &mut context)?
+                    .query_transaction_memo(*tx_id, &mut context)
+                    .await?
                     .ok_or(Error::MissingTransaction(*tx_id))?;
                 // A trusted writer link that explicitly requests complete
                 // exclusive payloads must receive the whole cross-table
@@ -679,7 +681,8 @@ where
                     .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
                 if maintained_view_tx_versions_contain_winner(tx_versions, version) {
                     let stored_tx = self
-                        .query_transaction_memo(tx_id, &mut context)?
+                        .query_transaction_memo(tx_id, &mut context)
+                        .await?
                         .ok_or(Error::MissingTransaction(tx_id))?;
                     version_bundles.push(
                         self.version_bundle_for_maintained_view_versions_with_tx(
@@ -729,7 +732,8 @@ where
                 }
                 emitted_versions.insert(tx_id);
                 let stored_tx = self
-                    .query_transaction_memo(tx_id, &mut context)?
+                    .query_transaction_memo(tx_id, &mut context)
+                    .await?
                     .ok_or(Error::MissingTransaction(tx_id))?;
                 version_bundles.push(
                     self.version_bundle_for_maintained_view_versions_with_tx(

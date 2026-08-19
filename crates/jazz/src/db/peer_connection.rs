@@ -1156,11 +1156,15 @@ where
                             let action = request.action.clone();
                             let waiter_ids = request.waiters.clone();
                             scope_lease_manager.requests.remove(&request_id);
-                            let advice = evaluate_authoritative_permission_advice(
-                                &mut self.node.borrow_mut(),
-                                receipt.key.subject,
-                                action,
-                            );
+                            let advice = {
+                                let mut node = self.node.lock().await;
+                                evaluate_authoritative_permission_advice(
+                                    &mut node,
+                                    receipt.key.subject,
+                                    action,
+                                )
+                                .await
+                            };
                             for waiter_id in waiter_ids {
                                 if let Some(waiter) = self
                                     .permission_advice_waiters
@@ -2751,7 +2755,7 @@ fn transport_error(error: TransportError) -> Error {
     }
 }
 
-fn evaluate_authoritative_permission_advice<S>(
+async fn evaluate_authoritative_permission_advice<S>(
     node: &mut NodeState<S>,
     identity: AuthorId,
     action: PermissionAdviceAction,
@@ -2771,32 +2775,39 @@ where
             match id_dependent {
                 Ok(true) => return PermissionAdvice::Unknown,
                 Err(_) => return PermissionAdvice::Unknown,
-                Ok(false) => node.dry_run_insert_allows(
-                    MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
-                        .made_by(identity)
-                        .permission_subject(identity)
-                        .cells(cells),
-                ),
+                Ok(false) => {
+                    node.dry_run_insert_allows(
+                        MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
+                            .made_by(identity)
+                            .permission_subject(identity)
+                            .cells(cells),
+                    )
+                    .await
+                }
             }
         }
         PermissionAdviceAction::Read { table, row } => {
             node.dry_run_read_current_allows(&table, row, identity)
+                .await
         }
         PermissionAdviceAction::Update { table, row, patch } => {
             match node.current_rows(&table, DurabilityTier::Local) {
-                Ok(rows) if rows.iter().any(|current| current.row_uuid() == row) => node
-                    .dry_run_insert_allows(
+                Ok(rows) if rows.iter().any(|current| current.row_uuid() == row) => {
+                    node.dry_run_insert_allows(
                         MergeableCommit::new(table, row, 0)
                             .made_by(identity)
                             .permission_subject(identity)
                             .cells(patch),
-                    ),
+                    )
+                    .await
+                }
                 Ok(_) => Ok(false),
                 Err(error) => Err(error),
             }
         }
         PermissionAdviceAction::Delete { table, row } => {
             node.dry_run_delete_current_allows(&table, row, identity)
+                .await
         }
     };
     match result {
@@ -2860,8 +2871,10 @@ where
         )
     })?;
     if clause_count == 0 {
-        let advice =
-            evaluate_authoritative_permission_advice(&mut node.borrow_mut(), identity, action);
+        let advice = {
+            let mut node = node.lock().await;
+            evaluate_authoritative_permission_advice(&mut node, identity, action).await
+        };
         transport
             .send(SyncMessage::AuthorizationScopeDecision { request_id, advice })
             .map_err(transport_error)?;
