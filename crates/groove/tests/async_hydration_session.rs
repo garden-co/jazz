@@ -25,6 +25,18 @@ fn schema() -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
 }
 
+fn indexed_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "albums",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("title", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_index(IndexSchema::new("albums_by_title", ["title"]))])
+}
+
 #[test]
 fn cancelled_hydration_publishes_no_subscription_or_partial_session() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
@@ -84,6 +96,47 @@ fn hash_equal_hydration_roots_share_one_in_flight_storage_request() {
             .filter(|operation| **operation == TestStorageOperation::ScanOpen)
             .count(),
         1
+    );
+}
+
+#[test]
+fn blocked_index_source_retains_its_storage_request_across_polls() {
+    let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+    let mut database = block_on(Database::new(indexed_schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    block_on(database.commit_batch(batch)).unwrap();
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let mut install =
+        Box::pin(database.subscribe_one_sink(GraphBuilder::index("albums", "albums_by_title")));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1
+    );
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    let subscription = block_on(install).unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1,
+        "resuming evaluation must poll the retained request, not recreate it"
     );
 }
 
