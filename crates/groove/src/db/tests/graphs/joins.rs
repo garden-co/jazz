@@ -38,6 +38,44 @@ async fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
 }
 
 #[futures_test::test]
+async fn commits_do_not_scale_with_unrelated_resident_graph_size() {
+    async fn commit_with_unrelated_graphs(graph_count: u64) -> std::time::Duration {
+        let storage = MemoryStorage::new(&["albums", "archived_albums"]);
+        let mut database = Database::new(two_album_tables_schema(), storage)
+            .await
+            .unwrap();
+        let mut subscriptions = Vec::with_capacity(graph_count as usize);
+        for threshold in 0..graph_count {
+            subscriptions.push(
+                database
+                    .subscribe_one_sink(
+                        GraphBuilder::table("archived_albums")
+                            .filter(PredicateExpr::gt("id", Value::U64(threshold))),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let mut batch = database.open_batch();
+        batch.insert(
+            "albums",
+            vec![Value::U64(1), Value::String("unrelated write".to_owned())],
+        );
+        database.commit_batch(batch).await.unwrap();
+        std::hint::black_box(&subscriptions);
+        database.last_commit_metrics().unwrap().ivm_tick_time
+    }
+
+    let small = commit_with_unrelated_graphs(1).await;
+    let large = commit_with_unrelated_graphs(1_000).await;
+    assert!(
+        large <= small.saturating_mul(10) + std::time::Duration::from_micros(100),
+        "an unrelated resident graph must not make commits scale with total runtime size: small={small:?}, large={large:?}"
+    );
+}
+
+#[futures_test::test]
 async fn union_subscriptions_receive_deltas_from_multiple_tables() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
