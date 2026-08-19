@@ -128,3 +128,55 @@ fn cancelled_one_shot_query_discards_ephemeral_graph_and_hydration_state() {
     let records = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
     assert_eq!(records.deltas.len(), 1);
 }
+
+#[test]
+fn cancelled_storage_commit_does_not_publish_the_staged_tick() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let subscription =
+        block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    control.take_observed();
+    control.pause();
+    let mut commit = Box::pin(database.commit_batch(batch));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    for _ in 0..16 {
+        assert!(matches!(
+            Pin::new(&mut commit).poll(&mut context),
+            Poll::Pending
+        ));
+        if control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany)
+        {
+            break;
+        }
+        control.release_one();
+    }
+    assert!(
+        control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany)
+    );
+    drop(commit);
+
+    assert!(subscription.try_recv().is_err());
+    control.resume();
+    let rows = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
+    assert!(rows.is_empty());
+
+    let mut retry = database.open_batch();
+    retry.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    block_on(database.commit_batch(retry)).unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+}
