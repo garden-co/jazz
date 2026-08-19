@@ -322,8 +322,8 @@ where
 
     /// Serve a whole-table current-row view to this subscriber immediately and
     /// refresh it on later ticks.
-    pub fn serve_current_rows(&mut self, table: &str) -> Result<(), Error> {
-        self.tick()?;
+    pub async fn serve_current_rows(&mut self, table: &str) -> Result<(), Error> {
+        self.tick().await?;
         let ConnectionLink::Subscriber {
             peer,
             served_current_rows,
@@ -515,7 +515,7 @@ where
 
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
-    pub fn tick(&mut self) -> Result<DbTickStats, Error> {
+    pub async fn tick(&mut self) -> Result<DbTickStats, Error> {
         if let Some(error) = self.startup_error.take() {
             return Err(error);
         }
@@ -568,13 +568,15 @@ where
                             let registration_key =
                                 (shape.shape_id(), pending_subscription.opts.read_view_key());
                             if announced_shapes.insert(registration_key) {
-                                self.node.borrow_mut().apply_sync_message(
-                                    SyncMessage::RegisterShape {
+                                self.node
+                                    .lock()
+                                    .await
+                                    .apply_sync_message(SyncMessage::RegisterShape {
                                         shape_id: shape.shape_id(),
                                         ast: ShapeAst::from_validated(shape),
                                         opts: RegisterShapeOptions::default(),
-                                    },
-                                )?;
+                                    })
+                                    .await?;
                                 if let Err(error) =
                                     self.transport.send(SyncMessage::RegisterShape {
                                         shape_id: shape.shape_id(),
@@ -616,8 +618,10 @@ where
                                 summarize_subscription_key(subscribe.subscription)
                             ));
                             self.node
-                                .borrow_mut()
-                                .apply_sync_message(SyncMessage::Subscribe(subscribe.clone()))?;
+                                .lock()
+                                .await
+                                .apply_sync_message(SyncMessage::Subscribe(subscribe.clone()))
+                                .await?;
                             if let Err(error) =
                                 self.transport.send(SyncMessage::Subscribe(subscribe))
                             {
@@ -1225,14 +1229,18 @@ where
                                     }
                                     other => {
                                         self.node
-                                            .borrow_mut()
-                                            .apply_sync_message_with_ingest_context(other, None)?;
+                                            .lock()
+                                            .await
+                                            .apply_sync_message_with_ingest_context(other, None)
+                                            .await?;
                                     }
                                 }
                             } else {
                                 self.node
-                                    .borrow_mut()
-                                    .apply_sync_message_with_ingest_context(message, None)?;
+                                    .lock()
+                                    .await
+                                    .apply_sync_message_with_ingest_context(message, None)
+                                    .await?;
                             }
                             if let Some((tx_id, fate)) = routed_fate {
                                 let authority = *expected_scope_authority;
@@ -1552,13 +1560,15 @@ where
                             let rejection_subscription =
                                 register_shape_rejection_subscription(shape_id, registration_key.1);
                             let register_result = {
-                                self.node.borrow_mut().apply_sync_message(
-                                    SyncMessage::RegisterShape {
+                                self.node
+                                    .lock()
+                                    .await
+                                    .apply_sync_message(SyncMessage::RegisterShape {
                                         shape_id,
                                         ast,
                                         opts: RegisterShapeOptions::default(),
-                                    },
-                                )
+                                    })
+                                    .await
                             };
                             if let Err(error) = register_result {
                                 reject_server_subscription_failure(
@@ -1886,8 +1896,10 @@ where
                                 );
                             }
                             self.node
-                                .borrow_mut()
-                                .apply_sync_message(SyncMessage::Subscribe(subscribe))?;
+                                .lock()
+                                .await
+                                .apply_sync_message(SyncMessage::Subscribe(subscribe))
+                                .await?;
                             if let Some(purpose) = scope_purpose {
                                 let aggregate = scope_aggregates
                                     .entry(purpose.key.clone())
@@ -2233,19 +2245,24 @@ where
                                         )?;
                                     }
                                     self.node
-                                        .borrow_mut()
+                                        .lock()
+                                        .await
                                         .apply_sync_message_with_ingest_context(
                                             SyncMessage::CommitUnit { tx, versions },
                                             Some(*ingest_context),
-                                        )?
+                                        )
+                                        .await?
                                 }
-                                other => self
-                                    .node
-                                    .borrow_mut()
-                                    .apply_sync_message_with_ingest_context(
-                                        other,
-                                        Some(*ingest_context),
-                                    )?,
+                                other => {
+                                    self.node
+                                        .lock()
+                                        .await
+                                        .apply_sync_message_with_ingest_context(
+                                            other,
+                                            Some(*ingest_context),
+                                        )
+                                        .await?
+                                }
                             };
                             if let Some(tx_id) = write_state_tx_id {
                                 handle_write_state_update(

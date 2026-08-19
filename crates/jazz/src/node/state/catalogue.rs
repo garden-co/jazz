@@ -2,7 +2,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    fn persist_catalogue_schema(&mut self, schema: &SchemaVersion) -> Result<(), Error> {
+    async fn persist_catalogue_schema(&mut self, schema: &SchemaVersion) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue",
@@ -12,7 +12,7 @@ where
                 Value::Bytes(serde_json::to_vec(schema)?),
             ],
         );
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         Ok(())
     }
 
@@ -746,7 +746,7 @@ where
         Ok(())
     }
 
-    fn persist_catalogue_lens_with_physical_metadata(
+    async fn persist_catalogue_lens_with_physical_metadata(
         &mut self,
         lens: &MigrationLens,
         mapping: Option<&SchemaPhysicalMapping>,
@@ -770,7 +770,7 @@ where
                 ))?;
             Self::write_schema_version_mapping_to_batch(&mut batch, alias, lens.target, mapping)?;
         }
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         Ok(())
     }
 
@@ -905,9 +905,10 @@ where
             .find_map(|(id, candidate)| (*candidate == alias).then_some(*id))
     }
 
-    fn record_child_edges(&mut self, child: TxId, parents: impl IntoIterator<Item = TxId>) {
+    async fn record_child_edges(&mut self, child: TxId, parents: impl IntoIterator<Item = TxId>) {
         if self
             .query_transaction(child)
+            .await
             .ok()
             .flatten()
             .is_some_and(|tx| !matches!(tx.fate, Fate::Pending))
@@ -917,6 +918,7 @@ where
         for parent in parents {
             if self
                 .query_transaction(parent)
+                .await
                 .ok()
                 .flatten()
                 .is_some_and(|tx| !matches!(tx.fate, Fate::Pending))

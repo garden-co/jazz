@@ -12,15 +12,16 @@ where
     S: OrderedKvStorage,
 {
     #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
-    pub(super) fn query_row_versions(
+    pub(super) async fn query_row_versions(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Vec<VersionRow>, Error> {
         self.query_row_versions_in_branch(table, &BranchKey::default(), row_uuid)
+            .await
     }
 
-    pub(super) fn query_row_versions_in_branch(
+    pub(super) async fn query_row_versions_in_branch(
         &mut self,
         table: &str,
         branch_key: &BranchKey,
@@ -36,7 +37,7 @@ where
                         Value::Bytes(branch_key.canonical_bytes()),
                         Value::Uuid(row_uuid.0),
                     ],
-                )?
+                .await?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -52,7 +53,8 @@ where
                 .primary_key_scan_raw(
                     &storage_table,
                     &self.deletion_storage_prefix_in_branch(table, branch_key, Some(row_uuid))?,
-                )?
+                )
+                .await?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -117,13 +119,14 @@ where
     }
 
     #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
-    pub(super) fn query_local_layer_winner(
+    pub(super) async fn query_local_layer_winner(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
         self.query_layer_winner_from_pk(table, row_uuid, layer)
+            .await
     }
 
     pub(super) fn query_local_layer_winner_in_branch(
@@ -137,7 +140,7 @@ where
     }
 
     #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
-    pub(super) fn query_global_layer_winner(
+    pub(super) async fn query_global_layer_winner(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -153,6 +156,7 @@ where
             self.catalogue.current_schema_version_id
         };
         self.query_global_layer_winner_in_schema(schema_version, table, row_uuid, layer)
+            .await
     }
 
     pub(super) fn query_global_layer_winner_in_branch(
@@ -196,7 +200,7 @@ where
     /// Incoming historical versions retain their authored table literal, which
     /// need not exist in the currently selected write/read schema after a
     /// rename.
-    pub(super) fn query_global_layer_winner_in_schema(
+    pub(super) async fn query_global_layer_winner_in_schema(
         &mut self,
         schema_version: SchemaVersionId,
         table: &str,
@@ -212,7 +216,7 @@ where
         )
     }
 
-    pub(super) fn query_global_layer_winner_in_schema_and_branch(
+    pub(super) async fn query_global_layer_winner_in_schema_and_branch(
         &mut self,
         schema_version: SchemaVersionId,
         table: &str,
@@ -232,7 +236,7 @@ where
                 Value::Bytes(branch_key.canonical_bytes()),
                 Value::Uuid(row_uuid.0),
             ],
-        )?;
+        ).await?;
         let Some(raw) = raw else {
             return Ok(None);
         };
@@ -249,9 +253,10 @@ where
             tx_time,
             tx_node_alias,
         )
+        .await
     }
 
-    pub(super) fn query_layer_winner_from_pk(
+    pub(super) async fn query_layer_winner_from_pk(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -279,7 +284,8 @@ where
             };
             let Some(raw) = self
                 .database
-                .primary_key_last_raw(&storage_table, &prefix)?
+                .primary_key_last_raw(&storage_table, &prefix)
+                .await?
                 .map(|raw| raw.owned_record())
             else {
                 continue;
@@ -301,10 +307,10 @@ where
     }
 
     #[cfg(test)]
-    pub(super) fn query_all_versions(&mut self) -> Result<Vec<VersionRow>, Error> {
+    pub(super) async fn query_all_versions(&mut self) -> Result<Vec<VersionRow>, Error> {
         let mut versions = Vec::new();
         for table in self.catalogue.schema.tables.clone() {
-            versions.extend(self.query_table_versions(&table.name)?);
+            versions.extend(self.query_table_versions(&table.name).await?);
         }
         versions.sort_by_key(|version| {
             (
@@ -317,12 +323,16 @@ where
         Ok(versions)
     }
 
-    pub(super) fn query_table_versions(&mut self, table: &str) -> Result<Vec<VersionRow>, Error> {
+    pub(super) async fn query_table_versions(
+        &mut self,
+        table: &str,
+    ) -> Result<Vec<VersionRow>, Error> {
         let mut versions_by_key = BTreeMap::new();
         for storage_table in self.version_storage_sources_for_layer(table, VersionLayer::Content)? {
             let raws = self
                 .database
-                .primary_key_scan_raw(&storage_table, &[])?
+                .primary_key_scan_raw(&storage_table, &[])
+                .await?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -354,7 +364,8 @@ where
             let requested_table_id = self.physical_table_id_for_schema(schema_version, table)?;
             let raws = self
                 .database
-                .primary_key_scan_raw(&storage_table, &[])?
+                .primary_key_scan_raw(&storage_table, &[])
+                .await?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -387,11 +398,14 @@ where
         Ok(versions)
     }
 
-    pub(super) fn query_versions_for_tx(&mut self, tx_id: TxId) -> Result<Vec<VersionRow>, Error> {
+    pub(super) async fn query_versions_for_tx(
+        &mut self,
+        tx_id: TxId,
+    ) -> Result<Vec<VersionRow>, Error> {
         #[cfg(test)]
         record_query_versions_for_tx_call();
 
-        let Some(tx) = self.query_transaction(tx_id)? else {
+        let Some(tx) = self.query_transaction(tx_id).await? else {
             return Ok(Vec::new());
         };
         if let Some(mut versions) = self.cached_tx_versions(tx_id) {
@@ -421,7 +435,8 @@ where
                         &storage_table,
                         "by_tx",
                         &[Value::U64(tx_id.time.0), Value::U64(tx.node_alias.0)],
-                    )?
+                    )
+                    .await?
                     .into_iter()
                     .map(|raw| raw.owned_record())
                     .collect::<Vec<_>>();
@@ -460,7 +475,7 @@ where
         Ok(versions)
     }
 
-    pub(super) fn query_versions_for_tx_rows_by_alias(
+    pub(super) async fn query_versions_for_tx_rows_by_alias(
         &mut self,
         tx_id: TxId,
         tx_node_alias: NodeAlias,
@@ -469,8 +484,9 @@ where
         let mut versions = Vec::new();
         for (table, row_uuid) in rows {
             for layer in [VersionLayer::Content, VersionLayer::Deletion] {
-                if let Some(version) =
-                    self.query_version_by_alias(table, *row_uuid, layer, tx_id.time, tx_node_alias)?
+                if let Some(version) = self
+                    .query_version_by_alias(table, *row_uuid, layer, tx_id.time, tx_node_alias)
+                    .await?
                 {
                     versions.push(version);
                 }
@@ -775,7 +791,7 @@ where
         Ok(None)
     }
 
-    pub(super) fn preload_transaction_memo(
+    pub(super) async fn preload_transaction_memo(
         &mut self,
         tx_ids: impl IntoIterator<Item = TxId>,
         context: &mut super::policy::ViewEvaluationContext,
@@ -791,7 +807,7 @@ where
                     .or_default()
                     .insert(tx_id.time);
             } else {
-                let tx = self.query_transaction(tx_id)?;
+                let tx = self.query_transaction(tx_id).await?;
                 context.tx_rows.insert(tx_id, tx);
             }
         }
@@ -800,7 +816,7 @@ where
             if times.len() == 1 {
                 let time = *times.iter().next().expect("non-empty time set");
                 let tx_id = TxId::new(time, node);
-                let tx = self.query_transaction_by_alias(tx_id, alias)?;
+                let tx = self.query_transaction_by_alias(tx_id, alias).await?;
                 context.tx_rows.insert(tx_id, tx);
                 continue;
             }
@@ -810,7 +826,7 @@ where
             let Some(end_time) = max_time.0.checked_add(1) else {
                 for time in times {
                     let tx_id = TxId::new(time, node);
-                    let tx = self.query_transaction_by_alias(tx_id, alias)?;
+                    let tx = self.query_transaction_by_alias(tx_id, alias).await?;
                     context.tx_rows.insert(tx_id, tx);
                 }
                 continue;
@@ -819,11 +835,15 @@ where
             for time in &times {
                 context.tx_rows.insert(TxId::new(*time, node), None);
             }
-            for raw in self.database.primary_key_scan_range_raw(
-                "jazz_transactions",
-                &[Value::U64(min_time.0), Value::U64(0)],
-                &[Value::U64(end_time), Value::U64(0)],
-            )? {
+            for raw in self
+                .database
+                .primary_key_scan_range_raw(
+                    "jazz_transactions",
+                    &[Value::U64(min_time.0), Value::U64(0)],
+                    &[Value::U64(end_time), Value::U64(0)],
+                )
+                .await?
+            {
                 let record = raw.record();
                 let row_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
                 let time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
@@ -912,7 +932,7 @@ where
         })
     }
 
-    pub(super) fn transaction_exists(&self, tx_id: TxId) -> Result<bool, Error> {
+    pub(super) async fn transaction_exists(&self, tx_id: TxId) -> Result<bool, Error> {
         let Some(expected_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Ok(false);
         };
@@ -921,11 +941,12 @@ where
             .primary_key_get_raw(
                 "jazz_transactions",
                 &[Value::U64(tx_id.time.0), Value::U64(expected_alias.0)],
-            )?
+            )
+            .await?
             .is_some())
     }
 
-    pub(super) fn transaction_exists_memo(
+    pub(super) async fn transaction_exists_memo(
         &mut self,
         tx_id: TxId,
         memo: &mut IngestMemo,
@@ -933,22 +954,22 @@ where
         if let Some(exists) = memo.tx_exists.get(&tx_id) {
             return Ok(*exists);
         }
-        let exists = self.transaction_exists(tx_id)?;
+        let exists = self.transaction_exists(tx_id).await?;
         memo.tx_exists.insert(tx_id, exists);
         Ok(exists)
     }
 
-    pub(super) fn transaction_made_at(&self, tx_id: TxId) -> Result<Option<TxTime>, Error> {
+    pub(super) async fn transaction_made_at(&self, tx_id: TxId) -> Result<Option<TxTime>, Error> {
         if !self.node_aliases.contains_key(&tx_id.node) {
             return Ok(None);
         }
-        if self.transaction_exists(tx_id)? {
+        if self.transaction_exists(tx_id).await? {
             return Ok(Some(tx_id.time));
         }
         Ok(None)
     }
 
-    pub(super) fn transaction_made_at_memo(
+    pub(super) async fn transaction_made_at_memo(
         &mut self,
         tx_id: TxId,
         memo: &mut IngestMemo,
@@ -956,7 +977,7 @@ where
         if let Some(made_at) = memo.tx_made_at.get(&tx_id) {
             return Ok(*made_at);
         }
-        let made_at = self.transaction_made_at(tx_id)?;
+        let made_at = self.transaction_made_at(tx_id).await?;
         memo.tx_made_at.insert(tx_id, made_at);
         if made_at.is_some() {
             memo.tx_exists.insert(tx_id, true);
@@ -964,7 +985,7 @@ where
         Ok(made_at)
     }
 
-    pub(super) fn query_version_by_alias(
+    pub(super) async fn query_version_by_alias(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -973,20 +994,27 @@ where
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
         for storage_table in self.version_storage_sources_for_layer(table, layer)? {
-            if let Some(version) = self.query_version_by_alias_with_storage(
-                table,
-                &storage_table,
-                row_uuid,
-                tx_time,
-                tx_node_alias,
-            )? {
+            if let Some(version) = self
+                .query_version_by_alias_with_storage(
+                    table,
+                    &storage_table,
+                    row_uuid,
+                    tx_time,
+                    tx_node_alias,
+                )
+                .await?
+            {
                 return Ok(Some(version));
             }
         }
         Ok(None)
     }
 
-    pub(super) fn query_version_by_alias_in_branch(
+    /// Resolve an exact historical witness through the schema that authored
+    /// its table literal. Shared deletion history is keyed by physical table,
+    /// so an old `todos` witness must not construct its prefix via renamed
+    /// current `tasks` schema state.
+    pub(super) async fn query_version_by_alias_in_branch(
         &mut self,
         schema_version: SchemaVersionId,
         table: &str,
@@ -1011,9 +1039,10 @@ where
             tx_time,
             tx_node_alias,
         )
+        .await
     }
 
-    pub(super) fn query_version_by_alias_with_storage(
+    pub(super) async fn query_version_by_alias_with_storage(
         &mut self,
         table: &str,
         storage_table: &str,
@@ -1038,9 +1067,10 @@ where
             tx_time,
             tx_node_alias,
         )
+        .await
     }
 
-    fn query_version_by_alias_with_storage_in_schema(
+    async fn query_version_by_alias_with_storage_in_schema(
         &mut self,
         schema_version: SchemaVersionId,
         table: &str,
@@ -1069,7 +1099,8 @@ where
         };
         let raw = self
             .database
-            .primary_key_get_raw(storage_table, &key)?
+            .primary_key_get_raw(storage_table, &key)
+            .await?
             .map(|raw| raw.owned_record());
         let Some(record) = raw else {
             return Ok(None);

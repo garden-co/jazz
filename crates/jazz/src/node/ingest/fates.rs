@@ -506,10 +506,7 @@ where
         Ok(true)
     }
 
-    pub(super) fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error>
-    where
-        S: ReopenableStorage,
-    {
+    pub(super) fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error> {
         let mut updates = Vec::new();
         loop {
             let parked = self
@@ -567,10 +564,7 @@ where
         Ok(updates)
     }
 
-    pub(super) fn drain_parked_relay_commit_units(&mut self) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
+    pub(super) fn drain_parked_relay_commit_units(&mut self) -> Result<(), Error> {
         loop {
             let parked = self
                 .parking
