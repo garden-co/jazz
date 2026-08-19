@@ -277,14 +277,15 @@ where
                 read_view: coverage.opts.read_view_key(),
             };
             let update = {
-                let mut node = self.node.borrow_mut();
+                let mut node = self.node.lock().await;
                 peer.rehydrate_query_for_subscription_with_opts(
                     &mut node,
                     maintained_subscription,
                     &shape,
                     &binding,
                     coverage.opts,
-                )?
+                )
+                .await?
             };
             for subscription in subscribers {
                 let mut update = retarget_view_update(update.clone(), subscription);
@@ -339,8 +340,8 @@ where
         }
         for table in served_current_rows.values() {
             let update = {
-                let mut node = self.node.borrow_mut();
-                peer.current_rows_update(&mut node, table)?
+                let mut node = self.node.lock().await;
+                peer.current_rows_update(&mut node, table).await?
             };
             send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
         }
@@ -362,8 +363,8 @@ where
             return Ok(());
         };
         let update = {
-            let mut node = self.node.borrow_mut();
-            peer.current_rows_update(&mut node, table)?
+            let mut node = self.node.lock().await;
+            peer.current_rows_update(&mut node, table).await?
         };
         self.last_resume_bytes = Some(serialized_sync_message_len(&update));
         let subscription = view_update_subscription(&update);
@@ -421,7 +422,7 @@ where
     /// an authority installs its first permissions head or replaces it with a
     /// tighter one: the client keeps the same subscription, but its visible
     /// membership must be recalculated immediately.
-    pub(super) fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
+    pub(super) async fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
         self.bind_subscriber_session_claims();
         let connection_epoch = self.connection_epoch;
         let ConnectionLink::Subscriber {
@@ -455,14 +456,15 @@ where
                 read_view: coverage.opts.read_view_key(),
             };
             let update = {
-                let mut node = self.node.borrow_mut();
+                let mut node = self.node.lock().await;
                 peer.rehydrate_query_for_subscription_with_opts(
                     &mut node,
                     group_subscription,
                     &shape,
                     &binding,
                     coverage.opts.clone(),
-                )?
+                )
+                .await?
             };
             for subscription in subscribers {
                 let mut update = retarget_view_update(update.clone(), subscription);
@@ -1889,7 +1891,7 @@ where
                                 None
                             } else if first_subscriber {
                                 peer.declare_known_state(group_subscription, known_state.clone());
-                                let mut node = self.node.borrow_mut();
+                                let mut node = self.node.lock().await;
                                 let update_result = peer
                                     .rehydrate_query_for_subscription_with_opts(
                                         &mut node,
@@ -1897,7 +1899,8 @@ where
                                         &shape,
                                         &binding,
                                         opts.clone(),
-                                    );
+                                    )
+                                    .await;
                                 let update = match update_result {
                                     Ok(update) => update,
                                     Err(crate::node::Error::QueryCapability(detail)) => {
@@ -1929,14 +1932,15 @@ where
                                 Some(retarget_view_update(update, subscription))
                             } else {
                                 peer.declare_known_state(subscription, known_state.clone());
-                                let mut node = self.node.borrow_mut();
+                                let mut node = self.node.lock().await;
                                 let update_result = peer
                                     .rehydrate_query_for_subscription_from_maintained_subscription(
                                         &mut node,
                                         group_subscription,
                                         subscription,
                                         &shape,
-                                    );
+                                    )
+                                    .await;
                                 let update = match update_result {
                                     Ok(update) => update,
                                     Err(error) => {
@@ -2425,7 +2429,7 @@ where
                             continue;
                         }
                         let update_result = {
-                            let mut node = self.node.borrow_mut();
+                            let mut node = self.node.lock().await;
                             if settled_handoff {
                                 peer.rehydrate_query_for_subscription_with_opts(
                                     &mut node,
@@ -2434,6 +2438,7 @@ where
                                     &group.binding,
                                     coverage.opts.clone(),
                                 )
+                                .await
                             } else {
                                 peer.query_update_for_subscription_with_opts_after_runtime_flush(
                                     &mut node,
@@ -2442,6 +2447,7 @@ where
                                     &group.binding,
                                     coverage.opts.clone(),
                                 )
+                                .await
                             }
                         };
                         let update = match update_result {
@@ -2512,8 +2518,8 @@ where
                     }
                     for table in served_current_rows.values() {
                         let update = {
-                            let mut node = self.node.borrow_mut();
-                            peer.current_rows_update(&mut node, table)?
+                            let mut node = self.node.lock().await;
+                            peer.current_rows_update(&mut node, table).await?
                         };
                         if !view_update_is_empty(&update) {
                             send_with_sync_context(
@@ -2984,13 +2990,17 @@ where
         });
         transport.send(subscribe.clone()).map_err(transport_error)?;
         peer.declare_known_state(subscription, None);
-        let update = peer.rehydrate_query_for_subscription_with_opts(
-            &mut node.borrow_mut(),
-            subscription,
-            shape,
-            binding,
-            scope.options.clone(),
-        )?;
+        let update = {
+            let mut node = node.lock().await;
+            peer.rehydrate_query_for_subscription_with_opts(
+                &mut node,
+                subscription,
+                shape,
+                binding,
+                scope.options.clone(),
+            )
+            .await?
+        };
         let SyncMessage::ViewUpdate {
             settled_through: cut,
             ..

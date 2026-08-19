@@ -183,7 +183,7 @@ impl PeerState {
     /// Builds a full current-row view update, using tx-level refs for complete
     /// transaction payloads in this peer's inventory and bundles for new or
     /// partial view payload.
-    pub fn current_rows_update<S>(
+    pub async fn current_rows_update<S>(
         &mut self,
         node: &mut NodeState<S>,
         table: &str,
@@ -241,7 +241,8 @@ impl PeerState {
                     read_view: &ReadViewSpec::default(),
                     purpose: RehydratePurpose::Query,
                 },
-            );
+            )
+            .await;
         }
         if self
             .subscriptions
@@ -256,7 +257,8 @@ impl PeerState {
                 subscription,
                 Some(table),
                 true,
-            );
+            )
+            .await;
         }
         unreachable!("maintained subscription view state is either absent or present")
     }
@@ -264,7 +266,7 @@ impl PeerState {
     /// Builds a query-binding view update, using tx-level refs for complete
     /// transaction payloads in this peer's inventory and bundles for new or
     /// partial view payload.
-    pub fn query_update<S>(
+    pub async fn query_update<S>(
         &mut self,
         node: &mut NodeState<S>,
         shape: &ValidatedQuery,
@@ -273,11 +275,11 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        self.query_update_inner(node, shape, binding)
+        self.query_update_inner(node, shape, binding).await
     }
 
     /// Build an incremental view update addressed to a usage-site subscription.
-    pub fn query_update_for_subscription<S>(
+    pub async fn query_update_for_subscription<S>(
         &mut self,
         node: &mut NodeState<S>,
         subscription: SubscriptionKey,
@@ -294,11 +296,12 @@ impl PeerState {
             binding,
             RegisterShapeOptions::default(),
         )
+        .await
     }
 
     /// Build an incremental view update addressed to a usage-site subscription,
     /// preserving the read view and tier used when the shape was registered.
-    pub fn query_update_for_subscription_with_opts<S>(
+    pub async fn query_update_for_subscription_with_opts<S>(
         &mut self,
         node: &mut NodeState<S>,
         subscription: SubscriptionKey,
@@ -310,11 +313,12 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         self.query_update_inner_for_subscription(node, subscription, shape, binding, opts, true)
+            .await
     }
 
     /// Build an incremental view update after the caller has already flushed
     /// the shared Groove runtime for this refresh.
-    pub(crate) fn query_update_for_subscription_with_opts_after_runtime_flush<S>(
+    pub(crate) async fn query_update_for_subscription_with_opts_after_runtime_flush<S>(
         &mut self,
         node: &mut NodeState<S>,
         subscription: SubscriptionKey,
@@ -326,9 +330,10 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         self.query_update_inner_for_subscription(node, subscription, shape, binding, opts, false)
+            .await
     }
 
-    fn query_update_inner<S>(
+    async fn query_update_inner<S>(
         &mut self,
         node: &mut NodeState<S>,
         shape: &ValidatedQuery,
@@ -350,9 +355,10 @@ impl PeerState {
             RegisterShapeOptions::default(),
             true,
         )
+        .await
     }
 
-    fn query_update_inner_for_subscription<S>(
+    async fn query_update_inner_for_subscription<S>(
         &mut self,
         node: &mut NodeState<S>,
         subscription: SubscriptionKey,
@@ -389,7 +395,8 @@ impl PeerState {
                 subscription,
                 None,
                 flush_query_runtime,
-            );
+            )
+            .await;
         }
         let previous_member_result_set = self
             .subscriptions
@@ -421,9 +428,10 @@ impl PeerState {
                 purpose: RehydratePurpose::Query,
             },
         )
+        .await
     }
 
-    fn query_update_maintained_subscription_view<S>(
+    async fn query_update_maintained_subscription_view<S>(
         &mut self,
         node: &mut NodeState<S>,
         shape: &ValidatedQuery,
@@ -446,7 +454,8 @@ impl PeerState {
             subscription,
             result_table_filter,
             flush_query_runtime,
-        )?;
+        )
+        .await?;
         let drain_elapsed = trace_start.elapsed();
         let drain_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         let ResultTransitions {
@@ -502,7 +511,8 @@ impl PeerState {
                     read_view: &ReadViewSpec::default(),
                     purpose: RehydratePurpose::Query,
                 },
-            );
+            )
+            .await;
         }
         if let Some(state) = self.subscriptions.get(&subscription) {
             result_member_removes.extend(replacement_removals(state, &result_member_adds));
@@ -590,7 +600,7 @@ impl PeerState {
                 },
             )
         };
-        let mut update = update?;
+        let mut update = update.await?;
         if let SyncMessage::ViewUpdate {
             terminal_operations: outgoing,
             ..
@@ -633,7 +643,7 @@ impl PeerState {
         Ok(update)
     }
 
-    fn drain_maintained_subscription_view_changes<S>(
+    async fn drain_maintained_subscription_view_changes<S>(
         &mut self,
         node: &mut NodeState<S>,
         shape: &ValidatedQuery,
@@ -645,7 +655,7 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         if flush_query_runtime {
-            node.flush_query_runtime()?;
+            node.flush_query_runtime().await?;
         }
         let previous_member_result_set = self
             .subscriptions
@@ -797,7 +807,7 @@ impl PeerState {
         })
     }
 
-    fn rehydrate_query_maintained_subscription_view<S>(
+    async fn rehydrate_query_maintained_subscription_view<S>(
         &mut self,
         node: &mut NodeState<S>,
         request: MaintainedRehydrateRequest<'_>,
@@ -822,13 +832,16 @@ impl PeerState {
             node.reset_storage_read_metrics();
         }
         let opened = match purpose {
-            RehydratePurpose::Query => node.open_seeded_maintained_subscription_view(
-                shape,
-                binding,
-                self.identity(),
-                tier,
-                read_view,
-            ),
+            RehydratePurpose::Query => {
+                node.open_seeded_maintained_subscription_view(
+                    shape,
+                    binding,
+                    self.identity(),
+                    tier,
+                    read_view,
+                )
+                .await
+            }
             RehydratePurpose::AuthorizationSupport => node
                 .open_seeded_authorization_support_subscription_view(
                     shape,
@@ -836,7 +849,8 @@ impl PeerState {
                     self.identity(),
                     tier,
                     read_view,
-                ),
+                )
+                .await,
         };
         let (receiver, maintained, terminal_schemas, transitions, tables) = match opened {
             Ok(opened) => opened,
@@ -1013,15 +1027,15 @@ impl PeerState {
                 allow_storage_witness_fallback: false,
             },
         );
-        let bundle_elapsed = bundle_start.elapsed();
-        let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
-        let mut update = match update {
+        let mut update = match update.await {
             Ok(update) => update,
             Err(err) => {
-                node.unsubscribe_groove_subscription(receiver.id());
+                node.unsubscribe_groove_subscription(receiver.id()).await;
                 return Err(err);
             }
         };
+        let bundle_elapsed = bundle_start.elapsed();
+        let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if reset_result_set {
             view_update_reset_result_set(&mut update);
         }
@@ -1080,7 +1094,7 @@ impl PeerState {
     }
 
     /// Build a reset-result_set current-row view update.
-    pub fn rehydrate_current_rows<S>(
+    pub async fn rehydrate_current_rows<S>(
         &mut self,
         node: &mut NodeState<S>,
         table: &str,
@@ -1089,11 +1103,11 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         let (shape, binding) = node.whole_table_shape_binding(table)?;
-        self.rehydrate_query(node, &shape, &binding)
+        self.rehydrate_query(node, &shape, &binding).await
     }
 
     /// Build a reset-result-set query-binding view update.
-    pub fn rehydrate_query<S>(
+    pub async fn rehydrate_query<S>(
         &mut self,
         node: &mut NodeState<S>,
         shape: &ValidatedQuery,
@@ -1103,10 +1117,11 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         self.rehydrate_query_with_opts(node, shape, binding, RegisterShapeOptions::default())
+            .await
     }
 
     /// Build a reset-result-set query-binding view update with registration options.
-    pub fn rehydrate_query_with_opts<S>(
+    pub async fn rehydrate_query_with_opts<S>(
         &mut self,
         node: &mut NodeState<S>,
         shape: &ValidatedQuery,
@@ -1122,10 +1137,11 @@ impl PeerState {
             read_view: opts.read_view_key(),
         };
         self.rehydrate_query_for_subscription_with_opts(node, subscription, shape, binding, opts)
+            .await
     }
 
     /// Build a reset-result-set query view update for a usage-site subscription.
-    pub fn rehydrate_query_for_subscription_with_opts<S>(
+    pub async fn rehydrate_query_for_subscription_with_opts<S>(
         &mut self,
         node: &mut NodeState<S>,
         subscription: SubscriptionKey,
@@ -1144,9 +1160,10 @@ impl PeerState {
             opts,
             RehydratePurpose::Query,
         )
+        .await
     }
 
-    fn rehydrate_query_for_subscription_with_purpose<S>(
+    async fn rehydrate_query_for_subscription_with_purpose<S>(
         &mut self,
         node: &mut NodeState<S>,
         subscription: SubscriptionKey,
@@ -1212,9 +1229,10 @@ impl PeerState {
                 purpose,
             },
         )
+        .await
     }
 
-    pub(crate) fn rehydrate_authorization_support_query<S>(
+    pub(crate) async fn rehydrate_authorization_support_query<S>(
         &mut self,
         node: &mut NodeState<S>,
         shape: &ValidatedQuery,
@@ -1237,10 +1255,11 @@ impl PeerState {
             opts,
             RehydratePurpose::AuthorizationSupport,
         )
+        .await
     }
 
     /// Build a usage-site update from an already-maintained canonical subscription.
-    pub fn rehydrate_query_for_subscription_from_maintained_subscription<S>(
+    pub async fn rehydrate_query_for_subscription_from_maintained_subscription<S>(
         &mut self,
         node: &mut NodeState<S>,
         maintained_subscription: SubscriptionKey,
@@ -1257,7 +1276,8 @@ impl PeerState {
             maintained_subscription,
             None,
             true,
-        )?;
+        )
+        .await?;
         let ResultTransitions {
             authoritative_membership_changed: _,
             authoritative_member_adds: _,
@@ -1403,7 +1423,7 @@ impl PeerState {
                 },
             )
         };
-        let mut update = update?;
+        let mut update = update.await?;
         if reset_result_set {
             view_update_reset_result_set(&mut update);
         }

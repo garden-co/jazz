@@ -123,7 +123,7 @@ where
         self.node.borrow_mut().set_permissions_ready(ready);
         if ready {
             for connection in self.connections.borrow().iter() {
-                connection.borrow_mut().rehydrate_subscriber_views()?;
+                crate::db::block_on(connection.borrow_mut().rehydrate_subscriber_views())?;
             }
         }
         Ok(())
