@@ -237,6 +237,65 @@ fn declared_id_lookup_and_reachable_types_validate() {
     );
 }
 
+/// A same-table reachability seed may use `id` only when its effective
+/// frontier value is a non-null UUID; string and nullable declared IDs cannot
+/// drive UUID edge traversal.
+#[test]
+fn reachable_self_seed_id_requires_non_nullable_uuid() {
+    let schema = |team_id_type| {
+        JazzSchema::new([
+            TableSchema::new("roots", [ColumnSchema::new("label", ColumnType::String)]),
+            TableSchema::new(
+                "access",
+                [
+                    ColumnSchema::new("root", ColumnType::Uuid),
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("root", "roots")
+            .with_reference("team", "teams"),
+            TableSchema::new(
+                "teams",
+                [
+                    ColumnSchema::new("id", team_id_type),
+                    ColumnSchema::new("identity", ColumnType::Uuid),
+                ],
+            ),
+            TableSchema::new(
+                "edges",
+                [
+                    ColumnSchema::new("member", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("member", "teams")
+            .with_reference("parent", "teams"),
+        ])
+    };
+    let query = || {
+        Query::from("roots")
+            .reachable_via(
+                "access",
+                "root",
+                "team",
+                lit(Value::Uuid(uuid::Uuid::nil())),
+                "edges",
+                "member",
+                "parent",
+                [],
+            )
+            .seeded_by("teams", "identity", "sub", "id")
+    };
+
+    assert!(query().validate(&schema(ColumnType::Uuid)).is_ok());
+    assert!(query().validate(&schema(ColumnType::String)).is_err());
+    assert!(
+        query()
+            .validate(&schema(ColumnType::Uuid.nullable()))
+            .is_err()
+    );
+}
+
 #[test]
 fn join_read_tables_include_source_lookups_and_nested_joins() {
     let nested = crate::query::JoinVia {

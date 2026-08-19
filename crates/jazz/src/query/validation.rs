@@ -783,11 +783,13 @@ fn validate_reachable(
     }
     if let Some(seed) = &reachable.seed {
         let seed_table = table(schema, &seed.table)?;
-        planner_column_type(&seed_table, &seed.team_column)?;
+        if planner_column_type(&seed_table, &seed.team_column)? != &ColumnType::Uuid {
+            return Err(QueryError::OperandTypeMismatch);
+        }
         if let Some(user_column) = &seed.user_column {
             planner_column_type(&seed_table, user_column)?;
         }
-        let seed_projects_team = if seed.team_column == "id" && !has_declared_id(&seed_table) {
+        let seed_projects_team = if seed.team_column == "id" {
             seed_table.name == *team_table
         } else {
             matches!(
