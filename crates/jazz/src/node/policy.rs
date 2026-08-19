@@ -21,7 +21,7 @@ where
     /// version record.  This is the sole bridge from committed wire data to
     /// authorization support hydration: callers must not substitute a
     /// table-wide or placeholder update action.
-    pub(crate) fn authorization_actions_for_versions(
+    pub(crate) async fn authorization_actions_for_versions(
         &mut self,
         versions: &[VersionRecord],
     ) -> Result<Vec<PermissionAdviceAction>, Error> {
@@ -37,7 +37,8 @@ where
                 continue;
             }
             let is_update = self
-                .policy_previous_content_subject_row(policy_schema_version, &table, version)?
+                .policy_previous_content_subject_row(policy_schema_version, &table, version)
+                .await?
                 .is_some();
             if is_update {
                 let patch = match version.authored_columns() {
@@ -62,15 +63,16 @@ where
         Ok(actions)
     }
 
-    pub(super) fn write_policy_allows_version_record(
+    pub(super) async fn write_policy_allows_version_record(
         &mut self,
         version: &VersionRecord,
         author: AuthorId,
     ) -> Result<bool, Error> {
         self.write_policy_allows_version_record_for_view(version, author, None)
+            .await
     }
 
-    fn write_policy_allows_version_record_for_view(
+    async fn write_policy_allows_version_record_for_view(
         &mut self,
         version: &VersionRecord,
         author: AuthorId,
@@ -104,11 +106,13 @@ where
             let Some(policy) = table.write_policies.delete_using.clone() else {
                 return Ok(true);
             };
-            let current =
-                match self.policy_delete_subject_row(policy_schema_version, &table, version)? {
-                    Some(current) => current,
-                    None => current_row_from_cells(&table, version.row_uuid(), &cells)?,
-                };
+            let current = match self
+                .policy_delete_subject_row(policy_schema_version, &table, version)
+                .await?
+            {
+                Some(current) => current,
+                None => current_row_from_cells(&table, version.row_uuid(), &cells)?,
+            };
             let current_cells = table
                 .columns
                 .iter()
@@ -126,14 +130,17 @@ where
                 &current_cells,
                 author,
                 false,
-            );
+            )
+            .await;
         }
         let is_update = self
-            .policy_previous_content_subject_row(policy_schema_version, &table, version)?
+            .policy_previous_content_subject_row(policy_schema_version, &table, version)
+            .await?
             .is_some();
         if is_update {
-            let Some(previous) =
-                self.policy_previous_content_subject_row(policy_schema_version, &table, version)?
+            let Some(previous) = self
+                .policy_previous_content_subject_row(policy_schema_version, &table, version)
+                .await?
             else {
                 return Ok(false);
             };
@@ -155,7 +162,9 @@ where
                     &previous_cells,
                     author,
                     false,
-                )? {
+                )
+                .await?
+                {
                     return Ok(false);
                 }
             }
@@ -172,7 +181,8 @@ where
                 &effective_cells,
                 author,
                 false,
-            );
+            )
+            .await;
         }
         let Some(policy) = table.write_policies.insert_check.clone() else {
             return Ok(true);
@@ -186,18 +196,23 @@ where
             author,
             true,
         )
+        .await
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn dry_run_insert_allows(&mut self, commit: MergeableCommit) -> Result<bool, Error> {
+    pub(crate) async fn dry_run_insert_allows(
+        &mut self,
+        commit: MergeableCommit,
+    ) -> Result<bool, Error> {
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
         self.write_policy_allows_version_record(&version, commit.effective_permission_subject())
+            .await
     }
 
     #[cfg(test)]
-    pub(crate) fn advisory_mergeable_write_allows(
+    pub(crate) async fn advisory_mergeable_write_allows(
         &mut self,
         commit: MergeableCommit,
     ) -> Result<bool, Error> {
@@ -205,10 +220,11 @@ where
             self.catalogue.current_write_schema.schema,
             commit,
         )
+        .await
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn dry_run_mergeable_write_allows_in_schema(
+    pub(crate) async fn dry_run_mergeable_write_allows_in_schema(
         &mut self,
         write_schema_version: SchemaVersionId,
         commit: MergeableCommit,
@@ -216,10 +232,11 @@ where
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
         self.write_policy_allows_version_record(&version, commit.effective_permission_subject())
+            .await
     }
 
     #[cfg(test)]
-    pub(crate) fn dry_run_mergeable_write_allows_for_view(
+    pub(crate) async fn dry_run_mergeable_write_allows_for_view(
         &mut self,
         exact_view: &JazzSchema,
         commit: MergeableCommit,
@@ -236,9 +253,10 @@ where
             commit.effective_permission_subject(),
             Some(exact_view),
         )
+        .await
     }
 
-    pub(crate) fn dry_run_read_current_allows(
+    pub(crate) async fn dry_run_read_current_allows(
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
@@ -250,12 +268,13 @@ where
             self.catalogue.current_schema_version_id,
             identity,
         )
+        .await
     }
 
     /// Evaluate a point-read policy in the schema that named the wire
     /// request.  Repair requests may use a projected table from a catalogue
     /// schema newer than this node's base API schema.
-    pub(crate) fn dry_run_read_current_allows_in_schema(
+    pub(crate) async fn dry_run_read_current_allows_in_schema(
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
@@ -286,11 +305,12 @@ where
             identity,
             row_uuid,
         )
+        .await
         .map(|rows| rows.into_iter().any(|row| row.row_uuid() == row_uuid))
     }
 
     #[cfg(test)]
-    pub(crate) fn dry_run_write_current_allows(
+    pub(crate) async fn dry_run_write_current_allows(
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
@@ -307,9 +327,10 @@ where
             return Ok(false);
         };
         self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
+            .await
     }
 
-    pub(crate) fn dry_run_delete_current_allows(
+    pub(crate) async fn dry_run_delete_current_allows(
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
@@ -326,6 +347,7 @@ where
             return Ok(true);
         };
         self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
+            .await
     }
 
     fn policy_projection_for_version_row(
@@ -513,16 +535,17 @@ where
             .is_ok_and(|table| table.write_policies.any().is_some()))
     }
 
-    fn policy_delete_subject_row(
+    async fn policy_delete_subject_row(
         &mut self,
         policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         version: &VersionRecord,
     ) -> Result<Option<CurrentRow>, Error> {
         self.policy_previous_content_subject_row(policy_schema_version, table, version)
+            .await
     }
 
-    fn policy_previous_content_subject_row(
+    async fn policy_previous_content_subject_row(
         &mut self,
         _policy_schema_version: SchemaVersionId,
         table: &TableSchema,
@@ -537,7 +560,7 @@ where
             &table.name
         };
         for parent in version.parents() {
-            for parent_version in self.query_versions_for_tx(parent)? {
+            for parent_version in self.query_versions_for_tx(parent).await? {
                 if parent_version.row_uuid() != version.row_uuid()
                     || parent_version.layer() != VersionLayer::Content
                 {
@@ -577,7 +600,9 @@ where
             version.branch_key(),
             version.row_uuid(),
             VersionLayer::Content,
-        )? {
+        )
+        .await?
+        {
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
@@ -590,7 +615,9 @@ where
             version.branch_key(),
             version.row_uuid(),
             VersionLayer::Content,
-        )? {
+        )
+        .await?
+        {
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
@@ -601,13 +628,13 @@ where
         Ok(None)
     }
 
-    pub(super) fn query_transaction_memo(
+    pub(super) async fn query_transaction_memo(
         &mut self,
         tx_id: TxId,
         context: &mut ViewEvaluationContext,
     ) -> Result<Option<StoredTransaction>, Error> {
         if let std::collections::btree_map::Entry::Vacant(entry) = context.tx_rows.entry(tx_id) {
-            entry.insert(self.query_transaction(tx_id)?);
+            entry.insert(self.query_transaction(tx_id).await?);
         }
         Ok(context
             .tx_rows
