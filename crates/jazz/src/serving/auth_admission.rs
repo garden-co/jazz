@@ -227,6 +227,11 @@ pub fn admit_static_bearer_with_claims(
         }
     }
     let subject = subject.into();
+    if !crate::tools::identity::principal_is_nonempty(&subject) {
+        return Err(AuthAdmissionError::InvalidHandshake(
+            "sub must be non-empty".to_owned(),
+        ));
+    }
     Ok(AdmittedSession {
         author: author_id_from_subject(&subject),
         subject,
@@ -251,7 +256,7 @@ pub fn admit_bearer_jwt(
     validation.required_spec_claims.insert("exp".to_owned());
     validation.required_spec_claims.insert("sub".to_owned());
     let decoded = decode::<JwtClaims>(token, &key, &validation).map_err(jwt_error)?;
-    if decoded.claims.sub.is_empty() {
+    if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
     let subject = decoded.claims.sub;
@@ -298,7 +303,7 @@ pub fn admit_local_first_jwt(
         validation.validate_aud = false;
     }
     let decoded = decode::<LocalFirstJwtClaims>(token, &key, &validation).map_err(jwt_error)?;
-    if decoded.claims.sub.is_empty() {
+    if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
     if let Some(expected_audience) = config.expected_audience.as_deref() {

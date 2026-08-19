@@ -34,7 +34,9 @@ function trimOptional(value?: string): string | undefined {
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" ? trimOptional(value) : undefined;
+  // Subjects are opaque identity bytes: whitespace makes a subject unusable
+  // only when it is all whitespace, never by normalizing a valid principal.
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

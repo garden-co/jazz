@@ -68,6 +68,27 @@ describe("client session resolution", () => {
     });
   });
 
+  it("preserves exact nonblank JWT subject bytes and rejects whitespace-only subjects", () => {
+    const spaced = resolveClientSessionSync({
+      appId: "app-jwt-spaced-subject",
+      jwtToken: makeJwt({ sub: " alice " }),
+    });
+    const plain = resolveClientSessionSync({
+      appId: "app-jwt-plain-subject",
+      jwtToken: makeJwt({ sub: "alice" }),
+    });
+
+    expect(spaced?.user_id).toBe(" alice ");
+    expect(spaced?.claims.subject).toBe(" alice ");
+    expect(spaced?.user_id).not.toBe(plain?.user_id);
+    expect(
+      resolveClientSessionSync({
+        appId: "app-jwt-whitespace-subject",
+        jwtToken: makeJwt({ sub: " \t " }),
+      }),
+    ).toBeNull();
+  });
+
   it("accepts a JWT with only a sub claim", () => {
     const jwt = makeJwt({
       sub: "user-subject",

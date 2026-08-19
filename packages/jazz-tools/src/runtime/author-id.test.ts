@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { authorBytesForSubject } from "./author-id.js";
+import { authorBytesForSubject, isUsableSubject } from "./author-id.js";
 
 describe("authorBytesForSubject", () => {
   test("preserves UUID subjects", () => {
@@ -16,29 +16,55 @@ describe("authorBytesForSubject", () => {
     ]);
   });
 
-  test.each([
-    [
+  test("accepts only explicit UUID spellings and maps every other subject exactly", () => {
+    const canonical = "123e4567-e89b-12d3-a456-426614174000";
+    const direct = Array.from(authorBytesForSubject(canonical));
+    for (const subject of [
+      canonical,
+      "123E4567-E89B-12D3-A456-426614174000",
+      "123e4567e89b12d3a456426614174000",
+      "123E4567E89B12D3A456426614174000",
+    ]) {
+      expect(Array.from(authorBytesForSubject(subject))).toEqual(direct);
+    }
+
+    // Keep these literal vectors identical to crates/jazz/src/tools/identity.rs.
+    for (const [subject, expected] of [
+      ["123e4567e89b12d3-a456426614174000", "bf38a3ac-d534-5b16-8d93-14ddea925c47"],
+      ["workos_user_01J8Y3K4M5N6P7Q8R9S0T1U2V3", "001ee09d-5506-554f-9581-46bf449082bd"],
+      ["\u0085", "8fec6819-1507-5190-a4e6-d61b73fa4091"],
+      ["\ufeff", "aef4b8ca-08ab-51a8-adab-bd8c111efbe7"],
+    ]) {
+      expect(formatUuid(authorBytesForSubject(subject))).toBe(expected);
+      expect(Array.from(authorBytesForSubject(subject))).not.toEqual(direct);
+    }
+    for (const subject of [
+      "123e4567-e89b-12d3-a4564-26614174000", // moved hyphen
+      "123e4567-e89b-12d3-a456426614174000", // missing hyphen
+      "123e4567--e89b-12d3-a456-426614174000", // arbitrary extra hyphen
       " 123e4567-e89b-12d3-a456-426614174000 ",
-      [
-        0xca, 0xc0, 0x70, 0x3e, 0x90, 0xfb, 0x59, 0x3f, 0x8c, 0x2b, 0x00, 0xf1, 0x2c, 0xe3, 0xa4,
-        0xca,
-      ],
-    ],
-    [
       "urn:uuid:123e4567-e89b-12d3-a456-426614174000",
-      [
-        0x75, 0x2a, 0x3c, 0xeb, 0x73, 0xcd, 0x5b, 0xc3, 0x8b, 0x75, 0xce, 0x3f, 0x56, 0x4d, 0x0b,
-        0x4a,
-      ],
-    ],
-    [
       "{123e4567-e89b-12d3-a456-426614174000}",
-      [
-        0xac, 0x79, 0x26, 0x25, 0xaa, 0x76, 0x53, 0x66, 0xa3, 0xd7, 0x35, 0xf3, 0x54, 0x6e, 0x55,
-        0x0d,
-      ],
-    ],
-  ])("maps the exact non-canonical UUID subject %j", (subject, expected) => {
-    expect(Array.from(authorBytesForSubject(subject))).toEqual(expected);
+      "WORKOS_USER_01J8Y3K4M5N6P7Q8R9S0T1U2V3",
+    ]) {
+      expect(Array.from(authorBytesForSubject(subject))).not.toEqual(direct);
+    }
+    expect(Array.from(authorBytesForSubject("workos_user_01J8Y3K4M5N6P7Q8R9S0T1U2V3"))).not.toEqual(
+      Array.from(authorBytesForSubject("WORKOS_USER_01J8Y3K4M5N6P7Q8R9S0T1U2V3")),
+    );
+  });
+
+  test("uses ASCII-only blank-subject validation", () => {
+    for (const subject of ["", " \t\n\v\f\r "]) {
+      expect(isUsableSubject(subject)).toBe(false);
+    }
+    for (const subject of ["\u0085", "\ufeff", " subject "]) {
+      expect(isUsableSubject(subject)).toBe(true);
+    }
   });
 });
+
+function formatUuid(bytes: Uint8Array): string {
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}

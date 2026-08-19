@@ -1456,8 +1456,8 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
         .ok()?;
     let claims: UnverifiedJwtClaims = serde_json::from_slice(&payload).ok()?;
-    let user_id = claims.sub.trim();
-    if user_id.is_empty() {
+    let user_id = claims.sub.as_str();
+    if !crate::tools::identity::principal_is_nonempty(user_id) {
         return None;
     }
 

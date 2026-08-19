@@ -5,12 +5,31 @@ const URL_NAMESPACE = Uint8Array.from([
 ]);
 
 function uuidBytes(value: string): Uint8Array | null {
+  if (
+    !/^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})$/.test(
+      value,
+    )
+  ) {
+    return null;
+  }
   const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) return null;
 
   return Uint8Array.from({ length: 16 }, (_, index) =>
     Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16),
   );
+}
+
+/**
+ * Opaque provider subjects retain their exact spelling; only ASCII-blank values
+ * are invalid. This enumerates exactly space, tab, LF, VT, FF, and CR; Unicode
+ * whitespace remains an opaque, valid provider subject.
+ */
+export function isUsableSubject(subject: string): boolean {
+  for (let index = 0; index < subject.length; index++) {
+    const codePoint = subject.charCodeAt(index)!;
+    if (codePoint !== 0x20 && (codePoint < 0x09 || codePoint > 0x0d)) return true;
+  }
+  return false;
 }
 
 export function authorBytesForSubject(subject: string): Uint8Array {
