@@ -408,7 +408,7 @@ where
                 Some((
                     previous,
                     self.version_tx_id(previous)?,
-                    self.version_made_at(previous)?,
+                    self.version_made_at(previous).await?,
                 ))
             } else {
                 None
@@ -422,7 +422,8 @@ where
                 self.version_storage_primary_key(&stored)?,
                 groove_record,
             );
-            self.update_merge_heads_for_content_version(&mut batch, &stored)?;
+            self.update_merge_heads_for_content_version(&mut batch, &stored)
+                .await?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
             pending_parents.extend(stored.parents());
             stored_versions.push(stored);
@@ -514,8 +515,9 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        Ok(self
-            .current_rows(table, DurabilityTier::Local)?
+        Ok(crate::db::block_on(
+            self.current_rows(table, DurabilityTier::Local),
+        )?
             .into_iter()
             .find(|row| row.row_uuid() == row_uuid)
             .map(|row| {
@@ -643,7 +645,7 @@ where
     }
 
     /// Return current rows at the requested durability tier.
-    pub fn current_rows(
+    pub async fn current_rows(
         &mut self,
         table: &str,
         settled: DurabilityTier,
@@ -651,7 +653,7 @@ where
         self.require_catalogue_ready()?;
         let shape = crate::query::Query::from(table).validate(&self.catalogue.schema)?;
         let binding = shape.bind(BTreeMap::new())?;
-        self.query_rows(&shape, &binding, settled)
+        self.query_rows(&shape, &binding, settled).await
     }
 
     async fn local_layer_winner_tx_id(
