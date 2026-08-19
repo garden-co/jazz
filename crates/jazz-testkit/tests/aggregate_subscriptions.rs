@@ -3,12 +3,12 @@ use jazz_testkit as support;
 use std::time::{Duration, Instant};
 
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
+use jazz::query::{Aggregate, AggregateFunction, OrderDirection};
 use jazz::row_input;
-use jazz::tools::public_schema::AggregateFunction;
 use jazz::tools::{
-    ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, QueryBuilder, Row,
-    RowDescriptor, Schema, SchemaBuilder, SubscriptionStream, SubscriptionStreamItem, TableName,
-    TablePolicies, TableSchema, Value,
+    ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, Row, RowDescriptor,
+    Schema, SchemaBuilder, SubscriptionStream, SubscriptionStreamItem, TableName, TablePolicies,
+    TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{TestingClient, wait_for_query};
@@ -139,7 +139,7 @@ fn policy_metrics_schema() -> Schema {
 
 async fn wait_for_values(
     client: &JazzClient,
-    query: jazz::tools::Query,
+    query: jazz::query::Query,
     expected: Vec<Vec<Value>>,
     label: &str,
 ) {
@@ -184,7 +184,7 @@ struct ObservedSubscription {
 impl ObservedSubscription {
     fn new(
         stream: SubscriptionStream,
-        query: &jazz::tools::Query,
+        query: &jazz::query::Query,
         descriptor: RecordDescriptor,
     ) -> Self {
         let aggregate = query
@@ -194,7 +194,24 @@ impl ObservedSubscription {
         // Decode with the same key that core query normalization uses, rather
         // than reconstructing a function ordering in this observer. The key
         // includes function, input column, and generated alias.
-        let output_functions = query.canonical_aggregate_functions();
+        let mut outputs = aggregate.aggregates.clone();
+        outputs.sort_by(|left, right| {
+            let rank = |function| match function {
+                AggregateFunction::Avg => b'a',
+                AggregateFunction::Count => b'c',
+                AggregateFunction::Min => b'n',
+                AggregateFunction::Sum => b's',
+                AggregateFunction::Max => b'x',
+            };
+            rank(left.function)
+                .cmp(&rank(right.function))
+                .then_with(|| left.column.cmp(&right.column))
+                .then_with(|| left.alias.cmp(&right.alias))
+        });
+        let output_functions = outputs
+            .into_iter()
+            .map(|aggregate| aggregate.function)
+            .collect();
         Self {
             stream,
             descriptor,
@@ -400,7 +417,7 @@ fn aggregate_descriptor(
 
 async fn wait_for_one_shot_values(
     client: &JazzClient,
-    query: jazz::tools::Query,
+    query: jazz::query::Query,
     expected: Vec<Vec<Value>>,
     label: &str,
 ) {
@@ -425,7 +442,7 @@ async fn wait_for_one_shot_values(
 async fn wait_for_subscription_driven_values(
     client: &JazzClient,
     stream: &mut jazz::tools::SubscriptionStream,
-    query: jazz::tools::Query,
+    query: jazz::query::Query,
     expected: Vec<Vec<Value>>,
     label: &str,
 ) {
@@ -525,18 +542,20 @@ async fn insert_double_metric_at_tier(
 
 fn aggregate_query(
     outputs: impl IntoIterator<Item = (AggregateFunction, &'static str)>,
-) -> jazz::tools::Query {
-    let mut builder = QueryBuilder::new("metrics");
-    for (function, column) in outputs {
-        builder = match function {
-            AggregateFunction::Count => builder.count(),
-            AggregateFunction::Sum => builder.sum(column),
-            AggregateFunction::Avg => builder.avg(column),
-            AggregateFunction::Min => builder.min(column),
-            AggregateFunction::Max => builder.max(column),
-        };
-    }
-    builder.group_by("bucket").build()
+) -> jazz::query::Query {
+    jazz::query::Query::from("metrics")
+        .aggregate(
+            outputs
+                .into_iter()
+                .map(|(function, column)| match function {
+                    AggregateFunction::Count => Aggregate::count(),
+                    AggregateFunction::Sum => Aggregate::sum(column),
+                    AggregateFunction::Avg => Aggregate::avg(column),
+                    AggregateFunction::Min => Aggregate::min(column),
+                    AggregateFunction::Max => Aggregate::max(column),
+                }),
+        )
+        .group_by("bucket")
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -556,11 +575,10 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             )
             .await
             .expect("connect client");
-            let count_query = QueryBuilder::new("metrics").count().build();
-            let grouped_sum_query = QueryBuilder::new("metrics")
+            let count_query = jazz::query::Query::from("metrics").count();
+            let grouped_sum_query = jazz::query::Query::from("metrics")
                 .sum("score")
-                .group_by("bucket")
-                .build();
+                .group_by("bucket");
             let mut count_stream = ObservedSubscription::new(
                 client
                     .subscribe(count_query.clone())
@@ -705,10 +723,9 @@ async fn aggregate_subscription_group_field_named_count_uses_structural_wire_slo
             )
             .await
             .expect("connect subscriber");
-            let query = QueryBuilder::new("metrics")
+            let query = jazz::query::Query::from("metrics")
                 .sum("score")
-                .group_by("count")
-                .build();
+                .group_by("count");
             let mut stream = ObservedSubscription::new(
                 subscriber
                     .subscribe(query.clone())
@@ -762,13 +779,14 @@ async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
             )
             .await
             .expect("connect subscriber");
-            let query = QueryBuilder::new("metrics")
-                .count()
-                .sum("high")
-                .sum("score")
-                .avg("score")
-                .group_by("bucket")
-                .build();
+            let query = jazz::query::Query::from("metrics")
+                .aggregate([
+                    Aggregate::count(),
+                    Aggregate::sum("high"),
+                    Aggregate::sum("score"),
+                    Aggregate::avg("score"),
+                ])
+                .group_by("bucket");
             let mut stream = ObservedSubscription::new(
                 subscriber
                     .subscribe(query.clone())
@@ -835,7 +853,7 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
             )
             .await
             .expect("connect client");
-            let sum_query = QueryBuilder::new("metrics").sum("score").build();
+            let sum_query = jazz::query::Query::from("metrics").sum("score");
             let mut stream = client
                 .subscribe(sum_query.clone())
                 .await
@@ -913,11 +931,9 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
             )
             .await
             .expect("connect subscriber");
-            let query = QueryBuilder::new("metrics")
-                .sum("score")
-                .count()
-                .group_by("bucket")
-                .build();
+            let query = jazz::query::Query::from("metrics")
+                .aggregate([Aggregate::sum("score"), Aggregate::count()])
+                .group_by("bucket");
             let mut stream = ObservedSubscription::new(
                 client
                     .subscribe(query.clone())
@@ -1051,10 +1067,9 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
             )
             .await
             .expect("connect client");
-            let grouped_sum_query = QueryBuilder::new("metrics")
+            let grouped_sum_query = jazz::query::Query::from("metrics")
                 .sum("score")
-                .group_by("bucket")
-                .build();
+                .group_by("bucket");
             let mut sum_stream = ObservedSubscription::new(
                 client
                     .subscribe(grouped_sum_query.clone())
@@ -1148,10 +1163,9 @@ async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
             )
             .await
             .expect("connect client");
-            let query = QueryBuilder::new("metrics")
+            let query = jazz::query::Query::from("metrics")
                 .sum("score")
-                .group_by("bucket")
-                .build();
+                .group_by("bucket");
 
             insert_bigint_metric_at_tier(&writer, "same", -11, DurabilityTier::EdgeServer).await;
             insert_bigint_metric_at_tier(&writer, "same", 7, DurabilityTier::EdgeServer).await;
@@ -1201,14 +1215,12 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
             )
             .await
             .expect("connect client");
-            let sum_query = QueryBuilder::new("metrics")
+            let sum_query = jazz::query::Query::from("metrics")
                 .sum("score")
-                .group_by("bucket")
-                .build();
-            let avg_query = QueryBuilder::new("metrics")
+                .group_by("bucket");
+            let avg_query = jazz::query::Query::from("metrics")
                 .avg("score")
-                .group_by("bucket")
-                .build();
+                .group_by("bucket");
 
             insert_double_metric_at_tier(&writer, "same", 1.5, DurabilityTier::EdgeServer).await;
             insert_double_metric_at_tier(&writer, "same", -0.25, DurabilityTier::EdgeServer).await;
@@ -1287,14 +1299,12 @@ async fn maintained_min_and_max_replace_multi_row_groups() {
             .expect("connect client");
             insert_metric_at_tier(&writer, "same", 10, DurabilityTier::EdgeServer).await;
             insert_metric_at_tier(&writer, "same", 4, DurabilityTier::EdgeServer).await;
-            let min_query = QueryBuilder::new("metrics")
+            let min_query = jazz::query::Query::from("metrics")
                 .min("score")
-                .group_by("bucket")
-                .build();
-            let max_query = QueryBuilder::new("metrics")
+                .group_by("bucket");
+            let max_query = jazz::query::Query::from("metrics")
                 .max("score")
-                .group_by("bucket")
-                .build();
+                .group_by("bucket");
             let mut min_stream = ObservedSubscription::new(
                 client
                     .subscribe(min_query.clone())
@@ -1367,10 +1377,9 @@ async fn integer_sum_uses_public_signed_values_for_multi_row_groups() {
 
             wait_for_values(
                 &client,
-                QueryBuilder::new("metrics")
+                jazz::query::Query::from("metrics")
                     .sum("score")
-                    .group_by("bucket")
-                    .build(),
+                    .group_by("bucket"),
                 vec![
                     vec![Value::Text("mixed".to_owned()), Value::Integer(3)],
                     vec![Value::Text("negative".to_owned()), Value::Integer(-10)],
@@ -1467,10 +1476,9 @@ async fn integer_min_max_and_order_by_remain_signed() {
 
             wait_for_query(
                 &client,
-                QueryBuilder::new("metrics")
-                    .select(&["bucket", "score"])
-                    .order_by("score")
-                    .build(),
+                jazz::query::Query::from("metrics")
+                    .select(["bucket", "score"])
+                    .order_by("score", OrderDirection::Asc),
                 Some(DurabilityTier::EdgeServer),
                 QUERY_TIMEOUT,
                 "integer order_by stays signed",
@@ -1564,7 +1572,7 @@ async fn aggregate_sum_bigint_survives_public_client_boundary() {
             )
             .await
             .expect("connect client");
-            let sum_query = QueryBuilder::new("metrics").sum("score").build();
+            let sum_query = jazz::query::Query::from("metrics").sum("score");
 
             wait_for_values(
                 &client,
@@ -1657,10 +1665,9 @@ async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
                 .await
                 .expect("nullable aggregate value settles");
 
-            let grouped = QueryBuilder::new("metrics")
-                .group_by("sum_score")
+            let grouped = jazz::query::Query::from("metrics")
                 .sum("score")
-                .build();
+                .group_by("sum_score");
             wait_for_values(
                 &client,
                 grouped,
@@ -1670,7 +1677,7 @@ async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
             .await;
             wait_for_values(
                 &client,
-                QueryBuilder::new("metrics").sum("score").build(),
+                jazz::query::Query::from("metrics").sum("score"),
                 vec![vec![Value::BigInt(-3)]],
                 "non-grouped signed nullable aggregate remains public",
             )
@@ -1696,9 +1703,7 @@ async fn integer_counter_columns_merge_signed_public_values() {
             )
             .await
             .expect("connect bob");
-            let query = QueryBuilder::new("counters")
-                .select(&["name", "count"])
-                .build();
+            let query = jazz::query::Query::from("counters").select(["name", "count"]);
 
             let (counter_id, _, batch) = alice
                 .insert("counters", row_input!("name" => "shared", "count" => 0))
@@ -1787,7 +1792,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             )
             .await
             .expect("connect spy");
-            let count_query = QueryBuilder::new("metrics").count().build();
+            let count_query = jazz::query::Query::from("metrics").count();
             let mut spy_stream = ObservedSubscription::new(
                 spy.subscribe(count_query.clone())
                     .await

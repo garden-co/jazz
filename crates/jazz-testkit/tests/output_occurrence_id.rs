@@ -3,9 +3,10 @@ use jazz_testkit as support;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use jazz::query::{Query, col, eq, lit, table};
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, QueryBuilder, QueryResult, ResultKey, Schema, SchemaBuilder,
+    ColumnType, DurabilityTier, QueryResult, ResultKey, Schema, SchemaBuilder,
     SubscriptionStreamItem, TableSchema, Value,
 };
 use jazz_server::JazzServer;
@@ -78,6 +79,13 @@ fn key_for_joined_title(results: &[QueryResult], title: &str) -> ResultKey {
         .clone()
 }
 
+fn joined_todos(sources: &[(&str, &str, &str)]) -> Query {
+    sources.iter().fold(
+        Query::from(table("todos").alias("root")).filter(eq(col("root.done"), lit(false))),
+        |query, (alias, left, right)| query.flat_join(table("todos").alias(*alias), *left, *right),
+    )
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_replacements() {
     tokio::task::LocalSet::new()
@@ -105,13 +113,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .await
                 .expect("todo settles locally");
 
-            let joined_query = QueryBuilder::new("todos")
-                .alias("root")
-                .filter_eq("done", Value::Boolean(false))
-                .join("todos")
-                .alias("joined")
-                .on("root.bucket", "joined.bucket")
-                .build();
+            let joined_query = joined_todos(&[("joined", "root.bucket", "joined.bucket")]);
             let mut joined_stream = client
                 .subscribe(joined_query.clone())
                 .await
@@ -217,16 +219,10 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                     .any(|row| row.id == second_key),
                 "a second matching source produces a distinct occurrence under the same root: {fan_out:?}"
             );
-            let two_hop_query = QueryBuilder::new("todos")
-                .alias("root")
-                .filter_eq("done", Value::Boolean(false))
-                .join("todos")
-                .alias("first_hop")
-                .on("root.bucket", "first_hop.bucket")
-                .join("todos")
-                .alias("second_hop")
-                .on("first_hop.bucket", "second_hop.bucket")
-                .build();
+            let two_hop_query = joined_todos(&[
+                ("first_hop", "root.bucket", "first_hop.bucket"),
+                ("second_hop", "first_hop.bucket", "second_hop.bucket"),
+            ]);
             let two_hop_results = client
                 .query_results(two_hop_query.clone(), Some(DurabilityTier::Local))
                 .await
@@ -386,13 +382,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .await;
             let mut rehydrated_stream = rehydrated
                 .subscribe(
-                    QueryBuilder::new("todos")
-                        .alias("root")
-                        .filter_eq("done", Value::Boolean(false))
-                        .join("todos")
-                        .alias("joined")
-                        .on("root.bucket", "joined.bucket")
-                        .build(),
+                    joined_todos(&[("joined", "root.bucket", "joined.bucket")]),
                 )
                 .await
                 .expect("rehydrated joined maintained output is supported");
@@ -439,13 +429,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 .await
                 .expect("root settles");
 
-            let joined_query = QueryBuilder::new("todos")
-                .alias("root")
-                .filter_eq("done", Value::Boolean(false))
-                .join("todos")
-                .alias("joined")
-                .on("root.bucket", "joined.bucket")
-                .build();
+            let joined_query = joined_todos(&[("joined", "root.bucket", "joined.bucket")]);
             let mut stream = client
                 .subscribe(joined_query)
                 .await
@@ -483,13 +467,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
             let delta = next_delta_with_added(&mut stream).await;
             let results = client
                 .query_results(
-                    QueryBuilder::new("todos")
-                        .alias("root")
-                        .filter_eq("done", Value::Boolean(false))
-                        .join("todos")
-                        .alias("joined")
-                        .on("root.bucket", "joined.bucket")
-                        .build(),
+                    joined_todos(&[("joined", "root.bucket", "joined.bucket")]),
                     Some(DurabilityTier::Local),
                 )
                 .await

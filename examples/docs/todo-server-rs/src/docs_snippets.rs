@@ -2,9 +2,12 @@
 #![allow(dead_code)]
 
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
+use jazz::query::{
+    ArraySubquery, ArraySubqueryRequirement, Gather, OrderDirection, Query, col, contains, eq, gt,
+    gte, is_null, lit, lt, ne, not,
+};
 use jazz::tools::{
-    DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, QueryBuilder, Session,
-    TablePolicies, Value,
+    DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, Session, TablePolicies, Value,
 };
 use serde_json::json;
 
@@ -48,7 +51,7 @@ pub async fn list_todos_for_request(
     client: &JazzClient,
 ) -> Result<usize, StatusCode> {
     let user_client = client.for_session(requester_session_from_headers(headers)?);
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     let rows = user_client
         .query(query, None)
         .await
@@ -101,7 +104,7 @@ pub fn recursive_inherits_policy() -> TablePolicies {
 
 // #region reading-oneshot-rust
 pub async fn read_todos_oneshot(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     let rows = client.query(query, None).await?;
     Ok(rows.len())
 }
@@ -111,14 +114,14 @@ pub async fn read_todos_oneshot(client: &JazzClient) -> jazz::tools::Result<usiz
 pub async fn subscribe_todos(
     client: &JazzClient,
 ) -> jazz::tools::Result<jazz::tools::SubscriptionStream> {
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     client.subscribe(query).await
 }
 // #endregion reading-subscriptions-rust
 
 // #region reading-durability-tier-rust
 pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     let rows = client
         .query(query, Some(DurabilityTier::EdgeServer))
         .await?;
@@ -128,9 +131,7 @@ pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz::tools::
 
 // #region reading-filters-rust
 pub async fn read_todos_with_filters(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .build();
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
 
     let rows = client.query(query, None).await?;
     Ok(rows.len())
@@ -139,10 +140,9 @@ pub async fn read_todos_with_filters(client: &JazzClient) -> jazz::tools::Result
 
 // #region reading-sorting-rust
 pub async fn read_todos_sorted(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .order_by("title")
-        .build();
+    let query = Query::from("todos")
+        .filter(eq(col("done"), lit(false)))
+        .order_by("title", OrderDirection::Asc);
 
     let rows = client.query(query, None).await?;
     Ok(rows.len())
@@ -156,12 +156,11 @@ pub async fn read_todo_page(
     page: usize,
 ) -> jazz::tools::Result<usize> {
     let offset = page.saturating_sub(1) * page_size;
-    let query = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .order_by("title")
+    let query = Query::from("todos")
+        .filter(eq(col("done"), lit(false)))
+        .order_by("title", OrderDirection::Asc)
         .limit(page_size)
-        .offset(offset)
-        .build();
+        .offset(offset);
 
     let rows = client.query(query, None).await?;
     Ok(rows.len())
@@ -170,47 +169,38 @@ pub async fn read_todo_page(
 
 // #region reading-includes-rust
 pub async fn read_todos_with_project(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .join("projects")
-        .on("todos.project_id", "projects._id")
-        .build();
+    let query = Query::from("todos")
+        .filter(eq(col("done"), lit(false)))
+        .flat_join("projects", "todos.project_id", "projects.id");
 
-    let rows = client.query(query, None).await?;
+    let rows = client.query_results(query, None).await?;
     Ok(rows.len())
 }
 // #endregion reading-includes-rust
 
 // #region reading-reverse-relation-rust
-pub fn build_projects_with_todos_query() -> jazz::tools::Query {
-    QueryBuilder::new("projects")
-        .with_array("todos_via_project", |sub| {
-            sub.from("todos")
-                .correlate("project_id", "_id")
-                .filter_eq("done", Value::Boolean(false))
-        })
-        .build()
+pub fn build_projects_with_todos_query() -> Query {
+    Query::from("projects").array_subquery(
+        ArraySubquery::new("todos_via_project", "todos", "project_id", "id")
+            .filter(eq(col("done"), lit(false))),
+    )
 }
 // #endregion reading-reverse-relation-rust
 
 // #region reading-require-includes-rust
-pub fn build_todos_with_required_project() -> jazz::tools::Query {
-    QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .with_array("project", |sub| {
-            sub.from("projects")
-                .correlate("_id", "project_id")
-                .require_result()
-        })
-        .build()
+pub fn build_todos_with_required_project() -> Query {
+    Query::from("todos")
+        .filter(eq(col("done"), lit(false)))
+        .array_subquery(
+            ArraySubquery::new("project", "projects", "id", "project_id")
+                .requirement(ArraySubqueryRequirement::AtLeastOne),
+        )
 }
 // #endregion reading-require-includes-rust
 
 // #region reading-select-rust
 pub async fn read_todo_titles(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = QueryBuilder::new("todos")
-        .select(&["title", "done"])
-        .build();
+    let query = Query::from("todos").select(["title", "done"]);
 
     let rows = client.query(query, None).await?;
     Ok(rows.len())
@@ -218,16 +208,15 @@ pub async fn read_todo_titles(client: &JazzClient) -> jazz::tools::Result<usize>
 // #endregion reading-select-rust
 
 // #region reading-recursive-rust
-pub fn build_todo_lineage_query() -> jazz::tools::Query {
-    QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .with_recursive(|r| {
-            r.from("todos")
-                .correlate("id", "parent_id")
-                .hop("todos", "parent_id")
-                .max_depth(10)
-        })
-        .build()
+pub fn build_todo_lineage_query() -> Query {
+    Query::from("todos")
+        .filter(eq(col("done"), lit(false)))
+        .gather(
+            Gather::from("todos")
+                .where_current("id")
+                .hop_to("parent_id")
+                .max_depth(10),
+        )
 }
 // #endregion reading-recursive-rust
 
@@ -265,15 +254,11 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result
 
     // #region where-eq-ne-rust
     // Exact match
-    let query = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .build();
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
     let incomplete_todos = client.query(query, None).await?;
 
     // Not equal
-    let query = QueryBuilder::new("todos")
-        .filter_ne("title", Value::Text("Draft".into()))
-        .build();
+    let query = Query::from("todos").filter(ne(col("title"), lit("Draft")));
     let non_draft_todos = client.query(query, None).await?;
     // #endregion where-eq-ne-rust
 
@@ -282,66 +267,52 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    let one_week_ago = Value::Timestamp(now_ms - 7 * 24 * 60 * 60 * 1000);
+    let one_week_ago = now_ms - 7 * 24 * 60 * 60 * 1000;
 
-    let query = QueryBuilder::new("todos")
-        .filter_gt("$createdAt", one_week_ago)
-        .build();
+    let query = Query::from("todos").filter(gt(col("$createdAt"), lit(one_week_ago)));
     let recent_todos = client.query(query, None).await?;
 
-    let query = QueryBuilder::new("todos")
-        .filter_ge("priority", Value::Integer(3))
-        .build();
+    let query = Query::from("todos").filter(gte(col("priority"), lit(3)));
     let high_priority = client.query(query, None).await?;
 
-    let query = QueryBuilder::new("todos")
-        .filter_lt("priority", Value::Integer(10))
-        .build();
+    let query = Query::from("todos").filter(lt(col("priority"), lit(10)));
     let low_priority = client.query(query, None).await?;
     // #endregion where-numeric-rust
 
     // #region where-contains-rust
     // Substring match (case-sensitive)
-    let query = QueryBuilder::new("todos")
-        .filter_contains("title", Value::Text(search_term.into()))
-        .build();
+    let query = Query::from("todos").filter(contains(col("title"), lit(search_term)));
     let matches = client.query(query, None).await?;
     // #endregion where-contains-rust
 
     // #region where-null-rust
     // Rows where the optional ref is not set
-    let query = QueryBuilder::new("todos").filter_is_null("parent").build();
+    let query = Query::from("todos").filter(is_null(col("parent")));
     let unlinked_todos = client.query(query, None).await?;
 
     // Rows where it is set
-    let query = QueryBuilder::new("todos")
-        .filter_is_not_null("parent")
-        .build();
+    let query = Query::from("todos").filter(not(is_null(col("parent"))));
     let linked_todos = client.query(query, None).await?;
     // #endregion where-null-rust
 
     // #region where-and-rust
     // Multiple filter calls are AND-combined
-    let query = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(true))
-        .filter_is_not_null("project")
-        .build();
+    let query = Query::from("todos")
+        .filter(eq(col("done"), lit(true)))
+        .filter(not(is_null(col("project"))));
     let done_with_project = client.query(query, None).await?;
     // #endregion where-and-rust
 
     // #region where-order-limit-rust
-    let query = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .order_by("$createdAt")
-        .limit(50)
-        .build();
+    let query = Query::from("todos")
+        .filter(eq(col("done"), lit(false)))
+        .order_by("$createdAt", OrderDirection::Asc)
+        .limit(50);
     let recent_incomplete = client.query(query, None).await?;
     // #endregion where-order-limit-rust
 
     // #region where-subscription-rust
-    let query = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .build();
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
     let pending = client.subscribe(query).await?;
     // #endregion where-subscription-rust
 
@@ -364,15 +335,13 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result
 // #region reading-composing-queries-rust
 pub fn composing_queries() {
     // Build two views from the same base conditions.
-    let by_title = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .order_by("title")
-        .limit(20)
-        .build();
-    let by_newest = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .order_by_desc("id")
-        .build();
+    let by_title = Query::from("todos")
+        .filter(eq(col("done"), lit(false)))
+        .order_by("title", OrderDirection::Asc)
+        .limit(20);
+    let by_newest = Query::from("todos")
+        .filter(eq(col("done"), lit(false)))
+        .order_by("id", OrderDirection::Desc);
 
     let _ = (by_title, by_newest);
 }
@@ -439,10 +408,9 @@ pub async fn load_file_bytes(
 ) -> jazz::tools::Result<Option<Vec<u8>>> {
     let uploads = client
         .query(
-            QueryBuilder::new("uploads")
-                .select(&["fileId"])
-                .filter_eq("_id", Value::Uuid(upload_id))
-                .build(),
+            Query::from("uploads")
+                .select(["fileId"])
+                .filter(eq(col("id"), lit(*upload_id.uuid()))),
             Some(DurabilityTier::EdgeServer),
         )
         .await?;
@@ -456,10 +424,9 @@ pub async fn load_file_bytes(
 
     let files = client
         .query(
-            QueryBuilder::new("files")
-                .select(&["data"])
-                .filter_eq("_id", Value::Uuid(*file_id))
-                .build(),
+            Query::from("files")
+                .select(["data"])
+                .filter(eq(col("id"), lit(*file_id.uuid()))),
             Some(DurabilityTier::EdgeServer),
         )
         .await?;
@@ -482,10 +449,9 @@ pub async fn delete_upload_with_file(
 ) -> jazz::tools::Result<()> {
     let uploads = client
         .query(
-            QueryBuilder::new("uploads")
-                .select(&["fileId"])
-                .filter_eq("_id", Value::Uuid(upload_id))
-                .build(),
+            Query::from("uploads")
+                .select(["fileId"])
+                .filter(eq(col("id"), lit(*upload_id.uuid()))),
             Some(DurabilityTier::EdgeServer),
         )
         .await?;

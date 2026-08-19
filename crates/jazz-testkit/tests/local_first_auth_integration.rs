@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz::tools::{
-    AppContext, ClientId, ClientStorage, ColumnType, QueryBuilder, Schema, SchemaBuilder, Session,
-    TableSchema, Value, identity,
+    AppContext, ClientId, ClientStorage, ColumnType, Schema, SchemaBuilder, Session, TableSchema,
+    Value, identity,
 };
 use jazz_server::JazzServer;
 use jazz_server::middleware::auth::TestClock;
@@ -122,7 +122,7 @@ async fn same_seed_syncs_across_devices_impl() {
 
     wait_for_rows(
         &alice_device_b,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "alice device B sees todo written by device A",
         |rows| has_row(&rows, todo_id, &expected_values).then_some(()),
     )
@@ -180,7 +180,7 @@ async fn different_seeds_produce_distinct_principals_impl() {
 
     wait_for_rows(
         &alice,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "alice converges on both todos",
         |rows| {
             (has_row(&rows, alice_todo_id, &alice_values)
@@ -192,7 +192,7 @@ async fn different_seeds_produce_distinct_principals_impl() {
 
     wait_for_rows(
         &bob,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "bob converges on both todos",
         |rows| {
             (has_row(&rows, alice_todo_id, &alice_values)
@@ -238,7 +238,7 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
     // our principal on the first connect.
     wait_for_rows(
         &first,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "todo settles at server under alice's principal",
         |rows| has_row(&rows, todo_id, &expected_values).then_some(()),
     )
@@ -252,7 +252,7 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
 
     // Local state survived: row is visible immediately from local storage.
     let local_rows = reconnected
-        .query(QueryBuilder::new("todos").build(), None)
+        .query(jazz::query::Query::from("todos"), None)
         .await
         .expect("local query after reconnect");
     assert!(
@@ -264,7 +264,7 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
     // (which requires successful server auth) succeeds and returns the row.
     wait_for_rows(
         &reconnected,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "reconnected client re-authenticates with same principal and reads from edge",
         |rows| has_row(&rows, todo_id, &expected_values).then_some(()),
     )
@@ -317,9 +317,7 @@ async fn local_first_writes_carry_derived_principal_as_created_by_impl() {
 
     wait_for_rows(
         &alice,
-        QueryBuilder::new("todos")
-            .select(&["title", "completed", "$createdBy"])
-            .build(),
+        jazz::query::Query::from("todos").select(["title", "completed", "$createdBy"]),
         "todo records alice's derived principal in $createdBy",
         |rows| has_row(&rows, todo_id, &expected).then_some(()),
     )
@@ -388,9 +386,7 @@ async fn local_first_and_jwt_clients_coexist_impl() {
 
     wait_for_rows(
         &alice,
-        QueryBuilder::new("todos")
-            .select(&["title", "completed", "$createdBy"])
-            .build(),
+        jazz::query::Query::from("todos").select(["title", "completed", "$createdBy"]),
         "alice converges with bob's jwt-attributed row",
         |rows| {
             (has_row(&rows, alice_id, &alice_row) && has_row(&rows, bob_id, &bob_row)).then_some(())
@@ -400,9 +396,7 @@ async fn local_first_and_jwt_clients_coexist_impl() {
 
     wait_for_rows(
         &bob,
-        QueryBuilder::new("todos")
-            .select(&["title", "completed", "$createdBy"])
-            .build(),
+        jazz::query::Query::from("todos").select(["title", "completed", "$createdBy"]),
         "bob converges with alice's ed25519-attributed row",
         |rows| {
             (has_row(&rows, alice_id, &alice_row) && has_row(&rows, bob_id, &bob_row)).then_some(())
@@ -462,7 +456,7 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
         .expect("pre-expiry create");
     wait_for_rows(
         &client,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "pre-expiry todo settles at edge server",
         |rows| has_row(&rows, pre_id, &pre_values).then_some(()),
     )
@@ -500,7 +494,7 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
 
     wait_for_rows(
         &reconnected,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "queued post-expiry write flushes after token refresh",
         |rows| {
             (has_row(&rows, pre_id, &pre_values) && has_row(&rows, queued_id, &queued_values))
