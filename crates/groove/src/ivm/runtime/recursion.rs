@@ -161,7 +161,7 @@ where
             runtime.graph,
             runtime.variant_projections,
             None,
-            None,
+            runtime.evaluation_inputs.as_deref_mut(),
             node,
             recursive,
             output_desc,
