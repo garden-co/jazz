@@ -139,23 +139,18 @@ where
             })
             .collect::<Vec<_>>();
         let storage = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
-        let mut staged_runtime = self.ivm_runtime.clone();
-        staged_runtime
-            .tick_staged(table_deltas, &storage, &mut staged_operations)
+        let publication = PublicationId(self.next_publication_id);
+        self.next_publication_id = self.next_publication_id.saturating_add(1);
+        self.ivm_runtime
+            .tick_resident_staged(table_deltas, &storage, &mut staged_operations, publication)
             .await
             .map_err(Error::IvmRuntime)?;
 
-        let publication = PublicationId(self.next_publication_id);
-        self.next_publication_id = self.next_publication_id.saturating_add(1);
-        staged_runtime.tag_staged_subscription_notifications(publication);
         self.resident_writes
             .borrow_mut()
             .extend(staged_operations.iter().cloned());
         self.resident_publications
             .insert(publication, staged_operations.clone());
-        self.ivm_runtime = staged_runtime;
-        self.ivm_runtime.publish_staged_subscription_notifications();
-
         Ok(PublishedBatch {
             publication,
             storage: Rc::clone(&self.storage),

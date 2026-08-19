@@ -1949,7 +1949,7 @@ impl IvmRuntime {
         };
         if !binding_delta.deltas.is_empty()
             && let Err(error) = self
-                .tick_with_params(Vec::new(), vec![binding_delta], storage)
+                .tick_with_params(Vec::new(), vec![binding_delta], storage, None)
                 .await
         {
             self.remove_multisink_retainers(subscription_id, &outputs);
@@ -2141,7 +2141,7 @@ impl IvmRuntime {
                 && let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
                 && !param_delta.deltas.is_empty()
             {
-                self.tick_with_params(Vec::new(), vec![param_delta], storage)
+                self.tick_with_params(Vec::new(), vec![param_delta], storage, None)
                     .await?;
                 self.remove_unreferenced_auto_family(shape_id);
             }
