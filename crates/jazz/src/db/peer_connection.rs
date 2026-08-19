@@ -627,14 +627,16 @@ where
                             let values = binding_values_in_param_order(shape, binding);
                             let known_state = self
                                 .node
-                                .borrow_mut()
+                                .lock()
+                                .await
                                 .known_state_declaration_for_subscription(
                                     shape,
                                     binding,
                                     pending_subscription.subscription,
                                     &values,
                                     pending_subscription.identity,
-                                )?;
+                                )
+                                .await?;
                             let subscribe = Subscribe {
                                 shape_id: shape.shape_id(),
                                 subscription: pending_subscription.subscription,
@@ -740,13 +742,16 @@ where
                     .filter(|tx_id| !uploaded.contains(tx_id))
                     .collect();
                 for tx_id in to_upload {
-                    let unit = outbox
+                    let staged = outbox
                         .borrow()
                         .iter()
                         .find(|pending| pending.tx_id == tx_id)
-                        .and_then(|pending| pending.unit.clone())
-                        .map(Ok)
-                        .unwrap_or_else(|| self.node.borrow_mut().commit_unit_for(tx_id))?;
+                        .and_then(|pending| pending.unit.clone());
+                    let unit = if let Some(unit) = staged {
+                        unit
+                    } else {
+                        self.node.lock().await.commit_unit_for(tx_id).await?
+                    };
                     if let Err(error) =
                         send_with_local_sync_context(&self.node, self.transport.as_mut(), unit)
                     {
@@ -810,11 +815,12 @@ where
                                 continue;
                             };
                             {
-                                let mut node = self.node.borrow_mut();
+                                let mut node = self.node.lock().await;
                                 node.apply_row_version_payloads_for_requests(
                                     &repair.requests,
                                     version_bundles,
-                                )?;
+                                )
+                                .await?;
                             }
                             let (subscription, settled_through) = match &repair.update {
                                 SyncMessage::ViewUpdate {
@@ -845,8 +851,8 @@ where
                             #[cfg(not(feature = "sync-autopsy"))]
                             let _ = subscription;
                             let missing = {
-                                let mut node = self.node.borrow_mut();
-                                node.missing_known_state_row_version_refs(&message)?
+                                let mut node = self.node.lock().await;
+                                node.missing_known_state_row_version_refs(&message).await?
                             };
                             if missing.is_empty() {
                                 stage_initial_coverage_clear_for_update(
@@ -1254,8 +1260,10 @@ where
                                 match message {
                                     SyncMessage::CommitUnit { tx, versions } => {
                                         self.node
-                                            .borrow_mut()
-                                            .ingest_relay_commit_unit(tx, versions)?;
+                                            .lock()
+                                            .await
+                                            .ingest_relay_commit_unit(tx, versions)
+                                            .await?;
                                     }
                                     other => {
                                         let outcome = self
@@ -1529,7 +1537,8 @@ where
                                     };
                                     let supported = self
                                         .node
-                                        .borrow_mut()
+                                        .lock()
+                                        .await
                                         .ensure_peer_maintained_subscription_view_supported(
                                             shape,
                                             &binding,
@@ -1537,7 +1546,8 @@ where
                                             subscriber_permission_subject(*ingest_context),
                                             &opts.read_view,
                                             QueryAuthorizationMode::TrustedServing,
-                                        );
+                                        )
+                                        .await;
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
                                         supported
                                     {
@@ -1765,7 +1775,8 @@ where
                             }
                             let supported = self
                                 .node
-                                .borrow_mut()
+                                .lock()
+                                .await
                                 .ensure_peer_maintained_subscription_view_supported(
                                     &shape,
                                     &binding,
@@ -1773,7 +1784,8 @@ where
                                     subscriber_permission_subject(*ingest_context),
                                     &opts.read_view,
                                     QueryAuthorizationMode::TrustedServing,
-                                );
+                                )
+                                .await;
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
                                 send_unsupported_shape_capability_rejection(
                                     &mut *self.transport,
@@ -2145,8 +2157,10 @@ where
                                         &self.downstream_fates,
                                     );
                                     self.node
-                                        .borrow_mut()
-                                        .ingest_relay_commit_unit(tx, versions)?;
+                                        .lock()
+                                        .await
+                                        .ingest_relay_commit_unit(tx, versions)
+                                        .await?;
                                     PublicationOutcome::settled(Vec::new())
                                 }
                                 SyncMessage::CommitUnit { tx, versions }
@@ -2257,8 +2271,10 @@ where
                                             ])
                                         } else {
                                             self.node
-                                                .borrow_mut()
-                                                .ingest_relay_commit_unit(tx, versions)?;
+                                                .lock()
+                                                .await
+                                                .ingest_relay_commit_unit(tx, versions)
+                                                .await?;
                                             // Edge persistence is observable, but
                                             // final policy fate stays parked.
                                             PublicationOutcome::settled(vec![
@@ -2272,8 +2288,10 @@ where
                                         }
                                     } else {
                                         self.node
-                                            .borrow_mut()
-                                            .ingest_relay_commit_unit(tx, versions)?;
+                                            .lock()
+                                            .await
+                                            .ingest_relay_commit_unit(tx, versions)
+                                            .await?;
                                         PublicationOutcome::settled(Vec::new())
                                     }
                                 }
@@ -2374,7 +2392,7 @@ where
                     // Tick the shared runtime once before that drain rather than once
                     // per group.
                     if !coverage_groups.is_empty() {
-                        self.node.borrow_mut().flush_query_runtime()?;
+                        self.node.lock().await.flush_query_runtime().await?;
                     }
                     for (coverage, group) in coverage_groups.iter_mut() {
                         let group_subscription = SubscriptionKey {
