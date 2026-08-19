@@ -1669,6 +1669,13 @@ impl IvmRuntime {
         let subscription_id = self.next_subscription_id();
         let (sender, receiver) = mpsc::channel();
         let receiver_liveness = Arc::new(());
+        // Installation is not published until hydration succeeds. A dropped
+        // or failed future therefore leaves no live subscription or retainer;
+        // the hydration evaluation session independently guarantees that its
+        // staged IVM state is also discarded.
+        let initial = self
+            .hydration_snapshots_for_subscription(&outputs, storage)
+            .await?;
         for output in outputs.values() {
             self.retain_as_subscription(subscription_id, output.node);
         }
@@ -1681,16 +1688,6 @@ impl IvmRuntime {
                 target: MultisinkSubscriptionTarget::Direct,
             },
         );
-        let initial = match self
-            .hydration_snapshots_for_subscription(&outputs, storage)
-            .await
-        {
-            Ok(initial) => initial,
-            Err(error) => {
-                self.unsubscribe(subscription_id);
-                return Err(error);
-            }
-        };
         Ok(MultisinkSubscription {
             id: subscription_id,
             initial: Mutex::new(Some(initial)),

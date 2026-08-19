@@ -1377,6 +1377,7 @@ name = "groove"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures",
  "hdrhistogram",
  "internment",
  "jazz-benchmark-guard",
