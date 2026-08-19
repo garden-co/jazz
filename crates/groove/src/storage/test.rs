@@ -1,7 +1,7 @@
 //! Deterministically controlled storage used by async and failure-path tests.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::poll_fn;
 use std::rc::Rc;
 use std::task::{Poll, Waker};
@@ -33,6 +33,7 @@ struct ControlState {
     permits: usize,
     observed: Vec<TestStorageOperation>,
     waiters: Vec<Waker>,
+    failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
 }
 
 /// Controller held by tests independently from the storage under test.
@@ -42,6 +43,19 @@ pub struct TestStorageControl {
 }
 
 impl TestStorageControl {
+    /// Fail the next selected operation after any configured suspension.
+    pub fn fail_next(&self, operation: TestStorageOperation) {
+        self.state
+            .borrow_mut()
+            .failures
+            .entry(operation)
+            .or_default()
+            .push_back(Error::Backend {
+                backend: "test",
+                message: format!("injected {operation:?} failure"),
+            });
+    }
+
     /// Make subsequent storage progress require explicit permits.
     pub fn pause(&self) {
         self.state.borrow_mut().paused = true;
@@ -103,7 +117,7 @@ impl TestStorageControl {
         std::mem::take(&mut self.state.borrow_mut().observed)
     }
 
-    async fn before(&self, operation: TestStorageOperation) {
+    async fn before(&self, operation: TestStorageOperation) -> Result<(), Error> {
         let mut recorded = false;
         poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
@@ -127,7 +141,17 @@ impl TestStorageControl {
             }
             Poll::Pending
         })
-        .await
+        .await;
+        match self
+            .state
+            .borrow_mut()
+            .failures
+            .get_mut(&operation)
+            .and_then(VecDeque::pop_front)
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -167,7 +191,7 @@ struct TestStorageCursor<'a> {
 impl StorageCursor for TestStorageCursor<'_> {
     fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
         Box::pin(async move {
-            self.control.before(TestStorageOperation::ScanBatch).await;
+            self.control.before(TestStorageOperation::ScanBatch).await?;
             self.inner.next_batch().await
         })
     }
@@ -176,7 +200,7 @@ impl StorageCursor for TestStorageCursor<'_> {
 impl OrderedKvStorage for TestStorage {
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
-            self.control.before(TestStorageOperation::Get).await;
+            self.control.before(TestStorageOperation::Get).await?;
             self.inner.get(cf, key).await
         })
     }
@@ -188,21 +212,21 @@ impl OrderedKvStorage for TestStorage {
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            self.control.before(TestStorageOperation::Set).await;
+            self.control.before(TestStorageOperation::Set).await?;
             self.inner.set(cf, key, value).await
         })
     }
 
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            self.control.before(TestStorageOperation::Delete).await;
+            self.control.before(TestStorageOperation::Delete).await?;
             self.inner.delete(cf, key).await
         })
     }
 
     fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            self.control.before(TestStorageOperation::Close).await;
+            self.control.before(TestStorageOperation::Close).await?;
             self.inner.close().await
         })
     }
@@ -211,7 +235,7 @@ impl OrderedKvStorage for TestStorage {
         Box::pin(async move {
             self.control
                 .before(TestStorageOperation::SetWriteFlushCadence)
-                .await;
+                .await?;
             self.inner.set_write_flush_cadence(every).await
         })
     }
@@ -220,7 +244,7 @@ impl OrderedKvStorage for TestStorage {
         Box::pin(async move {
             self.control
                 .before(TestStorageOperation::FlushWriteBoundary)
-                .await;
+                .await?;
             self.inner.flush_write_boundary().await
         })
     }
@@ -229,7 +253,7 @@ impl OrderedKvStorage for TestStorage {
         Box::pin(async move {
             self.control
                 .before(TestStorageOperation::ApproximateClassBytes)
-                .await;
+                .await?;
             self.inner.approximate_class_bytes(cf).await
         })
     }
@@ -241,7 +265,7 @@ impl OrderedKvStorage for TestStorage {
         end: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
-            self.control.before(TestStorageOperation::ScanOpen).await;
+            self.control.before(TestStorageOperation::ScanOpen).await?;
             let inner = self.inner.scan_range(cf, start, end).await?;
             Ok(Box::new(TestStorageCursor {
                 inner,
@@ -256,7 +280,7 @@ impl OrderedKvStorage for TestStorage {
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
-            self.control.before(TestStorageOperation::ScanOpen).await;
+            self.control.before(TestStorageOperation::ScanOpen).await?;
             let inner = self.inner.scan_prefix(cf, prefix).await?;
             Ok(Box::new(TestStorageCursor {
                 inner,
@@ -271,7 +295,7 @@ impl OrderedKvStorage for TestStorage {
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
-            self.control.before(TestStorageOperation::ScanOpen).await;
+            self.control.before(TestStorageOperation::ScanOpen).await?;
             let inner = self.inner.scan_prefix_reverse(cf, prefix).await?;
             Ok(Box::new(TestStorageCursor {
                 inner,
@@ -285,7 +309,7 @@ impl OrderedKvStorage for TestStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            self.control.before(TestStorageOperation::WriteMany).await;
+            self.control.before(TestStorageOperation::WriteMany).await?;
             self.inner.write_many(operations).await
         })
     }
@@ -298,7 +322,7 @@ impl OrderedKvStorage for TestStorage {
 impl ReopenableStorage for TestStorage {
     fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
-            self.control.before(TestStorageOperation::Reopen).await;
+            self.control.before(TestStorageOperation::Reopen).await?;
             Ok(Self {
                 inner: self.inner.reopen(column_families).await?,
                 control: self.control,

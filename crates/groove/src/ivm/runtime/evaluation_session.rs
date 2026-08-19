@@ -129,11 +129,15 @@ impl<'a> StorageRequests<'a> {
 
     pub(super) fn drain_ready(
         &mut self,
-    ) -> Result<BTreeMap<StorageRequestKey, StorageRequestOutput>, StorageError> {
+    ) -> Result<BTreeMap<StorageRequestKey, StorageRequestOutput>, (StorageRequestKey, StorageError)>
+    {
         let ready = std::mem::take(&mut self.ready);
         ready
             .into_iter()
-            .map(|(key, value)| Ok((key, value?)))
+            .map(|(key, value)| match value {
+                Ok(value) => Ok((key, value)),
+                Err(error) => Err((key, error)),
+            })
             .collect()
     }
 
