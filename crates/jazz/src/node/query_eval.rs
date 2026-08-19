@@ -761,7 +761,7 @@ where
         })
     }
 
-    pub(crate) fn query_rows_with_prepared_plan(
+    pub(crate) async fn query_rows_with_prepared_plan(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -775,6 +775,7 @@ where
             prepared_plan,
             AuthorId::SYSTEM,
         )
+        .await
     }
 
     #[cfg(test)]
@@ -787,7 +788,7 @@ where
         self.query.query_shape_cache.is_empty()
     }
 
-    pub(crate) fn query_rows_with_prepared_plan_for_identity(
+    pub(crate) async fn query_rows_with_prepared_plan_for_identity(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -804,11 +805,12 @@ where
             false,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
     /// Execute an ordinary local client read. The upstream serving edge is the
     /// confidentiality boundary; this path must not re-evaluate row policy.
-    pub(crate) fn query_rows_for_client(
+    pub(crate) async fn query_rows_for_client(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -824,10 +826,11 @@ where
             false,
             QueryAuthorizationMode::ClientLocal,
         )
+        .await
     }
 
     #[allow(dead_code)]
-    pub(crate) fn query_rows_for_client_read_view(
+    pub(crate) async fn query_rows_for_client_read_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -839,8 +842,9 @@ where
         else {
             return Ok(Vec::new());
         };
-        let Some(snapshot) =
-            self.authoritative_reset_snapshot_for_binding_view(shape, binding_view)?
+        let Some(snapshot) = self
+            .authoritative_reset_snapshot_for_binding_view(shape, binding_view)
+            .await?
         else {
             return Ok(Vec::new());
         };
@@ -851,16 +855,17 @@ where
             .collect())
     }
 
-    pub(crate) fn query_rows_local_preview(
+    pub(crate) async fn query_rows_local_preview(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         prepared_plan: Option<&PreparedQueryPlanHandle>,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_prepared_plan(shape, binding, DurabilityTier::Local, prepared_plan)
+            .await
     }
 
-    pub(crate) fn query_rows_local_preview_profiled(
+    pub(crate) async fn query_rows_local_preview_profiled(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -873,9 +878,10 @@ where
             prepared_plan,
             AuthorId::SYSTEM,
         )
+        .await
     }
 
-    pub(crate) fn query_rows_including_deleted_in_authorization_mode(
+    pub(crate) async fn query_rows_including_deleted_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -893,9 +899,10 @@ where
             true,
             authorization_mode,
         )
+        .await
     }
 
-    fn query_rows_with_options_for_identity(
+    async fn query_rows_with_options_for_identity(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -968,14 +975,17 @@ where
         let program = if prepared_plan.is_some() {
             None
         } else {
-            Some(self.compile_current_query_program_for_one_shot_read(
-                shape,
-                binding,
-                tier,
-                identity,
-                settled_binding_view,
-                authorization_mode,
-            )?)
+            Some(
+                self.compile_current_query_program_for_one_shot_read(
+                    shape,
+                    binding,
+                    tier,
+                    identity,
+                    settled_binding_view,
+                    authorization_mode,
+                )
+                .await?,
+            )
         };
         let needs_binding = || {
             let parameters = &program
@@ -1006,7 +1016,8 @@ where
                             .expect("program is compiled when no prepared plan is supplied"),
                         shape,
                         binding,
-                    )?,
+                    )
+                    .await?,
                 ))
             }
             None => None,
@@ -1019,6 +1030,7 @@ where
                 .query_graph(lowered_materialization_app_rows_graph(
                     &program.expect("program is compiled when no prepared plan is supplied"),
                 )?)
+                .await
                 .map_err(Error::Groove),
             Some(plan) => match plan.as_ref() {
                 PreparedQueryPlan::Prepared { shape, params } => {
@@ -1028,12 +1040,15 @@ where
                         &policy,
                         PreparedClaimBindingMode::Strict,
                     )?;
-                    self.bind_shape_snapshot(*shape, &values)
-                        .and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))
+                    take_required_sink_deltas(
+                        self.bind_shape_snapshot(*shape, &values)?,
+                        JAZZ_APP_ROWS_SINK,
+                    )
                 }
                 PreparedQueryPlan::Graph(graph) => self
                     .database
                     .query_graph(graph.clone())
+                    .await
                     .map_err(Error::Groove),
                 PreparedQueryPlan::PeerMaintainedMarker => {
                     unreachable!("peer maintained markers are filtered before query execution")
@@ -1087,7 +1102,7 @@ where
         Ok(rows)
     }
 
-    fn query_rows_with_options_for_identity_profiled(
+    async fn query_rows_with_options_for_identity_profiled(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1135,14 +1150,17 @@ where
         let program = if prepared_plan.is_some() {
             None
         } else {
-            Some(self.compile_current_query_program_for_one_shot_read(
-                shape,
-                binding,
-                tier,
-                identity,
-                settled_binding_view,
-                QueryAuthorizationMode::TrustedServing,
-            )?)
+            Some(
+                self.compile_current_query_program_for_one_shot_read(
+                    shape,
+                    binding,
+                    tier,
+                    identity,
+                    settled_binding_view,
+                    QueryAuthorizationMode::TrustedServing,
+                )
+                .await?,
+            )
         };
         profile.compile_program = phase_started.elapsed();
 
@@ -1171,7 +1189,8 @@ where
                         .expect("program is compiled when no prepared plan is supplied"),
                     shape,
                     binding,
-                )?,
+                )
+                .await?,
             )),
             None => None,
         };
@@ -1186,6 +1205,7 @@ where
                 .query_graph(lowered_materialization_app_rows_graph(
                     &program.expect("program is compiled when no prepared plan is supplied"),
                 )?)
+                .await
                 .map_err(Error::Groove),
             Some(plan) => match plan.as_ref() {
                 PreparedQueryPlan::Prepared { shape, params } => {
@@ -1195,12 +1215,15 @@ where
                         &policy,
                         PreparedClaimBindingMode::Strict,
                     )?;
-                    self.bind_shape_snapshot(*shape, &values)
-                        .and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))
+                    take_required_sink_deltas(
+                        self.bind_shape_snapshot(*shape, &values)?,
+                        JAZZ_APP_ROWS_SINK,
+                    )
                 }
                 PreparedQueryPlan::Graph(graph) => self
                     .database
                     .query_graph(graph.clone())
+                    .await
                     .map_err(Error::Groove),
                 PreparedQueryPlan::PeerMaintainedMarker => {
                     unreachable!("peer maintained markers are filtered before query execution")
