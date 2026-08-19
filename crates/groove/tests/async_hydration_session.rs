@@ -373,7 +373,7 @@ fn publishing_an_insert_into_a_resident_table_does_not_wait_for_storage() {
         vec![Value::U64(1), Value::String("Kind of Blue".into())],
     );
     control.take_observed();
-    control.pause();
+    control.pause_on(TestStorageOperation::WriteMany);
     let mut publication = Box::pin(database.publish_batch(batch));
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
