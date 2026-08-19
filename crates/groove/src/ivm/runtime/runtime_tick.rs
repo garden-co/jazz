@@ -66,7 +66,25 @@ impl EvaluationWorkQueue {
         }
     }
 
-    fn discover(mut self, graph: &IvmGraph) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
+    fn discover_hydration(
+        self,
+        graph: &IvmGraph,
+    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
+        self.discover(graph, true)
+    }
+
+    fn discover_resident(
+        self,
+        graph: &IvmGraph,
+    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
+        self.discover(graph, false)
+    }
+
+    fn discover(
+        mut self,
+        graph: &IvmGraph,
+        hydrate_sources: bool,
+    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
         while let Some(node_id) = self.pending.pop_front() {
             if !self.visited.insert(node_id) {
                 continue;
@@ -78,10 +96,14 @@ impl EvaluationWorkQueue {
             for input in &node.descriptor.inputs {
                 self.dependents.entry(*input).or_default().push(node_id);
             }
-            let request = match &node.descriptor.operator {
-                OpType::TableSource(source) => NodeState::table_source_request(source)?,
-                OpType::IndexSource(source) => NodeState::index_source_request(source)?,
-                _ => None,
+            let request = if hydrate_sources {
+                match &node.descriptor.operator {
+                    OpType::TableSource(source) => NodeState::table_source_request(source)?,
+                    OpType::IndexSource(source) => NodeState::index_source_request(source)?,
+                    _ => None,
+                }
+            } else {
+                None
             };
             if let Some(request) = request {
                 self.storage_dependents
@@ -159,7 +181,7 @@ impl<'a> EvaluationSession<'a> {
         storage: OwnedStorage<'a>,
     ) -> Result<Self, IvmRuntimeError> {
         let (relevant_nodes, work_queue) =
-            EvaluationWorkQueue::new(roots.iter().copied()).discover(&runtime.graph)?;
+            EvaluationWorkQueue::new(roots.iter().copied()).discover_hydration(&runtime.graph)?;
         let mut storage_requests = StorageRequests::new();
         for request in work_queue.requests().cloned().collect::<Vec<_>>() {
             storage_requests.request(request, &storage);
@@ -495,6 +517,21 @@ impl IvmRuntime {
             .map(|(node, _)| *node)
             .collect::<Vec<_>>();
         retained_roots.sort_unstable();
+        let mut active_roots = self
+            .multisink_subscriptions
+            .values()
+            .flat_map(|subscription| {
+                subscription
+                    .outputs
+                    .values()
+                    .flat_map(|output| [Some(output.node), output.root_ordering_node])
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        active_roots.sort_unstable();
+        active_roots.dedup();
+        let (_, mut work_queue) =
+            EvaluationWorkQueue::new(active_roots).discover_resident(&self.graph)?;
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
             graph: &self.graph,
@@ -519,6 +556,11 @@ impl IvmRuntime {
             terminal_deltas: HashMap::default(),
             root_ordering_windows: HashMap::default(),
         };
+
+        while let Some(node) = work_queue.runnable.pop_front() {
+            evaluator.update_node(node).await?;
+            work_queue.complete(node);
+        }
 
         for (subscription_id, subscription) in &self.multisink_subscriptions {
             let mut sinks = BTreeMap::new();
