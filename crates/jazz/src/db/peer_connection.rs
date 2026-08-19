@@ -7,6 +7,35 @@
 use super::node_runtime::{refresh_subscriptions_in, route_upstream_subscription_rejection};
 use super::*;
 
+async fn finish_peer_publication_outcome<S, T>(
+    node: &SharedNodeState<S>,
+    subscriptions: &SubscriptionList,
+    active_authority_view_receipts: &ActiveAuthorityViewReceipts,
+    outcome: PublicationOutcome<T>,
+) -> Result<(T, usize), Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let PublicationOutcome {
+        value,
+        publications,
+    } = outcome;
+    if publications.is_empty() {
+        return Ok((value, 0));
+    }
+    let changed =
+        refresh_subscriptions_in(node, subscriptions, active_authority_view_receipts).await?;
+    let mut persisted = Vec::with_capacity(publications.len());
+    for publication in &publications {
+        persisted.push(publication.persist().await);
+    }
+    let mut node = node.lock().await;
+    for persistence in persisted {
+        node.settle_published_transaction(persistence)?;
+    }
+    Ok((value, changed))
+}
+
 /// A live link between this `Db` and one peer, owned by the `Db`.
 ///
 /// Two link shapes — a client/backend attached to an upstream, or a server
@@ -729,6 +758,7 @@ where
                     uploaded.insert(tx_id);
                 }
                 let mut applied = false;
+                let mut publications = Vec::new();
                 let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
                 let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
                 while let Some(StagedInboundMessage {
@@ -1228,19 +1258,23 @@ where
                                             .ingest_relay_commit_unit(tx, versions)?;
                                     }
                                     other => {
-                                        self.node
+                                        let outcome = self
+                                            .node
                                             .lock()
                                             .await
                                             .apply_sync_message_with_ingest_context(other, None)
                                             .await?;
+                                        publications.extend(outcome.publications);
                                     }
                                 }
                             } else {
-                                self.node
+                                let outcome = self
+                                    .node
                                     .lock()
                                     .await
                                     .apply_sync_message_with_ingest_context(message, None)
                                     .await?;
+                                publications.extend(outcome.publications);
                             }
                             if let Some((tx_id, fate)) = routed_fate {
                                 let authority = *expected_scope_authority;
@@ -1300,7 +1334,17 @@ where
                         &self.node,
                         &self.subscriptions,
                         &self.active_authority_view_receipts,
-                    )?;
+                    )
+                    .await?;
+                    let mut persisted = Vec::with_capacity(publications.len());
+                    for publication in &publications {
+                        persisted.push(publication.persist().await);
+                    }
+                    let mut node = self.node.lock().await;
+                    for persistence in persisted {
+                        node.settle_published_transaction(persistence)?;
+                    }
+                    drop(node);
                     stats.remote_sync_applied += 1;
                     let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                     self.subscriber_dirty_epoch.set(next);
@@ -2092,7 +2136,7 @@ where
                             // binding), plus the write-upload path: any
                             // responses (e.g. fate updates) flow back to the
                             // subscriber.
-                            let responses = match other {
+                            let outcome = match other {
                                 SyncMessage::CommitUnit { tx, versions } if *local_receiver => {
                                     let tx_id = tx.tx_id;
                                     register_local_fate_route(
@@ -2103,7 +2147,7 @@ where
                                     self.node
                                         .borrow_mut()
                                         .ingest_relay_commit_unit(tx, versions)?;
-                                    Vec::new()
+                                    PublicationOutcome::settled(Vec::new())
                                 }
                                 SyncMessage::CommitUnit { tx, versions }
                                     if ingest_context.edge_authority
@@ -2198,34 +2242,39 @@ where
                                             // a write that lacks exactly one
                                             // authority route; otherwise its
                                             // caller could wait forever.
-                                            vec![SyncMessage::FateUpdate {
-                                                tx_id,
-                                                fate: Fate::Rejected(
-                                                    RejectionReason::MalformedCommit(
-                                                        "no admitted authority route".to_owned(),
+                                            PublicationOutcome::settled(vec![
+                                                SyncMessage::FateUpdate {
+                                                    tx_id,
+                                                    fate: Fate::Rejected(
+                                                        RejectionReason::MalformedCommit(
+                                                            "no admitted authority route"
+                                                                .to_owned(),
+                                                        ),
                                                     ),
-                                                ),
-                                                global_time: None,
-                                                durability: None,
-                                            }]
+                                                    global_time: None,
+                                                    durability: None,
+                                                },
+                                            ])
                                         } else {
                                             self.node
                                                 .borrow_mut()
                                                 .ingest_relay_commit_unit(tx, versions)?;
                                             // Edge persistence is observable, but
                                             // final policy fate stays parked.
-                                            vec![SyncMessage::FateUpdate {
-                                                tx_id,
-                                                fate: Fate::Accepted,
-                                                global_time: None,
-                                                durability: Some(DurabilityTier::Edge),
-                                            }]
+                                            PublicationOutcome::settled(vec![
+                                                SyncMessage::FateUpdate {
+                                                    tx_id,
+                                                    fate: Fate::Accepted,
+                                                    global_time: None,
+                                                    durability: Some(DurabilityTier::Edge),
+                                                },
+                                            ])
                                         }
                                     } else {
                                         self.node
                                             .borrow_mut()
                                             .ingest_relay_commit_unit(tx, versions)?;
-                                        Vec::new()
+                                        PublicationOutcome::settled(Vec::new())
                                     }
                                 }
                                 SyncMessage::CommitUnit { tx, versions }
@@ -2264,6 +2313,14 @@ where
                                         .await?
                                 }
                             };
+                            let (responses, changed) = finish_peer_publication_outcome(
+                                &self.node,
+                                &self.subscriptions,
+                                &self.active_authority_view_receipts,
+                                outcome,
+                            )
+                            .await?;
+                            stats.subscription_events += changed;
                             if let Some(tx_id) = write_state_tx_id {
                                 handle_write_state_update(
                                     &self.node,
