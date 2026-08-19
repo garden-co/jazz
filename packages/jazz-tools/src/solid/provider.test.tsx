@@ -24,11 +24,11 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
-function makeClient(id: string): JazzClient {
+function makeClient(id: string, shutdown = vi.fn(async () => undefined)): JazzClient {
   return {
     db: { id } as never,
     session: null,
-    shutdown: vi.fn(async () => undefined),
+    shutdown,
   };
 }
 
@@ -94,7 +94,11 @@ describe("Solid providers", () => {
     expect(createJazzClient).toHaveBeenCalledWith({ appId: "first" });
     expect(container.textContent).toBe("Loading");
 
-    const firstClient = makeClient("first");
+    const firstShutdown = deferred<void>();
+    const firstClient = makeClient(
+      "first",
+      vi.fn(() => firstShutdown.promise),
+    );
     first.resolve(firstClient);
     await flushMicrotasks();
     expect(container.textContent).toBe("Ready");
@@ -102,6 +106,11 @@ describe("Solid providers", () => {
     setConfig({ appId: "second" });
     await flushMicrotasks();
     expect(firstClient.shutdown).toHaveBeenCalledOnce();
+    expect(createJazzClient).toHaveBeenCalledOnce();
+    expect(container.textContent).toBe("Loading");
+
+    firstShutdown.resolve();
+    await flushMicrotasks();
     expect(createJazzClient).toHaveBeenCalledWith({ appId: "second" });
     expect(container.textContent).toBe("Loading");
 
