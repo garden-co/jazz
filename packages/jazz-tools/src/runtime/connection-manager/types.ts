@@ -119,6 +119,8 @@ export abstract class ConnectionManager {
 
   abstract shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean;
 
+  abstract shouldSeedDeferredSubscription(tier?: DurabilityTier): boolean;
+
   abstract disconnect(): Promise<void>;
 
   abstract reconnect(): Promise<void>;

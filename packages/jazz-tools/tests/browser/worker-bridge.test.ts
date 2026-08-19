@@ -33,7 +33,7 @@ import {
   createRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
-import { CompiledPermissions, schema as s } from "../../src/";
+import { CompiledPermissions, RowChangeKind, schema as s } from "../../src/";
 import { deploy } from "../../src/dev/catalogue.js";
 
 // ---------------------------------------------------------------------------
@@ -1076,69 +1076,73 @@ describe("Worker Bridge with OPFS", () => {
     unsub();
   });
 
-  it("tiered subscriptions gate the first callback until the worker's settled snapshot content is local", async () => {
-    const syncServer = await publishSyncServerSchemaAndPermissions("subscribe-global-gated");
-    const sharedLocalAuthToken = generateAuthSecret();
-    const seeder = track(
-      await createDb({
-        appId: syncServer.appId,
-        driver: {
-          type: "persistent",
-          dbName: uniqueDbName("subscribe-global-gated-seeder"),
-        },
-        serverUrl: syncServer.serverUrl,
-        secret: sharedLocalAuthToken,
-      }),
-    );
+  it.each(["edge", "global"] as const)(
+    "%s subscriptions gate the first callback until the worker's settled snapshot content is local",
+    async (tier) => {
+      const syncServer = await publishSyncServerSchemaAndPermissions(`subscribe-${tier}-gated`);
+      const sharedLocalAuthToken = generateAuthSecret();
+      const seeder = track(
+        await createDb({
+          appId: syncServer.appId,
+          driver: {
+            type: "persistent",
+            dbName: uniqueDbName(`subscribe-${tier}-gated-seeder`),
+          },
+          serverUrl: syncServer.serverUrl,
+          secret: sharedLocalAuthToken,
+        }),
+      );
 
-    const {
-      value: { id: projectId },
-    } = seeder.insert(projects, { name: `server-project-${Date.now()}` });
-    await seeder.all(app.projects.where({ id: projectId }), { tier: "global" });
+      const {
+        value: { id: projectId },
+      } = seeder.insert(projects, { name: `server-project-${Date.now()}` });
+      await seeder.all(app.projects.where({ id: projectId }), { tier });
 
-    const expectedTitles: string[] = [];
-    for (let i = 0; i < 12; i += 1) {
-      const title = `server-seeded-${i}`;
-      expectedTitles.push(title);
-      await seeder.insert(todos, { title, done: i % 2 === 0, projectId }).wait({ tier: "global" });
-    }
-    await seeder.shutdown();
-    ctx.untrack(seeder);
+      const expectedTitles: string[] = [];
+      for (let i = 0; i < 12; i += 1) {
+        const title = `server-seeded-${i}`;
+        expectedTitles.push(title);
+        await seeder.insert(todos, { title, done: i % 2 === 0, projectId }).wait({ tier });
+      }
+      await seeder.shutdown();
+      ctx.untrack(seeder);
 
-    const fresh = track(
-      await createDb({
-        appId: syncServer.appId,
-        driver: {
-          type: "persistent",
-          dbName: uniqueDbName("subscribe-global-gated-fresh"),
-        },
-        serverUrl: syncServer.serverUrl,
-        secret: sharedLocalAuthToken,
-      }),
-    );
-    const snapshots: Todo[][] = [];
-    const unsubscribe = trackSubscription(
-      fresh.subscribeAll(
-        todosByProject(projectId),
-        (delta) => {
-          snapshots.push([...(delta.all ?? [])]);
-        },
-        { tier: "global" },
-      ),
-    );
+      const fresh = track(
+        await createDb({
+          appId: syncServer.appId,
+          driver: {
+            type: "persistent",
+            dbName: uniqueDbName(`subscribe-${tier}-gated-fresh`),
+          },
+          serverUrl: syncServer.serverUrl,
+          secret: sharedLocalAuthToken,
+        }),
+      );
+      const snapshots: Todo[][] = [];
+      const unsubscribe = trackSubscription(
+        fresh.subscribeAll(
+          todosByProject(projectId),
+          (delta) => {
+            snapshots.push([...(delta.all ?? [])]);
+          },
+          { tier },
+        ),
+      );
 
-    await waitForCondition(
-      async () => snapshots.some((snapshot) => snapshot.length === expectedTitles.length),
-      15000,
-      "global tier subscription should deliver the settled snapshot",
-    );
+      await waitForCondition(
+        async () => snapshots.some((snapshot) => snapshot.length === expectedTitles.length),
+        15000,
+        `${tier} tier subscription should deliver the settled snapshot`,
+      );
 
-    const firstSnapshot = snapshots[0];
-    expect(firstSnapshot).toHaveLength(expectedTitles.length);
-    expect(firstSnapshot.map((row) => row.title).sort()).toEqual([...expectedTitles].sort());
+      const firstSnapshot = snapshots[0];
+      expect(firstSnapshot).toHaveLength(expectedTitles.length);
+      expect(firstSnapshot.map((row) => row.title).sort()).toEqual([...expectedTitles].sort());
 
-    unsubscribe();
-  }, 90000);
+      unsubscribe();
+    },
+    90000,
+  );
 
   it("delivers an initial scoped subscription snapshot after seeding many synced rows", async () => {
     const sharedLocalAuthToken = generateAuthSecret();
@@ -1320,6 +1324,84 @@ describe("Worker Bridge with OPFS", () => {
     const todosAfterRevert = await db.all(allTodos, { tier: "local" });
     expect(todosAfterRevert.length).toBe(0);
   });
+
+  it("relays incremental filtered membership between independent browser workers", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("filtered-membership-workers");
+    const sharedSecret = generateAuthSecret();
+    const dbA = ctx.track(
+      await createDb({
+        appId: syncServer.appId,
+        driver: { type: "persistent", dbName: uniqueDbName("filtered-membership-a") },
+        serverUrl: syncServer.serverUrl,
+        adminSecret: syncServer.adminSecret,
+        secret: sharedSecret,
+      }),
+    );
+    const openTodos = todos.where({ done: false });
+    await dbA.all(openTodos, { tier: "local" });
+    const dbB = ctx.track(
+      await createDb({
+        appId: syncServer.appId,
+        driver: { type: "persistent", dbName: uniqueDbName("filtered-membership-b") },
+        serverUrl: syncServer.serverUrl,
+        adminSecret: syncServer.adminSecret,
+        secret: sharedSecret,
+      }),
+    );
+    const snapshots: Todo[][] = [];
+    const publicChanges: Array<{ kind: number; id: string }> = [];
+    const writes: Array<ReturnType<Db["insert"]>> = [];
+    const competingWrites: Array<ReturnType<Db["insert"]>> = [];
+    trackSubscription(
+      dbB.subscribeAll(
+        openTodos,
+        (delta) => {
+          snapshots.push([...(delta.all ?? [])]);
+          publicChanges.push(...delta.delta.map(({ kind, id }) => ({ kind, id })));
+          if (delta.all?.length === 0 && writes.length === 0) {
+            for (let index = 0; index < 22; index += 1) {
+              writes.push(
+                dbA.insert(todos, { title: `remote worker entry ${index}`, done: false }),
+              );
+              competingWrites.push(
+                dbB.insert(todos, { title: `local worker entry ${index}`, done: false }),
+              );
+            }
+          }
+        },
+        { tier: "edge" },
+      ),
+    );
+    trackSubscription(dbA.subscribeAll(openTodos, () => {}, { tier: "edge" }));
+    trackSubscription(dbA.subscribeAll(todos.where({ done: true }), () => {}));
+    trackSubscription(dbB.subscribeAll(todos.where({ done: true }), () => {}));
+
+    await waitForCondition(
+      async () => snapshots.length > 0 && snapshots.at(-1)?.length === 0,
+      10_000,
+      "B receives the authoritative empty filtered snapshot",
+    );
+    await Promise.all([...writes, ...competingWrites].map((write) => write.wait({ tier: "edge" })));
+    await waitForCondition(
+      async () => snapshots.at(-1)?.length === writes.length + competingWrites.length,
+      10_000,
+      "B receives every membership entry",
+    );
+    for (const write of writes) {
+      expect(publicChanges).toContainEqual({ kind: RowChangeKind.Added, id: write.value.id });
+    }
+
+    await dbA.update(todos, writes[0]!.value.id, { done: true }).wait({ tier: "edge" });
+    await waitForCondition(
+      async () => snapshots.at(-1)?.length === writes.length + competingWrites.length - 1,
+      10_000,
+      "B receives membership exit",
+    );
+    expect(publicChanges).toContainEqual({
+      kind: RowChangeKind.Removed,
+      id: writes[0]!.value.id,
+    });
+  }, 60_000);
 
   it("server permissions check rejects client optimistic insert - onMutationError notification", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(

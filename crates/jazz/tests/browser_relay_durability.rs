@@ -20,6 +20,13 @@ fn schema() -> JazzSchema {
     )])
 }
 
+fn filtered_membership_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "deposits",
+        [ColumnSchema::new("collected", ColumnType::Bool)],
+    )])
+}
+
 fn included_relation_schema() -> JazzSchema {
     JazzSchema::new([
         TableSchema::new("profiles", [ColumnSchema::new("name", ColumnType::String)]),
@@ -798,6 +805,148 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
             } if added.is_empty()
         )),
         "expected explicit settled-empty handoff, got {settled:?}"
+    );
+}
+
+/// Native isolation test for incremental filtered membership across two browser relays.
+/// Bob subscribes through one worker while Alice writes through another; after the
+/// authority confirms Bob's initial empty result, matching and non-matching changes must
+/// reach Bob as membership additions and removals.
+///
+/// ```text
+/// alice main ──insert/update──► alice worker ──► server
+///                                                   │
+/// bob main ◄──add/remove──── bob worker ◄───────────┘
+/// ```
+#[test]
+fn browser_relays_propagate_incremental_filtered_membership_add_and_remove() {
+    let schema = filtered_membership_schema();
+    let alice = AuthorId::from_bytes([0xc1; 16]);
+    let bob = alice;
+    let alice_main = open_db(0x41, alice, &schema);
+    let alice_worker = open_db(0x42, AuthorId::SYSTEM, &schema);
+    let bob_main = open_db(0x43, bob, &schema);
+    let bob_worker = open_db(0x44, AuthorId::SYSTEM, &schema);
+    let core = open_core(0x45, &schema);
+    alice_main.set_non_durable_client();
+    bob_main.set_non_durable_client();
+
+    let (alice_main_transport, alice_worker_transport) = duplex();
+    let _alice_main_connection = alice_main.connect_upstream(alice_main_transport);
+    let _alice_worker_subscriber = alice_worker.accept_subscriber(alice_worker_transport, alice);
+    let (alice_upstream_transport, alice_core_transport) = duplex();
+    let _alice_upstream = alice_worker.connect_upstream(alice_upstream_transport);
+    let _alice_core_subscriber = core.accept_subscriber(alice_core_transport, alice);
+
+    let (bob_main_transport, bob_worker_transport) = duplex();
+    let _bob_main_connection = bob_main.connect_upstream(bob_main_transport);
+    let _bob_worker_subscriber = bob_worker.accept_subscriber(bob_worker_transport, bob);
+    let (bob_upstream_transport, bob_core_transport) = duplex();
+    let _bob_upstream = bob_worker.connect_upstream(bob_upstream_transport);
+    let _bob_core_subscriber = core.accept_subscriber(bob_core_transport, bob);
+
+    let uncollected = bob_main
+        .prepare_query(
+            &bob_main
+                .table("deposits")
+                .filter(eq(col("collected"), lit(false))),
+        )
+        .expect("prepare Bob's filtered query");
+    let mut subscription = block_on(bob_main.subscribe(
+        &uncollected,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe through Bob's worker");
+
+    bob_main.tick().expect("register Bob's coverage");
+    bob_worker.tick().expect("forward Bob's coverage");
+
+    let first_insert = alice_main
+        .insert(
+            "deposits",
+            BTreeMap::from([("collected".to_owned(), Value::Bool(false))]),
+        )
+        .expect("Alice inserts a matching deposit");
+    let row = first_insert.row_uuid();
+    let mut remaining_rows = Vec::new();
+    for _ in 1..22 {
+        remaining_rows.push(
+            alice_main
+                .insert(
+                    "deposits",
+                    BTreeMap::from([("collected".to_owned(), Value::Bool(false))]),
+                )
+                .expect("Alice inserts another matching deposit")
+                .row_uuid(),
+        );
+    }
+    alice_main.tick().expect("upload Alice's seed batch");
+    alice_worker.tick().expect("relay Alice's seed batch");
+
+    // The authority observes Bob's registration and Alice's seed batch in the
+    // same turn, while Bob's initial empty result is still being established.
+    for _ in 0..4 {
+        core.tick()
+            .expect("serve Bob and accept Alice's seed batch");
+        alice_worker
+            .tick()
+            .expect("receive Alice's acknowledgement");
+        bob_worker.tick().expect("receive matching membership");
+        bob_main.tick().expect("apply matching membership");
+    }
+    let entered = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        entered
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. }))
+    );
+    assert!(
+        entered.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, .. }
+                if added.iter().any(|item| item.row.row_uuid() == row)
+        )),
+        "matching insert must enter Bob's filtered result: {entered:?}"
+    );
+    for expected in remaining_rows {
+        assert!(
+            entered.iter().any(|event| matches!(
+                event,
+                SubscriptionEvent::Delta { added, .. }
+                    if added.iter().any(|item| item.row.row_uuid() == expected)
+            )),
+            "every matching insert must enter Bob's filtered result: {entered:?}"
+        );
+    }
+
+    alice_main
+        .update(
+            "deposits",
+            row,
+            BTreeMap::from([("collected".to_owned(), Value::Bool(true))]),
+        )
+        .expect("Alice moves the deposit out of the filter");
+    for _ in 0..4 {
+        alice_main.tick().expect("upload Alice's update");
+        alice_worker.tick().expect("relay Alice's update");
+        core.tick().expect("accept Alice's update");
+        alice_worker
+            .tick()
+            .expect("receive Alice's acknowledgement");
+        bob_worker.tick().expect("receive removed membership");
+        bob_main.tick().expect("apply removed membership");
+    }
+    let exited = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        exited.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { removed, .. }
+                if removed.iter().any(|item| item.row_uuid == row)
+        )),
+        "non-matching update must exit Bob's filtered result: {exited:?}"
     );
 }
 

@@ -53,6 +53,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   private resolveFollowerReady: (() => void) | null = null;
   private rejectFollowerReady: ((error: Error) => void) | null = null;
   private followerReadyResolved = false;
+  private explicitlyDisconnected = false;
   private durablePathError: Error | null = null;
   private brokerSchemaFingerprint: string | null = null;
   private brokerResetSchema: WasmSchema | null = null;
@@ -161,6 +162,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       throw new Error("Db.disconnect() requires an active browser connection.");
     }
     await roleBridge.disconnect();
+    this.explicitlyDisconnected = true;
   }
 
   async reconnect(): Promise<void> {
@@ -173,6 +175,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       throw new Error("Db.reconnect() requires an active browser connection.");
     }
     await roleBridge.reconnect();
+    this.explicitlyDisconnected = false;
     this.brokerClient?.replayAuthRefresh();
   }
 
@@ -188,6 +191,10 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean {
     return tier === "edge" || tier === "global";
+  }
+
+  shouldSeedDeferredSubscription(tier?: DurabilityTier): boolean {
+    return (tier === "edge" || tier === "global") && this.explicitlyDisconnected;
   }
 
   async deleteClientStorage(): Promise<void> {

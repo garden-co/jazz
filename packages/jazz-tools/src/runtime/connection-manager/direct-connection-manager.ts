@@ -48,6 +48,10 @@ export class DirectConnectionManager extends ConnectionManager {
     return false;
   }
 
+  shouldSeedDeferredSubscription(_tier?: DurabilityTier): boolean {
+    return false;
+  }
+
   async disconnect(): Promise<void> {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.disconnect() requires a configured serverUrl.");

@@ -1635,11 +1635,15 @@ export class Db {
     if (queryOptions.tier == null || queryOptions.tier === "local") {
       callback(manager.seed([]));
     }
-    if (this.connection.shouldDeferSubscriptionStart(queryOptions.tier)) {
+    const deferSubscriptionStart = this.connection.shouldDeferSubscriptionStart(queryOptions.tier);
+    const seedDeferredSubscription =
+      deferSubscriptionStart && this.connection.shouldSeedDeferredSubscription(queryOptions.tier);
+    if (deferSubscriptionStart) {
       // The worker can only classify the initial authority-tier snapshot as
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
-      // then owns the settled-snapshot gate and remains the sole data source.
+      // then owns the settled-snapshot gate. An explicitly disconnected client
+      // may still publish its local optimistic seed while it waits to reconnect.
       void this.ensureReady(queryOptions.tier)
         .then(startNativeSubscription)
         .catch((error: unknown) => {
@@ -1653,6 +1657,7 @@ export class Db {
     }
     if (
       this.config.serverUrl &&
+      (!deferSubscriptionStart || seedDeferredSubscription) &&
       queryOptions.propagation !== "local-only" &&
       queryOptions.tier !== "global" &&
       !queryUsesRelationTraversal(builtQuery)
