@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use jazz::query::Query;
-use jazz::row_input;
 use jazz::tools::{
     ColumnType, JazzClient, ObjectId, SchemaBuilder, TableSchema, Value, permissions,
     policy_expr as pe,
@@ -50,14 +49,14 @@ async fn rebac_select_policy_with_null_literal_filters_query_results() {
             let (visible_id, _, visible_tx) = admin
                 .insert(
                     "documents",
-                    row_input!("title" => "draft", "deleted_at" => Value::Null),
+                    jazz::row_input!("title" => "draft", "deleted_at" => Value::Null),
                 )
                 .expect("seed visible document");
             let visible_tx = visible_tx.expect("ordinary mutation commits immediately");
             let (hidden_id, _, hidden_tx) = admin
                 .insert(
                     "documents",
-                    row_input!(
+                    jazz::row_input!(
                         "title" => "soft-deleted",
                         "deleted_at" => "2026-03-30T12:00:00Z",
                     ),
@@ -69,7 +68,7 @@ async fn rebac_select_policy_with_null_literal_filters_query_results() {
             let alice = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
-                .with_user_id("alice")
+                .with_user_id(super::ALICE_ID)
                 .ready_on("documents", Duration::from_secs(30))
                 .connect()
                 .await;
@@ -120,14 +119,14 @@ async fn rebac_select_policy_with_is_null_filters_query_results() {
             let (visible_id, _, visible_tx) = admin
                 .insert(
                     "documents",
-                    row_input!("title" => "draft", "deleted_at" => Value::Null),
+                    jazz::row_input!("title" => "draft", "deleted_at" => Value::Null),
                 )
                 .expect("seed visible document");
             let visible_tx = visible_tx.expect("ordinary mutation commits immediately");
             let (hidden_id, _, hidden_tx) = admin
                 .insert(
                     "documents",
-                    row_input!(
+                    jazz::row_input!(
                         "title" => "soft-deleted",
                         "deleted_at" => "2026-03-30T12:00:00Z",
                     ),
@@ -139,7 +138,7 @@ async fn rebac_select_policy_with_is_null_filters_query_results() {
             let alice = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
-                .with_user_id("alice")
+                .with_user_id(super::ALICE_ID)
                 .ready_on("documents", Duration::from_secs(30))
                 .connect()
                 .await;

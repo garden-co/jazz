@@ -300,6 +300,7 @@ pub async fn connect_ready_client(
         .with_server(server)
         .with_schema(schema.clone())
         .with_user_id(user_id)
+        .as_admin()
         .ready_on(ready_table, ready_timeout)
         .connect()
         .await
