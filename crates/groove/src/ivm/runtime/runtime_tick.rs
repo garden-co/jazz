@@ -123,6 +123,12 @@ impl IvmRuntime {
         }
     }
 
+    pub(crate) fn tag_staged_subscription_notifications(&mut self, publication: PublicationId) {
+        for (_, queued) in &mut self.staged_subscription_notifications {
+            queued.publication = Some(publication);
+        }
+    }
+
     /// Forget output from a failed staged storage transaction.  The runtime is
     /// generally poisoned by its caller after that failure, but clearing this
     /// queue makes the no-publication boundary explicit and robust to teardown.

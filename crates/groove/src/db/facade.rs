@@ -55,8 +55,14 @@ where
             last_tick_metrics: None,
             storage_read_metrics: RefCell::new(StorageReadMetrics::default()),
             durable_publication_state: Arc::new(Mutex::new(DurablePublicationState::default())),
+            next_publication_id: 1,
+            durable_publication_frontier: None,
             poisoned: false,
         })
+    }
+
+    pub fn durable_publication_frontier(&self) -> Option<PublicationId> {
+        self.durable_publication_frontier
     }
 
     /// Begin a host transaction whose subscription publication boundary spans

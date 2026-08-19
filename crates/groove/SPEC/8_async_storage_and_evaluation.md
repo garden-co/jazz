@@ -131,6 +131,29 @@ If persistence failure has different semantics for a particular operation,
 that operation must model those semantics explicitly rather than leaving a
 partially advanced evaluator behind.
 
+### Immediate resident publication and durable release
+
+Host-local visibility and external durability-dependent release are distinct
+boundaries. For an immediate local publication, Groove must synchronously
+advance every resident base row and unblocked maintained terminal before
+waiting for ordered storage persistence. Flat resident one-shot reads observe
+the same publication through Groove's resident write overlay. A terminal whose
+new include or join dependency is non-resident may remain blocked without
+delaying unrelated resident terminals.
+
+Each resident publication has a monotone `PublicationId`. Incremental terminal
+output carries that identity, and successful ordered persistence advances a
+contiguous durable publication frontier. Groove does not know whether a
+consumer is a Jazz peer: Jazz may deliver local output immediately while
+holding peer-visible effects until their publication is at or below Groove's
+durable frontier. A later publication must never become externally releasable
+past an earlier unresolved publication.
+
+Durability-before-publication remains an explicit policy for operations such
+as schema installation that must not become optimistically visible. The policy
+is named at the existing Groove database boundary; it does not select another
+database, storage, or subscription implementation.
+
 ## Terminal installation
 
 Opening a terminal is itself an evaluation session. Updates that commit while
@@ -182,6 +205,8 @@ delays. The persistent B-tree backend used by storage-fidelity tests is named
   prepared write set/read view above atomic `write_many`. Public batch reads
   have genuine users; the IVM's current same-tick usage is not assumed to be
   the target design.
-- Whether tick persistence precedes publication for every current operation or
-  whether Groove needs two explicitly named publication policies. Either way,
-  no policy may suspend in the middle of visible IVM mutation.
+- The exact final shape of Groove's resident write overlay and blocked-terminal
+  continuation. The two publication policies and their visibility ordering are
+  no longer open: immediate local updates publish resident work before
+  persistence, while durability-before-publication remains available for
+  explicitly durable operations.

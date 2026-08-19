@@ -154,6 +154,9 @@ where
             .tick_staged(table_deltas, &storage, &mut staged_operations)
             .await
             .map_err(Error::IvmRuntime)?;
+        let publication = PublicationId(self.next_publication_id);
+        self.next_publication_id = self.next_publication_id.saturating_add(1);
+        staged_runtime.tag_staged_subscription_notifications(publication);
         let ivm_tick_time = tick_start.elapsed();
         let operations = staged_operations
             .iter()
@@ -172,6 +175,7 @@ where
             return Err(Error::from(error));
         }
         self.ivm_runtime = staged_runtime;
+        self.durable_publication_frontier = Some(publication);
         if self
             .durable_publication_state
             .lock()
