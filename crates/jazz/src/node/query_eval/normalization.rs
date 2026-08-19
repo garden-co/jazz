@@ -1322,7 +1322,7 @@ fn normalize_reachable(
     ))
 }
 
-fn source_column_value(
+pub(super) fn source_column_value(
     schema: &JazzSchema,
     source: &SourceId,
     column: &str,

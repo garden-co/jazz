@@ -1,6 +1,7 @@
 //! normalization query-evaluation tests.
 
 use super::*;
+use crate::node::query_eval::normalization::source_column_value;
 
 #[test]
 fn payload_enum_normalization_uses_case_local_field_types() {
@@ -100,6 +101,32 @@ fn declared_id_order_and_aggregate_lower_as_source_fields() {
         Some(RowSetExpr::Aggregate { group_by, .. })
             if matches!(group_by.as_slice(), [NormalizedValueRef::SourceField { source: key_source, field }]
                 if key_source == &source && field == "id")
+    ));
+}
+
+/// The shared source-key resolver is used by lookup joins, reachability seeds
+/// and access joins, array correlations, and flat joins. Declared `id` must
+/// select the authored field while legacy tables keep their physical row id.
+#[test]
+fn source_key_resolution_distinguishes_declared_and_physical_ids() {
+    let schema = JazzSchema::new([
+        TableSchema::new("declared", [ColumnSchema::new("id", ColumnType::Uuid)]),
+        TableSchema::new("legacy", [ColumnSchema::new("label", ColumnType::String)]),
+    ]);
+    let declared = root_source_id("declared");
+    let legacy = root_source_id("legacy");
+
+    assert!(matches!(
+        source_column_value(&schema, &declared, "id", JoinTarget::Column),
+        NormalizedValueRef::SourceField { source, field } if source == declared && field == "id"
+    ));
+    assert!(matches!(
+        source_column_value(&schema, &legacy, "id", JoinTarget::Column),
+        NormalizedValueRef::RowId(RowIdRef::Source(source)) if source == legacy
+    ));
+    assert!(matches!(
+        source_column_value(&schema, &declared, "id", JoinTarget::RowId),
+        NormalizedValueRef::RowId(RowIdRef::Source(source)) if source == declared
     ));
 }
 
