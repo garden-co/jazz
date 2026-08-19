@@ -1,5 +1,5 @@
-use jazz::tools::server::JazzServer;
 use jazz::tools::{JazzClient, QueryBuilder, Value};
+use jazz_server::JazzServer;
 
 use crate::common::{
     ClientPair, NO_DELTA_WINDOW, QUERY_TIMEOUT, READY_TIMEOUT, TodoSeed, create_todo,

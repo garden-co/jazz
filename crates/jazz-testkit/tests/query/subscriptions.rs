@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use jazz::db::ReadOpts;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{JazzClient, Query, QueryBuilder, Value};
+use jazz_server::JazzServer;
 
 use crate::common::{
     ClientPair, NO_DELTA_WINDOW, QUERY_TIMEOUT, READY_TIMEOUT, TodoSeed, create_todo,
@@ -565,7 +564,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
     let descriptor = todo_subscription_record_descriptor();
 
     let mut stream = client
-        .subscribe_with_opts(query.clone(), ReadOpts::default())
+        .subscribe(query.clone())
         .await
         .expect("subscribe to local todos");
     let mut log = Vec::new();

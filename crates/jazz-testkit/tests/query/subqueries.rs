@@ -6,11 +6,11 @@ use crate::support::{
     wait_for_subscription_update,
 };
 use jazz::row_input;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, JazzClient, ObjectId, Query, QueryBuilder, Schema, SchemaBuilder, TableSchema,
     Value,
 };
+use jazz_server::JazzServer;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);

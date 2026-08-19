@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
 use jazz::row_input;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Row,
     Schema, SchemaBuilder, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use tempfile::TempDir;
 
 use crate::support::TestingClient;
@@ -357,6 +357,7 @@ pub(crate) async fn start_local_client(schema: Schema) -> (TempDir, JazzClient) 
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
+        storage_factory: None,
     };
 
     let client = JazzClient::connect(context)

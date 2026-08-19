@@ -495,8 +495,8 @@ fn validate_flat_join(
         let left_schema = table(schema, left_table)?;
         let right_schema = table(schema, &source.table)?;
         if !flat_join_key_types_compatible(
-            planner_column_type(&left_schema, left_column)?,
-            planner_column_type(&right_schema, right_column)?,
+            flat_join_column_type(&left_schema, left_column)?,
+            flat_join_column_type(&right_schema, right_column)?,
         ) {
             return Err(QueryError::OperandTypeMismatch);
         }
