@@ -237,7 +237,9 @@ fn fixed_schema_db_branch_and_bootstrap_writes_retain_authored_schema() {
         .node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_snapshot(writer.node.node.borrow().catalogue_snapshot().unwrap())
+        .apply_trusted_catalogue_snapshot_settled(
+            writer.node.node.borrow().catalogue_snapshot().unwrap(),
+        )
         .unwrap();
     receiver.create_branch_with_id(branch).unwrap();
     receiver

@@ -439,7 +439,7 @@ fn churn_row(index: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
-fn accept_churn_with_parent<S: OrderedKvStorage>(
+fn accept_churn_with_parent<S: OrderedKvStorage + ReopenableStorage>(
     core: &mut NodeState<S>,
     parents: &mut BTreeMap<RowUuid, TxId>,
     row_uuid: RowUuid,
@@ -461,7 +461,7 @@ fn accept_churn_with_parent<S: OrderedKvStorage>(
     parents.insert(row_uuid, tx_id);
 }
 
-fn delete_churn_with_parent<S: OrderedKvStorage>(
+fn delete_churn_with_parent<S: OrderedKvStorage + ReopenableStorage>(
     core: &mut NodeState<S>,
     parents: &mut BTreeMap<RowUuid, TxId>,
     row_uuid: RowUuid,

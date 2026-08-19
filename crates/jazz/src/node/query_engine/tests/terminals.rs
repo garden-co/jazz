@@ -739,7 +739,8 @@ fn production_output_profiles_lower_for_linear_and_correlated_shapes() {
             CorrelationRequirement::Optional,
             production_output_request(profile, true),
         );
-        let result = lower_query_program(correlated_request, &mut FakeSourceResolver::default());
+        let mut resolver = FakeSourceResolver::default();
+        let result = lower_query_program(correlated_request, &mut resolver).resolve();
         match profile {
             ProductionOutputProfile::AuthorizedRows => {
                 result.unwrap_or_else(|err| {

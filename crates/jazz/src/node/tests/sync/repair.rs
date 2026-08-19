@@ -55,7 +55,7 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
         alice_peer.handle_row_versions_fetch(
             &mut core,
             SyncMessage::FetchRowVersions { requests: too_many },
-        ),
+        ).resolve(),
         Err(Error::UnsupportedSyncMessage(
             "row-version repair request exceeds limit"
         ))
@@ -236,7 +236,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     // canonical `todos` payload resolve to the one durable physical table.
     let (_reader_dir, mut reader) = open_node_with_schema(node(0x93), base.clone());
     reader
-        .apply_trusted_catalogue_snapshot(core.catalogue_snapshot().unwrap())
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
         .unwrap();
     let (shape, binding) = core.whole_table_shape_binding("tasks").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
@@ -356,7 +356,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     .unwrap()];
     let (_negative_dir, mut negative) = open_node_with_schema(node(0x94), schema());
     negative
-        .apply_trusted_catalogue_snapshot(core.catalogue_snapshot().unwrap())
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
         .unwrap();
     register_shape_binding(&mut negative, &shape, &binding);
     negative
@@ -376,7 +376,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     wrong_tx.tx.tx_id = TxId::new(TxTime(tx_id.time.0 + 1), tx_id.node);
     let (_wrong_tx_dir, mut wrong_tx_reader) = open_node_with_schema(node(0x95), schema());
     wrong_tx_reader
-        .apply_trusted_catalogue_snapshot(core.catalogue_snapshot().unwrap())
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
         .unwrap();
     register_shape_binding(&mut wrong_tx_reader, &shape, &binding);
     wrong_tx_reader
@@ -535,4 +535,3 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         "an old same-named inline body does not cover the registered shape's reintroduced lineage"
     );
 }
-

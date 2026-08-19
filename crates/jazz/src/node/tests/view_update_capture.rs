@@ -460,7 +460,8 @@ impl MaintainedSubscriptionViewSubscription {
                 maintained_facts: &self.maintained,
                 allow_storage_witness_fallback: false,
             },
-        )?;
+        )
+        .resolve()?;
         let SyncMessage::ViewUpdate {
             reset_result_set: update_reset,
             ..

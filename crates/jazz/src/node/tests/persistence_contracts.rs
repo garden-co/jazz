@@ -101,19 +101,19 @@ fn fail_write_many_node() -> (NodeState<FailWriteManyMemoryStorage>, FailWriteMa
 
 fn assert_poisoned_node_exposes_nothing(core: &mut NodeState<FailWriteManyMemoryStorage>) {
     assert!(matches!(
-        core.subscribe_history("todos"),
+        core.subscribe_history("todos").resolve(),
         Err(Error::Groove(groove::db::Error::DatabasePoisoned))
     ));
     assert!(matches!(
-        core.current_rows("todos", DurabilityTier::Global),
+        core.current_rows("todos", DurabilityTier::Global).resolve(),
         Err(Error::Groove(groove::db::Error::DatabasePoisoned))
     ));
     assert!(matches!(
-        core.query_table_versions("todos"),
+        core.query_table_versions("todos").resolve(),
         Err(Error::Groove(groove::db::Error::DatabasePoisoned))
     ));
     assert!(matches!(
-        core.database.flush(),
+        core.database.flush().resolve(),
         Err(groove::db::Error::DatabasePoisoned)
     ));
 }

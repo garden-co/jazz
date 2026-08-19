@@ -536,7 +536,9 @@ fn row_version_repair_rejects_incomplete_authored_row_before_storage() {
 
     let (_reader_dir, mut reader) = open_node_with_schema(node(0x71), base);
     assert!(matches!(
-        reader.apply_row_version_payloads_for_requests(&[request], bundles),
+        reader
+            .apply_row_version_payloads_for_requests(&[request], bundles)
+            .resolve(),
         Err(Error::MalformedViewUpdate(
             "row version does not carry the complete descriptor of its authored schema"
         ))
@@ -595,7 +597,8 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
             terminal_operations,
             program_fact_adds,
             program_fact_removes,
-        }]),
+        }])
+        .resolve(),
         Err(Error::MalformedViewUpdate(
             "row version does not carry the complete descriptor of its authored schema"
         ))
@@ -670,7 +673,8 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
             terminal_operations,
             program_fact_adds,
             program_fact_removes,
-        }]),
+        }])
+        .resolve(),
         Err(Error::MalformedViewUpdate(
             "row version does not carry the complete descriptor of its authored schema"
         ))
@@ -692,4 +696,3 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
     assert!(!reader.initial_sync_flush_active);
     assert!(reader.query.initial_hydration_binding_views.is_empty());
 }
-

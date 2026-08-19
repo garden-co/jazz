@@ -309,7 +309,7 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
 
     let mut peer = PeerState::new();
     assert!(matches!(
-        peer.current_rows_update(&mut core, "tasks"),
+        peer.current_rows_update(&mut core, "tasks").resolve(),
         Err(Error::InvalidStoredValue(
             "maintained witness maps to zero or multiple physical tables"
         ))

@@ -87,7 +87,7 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
             "catalogue snapshot requires a trusted upstream link"
         ))
     ));
-    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     assert_eq!(receiver.current_write_schema().unwrap().schema, evolved.id);
     receiver.apply_sync_message_settled(authored).unwrap();
     let versions = receiver.query_all_versions().unwrap();
@@ -149,7 +149,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
         )
         .unwrap();
     receiver
-        .apply_trusted_catalogue_snapshot(authority.catalogue_snapshot().unwrap())
+        .apply_trusted_catalogue_snapshot_settled(authority.catalogue_snapshot().unwrap())
         .unwrap();
 
     assert_eq!(
@@ -202,10 +202,10 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
     let snapshot = authority.catalogue_snapshot().unwrap();
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x64), base.clone());
     writer
-        .apply_trusted_catalogue_snapshot(snapshot.clone())
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .unwrap();
     let tx_id = writer
-        .commit_mergeable_in_schema(
+        .commit_mergeable_in_schema_settled(
             base.version_id(),
             MergeableCommit::new("todos", row(0x65), 10).cells(title_cells("authored-base")),
         )
@@ -219,7 +219,7 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
     let (_receiver_dir, mut receiver) =
         open_node_with_schema(node(0x66), evolved.schema.clone());
     receiver
-        .apply_trusted_catalogue_snapshot(snapshot)
+        .apply_trusted_catalogue_snapshot_settled(snapshot)
         .unwrap();
     receiver
         .ingest_known_transaction(
@@ -270,7 +270,7 @@ fn mergeable_commit_rejects_unadmitted_authored_schema() {
     let (_dir, mut writer) = open_node_with_schema(node(0x67), schema());
     let unknown = SchemaVersionId(uuid::Uuid::from_bytes([0x67; 16]));
     assert!(matches!(
-        writer.commit_mergeable_in_schema(
+        writer.commit_mergeable_in_schema_settled(
             unknown,
             MergeableCommit::new("todos", row(0x68), 10).cells(title_cells("forged")),
         ),
@@ -290,7 +290,7 @@ fn branch_commit_rejects_unadmitted_authored_schema_without_persistence() {
             branch_id,
             unknown,
             MergeableCommit::new("todos", row(0x6a), 10).cells(title_cells("forged")),
-        ),
+        ).resolve(),
         Err(Error::InvalidMergeableCommit(
             "authored schema version is not admitted"
         ))
@@ -309,7 +309,7 @@ fn trusted_catalogue_snapshot_rebuilds_transitions_but_preserves_identical_prefi
     let runtime_before_transition = receiver.groove_runtime_token();
 
     receiver
-        .apply_trusted_catalogue_snapshot(snapshot.clone())
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .unwrap();
     assert_eq!(receiver.active_catalogue_seq(), 1);
     assert_ne!(
@@ -332,7 +332,7 @@ fn trusted_catalogue_snapshot_rebuilds_transitions_but_preserves_identical_prefi
         .insert(cached_view, BTreeSet::new());
     let runtime_before_idempotent_replay = receiver.groove_runtime_token();
     receiver
-        .apply_trusted_catalogue_snapshot(snapshot.clone())
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .unwrap();
     assert_eq!(receiver.groove_runtime_token(), runtime_before_idempotent_replay);
     assert!(
@@ -344,7 +344,7 @@ fn trusted_catalogue_snapshot_rebuilds_transitions_but_preserves_identical_prefi
     let mut reopened = reopen_node_at(&dir, node(0x3f), base);
     assert_eq!(reopened.active_catalogue_seq(), 1);
     let runtime_before_reopen_replay = reopened.groove_runtime_token();
-    reopened.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    reopened.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     assert_eq!(reopened.active_catalogue_seq(), 1);
     assert_eq!(reopened.groove_runtime_token(), runtime_before_reopen_replay);
 }
@@ -419,7 +419,7 @@ fn fresh_dynamic_edge_open(
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(path, &refs)?;
-    NodeState::new_catalogue_uninitialized(node_uuid, storage)
+    NodeState::new_catalogue_uninitialized(node_uuid, storage).resolve()
 }
 
 fn write_active_lineage_record(node: &mut NodeState<RocksDbStorage>, staged: &StagedSchemaLineage) {
@@ -480,7 +480,7 @@ fn assert_staged_corruption_rejected(
     let base = schema();
     let snapshot = catalogue_snapshot_fixture();
     let (dir, mut receiver) = open_node_with_schema(node(byte), base.clone());
-    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     let mut staged = receiver
         .catalogue
         .active_lineages_by_target
@@ -521,7 +521,7 @@ fn assert_catalogue_reopen_rejected(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
     assert!(matches!(
-        NodeState::new(node_uuid, schema, storage),
+        NodeState::new(node_uuid, schema, storage).resolve(),
         Err(Error::InvalidStoredValue(message)) if message == expected
     ));
 }
@@ -531,7 +531,7 @@ fn reopen_rejects_active_catalogue_marker_without_canonical_payload() {
     let base = schema();
     let snapshot = catalogue_snapshot_fixture();
     let (dir, mut receiver) = open_node_with_schema(node(0x40), base.clone());
-    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     let publication_id = receiver
         .catalogue
         .active_lineages_by_target
@@ -560,7 +560,7 @@ fn reopen_rejects_active_catalogue_marker_with_mismatched_payload_sequence() {
     let base = schema();
     let snapshot = catalogue_snapshot_fixture();
     let (dir, mut receiver) = open_node_with_schema(node(0x41), base.clone());
-    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     let mut staged = receiver
         .catalogue
         .active_lineages_by_target
@@ -590,7 +590,7 @@ fn reopen_rejects_gapped_active_catalogue_sequences() {
     let base = schema();
     let snapshot = catalogue_snapshot_fixture();
     let (dir, mut receiver) = open_node_with_schema(node(0x42), base.clone());
-    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
 
     let v2 = SchemaVersion::new(catalogue_evolved_schema());
     let v3 = SchemaVersion::new(JazzSchema::new([TableSchema::new(
@@ -638,7 +638,7 @@ fn reopen_rejects_duplicate_active_catalogue_targets() {
     let base = schema();
     let snapshot = catalogue_snapshot_fixture();
     let (dir, mut receiver) = open_node_with_schema(node(0x43), base.clone());
-    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     let original = receiver
         .catalogue
         .active_lineages_by_target
@@ -663,7 +663,7 @@ fn reopen_rejects_inactive_catalogue_target_already_active() {
     let base = schema();
     let snapshot = catalogue_snapshot_fixture();
     let (dir, mut receiver) = open_node_with_schema(node(0x44), base.clone());
-    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     let original = receiver
         .catalogue
         .active_lineages_by_target
@@ -693,7 +693,7 @@ fn reopen_rejects_duplicate_inactive_catalogue_targets() {
     let base = schema();
     let snapshot = catalogue_snapshot_fixture();
     let (dir, mut receiver) = open_node_with_schema(node(0x45), base.clone());
-    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     let mut first = receiver
         .catalogue
         .active_lineages_by_target
@@ -735,7 +735,7 @@ fn reopen_rejects_zero_sequence_staged_lineage() {
     let base = schema();
     let snapshot = catalogue_snapshot_fixture();
     let (dir, mut receiver) = open_node_with_schema(node(0x46), base.clone());
-    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     let mut staged = receiver
         .catalogue
         .active_lineages_by_target
@@ -874,7 +874,7 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
         "uninitialized edge must not persist a provisional physical mapping"
     );
     assert!(matches!(
-        edge.current_rows("todos", DurabilityTier::Local),
+        edge.current_rows("todos", DurabilityTier::Local).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
@@ -886,7 +886,7 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
 
     let snapshot = catalogue_snapshot_fixture();
     let authority_genesis = schema().version_id();
-    edge.apply_trusted_catalogue_snapshot(snapshot.clone())
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .expect("install exact trusted core catalogue");
     assert_eq!(edge.catalogue_bootstrap_state(), CatalogueBootstrapState::Ready);
     assert_eq!(edge.catalogue.current_schema_version_id, authority_genesis);
@@ -935,7 +935,7 @@ fn dynamic_edge_bootstrap_failure_never_persists_a_partial_authority_catalogue()
     );
 
     assert!(matches!(
-        edge.apply_trusted_catalogue_snapshot(catalogue_snapshot_fixture()),
+        edge.apply_trusted_catalogue_snapshot_settled(catalogue_snapshot_fixture()),
         Err(Error::CatalogueActivationFailed)
     ));
     assert_eq!(
@@ -991,7 +991,7 @@ fn dynamic_edge_reopen_rejects_catalogue_prefix_without_bootstrap_marker() {
     let mut edge = NodeState::new_catalogue_uninitialized(node(0x9a), storage)
         .expect("open explicit uninitialized edge");
     let snapshot = catalogue_snapshot_fixture();
-    edge.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     delete_catalogue_record(
         &mut edge,
         b"bootstrap_ready",
@@ -1049,7 +1049,7 @@ fn dynamic_edge_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
     let mut edge = NodeState::new_catalogue_uninitialized(node(0x9b), storage)
         .expect("open explicit uninitialized edge");
     let snapshot = catalogue_snapshot_fixture();
-    edge.apply_trusted_catalogue_snapshot(snapshot.clone()).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
     delete_catalogue_pointer(&mut edge, snapshot.current_write_schema.revision);
     drop(edge);
 
@@ -1066,7 +1066,7 @@ fn dynamic_edge_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open second edge store");
     let mut edge = NodeState::new_catalogue_uninitialized(node(0x9c), storage)
         .expect("open explicit uninitialized edge");
-    edge.apply_trusted_catalogue_snapshot(snapshot.clone()).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
     write_catalogue_record(
         &mut edge,
         b"bootstrap_ready",
@@ -1101,7 +1101,7 @@ fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
     let mut edge = NodeState::new_catalogue_uninitialized(node(0x9d), storage)
         .expect("open explicit uninitialized edge");
-    edge.apply_trusted_catalogue_snapshot(catalogue_snapshot_fixture())
+    edge.apply_trusted_catalogue_snapshot_settled(catalogue_snapshot_fixture())
         .unwrap();
 
     let smuggled = SchemaVersion::new(JazzSchema::new([TableSchema::new(
@@ -1149,7 +1149,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
     let mut edge = NodeState::new_catalogue_uninitialized(node(0xa1), storage)
         .expect("open explicit uninitialized edge");
-    edge.apply_trusted_catalogue_snapshot(crate::protocol::CatalogueSnapshot {
+    edge.apply_trusted_catalogue_snapshot_settled(crate::protocol::CatalogueSnapshot {
         schemas: vec![SchemaVersion::new(base.clone())],
         lineages: Vec::new(),
         current_write_schema: CurrentWriteSchema {
@@ -1233,7 +1233,7 @@ fn dynamic_edge_bootstrap_rejects_snapshot_with_ambiguous_genesis() {
     ])));
 
     assert!(matches!(
-        edge.apply_trusted_catalogue_snapshot(snapshot),
+        edge.apply_trusted_catalogue_snapshot_settled(snapshot),
         Err(Error::InvalidCatalogueUpdate(
             "trusted catalogue snapshot must contain exactly one genesis schema"
         ))
@@ -1309,7 +1309,7 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
         .expect("open explicit uninitialized edge");
 
     assert!(matches!(
-        edge.open_exclusive(OpenTransactionId::new()),
+        edge.open_exclusive(OpenTransactionId::new()).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
@@ -1317,7 +1317,7 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.ingest_edge_authority_mergeable_commit_unit(tx.clone(), versions.clone(), 20),
+        edge.ingest_edge_authority_mergeable_commit_unit(tx.clone(), versions.clone(), 20).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
@@ -1326,15 +1326,15 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
             versions.clone(),
             20,
             AuthorId::SYSTEM,
-        ),
+        ).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.ingest_relay_commit_unit(tx.clone(), versions),
+        edge.ingest_relay_commit_unit(tx.clone(), versions).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.apply_fate_update(tx.tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge)),
+        edge.apply_fate_update(tx.tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge)).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     for table in [
@@ -1369,11 +1369,11 @@ fn dynamic_edge_bootstrap_rejects_branch_creation_without_residue() {
         .expect("open explicit uninitialized edge");
 
     assert!(matches!(
-        edge.create_branch(BranchId(uuid::Uuid::from_bytes([0x96; 16]))),
+        edge.create_branch(BranchId(uuid::Uuid::from_bytes([0x96; 16]))).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.create_root_branch(BranchId(uuid::Uuid::from_bytes([0x97; 16]))),
+        edge.create_root_branch(BranchId(uuid::Uuid::from_bytes([0x97; 16]))).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(
@@ -1423,7 +1423,7 @@ fn trusted_catalogue_snapshot_rejects_invalid_later_lineage_without_prefix_activ
     snapshot.lineages.push((2, snapshot.lineages[0].1.clone()));
 
     assert!(matches!(
-        core.apply_trusted_catalogue_snapshot(snapshot),
+        core.apply_trusted_catalogue_snapshot_settled(snapshot),
         Err(Error::InvalidCatalogueUpdate(_))
     ));
     assert_eq!(core.active_catalogue_seq(), 0);
@@ -1445,7 +1445,7 @@ fn trusted_catalogue_snapshot_rejects_pointer_conflict_without_lineage_activatio
     snapshot.current_write_schema.revision = 0;
 
     assert!(matches!(
-        core.apply_trusted_catalogue_snapshot(snapshot),
+        core.apply_trusted_catalogue_snapshot_settled(snapshot),
         Err(Error::InvalidCatalogueUpdate(_))
     ));
     assert_eq!(core.active_catalogue_seq(), 0);
@@ -1467,7 +1467,7 @@ fn trusted_catalogue_snapshot_activation_failure_never_exposes_a_prefix_and_reop
     );
 
     assert!(matches!(
-        core.apply_trusted_catalogue_snapshot(catalogue_snapshot_fixture()),
+        core.apply_trusted_catalogue_snapshot_settled(catalogue_snapshot_fixture()),
         Err(Error::CatalogueActivationFailed)
     ));
     assert_eq!(core.active_catalogue_seq(), 0);
@@ -1490,10 +1490,9 @@ fn trusted_catalogue_snapshot_activation_failure_never_exposes_a_prefix_and_reop
     assert_eq!(reopened.catalogue_schemas().len(), 1);
     assert_eq!(reopened.current_write_schema().unwrap().revision, 0);
     reopened
-        .apply_trusted_catalogue_snapshot(catalogue_snapshot_fixture())
+        .apply_trusted_catalogue_snapshot_settled(catalogue_snapshot_fixture())
         .unwrap();
     assert_eq!(reopened.active_catalogue_seq(), 1);
     assert_eq!(reopened.catalogue_schemas().len(), 2);
     assert_eq!(reopened.current_write_schema().unwrap().revision, 1);
 }
-

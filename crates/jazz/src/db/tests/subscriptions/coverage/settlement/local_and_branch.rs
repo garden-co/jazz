@@ -170,7 +170,7 @@ fn client_local_branch_subscription_survives_sparse_first_write_delete_and_resto
     db.node
         .node
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch,
             MergeableCommit::new("todos", row(0x42), 10)
                 .cells(doctest_support::todo_cells("first pending overlay", false)),
@@ -185,7 +185,7 @@ fn client_local_branch_subscription_survives_sparse_first_write_delete_and_resto
     db.node
         .node
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch,
             MergeableCommit::new("todos", row(0x42), 11).deletion(DeletionEvent::Deleted),
         )
@@ -205,7 +205,7 @@ fn client_local_branch_subscription_survives_sparse_first_write_delete_and_resto
     db.node
         .node
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch,
             MergeableCommit::new("todos", row(0x42), 12).deletion(DeletionEvent::Restored),
         )
@@ -339,7 +339,7 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
     let branch_write = server
         .node()
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch,
             MergeableCommit::new("todos", row(0x42), 10).cells(cells(
                 "branch-only",
@@ -502,7 +502,7 @@ fn branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity() {
         let tx = server
             .node()
             .borrow_mut()
-            .commit_mergeable_on_branch(
+            .commit_mergeable_on_branch_settled(
                 branch,
                 MergeableCommit::new("todos", row_id, 10).cells(cells(title, false, client_author)),
             )
@@ -552,7 +552,7 @@ fn branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity() {
         .node
         .node
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_a,
             MergeableCommit::new("todos", row(0x46), 20).cells(cells(
                 "unsent local pending",

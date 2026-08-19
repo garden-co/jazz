@@ -30,7 +30,7 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
         BTreeMap::from([(row(9), title_cells("persisted"))])
     );
     assert_eq!(
-        reopened.transaction_state(first_tx).unwrap(),
+        reopened.transaction_state_settled(first_tx).unwrap(),
         (Fate::Pending, None, DurabilityTier::Local)
     );
     let next_tx = reopened
@@ -146,9 +146,9 @@ fn opening_defers_malformed_current_row_to_read() {
             groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
         storage
             .set(
-                &table,
-                &key,
-                &groove::records::encode_variant_record(variant_tag, &raw[..1]),
+                table.clone(),
+                key,
+                groove::records::encode_variant_record(variant_tag, &raw[..1]),
             )
             .unwrap();
         storage.close().unwrap();
@@ -488,7 +488,7 @@ fn global_sequence_allocates_max_once_then_stays_exhausted() {
         .unwrap();
     node.finalize_local_mergeable_commit_settled(last_tx).unwrap();
     assert_eq!(
-        node.transaction_state(last_tx).unwrap(),
+        node.transaction_state_settled(last_tx).unwrap(),
         (
             Fate::Accepted,
             Some(GlobalSeq(u64::MAX)),
@@ -507,7 +507,7 @@ fn global_sequence_allocates_max_once_then_stays_exhausted() {
         Err(Error::InvalidStoredValue("global sequence exhausted"))
     ));
     assert_eq!(
-        node.transaction_state(after_exhaustion).unwrap(),
+        node.transaction_state_settled(after_exhaustion).unwrap(),
         (Fate::Pending, None, DurabilityTier::Local)
     );
 }
@@ -578,7 +578,7 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let error = match NodeState::new(node(1), schema, storage) {
+    let error = match NodeState::new(node(1), schema, storage).resolve() {
         Ok(_) => panic!("reopen must refuse impossible persisted durability"),
         Err(error) => error,
     };
@@ -941,7 +941,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
 
     let mut reopened = core.reopen_in_place().unwrap();
     assert_eq!(
-        reopened.transaction_state(accepted).unwrap(),
+        reopened.transaction_state_settled(accepted).unwrap(),
         (Fate::Accepted, Some(GlobalSeq(7)), DurabilityTier::Global)
     );
     assert_eq!(

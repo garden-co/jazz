@@ -255,7 +255,7 @@ fn sync_message_dispatches_commit_fate_and_view_updates() {
         panic!("expected one fate update");
     };
     writer.apply_sync_message_settled(fate_update.clone()).unwrap();
-    let (fate, _, _) = writer.transaction_state(tx_id).unwrap();
+    let (fate, _, _) = writer.transaction_state_settled(tx_id).unwrap();
     assert_eq!(fate, Fate::Accepted);
 
     let view_update = core.view_update_for_current_rows("todos").unwrap();

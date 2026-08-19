@@ -413,7 +413,7 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
         .unwrap();
     client.apply_sync_message_settled(fate).unwrap();
     assert_eq!(
-        client.transaction_state(tx_id).unwrap(),
+        client.transaction_state_settled(tx_id).unwrap(),
         (Fate::Accepted, Some(GlobalSeq(1)), DurabilityTier::Global)
     );
 

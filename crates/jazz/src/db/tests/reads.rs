@@ -1951,7 +1951,8 @@ fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
     let unit = core
         .node()
         .borrow_mut()
-        .commit_unit_for(write.mergeable_tx_id());
+        .commit_unit_for(write.mergeable_tx_id())
+        .resolve();
     let SyncMessage::CommitUnit { tx, versions } = unit.unwrap() else {
         panic!("commit unit expected");
     };
