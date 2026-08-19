@@ -1972,6 +1972,7 @@ impl IvmRuntime {
                 failed: false,
             },
         );
+        self.index_subscription_outputs(subscription_id, &outputs);
         Ok(MultisinkSubscription {
             id: subscription_id,
             initial: Mutex::new(Some(initial)),
@@ -2189,6 +2190,7 @@ impl IvmRuntime {
                 failed: false,
             },
         );
+        self.index_subscription_outputs(subscription_id, &outputs);
         let initial = match self
             .hydration_snapshots_for_subscription(&outputs, storage)
             .await
@@ -2325,8 +2327,41 @@ impl IvmRuntime {
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
+    fn index_subscription_outputs(
+        &mut self,
+        subscription_id: SubscriptionId,
+        outputs: &BTreeMap<String, CompiledNode>,
+    ) {
+        for output in outputs.values() {
+            self.subscriptions_by_output_node
+                .entry(output.node)
+                .or_default()
+                .insert(subscription_id);
+        }
+    }
+
+    fn unindex_subscription_outputs(
+        &mut self,
+        subscription_id: SubscriptionId,
+        outputs: &BTreeMap<String, CompiledNode>,
+    ) {
+        for output in outputs.values() {
+            let remove_node = self
+                .subscriptions_by_output_node
+                .get_mut(&output.node)
+                .is_some_and(|subscriptions| {
+                    subscriptions.remove(&subscription_id);
+                    subscriptions.is_empty()
+                });
+            if remove_node {
+                self.subscriptions_by_output_node.remove(&output.node);
+            }
+        }
+    }
+
     pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
+            self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
@@ -2353,6 +2388,7 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
+            self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,

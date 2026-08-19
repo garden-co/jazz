@@ -159,6 +159,7 @@ pub struct IvmRuntime {
     variant_projections: HashMap<VariantProjectionKey, VariantProjection>,
     graph: IvmGraph,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
+    subscriptions_by_output_node: HashMap<NodeId, HashSet<SubscriptionId>>,
     /// Output from a staged durable tick.  `Database::commit_batch` releases
     /// this only after its storage transaction commits, so a failed write can
     /// never leak a speculative subscription delta.
@@ -215,6 +216,7 @@ impl IvmRuntime {
             variant_projections: HashMap::default(),
             graph: IvmGraph::new(),
             multisink_subscriptions: HashMap::default(),
+            subscriptions_by_output_node: HashMap::default(),
             staged_subscription_notifications: Vec::new(),
             defer_subscription_notifications: false,
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),

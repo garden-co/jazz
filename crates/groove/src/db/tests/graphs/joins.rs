@@ -69,6 +69,11 @@ async fn commits_do_not_scale_with_unrelated_resident_graph_size() {
 
     let small = commit_with_unrelated_graphs(1).await;
     let large = commit_with_unrelated_graphs(1_000).await;
+    eprintln!(
+        "unrelated_graph_commit_scaling_receipt small_us={} large_us={}",
+        small.as_micros(),
+        large.as_micros()
+    );
     assert!(
         large <= small.saturating_mul(10) + std::time::Duration::from_micros(100),
         "an unrelated resident graph must not make commits scale with total runtime size: small={small:?}, large={large:?}"
