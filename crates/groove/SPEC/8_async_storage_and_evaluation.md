@@ -49,9 +49,11 @@ borrowing executor-local state such as metrics or a transaction session; the
 cursor is not required to be `'static`. Those borrows belong to the cursor and
 never become borrows held by an IVM node continuation.
 
-`StorageTransaction` retains an owned write overlay. Its reads consult the
-overlay synchronously and then await the underlying storage when necessary.
-Commit submits one owned ordered write batch.
+Atomic `write_many` is the required backend boundary. The existing
+read-your-writes overlay remains available during migration, but whether it is
+ultimately an ordered-storage transaction or a Groove-owned prepared write set
+is intentionally open; see the storage-model open question. The async migration
+must not accidentally make backend transaction lifecycle a new requirement.
 
 ## Evaluation session
 
@@ -159,6 +161,10 @@ delays. The persistent B-tree backend used by storage-fidelity tests is named
 
 - Whether native and browser implementations should expose associated future
   types or one boxed local-future representation.
+- Whether read-your-writes belongs to `OrderedKvStorage`, or to a Groove-owned
+  prepared write set/read view above atomic `write_many`. Public batch reads
+  have genuine users; the IVM's current same-tick usage is not assumed to be
+  the target design.
 - Whether tick persistence precedes publication for every current operation or
   whether Groove needs two explicitly named publication policies. Either way,
   no policy may suspend in the middle of visible IVM mutation.
