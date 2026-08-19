@@ -4,8 +4,8 @@ use crate::schema::{
 };
 use crate::storage::{RecordStore, TestBtreeStorage};
 
-#[test]
-fn terminal_collect_canonicalization_emits_net_remove_before_net_insert() {
+#[futures_test::test]
+async fn terminal_collect_canonicalization_emits_net_remove_before_net_insert() {
     let record = |label: u8| Bytes::from(vec![label]);
     let keyed = |record: Bytes, weight| (vec![1], Vec::new(), record, weight);
 
@@ -45,8 +45,8 @@ fn terminal_collect_canonicalization_emits_net_remove_before_net_insert() {
     );
 }
 
-#[test]
-fn raw_variant_case_registry_refresh_rejects_projection_replacement() {
+#[futures_test::test]
+async fn raw_variant_case_registry_refresh_rejects_projection_replacement() {
     // A live physical registry may append a case, but refreshing its raw
     // source descriptor must not become a back door for changing how an
     // already-installed case maps its fields.
@@ -88,8 +88,8 @@ fn raw_variant_case_registry_refresh_rejects_projection_replacement() {
     );
 }
 
-#[test]
-fn payload_enum_remap_changes_only_the_case_tag() {
+#[futures_test::test]
+async fn payload_enum_remap_changes_only_the_case_tag() {
     let descriptor = RecordDescriptor::new([("value", ValueType::String)]);
     let value = Value::Enum(
         EnumValue::create(2, descriptor, &[Value::String("later".to_owned())]).unwrap(),
@@ -105,8 +105,8 @@ fn payload_enum_remap_changes_only_the_case_tag() {
     );
 }
 
-#[test]
-fn recursive_enum_projection_reencodes_nullable_array_tuple_and_record_occurrences() {
+#[futures_test::test]
+async fn recursive_enum_projection_reencodes_nullable_array_tuple_and_record_occurrences() {
     let physical = ValueType::EnumTag(
         records::ScalarEnumSchema::new("physical", ["draft", "snoozed", "archived"]).unwrap(),
     );
@@ -162,8 +162,8 @@ fn recursive_enum_projection_reencodes_nullable_array_tuple_and_record_occurrenc
     assert_eq!(record.to_values().unwrap(), vec![Value::EnumTag(1)]);
 }
 
-#[test]
-fn recursive_enum_projection_remaps_payload_cases_and_nested_payload_enums() {
+#[futures_test::test]
+async fn recursive_enum_projection_remaps_payload_cases_and_nested_payload_enums() {
     let physical_scalar = ValueType::EnumTag(
         records::ScalarEnumSchema::new("physical", ["draft", "snoozed", "archived"]).unwrap(),
     );
@@ -267,8 +267,8 @@ fn recursive_enum_projection_remaps_payload_cases_and_nested_payload_enums() {
     ));
 }
 
-#[test]
-fn collect_by_terminal_records_preserve_nullable_descriptor_wrappers() {
+#[futures_test::test]
+async fn collect_by_terminal_records_preserve_nullable_descriptor_wrappers() {
     let uuid = uuid::Uuid::from_bytes([7; 16]);
 
     assert_eq!(
@@ -294,8 +294,8 @@ fn collect_by_terminal_records_preserve_nullable_descriptor_wrappers() {
     );
 }
 
-#[test]
-fn root_ordering_rewrites_insert_indices_and_emits_moves_after_payload_edits() {
+#[futures_test::test]
+async fn root_ordering_rewrites_insert_indices_and_emits_moves_after_payload_edits() {
     // Internal coverage is intentional: the public browser matrix proves
     // end-to-end ordering, while this pins the terminal operation protocol
     // ordering that is not otherwise observable through the public API.
@@ -348,8 +348,8 @@ fn root_ordering_rewrites_insert_indices_and_emits_moves_after_payload_edits() {
     );
 }
 
-#[test]
-fn root_ordering_emits_moves_without_payload_terminal_edits() {
+#[futures_test::test]
+async fn root_ordering_emits_moves_without_payload_terminal_edits() {
     // A policy-scope re-entry can reorder visible roots without any
     // payload edit. The subscription output descriptor, rather than a
     // payload operation, supplies the descriptor for the following move.
@@ -441,8 +441,8 @@ fn reach_descriptor() -> RecordDescriptor {
     ])
 }
 
-#[test]
-fn top_by_distinguishes_finite_max_from_unbounded_limit() {
+#[futures_test::test]
+async fn top_by_distinguishes_finite_max_from_unbounded_limit() {
     // Direct helper coverage is intentional: constructing more than
     // u64::MAX derivations through public tables is not feasible, while
     // synthetic weights exercise the semantic boundary without expanding
@@ -535,7 +535,7 @@ fn recursive_reach_from_with_union_step_graph(src: u64) -> GraphBuilder {
     GraphBuilder::recursive(seed, step, "frontier", 16)
 }
 
-fn assert_auto_family_matches_direct_with_prepared_count(
+async fn assert_auto_family_matches_direct_with_prepared_count(
     schema: DatabaseSchema,
     families: &[GraphBuilder],
     table_deltas: Vec<TableDelta>,
@@ -547,20 +547,22 @@ fn assert_auto_family_matches_direct_with_prepared_count(
     let mut direct = IvmRuntime::new(schema).unwrap();
     direct.set_auto_direct_family_enabled(false);
 
-    let familied_subscriptions = families
-        .iter()
-        .cloned()
-        .map(|graph| {
+    let mut familied_subscriptions = Vec::with_capacity(families.len());
+    let mut direct_subscriptions = Vec::with_capacity(families.len());
+    for graph in families.iter().cloned() {
+        familied_subscriptions.push(
             familied
-                .subscribe_one_sink(graph, storage_familied)
-                .unwrap()
-        })
-        .collect::<Vec<_>>();
-    let direct_subscriptions = families
-        .iter()
-        .cloned()
-        .map(|graph| direct.subscribe_one_sink(graph, storage_direct).unwrap())
-        .collect::<Vec<_>>();
+                .subscribe_one_sink(graph.clone(), storage_familied)
+                .await
+                .unwrap(),
+        );
+        direct_subscriptions.push(
+            direct
+                .subscribe_one_sink(graph, storage_direct)
+                .await
+                .unwrap(),
+        );
+    }
 
     assert_eq!(familied.prepared_shapes.len(), expected_prepared_shapes);
     for (familied_subscription, direct_subscription) in familied_subscriptions
@@ -575,9 +577,11 @@ fn assert_auto_family_matches_direct_with_prepared_count(
 
     familied
         .tick(table_deltas.clone(), storage_familied)
+        .await
         .expect("familied tick");
     direct
         .tick(table_deltas, storage_direct)
+        .await
         .expect("direct tick");
     for (familied_subscription, direct_subscription) in familied_subscriptions
         .iter()
@@ -596,7 +600,7 @@ fn assert_auto_family_matches_direct_with_prepared_count(
     }
 }
 
-fn assert_auto_family_matches_direct(
+async fn assert_auto_family_matches_direct(
     schema: DatabaseSchema,
     families: &[GraphBuilder],
     table_deltas: Vec<TableDelta>,
@@ -610,11 +614,12 @@ fn assert_auto_family_matches_direct(
         storage_familied,
         storage_direct,
         1,
-    );
+    )
+    .await;
 }
 
-#[test]
-fn direct_literal_subscriptions_share_auto_family_and_keep_direct_output() {
+#[futures_test::test]
+async fn direct_literal_subscriptions_share_auto_family_and_keep_direct_output() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = crate::storage::MemoryStorage::new(&["albums"]);
@@ -625,6 +630,7 @@ fn direct_literal_subscriptions_share_auto_family_and_keep_direct_output() {
                 .project(["title"]),
             &storage,
         )
+        .await
         .unwrap();
     let second = runtime
         .subscribe_one_sink(
@@ -633,6 +639,7 @@ fn direct_literal_subscriptions_share_auto_family_and_keep_direct_output() {
                 .project(["title"]),
             &storage,
         )
+        .await
         .unwrap();
 
     assert!(first.recv().unwrap().is_empty());
@@ -675,6 +682,7 @@ fn direct_literal_subscriptions_share_auto_family_and_keep_direct_output() {
             }],
             &storage,
         )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -687,18 +695,19 @@ fn direct_literal_subscriptions_share_auto_family_and_keep_direct_output() {
     );
 }
 
-#[test]
-fn hydration_memo_survives_empty_ticks_without_replaying_deltas() {
+#[futures_test::test]
+async fn hydration_memo_survives_empty_ticks_without_replaying_deltas() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = crate::storage::MemoryStorage::new(&["albums"]);
     let subscription = runtime
         .subscribe_one_sink(GraphBuilder::table("albums"), &storage)
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
     assert!(runtime.eval_memo.keys().any(|key| key.tick_epoch.is_none()));
 
-    runtime.tick(Vec::new(), &storage).unwrap();
+    runtime.tick(Vec::new(), &storage).await.unwrap();
     assert!(subscription.try_recv().is_err());
     assert!(runtime.eval_memo.keys().any(|key| key.tick_epoch.is_none()));
 
@@ -719,14 +728,15 @@ fn hydration_memo_survives_empty_ticks_without_replaying_deltas() {
             }],
             &storage,
         )
+        .await
         .unwrap();
     assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
 
-    runtime.tick(Vec::new(), &storage).unwrap();
+    runtime.tick(Vec::new(), &storage).await.unwrap();
     assert!(subscription.try_recv().is_err());
 }
 
-fn write_two_album_rows(storage: &impl OrderedKvStorage, albums: &RecordDescriptor) {
+async fn write_two_album_rows(storage: &impl OrderedKvStorage, albums: &RecordDescriptor) {
     let store = RecordStore::new(storage, "albums", albums);
     let first = albums
         .create(&[Value::U64(1), Value::String("one".to_owned())])
@@ -737,7 +747,8 @@ fn write_two_album_rows(storage: &impl OrderedKvStorage, albums: &RecordDescript
     let first = crate::records::encode_variant_record(0, &first);
     let second = crate::records::encode_variant_record(0, &second);
     store
-        .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])
+        .write_many(vec![store.set(b"1", &first), store.set(b"2", &second)])
+        .await
         .unwrap();
 }
 
@@ -754,18 +765,19 @@ fn album_count_graph() -> GraphBuilder {
     )
 }
 
-#[test]
-fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
+#[futures_test::test]
+async fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let albums = schema.table("albums").unwrap().record_schema();
-    write_two_album_rows(&storage, &albums);
+    write_two_album_rows(&storage, &albums).await;
 
     let first = runtime
         .subscribe_one_sink(album_count_graph(), &storage)
+        .await
         .unwrap();
     let first_snapshot = first.recv().unwrap();
     assert_eq!(
@@ -778,12 +790,14 @@ fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     let mut fresh_runtime = IvmRuntime::new(schema).unwrap();
     let fresh = fresh_runtime
         .subscribe_one_sink(album_count_graph(), &storage)
+        .await
         .unwrap()
         .recv()
         .unwrap();
 
     let second = runtime
         .subscribe_one_sink(album_count_graph(), &storage)
+        .await
         .unwrap();
     let reused = second.recv().unwrap();
     let after_second = runtime.stats();
@@ -799,18 +813,19 @@ fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     );
 }
 
-#[test]
-fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_seed() {
+#[futures_test::test]
+async fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_seed() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let albums = schema.table("albums").unwrap().record_schema();
-    write_two_album_rows(&storage, &albums);
+    write_two_album_rows(&storage, &albums).await;
 
     let one_shot = runtime
         .query_snapshot(album_count_graph(), &storage)
+        .await
         .unwrap();
     assert_eq!(
         one_shot.to_values().unwrap(),
@@ -821,6 +836,7 @@ fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_seed()
 
     let subscription = runtime
         .subscribe_one_sink(album_count_graph(), &storage)
+        .await
         .unwrap();
     let snapshot = subscription.recv().unwrap();
     let after_subscribe = runtime.stats();
@@ -833,16 +849,17 @@ fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_seed()
     assert_eq!(after_subscribe.arrangement_count, 1);
 }
 
-#[test]
-fn pending_subscription_drains_match_unbounded_when_eval_memo_is_evicted_before_drain() {
+#[futures_test::test]
+async fn pending_subscription_drains_match_unbounded_when_eval_memo_is_evicted_before_drain() {
     let schema = albums_schema();
     let albums = schema.table("albums").unwrap().record_schema();
 
-    let run = |evict_before_drain: bool| {
+    let run = async |evict_before_drain: bool| {
         let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
         let storage = crate::storage::MemoryStorage::new(&["albums"]);
         let subscription = runtime
             .subscribe_one_sink(GraphBuilder::table("albums"), &storage)
+            .await
             .unwrap();
         assert!(subscription.recv().unwrap().is_empty());
 
@@ -862,6 +879,7 @@ fn pending_subscription_drains_match_unbounded_when_eval_memo_is_evicted_before_
                 }],
                 &storage,
             )
+            .await
             .unwrap();
 
         if evict_before_drain {
@@ -885,11 +903,11 @@ fn pending_subscription_drains_match_unbounded_when_eval_memo_is_evicted_before_
         delivered
     };
 
-    assert_eq!(run(true), run(false));
+    assert_eq!(run(true).await, run(false).await);
 }
 
-#[test]
-fn memo_context_digest_distinguishes_frontier_binding_values() {
+#[futures_test::test]
+async fn memo_context_digest_distinguishes_frontier_binding_values() {
     let descriptor = reach_descriptor();
     let left = RecordDeltas {
         descriptor,
@@ -916,8 +934,8 @@ fn memo_context_digest_distinguishes_frontier_binding_values() {
     assert_eq!(record_deltas_digest(&left), record_deltas_digest(&left));
 }
 
-#[test]
-fn project_emits_copied_literal_and_null_columns() {
+#[futures_test::test]
+async fn project_emits_copied_literal_and_null_columns() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = crate::storage::MemoryStorage::new(&["albums"]);
@@ -936,6 +954,7 @@ fn project_emits_copied_literal_and_null_columns() {
             ]),
             &storage,
         )
+        .await
         .unwrap();
 
     assert!(subscription.recv().unwrap().is_empty());
@@ -978,6 +997,7 @@ fn project_emits_copied_literal_and_null_columns() {
             }],
             &storage,
         )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -1003,8 +1023,8 @@ fn project_emits_copied_literal_and_null_columns() {
     );
 }
 
-#[test]
-fn project_typed_literal_preserves_nested_nullable_null_type() {
+#[futures_test::test]
+async fn project_typed_literal_preserves_nested_nullable_null_type() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = crate::storage::MemoryStorage::new(&["albums"]);
@@ -1020,6 +1040,7 @@ fn project_typed_literal_preserves_nested_nullable_null_type() {
             ]),
             &storage,
         )
+        .await
         .unwrap();
 
     assert!(subscription.recv().unwrap().is_empty());
@@ -1040,6 +1061,7 @@ fn project_typed_literal_preserves_nested_nullable_null_type() {
             }],
             &storage,
         )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -1054,8 +1076,8 @@ fn project_typed_literal_preserves_nested_nullable_null_type() {
     );
 }
 
-#[test]
-fn cold_project_hydration_materializes_literal_and_typed_null_columns() {
+#[futures_test::test]
+async fn cold_project_hydration_materializes_literal_and_typed_null_columns() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = crate::storage::MemoryStorage::new(&["albums"]);
@@ -1071,7 +1093,8 @@ fn cold_project_hydration_materializes_literal_and_typed_null_columns() {
     let second = crate::records::encode_variant_record(0, &second);
 
     store
-        .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])
+        .write_many(vec![store.set(b"1", &first), store.set(b"2", &second)])
+        .await
         .unwrap();
 
     let subscription = runtime
@@ -1086,6 +1109,7 @@ fn cold_project_hydration_materializes_literal_and_typed_null_columns() {
             ]),
             &storage,
         )
+        .await
         .unwrap();
 
     let mut initial = subscription.recv().unwrap().to_values().unwrap();
@@ -1118,8 +1142,8 @@ fn cold_project_hydration_materializes_literal_and_typed_null_columns() {
     );
 }
 
-#[test]
-fn pure_copy_project_lowers_with_full_fast_mapping() {
+#[futures_test::test]
+async fn pure_copy_project_lowers_with_full_fast_mapping() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let storage = crate::storage::MemoryStorage::new(&["albums"]);
@@ -1128,6 +1152,7 @@ fn pure_copy_project_lowers_with_full_fast_mapping() {
             GraphBuilder::table("albums").project(["id", "title"]),
             &storage,
         )
+        .await
         .unwrap();
 
     assert!(subscription.recv().unwrap().is_empty());
@@ -1144,8 +1169,8 @@ fn pure_copy_project_lowers_with_full_fast_mapping() {
     }));
 }
 
-#[test]
-fn auto_family_hidden_field_does_not_collide_with_user_column() {
+#[futures_test::test]
+async fn auto_family_hidden_field_does_not_collide_with_user_column() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "records",
         [
@@ -1163,6 +1188,7 @@ fn auto_family_hidden_field_does_not_collide_with_user_column() {
                 .project(["__auto_binding_0"]),
             &storage,
         )
+        .await
         .unwrap();
     let second = runtime
         .subscribe_one_sink(
@@ -1171,6 +1197,7 @@ fn auto_family_hidden_field_does_not_collide_with_user_column() {
                 .project(["__auto_binding_0"]),
             &storage,
         )
+        .await
         .unwrap();
     assert!(first.recv().unwrap().is_empty());
     assert!(second.recv().unwrap().is_empty());
@@ -1202,6 +1229,7 @@ fn auto_family_hidden_field_does_not_collide_with_user_column() {
             }],
             &storage,
         )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -1214,8 +1242,8 @@ fn auto_family_hidden_field_does_not_collide_with_user_column() {
     );
 }
 
-#[test]
-fn auto_family_multi_join_is_byte_identical_to_direct_path() {
+#[futures_test::test]
+async fn auto_family_multi_join_is_byte_identical_to_direct_path() {
     let schema = DatabaseSchema::new([
         TableSchema::new(
             "albums",
@@ -1328,11 +1356,12 @@ fn auto_family_multi_join_is_byte_identical_to_direct_path() {
         deltas,
         &familied_storage,
         &direct_storage,
-    );
+    )
+    .await;
 }
 
-#[test]
-fn auto_family_recursive_shape_falls_back_to_byte_identical_direct_path() {
+#[futures_test::test]
+async fn auto_family_recursive_shape_falls_back_to_byte_identical_direct_path() {
     let schema = edges_schema();
     let edges = schema.table("edges").unwrap().record_schema();
     let deltas = vec![TableDelta {
@@ -1372,11 +1401,12 @@ fn auto_family_recursive_shape_falls_back_to_byte_identical_direct_path() {
         &familied_storage,
         &direct_storage,
         0,
-    );
+    )
+    .await;
 }
 
-#[test]
-fn auto_family_arg_max_by_shape_is_byte_identical_to_direct_path() {
+#[futures_test::test]
+async fn auto_family_arg_max_by_shape_is_byte_identical_to_direct_path() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "scores",
         [
@@ -1432,19 +1462,22 @@ fn auto_family_arg_max_by_shape_is_byte_identical_to_direct_path() {
         deltas,
         &familied_storage,
         &direct_storage,
-    );
+    )
+    .await;
 }
 
-#[test]
-fn auto_family_excluded_recursive_shape_falls_back_to_direct_path() {
+#[futures_test::test]
+async fn auto_family_excluded_recursive_shape_falls_back_to_direct_path() {
     let schema = edges_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let storage = crate::storage::MemoryStorage::new(&["edges"]);
     let first = runtime
         .subscribe_one_sink(recursive_reach_from_with_union_step_graph(1), &storage)
+        .await
         .unwrap();
     let second = runtime
         .subscribe_one_sink(recursive_reach_from_with_union_step_graph(9), &storage)
+        .await
         .unwrap();
 
     assert!(first.recv().unwrap().is_empty());
@@ -1468,8 +1501,8 @@ fn auto_family_excluded_recursive_shape_falls_back_to_direct_path() {
     ));
 }
 
-#[test]
-fn subscription_retainers_keep_output_ancestors_alive() {
+#[futures_test::test]
+async fn subscription_retainers_keep_output_ancestors_alive() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1482,6 +1515,7 @@ fn subscription_retainers_keep_output_ancestors_alive() {
                 .project(["title"]),
             &storage,
         )
+        .await
         .unwrap();
     let output = runtime.subscription_output_node(subscription.id()).unwrap();
     let retained = runtime.retained_node_ids();
@@ -1491,8 +1525,8 @@ fn subscription_retainers_keep_output_ancestors_alive() {
     assert!(runtime.graph().node(output).is_some());
 }
 
-#[test]
-fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
+#[futures_test::test]
+async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1500,6 +1534,7 @@ fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let subscription = runtime
         .subscribe_one_sink(GraphBuilder::table("albums"), &storage)
+        .await
         .unwrap();
     let output = runtime.subscription_output_node(subscription.id()).unwrap();
 
@@ -1518,8 +1553,8 @@ fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     assert!(!runtime.node_meta.contains_key(&output));
 }
 
-#[test]
-fn identical_subscriptions_share_one_node_with_multiple_retainers() {
+#[futures_test::test]
+async fn identical_subscriptions_share_one_node_with_multiple_retainers() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1531,8 +1566,8 @@ fn identical_subscriptions_share_one_node_with_multiple_retainers() {
             .project(["title"])
     };
 
-    let first = runtime.subscribe_one_sink(graph(), &storage).unwrap();
-    let second = runtime.subscribe_one_sink(graph(), &storage).unwrap();
+    let first = runtime.subscribe_one_sink(graph(), &storage).await.unwrap();
+    let second = runtime.subscribe_one_sink(graph(), &storage).await.unwrap();
     let output = runtime.subscription_output_node(first.id()).unwrap();
 
     assert_eq!(Some(output), runtime.subscription_output_node(second.id()));
@@ -1559,8 +1594,8 @@ fn identical_subscriptions_share_one_node_with_multiple_retainers() {
     assert!(!runtime.node_meta.contains_key(&output));
 }
 
-#[test]
-fn durable_schema_nodes_are_runtime_retainer_roots() {
+#[futures_test::test]
+async fn durable_schema_nodes_are_runtime_retainer_roots() {
     let schema = indexed_albums_schema();
     let runtime = IvmRuntime::new(schema).unwrap();
     let retained = runtime.retained_node_ids();
@@ -1579,8 +1614,8 @@ fn durable_schema_nodes_are_runtime_retainer_roots() {
     assert_eq!(retained.len(), 3);
 }
 
-#[test]
-fn unsupported_query_operator_variants_are_not_executable() {
+#[futures_test::test]
+async fn unsupported_query_operator_variants_are_not_executable() {
     let schema = albums_schema();
     let storage = crate::storage::MemoryStorage::new(&["albums"]);
     let mut runtime = IvmRuntime::new(schema).unwrap();
@@ -1598,14 +1633,16 @@ fn unsupported_query_operator_variants_are_not_executable() {
             NodeDurability::Ephemeral,
         );
         assert!(matches!(
-            runtime.hydration_snapshot(node, &storage, HydrationMode::Ordinary),
+            runtime
+                .hydration_snapshot(node, &storage, HydrationMode::Ordinary)
+                .await,
             Err(IvmRuntimeError::UnsupportedOperator)
         ));
     }
 }
 
-#[test]
-fn stale_as_of_state_rejects_wrong_or_backward_logical_time() {
+#[futures_test::test]
+async fn stale_as_of_state_rejects_wrong_or_backward_logical_time() {
     let mut state = AsOf::<usize, SubTick>::new(7);
 
     assert!(matches!(
@@ -1646,8 +1683,8 @@ fn stale_as_of_state_rejects_wrong_or_backward_logical_time() {
     ));
 }
 
-#[test]
-fn similar_join_subscriptions_share_context_independent_base_arrangements() {
+#[futures_test::test]
+async fn similar_join_subscriptions_share_context_independent_base_arrangements() {
     let schema = albums_artists_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1666,6 +1703,7 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
             ),
             &storage,
         )
+        .await
         .unwrap();
     let _second = runtime
         .subscribe_one_sink(
@@ -1677,6 +1715,7 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
             ),
             &storage,
         )
+        .await
         .unwrap();
 
     let albums = schema.table("albums").unwrap().record_schema();
@@ -1715,6 +1754,7 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
             ],
             &storage,
         )
+        .await
         .unwrap();
 
     let artist_arrangements = runtime
@@ -1736,8 +1776,8 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
     assert!(stats.dedupe_ratio() < 1.0);
 }
 
-#[test]
-fn recursive_recompute_reuses_graph_nodes_without_persisting_contextual_child_state() {
+#[futures_test::test]
+async fn recursive_recompute_reuses_graph_nodes_without_persisting_contextual_child_state() {
     let schema = edges_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1745,9 +1785,11 @@ fn recursive_recompute_reuses_graph_nodes_without_persisting_contextual_child_st
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let first = runtime
         .subscribe_one_sink(recursive_reach_graph(), &storage)
+        .await
         .unwrap();
     let second = runtime
         .subscribe_one_sink(recursive_reach_graph(), &storage)
+        .await
         .unwrap();
 
     assert_eq!(
@@ -1777,7 +1819,7 @@ fn recursive_recompute_reuses_graph_nodes_without_persisting_contextual_child_st
             },
         ],
     };
-    runtime.tick(vec![table_delta], &storage).unwrap();
+    runtime.tick(vec![table_delta], &storage).await.unwrap();
 
     assert!(
         runtime
@@ -1788,8 +1830,8 @@ fn recursive_recompute_reuses_graph_nodes_without_persisting_contextual_child_st
     );
 }
 
-#[test]
-fn key_encoding_preserves_value_order_for_index_range_scans() {
+#[futures_test::test]
+async fn key_encoding_preserves_value_order_for_index_range_scans() {
     let mut encoded = [
         Value::U64(1),
         Value::U64(256),
@@ -1843,8 +1885,8 @@ fn key_encoding_preserves_value_order_for_index_range_scans() {
     ));
 }
 
-#[test]
-fn record_values_canonicalize_delta_identity_and_are_rejected_as_arrangement_keys() {
+#[futures_test::test]
+async fn record_values_canonicalize_delta_identity_and_are_rejected_as_arrangement_keys() {
     // This is deliberately a runtime-level test: consolidation identifies
     // records by their encoded bytes, so the relevant observable is the
     // delta batch produced by the maintained runtime rather than a record
