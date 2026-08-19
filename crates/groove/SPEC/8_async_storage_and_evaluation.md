@@ -57,6 +57,21 @@ must not accidentally make backend transaction lifecycle a new requirement.
 
 ## Evaluation session
 
+### Migration bridge versus target
+
+The minimal bridge may drive hydration with a boxed executor-local future, but
+it MUST evaluate against private staged operator, arrangement, memo, and node
+metadata. Those staged values are installed only after the complete hydration
+succeeds. Cancellation or a storage error therefore discards all partial IVM
+work. This is a worthwhile intermediate safety property, not the target
+scheduler: it neither discovers independent blocked branches eagerly nor
+shares in-flight requests.
+
+The target remains the explicit owned session below. In particular, a boxed
+recursive future MUST NOT become the durable representation of blocked work or
+be credited with request coalescing, bounded stepping, or in-flight node
+sharing that it does not provide.
+
 An evaluation is owned state advanced by the runtime:
 
 ```rust,ignore
