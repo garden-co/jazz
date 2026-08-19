@@ -892,7 +892,8 @@ where
             for bundle in
                 version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
             {
-                self.prepare_branch_target_partitions_if_ready(&bundle.tx, bundle.versions)?;
+                self.prepare_branch_target_partitions_if_ready(&bundle.tx, bundle.versions)
+                    .await?;
             }
         }
         Ok(())

@@ -1031,7 +1031,7 @@ where
     /// Prepare physical branch storage only after bounded structural checks and
     /// catalogue dependencies are known to be satisfiable. Missing catalogue
     /// schemas are left for the ordinary parking path.
-    pub(super) fn prepare_branch_target_partitions_if_ready(
+    pub(super) async fn prepare_branch_target_partitions_if_ready(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
@@ -1053,6 +1053,6 @@ where
         {
             return Ok(());
         }
-        self.ensure_branch_target_partitions(branch_id, versions)
+        self.ensure_branch_target_partitions(branch_id, versions).await
     }
 }

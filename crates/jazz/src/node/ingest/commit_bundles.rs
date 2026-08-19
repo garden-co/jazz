@@ -50,7 +50,8 @@ where
                 .await
                 .map(PublicationOutcome::settled);
         }
-        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
+        self.prepare_branch_target_partitions_if_ready(&tx, &versions)
+            .await?;
         let mut updates = self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context).await?;
         updates.extend(self.drain_parked_commit_units().await?);
         Ok(updates)
@@ -83,7 +84,8 @@ where
         if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
         {
-            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
+            self.prepare_branch_target_partitions_if_ready(&tx, &versions)
+                .await?;
         }
         let mut updates =
             self.ingest_edge_authority_mergeable_commit_unit_once(tx, versions, now_ms, None).await?;
@@ -116,7 +118,8 @@ where
         if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
         {
-            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
+            self.prepare_branch_target_partitions_if_ready(&tx, &versions)
+                .await?;
         }
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
@@ -176,7 +179,9 @@ where
             },
             &records,
             None,
-        )? {
+        )
+        .await?
+        {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
@@ -442,7 +447,8 @@ where
         if self.malformed_authored_version_reason(&versions).is_some() {
             return Err(Error::UnsupportedCommitUnit("malformed relay commit unit"));
         }
-        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
+        self.prepare_branch_target_partitions_if_ready(&tx, &versions)
+            .await?;
         self.ingest_relay_commit_unit_once(tx, versions).await?;
         self.drain_parked_relay_commit_units().await?;
         Ok(())
@@ -653,7 +659,10 @@ where
                 durability: None,
             }]));
         }
-        if !self.commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)? {
+        if !self
+            .commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)
+            .await?
+        {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -850,7 +859,10 @@ where
                 durability: None,
             }]));
         }
-        if !self.commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)? {
+        if !self
+            .commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)
+            .await?
+        {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -967,6 +979,7 @@ where
             global_seq,
             staged_global_seqs,
         )
+        .await
     }
 
     pub(super) async fn ingest_reset_view_bundle_refs_in_bulk(
