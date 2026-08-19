@@ -401,110 +401,192 @@ impl<'a, S> MeteredStorage<'a, S> {
     }
 }
 
+struct MeteredStorageCursor<'a> {
+    inner: crate::storage::StorageScan<'a>,
+    column_family: String,
+    metrics: &'a RefCell<StorageReadMetrics>,
+}
+
+impl crate::storage::StorageCursor for MeteredStorageCursor<'_> {
+    fn next_batch(
+        &mut self,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<Vec<crate::storage::KeyValue>>, crate::storage::Error>,
+    > {
+        Box::pin(async move {
+            let batch = self.inner.next_batch().await?;
+            if let Some(batch) = &batch {
+                let mut metrics = self.metrics.borrow_mut();
+                for (key, _) in batch {
+                    metrics.record_range_row(&self.column_family, key);
+                }
+            }
+            Ok(batch)
+        })
+    }
+}
+
 impl<S> OrderedKvStorage for MeteredStorage<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn close(&self) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
+        self.storage.close()
+    }
+
+    fn set_write_flush_cadence(
+        &self,
+        every: usize,
+    ) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
+        self.storage.set_write_flush_cadence(every)
+    }
+
+    fn flush_write_boundary(
+        &self,
+    ) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
+        self.storage.flush_write_boundary()
+    }
+
+    fn approximate_class_bytes(
+        &self,
+        cf: String,
+    ) -> crate::storage::StorageFuture<'_, Result<Option<u64>, crate::storage::Error>> {
+        self.storage.approximate_class_bytes(cf)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.storage.column_family_names()
+    }
+
     fn get(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        key: &crate::storage::Key,
-    ) -> Result<Option<crate::storage::Value>, crate::storage::Error> {
-        self.metrics.borrow_mut().record_point(cf, key);
+        cf: String,
+        key: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<crate::storage::Value>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_point(&cf, &key);
         self.storage.get(cf, key)
     }
 
     fn set(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        key: &crate::storage::Key,
-        value: &[u8],
-    ) -> Result<(), crate::storage::Error> {
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
         self.storage.set(cf, key, value)
     }
 
     fn delete(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        key: &crate::storage::Key,
-    ) -> Result<(), crate::storage::Error> {
+        cf: String,
+        key: Vec<u8>,
+    ) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
         self.storage.delete(cf, key)
     }
 
     fn scan_range(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        start: &crate::storage::Key,
-        end: &crate::storage::Key,
-        visit: &mut crate::storage::ScanVisitor<'_>,
-    ) -> Result<(), crate::storage::Error> {
-        self.metrics.borrow_mut().record_range(cf, start);
-        self.storage.scan_range(cf, start, end, &mut |key, value| {
-            self.metrics.borrow_mut().record_range_row(cf, key);
-            visit(key, value)
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_range(&cf, &start);
+        Box::pin(async move {
+            Ok(Box::new(MeteredStorageCursor {
+                inner: self.storage.scan_range(cf.clone(), start, end).await?,
+                column_family: cf,
+                metrics: self.metrics,
+            }) as crate::storage::StorageScan<'_>)
         })
     }
 
     fn scan_prefix(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &crate::storage::Key,
-        visit: &mut crate::storage::ScanVisitor<'_>,
-    ) -> Result<(), crate::storage::Error> {
-        self.metrics.borrow_mut().record_range(cf, prefix);
-        self.storage.scan_prefix(cf, prefix, &mut |key, value| {
-            self.metrics.borrow_mut().record_range_row(cf, key);
-            visit(key, value)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_range(&cf, &prefix);
+        Box::pin(async move {
+            Ok(Box::new(MeteredStorageCursor {
+                inner: self.storage.scan_prefix(cf.clone(), prefix).await?,
+                column_family: cf,
+                metrics: self.metrics,
+            }) as crate::storage::StorageScan<'_>)
         })
     }
 
     fn scan_prefix_reverse(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &crate::storage::Key,
-        visit: &mut crate::storage::ScanVisitor<'_>,
-    ) -> Result<(), crate::storage::Error> {
-        self.metrics.borrow_mut().record_range(cf, prefix);
-        self.storage
-            .scan_prefix_reverse(cf, prefix, &mut |key, value| {
-                self.metrics.borrow_mut().record_range_row(cf, key);
-                visit(key, value)
-            })
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_range(&cf, &prefix);
+        Box::pin(async move {
+            Ok(Box::new(MeteredStorageCursor {
+                inner: self.storage.scan_prefix_reverse(cf.clone(), prefix).await?,
+                column_family: cf,
+                metrics: self.metrics,
+            }) as crate::storage::StorageScan<'_>)
+        })
     }
 
     fn last_with_prefix(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &crate::storage::Key,
-    ) -> Result<Option<crate::storage::KeyValue>, crate::storage::Error> {
-        self.metrics.borrow_mut().record_range(cf, prefix);
-        let value = self.storage.last_with_prefix(cf, prefix)?;
-        if let Some((key, _)) = &value {
-            self.metrics.borrow_mut().record_range_row(cf, key);
-        }
-        Ok(value)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<crate::storage::KeyValue>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_range(&cf, &prefix);
+        Box::pin(async move {
+            let value = self.storage.last_with_prefix(cf.clone(), prefix).await?;
+            if let Some((key, _)) = &value {
+                self.metrics.borrow_mut().record_range_row(&cf, key);
+            }
+            Ok(value)
+        })
     }
 
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &crate::storage::Key,
-        upper: &crate::storage::Key,
-    ) -> Result<Option<crate::storage::KeyValue>, crate::storage::Error> {
-        self.metrics.borrow_mut().record_range(cf, prefix);
-        let value = self
-            .storage
-            .last_with_prefix_before_or_at(cf, prefix, upper)?;
-        if let Some((key, _)) = &value {
-            self.metrics.borrow_mut().record_range_row(cf, key);
-        }
-        Ok(value)
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<crate::storage::KeyValue>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_range(&cf, &prefix);
+        Box::pin(async move {
+            let value = self
+                .storage
+                .last_with_prefix_before_or_at(cf.clone(), prefix, upper)
+                .await?;
+            if let Some((key, _)) = &value {
+                self.metrics.borrow_mut().record_range_row(&cf, key);
+            }
+            Ok(value)
+        })
     }
 
     fn write_many(
         &self,
-        operations: &[crate::storage::WriteOperation<'_>],
-    ) -> Result<(), crate::storage::Error> {
+        operations: Vec<crate::storage::OwnedWriteOperation>,
+    ) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
         self.storage.write_many(operations)
     }
 }

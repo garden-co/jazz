@@ -201,7 +201,7 @@ where
         cf: String,
         start: Vec<u8>,
         end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
             let start = self.encoded_key(&cf, &start)?;
             let end = self.encoded_key(&cf, &end)?;
@@ -215,7 +215,7 @@ where
                     Ok((user_key.to_vec(), value))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan)
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
         })
     }
 
@@ -223,7 +223,7 @@ where
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
             let start = self.encoded_key(&cf, &prefix)?;
             let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
@@ -237,7 +237,7 @@ where
                     Ok((user_key.to_vec(), value))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan)
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
         })
     }
 
@@ -245,7 +245,7 @@ where
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
             let start = self.encoded_key(&cf, &prefix)?;
             let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
@@ -259,7 +259,7 @@ where
                     Ok((user_key.to_vec(), value))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan)
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
         })
     }
 

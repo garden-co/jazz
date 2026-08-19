@@ -139,12 +139,12 @@ impl TestStorage {
     }
 }
 
-struct TestStorageCursor {
-    inner: StorageScan,
+struct TestStorageCursor<'a> {
+    inner: StorageScan<'a>,
     control: TestStorageControl,
 }
 
-impl StorageCursor for TestStorageCursor {
+impl StorageCursor for TestStorageCursor<'_> {
     fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
         Box::pin(async move {
             self.control.before(TestStorageOperation::ScanBatch).await;
@@ -219,14 +219,14 @@ impl OrderedKvStorage for TestStorage {
         cf: String,
         start: Vec<u8>,
         end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
             self.control.before(TestStorageOperation::ScanOpen).await;
             let inner = self.inner.scan_range(cf, start, end).await?;
             Ok(Box::new(TestStorageCursor {
                 inner,
                 control: self.control.clone(),
-            }) as StorageScan)
+            }) as StorageScan<'_>)
         })
     }
 
@@ -234,14 +234,14 @@ impl OrderedKvStorage for TestStorage {
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
             self.control.before(TestStorageOperation::ScanOpen).await;
             let inner = self.inner.scan_prefix(cf, prefix).await?;
             Ok(Box::new(TestStorageCursor {
                 inner,
                 control: self.control.clone(),
-            }) as StorageScan)
+            }) as StorageScan<'_>)
         })
     }
 
@@ -249,14 +249,14 @@ impl OrderedKvStorage for TestStorage {
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
             self.control.before(TestStorageOperation::ScanOpen).await;
             let inner = self.inner.scan_prefix_reverse(cf, prefix).await?;
             Ok(Box::new(TestStorageCursor {
                 inner,
                 control: self.control.clone(),
-            }) as StorageScan)
+            }) as StorageScan<'_>)
         })
     }
 

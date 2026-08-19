@@ -44,6 +44,11 @@ browser executors, so the interface must not require `Send` merely for
 convenience. Type erasure must preserve the same semantic interface; it must
 not select an alternate implementation path.
 
+Cursor lifetimes are explicit. A storage adapter may wrap a cursor while
+borrowing executor-local state such as metrics or a transaction session; the
+cursor is not required to be `'static`. Those borrows belong to the cursor and
+never become borrows held by an IVM node continuation.
+
 `StorageTransaction` retains an owned write overlay. Its reads consult the
 overlay synchronously and then await the underlying storage when necessary.
 Commit submits one owned ordered write batch.
