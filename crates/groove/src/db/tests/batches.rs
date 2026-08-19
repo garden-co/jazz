@@ -2,12 +2,12 @@
 
 use super::*;
 
-#[test]
-fn commits_insert_update_and_delete_batches() {
+#[futures_test::test]
+async fn commits_insert_update_and_delete_batches() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     assert!(batch.is_empty());
@@ -15,12 +15,13 @@ fn commits_insert_update_and_delete_batches() {
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         database
             .storage
-            .get("albums", &PrimaryKeyValue::U64(7).into_bytes())
+            .get("albums".to_owned(), PrimaryKeyValue::U64(7).into_bytes())
+            .await
             .unwrap(),
         Some(crate::records::encode_variant_record(
             0,
@@ -40,10 +41,11 @@ fn commits_insert_update_and_delete_batches() {
         "albums",
         vec![Value::U64(7), Value::String("Giant Steps".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let stored = database
         .storage
-        .get("albums", &PrimaryKeyValue::U64(7).into_bytes())
+        .get("albums".to_owned(), PrimaryKeyValue::U64(7).into_bytes())
+        .await
         .unwrap()
         .unwrap();
     let descriptor = database
@@ -60,19 +62,22 @@ fn commits_insert_update_and_delete_batches() {
 
     let mut batch = database.open_batch();
     batch.delete("albums", PrimaryKeyValue::U64(7));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         database
             .storage
-            .get("albums", &PrimaryKeyValue::U64(7).into_bytes())
+            .get("albums".to_owned(), PrimaryKeyValue::U64(7).into_bytes())
+            .await
             .unwrap(),
         None
     );
 }
 
-#[test]
-fn staged_batch_reads_observe_uncommitted_writes() {
-    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+#[futures_test::test]
+async fn staged_batch_reads_observe_uncommitted_writes() {
+    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap();
 
     let mut staged = database.open_staged_batch();
     staged.insert(
@@ -82,6 +87,7 @@ fn staged_batch_reads_observe_uncommitted_writes() {
     assert_eq!(
         staged
             .primary_key_scan("albums", &[Value::U64(7)])
+            .await
             .unwrap()
             .into_iter()
             .map(|record| record.get("title").unwrap())
@@ -95,6 +101,7 @@ fn staged_batch_reads_observe_uncommitted_writes() {
     assert_eq!(
         staged
             .primary_key_scan("albums", &[Value::U64(7)])
+            .await
             .unwrap()
             .into_iter()
             .map(|record| record.get("title").unwrap())
@@ -105,14 +112,16 @@ fn staged_batch_reads_observe_uncommitted_writes() {
     assert!(
         staged
             .primary_key_scan("albums", &[Value::U64(7)])
+            .await
             .unwrap()
             .is_empty()
     );
-    staged.commit().unwrap();
+    staged.commit().await.unwrap();
 
     assert!(
         database
             .primary_key_scan("albums", &[Value::U64(7)])
+            .await
             .unwrap()
             .is_empty()
     );
@@ -126,7 +135,7 @@ fn staged_batch_reads_observe_uncommitted_writes() {
     );
 }
 
-fn vec_derived_primary_key_scan_raw(
+async fn vec_derived_primary_key_scan_raw(
     database: &Database<MemoryStorage>,
     batch: &DatabaseBatch,
     table: &str,
@@ -138,6 +147,7 @@ fn vec_derived_primary_key_scan_raw(
     }
     let mut rows = database
         .primary_key_scan_raw(table, prefix)
+        .await
         .unwrap()
         .into_iter()
         .map(EncodedKeyValue::into_parts)
@@ -161,9 +171,11 @@ fn vec_derived_primary_key_scan_raw(
     rows.into_iter().collect()
 }
 
-#[test]
-fn staged_batch_storage_txn_handles_large_accumulated_batches() {
-    let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+#[futures_test::test]
+async fn staged_batch_storage_txn_handles_large_accumulated_batches() {
+    let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap();
     let mut batch = database.open_batch();
     for id in 0..10_000 {
         batch.insert(
@@ -174,6 +186,7 @@ fn staged_batch_storage_txn_handles_large_accumulated_batches() {
 
     let rows = database
         .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(9_999)])
+        .await
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -186,11 +199,12 @@ fn staged_batch_storage_txn_handles_large_accumulated_batches() {
             .cloned()
             .map(EncodedKeyValue::into_parts)
             .collect::<Vec<_>>(),
-        vec_derived_primary_key_scan_raw(&database, &batch, "albums", &[Value::U64(9_999)])
+        vec_derived_primary_key_scan_raw(&database, &batch, "albums", &[Value::U64(9_999)]).await
     );
 
     let cached_rows = database
         .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(42)])
+        .await
         .unwrap();
     assert_eq!(
         cached_rows[0].record().get("title").unwrap(),
@@ -203,6 +217,7 @@ fn staged_batch_storage_txn_handles_large_accumulated_batches() {
     );
     let updated = database
         .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(42)])
+        .await
         .unwrap();
     assert_eq!(
         updated[0].record().get("title").unwrap(),
@@ -214,19 +229,21 @@ fn staged_batch_storage_txn_handles_large_accumulated_batches() {
             .cloned()
             .map(EncodedKeyValue::into_parts)
             .collect::<Vec<_>>(),
-        vec_derived_primary_key_scan_raw(&database, &batch, "albums", &[Value::U64(42)])
+        vec_derived_primary_key_scan_raw(&database, &batch, "albums", &[Value::U64(42)]).await
     );
 
     batch.delete("albums", PrimaryKeyValue::U64(42));
     assert!(
         database
             .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(42)])
+            .await
             .unwrap()
             .is_empty()
     );
     assert_eq!(
         database
             .primary_key_scan_raw_in_batch(&batch, "albums", &[])
+            .await
             .unwrap()
             .len(),
         9_999
@@ -234,9 +251,11 @@ fn staged_batch_storage_txn_handles_large_accumulated_batches() {
     assert_eq!(batch.txn_indexed_operations.get(), batch.operations.len());
 }
 
-#[test]
-fn primary_key_get_raw_observes_staged_overlay() {
-    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+#[futures_test::test]
+async fn primary_key_get_raw_observes_staged_overlay() {
+    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap();
     let mut seed = database.open_batch();
     seed.insert(
         "albums",
@@ -246,7 +265,7 @@ fn primary_key_get_raw_observes_staged_overlay() {
         "albums",
         vec![Value::U64(2), Value::String("stored-two".to_owned())],
     );
-    database.commit_batch(seed).unwrap();
+    database.commit_batch(seed).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.update(
@@ -261,6 +280,7 @@ fn primary_key_get_raw_observes_staged_overlay() {
 
     let updated = database
         .primary_key_get_raw_in_batch(&batch, "albums", &[Value::U64(1)])
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -270,11 +290,13 @@ fn primary_key_get_raw_observes_staged_overlay() {
     assert!(
         database
             .primary_key_get_raw_in_batch(&batch, "albums", &[Value::U64(2)])
+            .await
             .unwrap()
             .is_none()
     );
     let inserted = database
         .primary_key_get_raw_in_batch(&batch, "albums", &[Value::U64(3)])
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -284,9 +306,11 @@ fn primary_key_get_raw_observes_staged_overlay() {
     assert_eq!(batch.txn_indexed_operations.get(), batch.operations.len());
 }
 
-#[test]
-fn staged_batch_storage_txn_overlays_storage_for_prefix_scans() {
-    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+#[futures_test::test]
+async fn staged_batch_storage_txn_overlays_storage_for_prefix_scans() {
+    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap();
     let mut seed = database.open_batch();
     seed.insert(
         "albums",
@@ -296,7 +320,7 @@ fn staged_batch_storage_txn_overlays_storage_for_prefix_scans() {
         "albums",
         vec![Value::U64(2), Value::String("stored-two".to_owned())],
     );
-    database.commit_batch(seed).unwrap();
+    database.commit_batch(seed).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.update(
@@ -311,6 +335,7 @@ fn staged_batch_storage_txn_overlays_storage_for_prefix_scans() {
 
     let rows = database
         .primary_key_scan_raw_in_batch(&batch, "albums", &[])
+        .await
         .unwrap()
         .into_iter()
         .map(|row| row.record().get("title").unwrap())
@@ -325,17 +350,20 @@ fn staged_batch_storage_txn_overlays_storage_for_prefix_scans() {
     assert_eq!(
         database
             .primary_key_scan_raw_in_batch(&batch, "albums", &[])
+            .await
             .unwrap()
             .into_iter()
             .map(EncodedKeyValue::into_parts)
             .collect::<Vec<_>>(),
-        vec_derived_primary_key_scan_raw(&database, &batch, "albums", &[])
+        vec_derived_primary_key_scan_raw(&database, &batch, "albums", &[]).await
     );
 }
 
-#[test]
-fn staged_batch_storage_txn_advances_only_new_operations() {
-    let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+#[futures_test::test]
+async fn staged_batch_storage_txn_advances_only_new_operations() {
+    let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap();
     let mut batch = database.open_batch();
     for id in 0..10_000 {
         batch.insert(
@@ -345,6 +373,7 @@ fn staged_batch_storage_txn_advances_only_new_operations() {
     }
     database
         .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(9_999)])
+        .await
         .unwrap();
     assert_eq!(batch.txn_indexed_operations.get(), 10_000);
 
@@ -356,6 +385,7 @@ fn staged_batch_storage_txn_advances_only_new_operations() {
     }
     database
         .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(19_999)])
+        .await
         .unwrap();
     assert_eq!(batch.txn_indexed_operations.get(), 20_000);
     assert_eq!(batch.txn_operations.borrow().len(), 20_000);
@@ -366,16 +396,20 @@ fn staged_batch_storage_txn_advances_only_new_operations() {
     );
     database
         .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(19_999)])
+        .await
         .unwrap();
     assert_eq!(batch.txn_indexed_operations.get(), 20_001);
     assert_eq!(batch.txn_operations.borrow().len(), 20_001);
 }
 
-#[test]
-fn staged_batch_commit_ticks_once_for_multiple_writes() {
-    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+#[futures_test::test]
+async fn staged_batch_commit_ticks_once_for_multiple_writes() {
+    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
@@ -388,7 +422,7 @@ fn staged_batch_commit_ticks_once_for_multiple_writes() {
         "albums",
         vec![Value::U64(2), Value::String("Blue Train".to_owned())],
     );
-    staged.commit().unwrap();
+    staged.commit().await.unwrap();
 
     let metrics = database.last_commit_metrics().unwrap();
     assert_eq!(metrics.tick.table_delta_records, 2);
@@ -415,10 +449,14 @@ fn staged_batch_commit_ticks_once_for_multiple_writes() {
     assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
 }
 
-#[test]
-fn staged_batch_commit_matches_one_shot_wrapper() {
-    let mut staged_db = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
-    let mut wrapper_db = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+#[futures_test::test]
+async fn staged_batch_commit_matches_one_shot_wrapper() {
+    let mut staged_db = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap();
+    let mut wrapper_db = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap();
 
     let mut staged = staged_db.open_staged_batch();
     staged.insert(
@@ -430,7 +468,7 @@ fn staged_batch_commit_matches_one_shot_wrapper() {
         vec![Value::U64(2), Value::String("Blue Train".to_owned())],
     );
     staged.delete("albums", PrimaryKeyValue::U64(1));
-    staged.commit().unwrap();
+    staged.commit().await.unwrap();
 
     let mut wrapper = wrapper_db.open_batch();
     wrapper.insert(
@@ -442,11 +480,12 @@ fn staged_batch_commit_matches_one_shot_wrapper() {
         vec![Value::U64(2), Value::String("Blue Train".to_owned())],
     );
     wrapper.delete("albums", PrimaryKeyValue::U64(1));
-    wrapper_db.commit_batch(wrapper).unwrap();
+    wrapper_db.commit_batch(wrapper).await.unwrap();
 
     assert_eq!(
         staged_db
             .primary_key_scan("albums", &[])
+            .await
             .unwrap()
             .into_iter()
             .map(|record| record.to_values())
@@ -454,6 +493,7 @@ fn staged_batch_commit_matches_one_shot_wrapper() {
             .unwrap(),
         wrapper_db
             .primary_key_scan("albums", &[])
+            .await
             .unwrap()
             .into_iter()
             .map(|record| record.to_values())
@@ -478,8 +518,8 @@ fn staged_batch_commit_matches_one_shot_wrapper() {
     );
 }
 
-#[test]
-fn direct_record_store_stores_ordered_records_independent_of_tables() {
+#[futures_test::test]
+async fn direct_record_store_stores_ordered_records_independent_of_tables() {
     let temp_dir = tempfile::tempdir().unwrap();
     let schema = albums_schema().with_direct_record_store(DirectRecordStoreSchema::new(
         "streams",
@@ -493,9 +533,10 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &column_families)
             .unwrap();
-    let mut database = Database::new(schema.clone(), storage).unwrap();
+    let mut database = Database::new(schema.clone(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
@@ -509,6 +550,7 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
                 ],
                 &[Value::Bytes(b"two".to_vec())],
             )
+            .await
             .unwrap();
         store
             .set(
@@ -518,6 +560,7 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
                 ],
                 &[Value::Bytes(b"one".to_vec())],
             )
+            .await
             .unwrap();
         store
             .set(
@@ -527,6 +570,7 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
                 ],
                 &[Value::Bytes(b"three".to_vec())],
             )
+            .await
             .unwrap();
         store
             .set(
@@ -536,6 +580,7 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
                 ],
                 &[Value::Bytes(b"cp".to_vec())],
             )
+            .await
             .unwrap();
 
         assert_eq!(
@@ -544,6 +589,7 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
                     Value::String("content".to_owned()),
                     Value::String("content/02".to_owned()),
                 ])
+                .await
                 .unwrap()
                 .unwrap()
                 .get("bytes")
@@ -562,6 +608,7 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
                         Value::String("content/04".to_owned()),
                     ]
                 )
+                .await
                 .unwrap()
                 .into_iter()
                 .map(|record| record.get("bytes").unwrap())
@@ -575,6 +622,7 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
         assert_eq!(
             store
                 .prefix(&[Value::String("content".to_owned())])
+                .await
                 .unwrap()
                 .into_iter()
                 .map(|record| record.get("bytes").unwrap())
@@ -589,13 +637,14 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
         let raw_value = database
             .storage
             .get(
-                "streams",
-                &PrimaryKeyValue::Composite(vec![
+                "streams".to_owned(),
+                PrimaryKeyValue::Composite(vec![
                     PrimaryKeyValue::String("content".to_owned()),
                     PrimaryKeyValue::String("content/01".to_owned()),
                 ])
                 .into_bytes(),
             )
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(raw_value, b"one");
@@ -605,6 +654,7 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
                 Value::String("content".to_owned()),
                 Value::String("content/02".to_owned()),
             ])
+            .await
             .unwrap();
         assert!(
             store
@@ -612,19 +662,26 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
                     Value::String("content".to_owned()),
                     Value::String("content/02".to_owned()),
                 ])
+                .await
                 .unwrap()
                 .is_none()
         );
     }
     assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
-    assert!(database.primary_key_scan("albums", &[]).unwrap().is_empty());
+    assert!(
+        database
+            .primary_key_scan("albums", &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         vec![(
@@ -640,24 +697,33 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
                 Value::String("checkpoint".to_owned()),
                 Value::String("checkpoint".to_owned()),
             ])
+            .await
             .unwrap()
             .unwrap()
             .get("bytes")
             .unwrap(),
         Value::Bytes(b"cp".to_vec())
     );
-    assert_eq!(database.storage.get("albums", b"content/01").unwrap(), None);
+    assert_eq!(
+        database
+            .storage
+            .get("albums".to_owned(), b"content/01".to_vec())
+            .await
+            .unwrap(),
+        None
+    );
 
     drop(database);
     let column_families = schema.column_families();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &column_families)
             .unwrap();
-    let reopened = Database::new(schema, storage).unwrap();
+    let reopened = Database::new(schema, storage).await.unwrap();
     let store = reopened.direct_record_store("streams").unwrap();
     assert_eq!(
         store
             .prefix(&[Value::String("content".to_owned())])
+            .await
             .unwrap()
             .into_iter()
             .map(|record| record.get("bytes").unwrap())
@@ -670,6 +736,7 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
     assert_eq!(
         reopened
             .primary_key_scan("albums", &[Value::U64(7)])
+            .await
             .unwrap()
             .into_iter()
             .map(|record| record.get("title").unwrap())
@@ -678,7 +745,7 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
     );
 }
 
-fn assert_direct_record_store_round_trips_array_of_record_values() {
+async fn assert_direct_record_store_round_trips_array_of_record_values() {
     let child = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
     let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
         "rendered_results",
@@ -689,7 +756,7 @@ fn assert_direct_record_store_round_trips_array_of_record_values() {
         )]),
     ));
     let storage = MemoryStorage::new(&schema.column_families());
-    let database = Database::new(schema, storage).unwrap();
+    let database = Database::new(schema, storage).await.unwrap();
     let first = crate::records::OwnedRecord::new(
         child
             .create(&[Value::U64(1), Value::String("Kind of Blue".to_owned())])
@@ -707,11 +774,13 @@ fn assert_direct_record_store_round_trips_array_of_record_values() {
 
     store
         .set(&[Value::U64(7)], std::slice::from_ref(&results))
+        .await
         .unwrap();
 
     assert_eq!(
         store
             .get(&[Value::U64(7)])
+            .await
             .unwrap()
             .unwrap()
             .get("results")
@@ -720,7 +789,7 @@ fn assert_direct_record_store_round_trips_array_of_record_values() {
     );
 }
 
-fn assert_direct_record_store_rejects_noncanonical_record_value_bytes_at_admission() {
+async fn assert_direct_record_store_rejects_noncanonical_record_value_bytes_at_admission() {
     let child = RecordDescriptor::new([("maybe_id", ValueType::Nullable(Box::new(ValueType::U8)))]);
     let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
         "rendered_results",
@@ -731,26 +800,28 @@ fn assert_direct_record_store_rejects_noncanonical_record_value_bytes_at_admissi
         )]),
     ));
     let storage = MemoryStorage::new(&schema.column_families());
-    let database = Database::new(schema, storage).unwrap();
+    let database = Database::new(schema, storage).await.unwrap();
     let store = database.direct_record_store("rendered_results").unwrap();
     // A fixed-width null reserves a zero payload byte; this child has a
     // noncanonical nonzero payload and must not reach durable storage.
     let noncanonical = crate::records::OwnedRecord::new(vec![0, 7], child);
 
     assert!(matches!(
-        store.set(
-            &[Value::U64(7)],
-            &[Value::Array(vec![Value::Record(noncanonical)])],
-        ),
+        store
+            .set(
+                &[Value::U64(7)],
+                &[Value::Array(vec![Value::Record(noncanonical)])],
+            )
+            .await,
         Err(Error::RecordEncoding(crate::records::Error::InvalidOffset))
     ));
-    assert!(store.get(&[Value::U64(7)]).unwrap().is_none());
+    assert!(store.get(&[Value::U64(7)]).await.unwrap().is_none());
 }
 
-#[test]
-fn direct_record_store_rejects_record_containing_durable_keys_at_schema_admission() {
-    assert_direct_record_store_round_trips_array_of_record_values();
-    assert_direct_record_store_rejects_noncanonical_record_value_bytes_at_admission();
+#[futures_test::test]
+async fn direct_record_store_rejects_record_containing_durable_keys_at_schema_admission() {
+    assert_direct_record_store_round_trips_array_of_record_values().await;
+    assert_direct_record_store_rejects_noncanonical_record_value_bytes_at_admission().await;
 
     let child = RecordDescriptor::new([("id", ValueType::U64)]);
     for (name, key_type) in [
@@ -775,7 +846,7 @@ fn direct_record_store_rejects_record_containing_durable_keys_at_schema_admissio
         let storage = MemoryStorage::new(&schema.column_families());
 
         assert!(matches!(
-            Database::new(schema, storage),
+            Database::new(schema, storage).await,
             Err(Error::InvalidDirectRecordStoreKey(store)) if store == name
         ));
     }
@@ -787,15 +858,17 @@ fn direct_record_store_rejects_record_containing_durable_keys_at_schema_admissio
             RecordDescriptor::new([("payload", ValueType::Bytes)]),
         ));
     let scalar_storage = MemoryStorage::new(&scalar_schema.column_families());
-    let scalar_database = Database::new(scalar_schema, scalar_storage).unwrap();
+    let scalar_database = Database::new(scalar_schema, scalar_storage).await.unwrap();
     let scalar_store = scalar_database.direct_record_store("scalar_key").unwrap();
 
     scalar_store
         .set(&[Value::U64(7)], &[Value::Bytes(b"allowed".to_vec())])
+        .await
         .unwrap();
     assert_eq!(
         scalar_store
             .get(&[Value::U64(7)])
+            .await
             .unwrap()
             .unwrap()
             .get("payload")
@@ -804,15 +877,16 @@ fn direct_record_store_rejects_record_containing_durable_keys_at_schema_admissio
     );
 }
 
-#[test]
-fn commit_metrics_split_storage_and_tick_work() {
+#[futures_test::test]
+async fn commit_metrics_split_storage_and_tick_work() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     database.set_tick_runtime_stats_enabled(true);
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
         .unwrap();
     let _initial = subscription.recv().unwrap();
 
@@ -821,7 +895,7 @@ fn commit_metrics_split_storage_and_tick_work() {
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let metrics = database.last_commit_metrics().unwrap();
     assert_eq!(metrics.storage_write_count, 1);
@@ -832,9 +906,9 @@ fn commit_metrics_split_storage_and_tick_work() {
     assert!(metrics.tick.runtime_stats.graph_nodes > 0);
 }
 
-#[test]
-fn commit_metrics_split_storage_writes_by_jazz_destination() {
-    fn run(layout: StorageLayout) -> StorageWriteMetrics {
+#[futures_test::test]
+async fn commit_metrics_split_storage_writes_by_jazz_destination() {
+    async fn run(layout: StorageLayout) -> StorageWriteMetrics {
         let schema = DatabaseSchema::new([
             TableSchema::new(
                 "jazz_docs_history",
@@ -912,7 +986,9 @@ fn commit_metrics_split_storage_writes_by_jazz_destination() {
             .map(String::as_str)
             .collect::<Vec<_>>();
         let storage = MemoryStorage::new(&refs);
-        let mut database = Database::new_with_storage_layout(schema, storage, layout).unwrap();
+        let mut database = Database::new_with_storage_layout(schema, storage, layout)
+            .await
+            .unwrap();
         let row_uuid = uuid(1);
 
         let mut batch = database.open_batch();
@@ -951,12 +1027,12 @@ fn commit_metrics_split_storage_writes_by_jazz_destination() {
             "jazz_transactions",
             vec![Value::U64(1), Value::U64(2), Value::U64(1)],
         );
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
 
         database.last_commit_metrics().unwrap().storage_writes
     }
 
-    let writes = run(StorageLayout::Identity);
+    let writes = run(StorageLayout::Identity).await;
     assert_eq!(writes.total.count, 9);
     assert_eq!(writes.history_rows.count, 1);
     assert_eq!(writes.history_indexes.count, 1);
@@ -969,20 +1045,21 @@ fn commit_metrics_split_storage_writes_by_jazz_destination() {
     assert_eq!(writes.transactions_indexes.count, 1);
     assert_eq!(writes.other.count, 0);
 
-    let class_writes = run(StorageLayout::jazz_class_v1());
+    let class_writes = run(StorageLayout::jazz_class_v1()).await;
     assert_eq!(class_writes, writes);
 }
 
 // Same-batch consolidation and conflict behavior.
 
-#[test]
-fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
+#[futures_test::test]
+async fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -994,7 +1071,7 @@ fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
         "albums",
         vec![Value::U64(7), Value::String("Giant Steps".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -1002,7 +1079,8 @@ fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
     );
     let stored = database
         .storage
-        .get("albums", &PrimaryKeyValue::U64(7).into_bytes())
+        .get("albums".to_owned(), PrimaryKeyValue::U64(7).into_bytes())
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -1018,20 +1096,24 @@ fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
     );
 }
 
-#[test]
-fn inserts_over_existing_primary_keys_are_rejected() {
+#[futures_test::test]
+async fn inserts_over_existing_primary_keys_are_rejected() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_albums_schema(), storage)
+        .await
+        .unwrap();
     database
         .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
         .unwrap();
     database
         .subscribe_one_sink(GraphBuilder::index("albums", "albums_by_title"))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -1039,18 +1121,19 @@ fn inserts_over_existing_primary_keys_are_rejected() {
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(7), Value::String("Giant Steps".to_owned())],
     );
-    let err = database.commit_batch(batch).unwrap_err();
+    let err = database.commit_batch(batch).await.unwrap_err();
 
     assert!(matches!(err, Error::DuplicatePrimaryKey { table, .. } if table == "albums"));
     let stored = database
         .storage
-        .get("albums", &PrimaryKeyValue::U64(7).into_bytes())
+        .get("albums".to_owned(), PrimaryKeyValue::U64(7).into_bytes())
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -1066,15 +1149,17 @@ fn inserts_over_existing_primary_keys_are_rejected() {
     );
 }
 
-#[test]
-fn inserts_over_primary_keys_created_earlier_in_the_same_batch_are_rejected() {
+#[futures_test::test]
+async fn inserts_over_primary_keys_created_earlier_in_the_same_batch_are_rejected() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -1085,26 +1170,28 @@ fn inserts_over_primary_keys_created_earlier_in_the_same_batch_are_rejected() {
         "albums",
         vec![Value::U64(7), Value::String("Giant Steps".to_owned())],
     );
-    let err = database.commit_batch(batch).unwrap_err();
+    let err = database.commit_batch(batch).await.unwrap_err();
 
     assert!(matches!(err, Error::DuplicatePrimaryKey { table, .. } if table == "albums"));
     assert!(
         database
             .storage
-            .get("albums", &PrimaryKeyValue::U64(7).into_bytes())
+            .get("albums".to_owned(), PrimaryKeyValue::U64(7).into_bytes())
+            .await
             .unwrap()
             .is_none()
     );
 }
 
-#[test]
-fn same_batch_same_key_operations_emit_only_the_consolidated_final_delta() {
+#[futures_test::test]
+async fn same_batch_same_key_operations_emit_only_the_consolidated_final_delta() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
         .unwrap();
     let _initial = subscription.recv().unwrap();
 
@@ -1117,7 +1204,7 @@ fn same_batch_same_key_operations_emit_only_the_consolidated_final_delta() {
         "albums",
         vec![Value::U64(7), Value::String("Giant Steps".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
