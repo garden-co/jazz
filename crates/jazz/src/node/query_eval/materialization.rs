@@ -553,10 +553,6 @@ where
                 version.clone()
             }
         };
-        // Several logical sources can witness the same physical row with
-        // different sparse projections. Materialize from its canonical stored
-        // version so the chosen witness cannot erase public fields.
-        let version = self.canonical_history_version_for_maintained_witness(&version)?;
         let mut row = self
             .projected_current_row_from_materialized_version_in_read_schema(
                 local.result_schema_version,
@@ -634,10 +630,6 @@ where
             };
             version.clone()
         };
-        // Several logical sources can witness the same physical row with
-        // different sparse projections. Materialize from its canonical stored
-        // version so the chosen witness cannot erase public fields.
-        let version = self.canonical_history_version_for_maintained_witness(&version)?;
         let _ = cache;
         self.projected_current_row_from_materialized_version_in_read_schema(
             local.result_schema_version,

@@ -1339,7 +1339,7 @@ where
     /// overlay. Edge/global reads consume only the identity-scoped result
     /// members emitted by the serving host. This is host-owned routing, not
     /// request-controlled authorization.
-    pub(crate) fn client_settled_binding_view_key_for_query(
+    fn client_settled_binding_view_key_for_query(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
