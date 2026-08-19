@@ -11,7 +11,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn global_layer_winner_at(
+    pub(super) async fn global_layer_winner_at(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -31,11 +31,10 @@ where
             Value::Bytes(version_layer_string(layer).into_bytes()),
             Value::U64(global_base.0),
         ];
-        let Some(raw) = self.database.primary_key_last_before_or_at_raw(
-            "jazz_global_changes",
-            &prefix,
-            &upper,
-        )?
+        let Some(raw) = self
+            .database
+            .primary_key_last_before_or_at_raw("jazz_global_changes", &prefix, &upper)
+            .await?
         else {
             return Ok(None);
         };
@@ -43,40 +42,46 @@ where
         let tx_time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
         let tx_node_alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
         self.query_version_by_alias(table, row_uuid, layer, tx_time, tx_node_alias)
+            .await
     }
 
-    pub(super) fn visible_global_content_tx_id_at(
+    pub(super) async fn visible_global_content_tx_id_at(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
         global_base: GlobalSeq,
     ) -> Result<Option<TxId>, Error> {
         let deleted = self
-            .global_layer_winner_at(table, row_uuid, VersionLayer::Deletion, global_base)?
+            .global_layer_winner_at(table, row_uuid, VersionLayer::Deletion, global_base)
+            .await?
             .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted));
         if deleted {
             return Ok(None);
         }
-        let Some(content) =
-            self.global_layer_winner_at(table, row_uuid, VersionLayer::Content, global_base)?
+        let Some(content) = self
+            .global_layer_winner_at(table, row_uuid, VersionLayer::Content, global_base)
+            .await?
         else {
             return Ok(None);
         };
         self.version_tx_id(&content).map(Some)
     }
 
-    pub(super) fn global_currency_changed_after(
+    pub(super) async fn global_currency_changed_after(
         &mut self,
         table: &str,
         global_base: GlobalSeq,
     ) -> Result<bool, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
-        let Some(raw) = self.database.index_last_raw(
-            "jazz_global_changes",
-            "by_table_global_seq",
-            &[Value::U64(table_id.0)],
-        )?
+        let Some(raw) = self
+            .database
+            .index_last_raw(
+                "jazz_global_changes",
+                "by_table_global_seq",
+                &[Value::U64(table_id.0)],
+            )
+            .await?
         else {
             return Ok(false);
         };
@@ -84,7 +89,7 @@ where
         Ok(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_SEQ_IDX)? > global_base.0)
     }
 
-    pub(super) fn visible_global_content_tx_id_now(
+    pub(super) async fn visible_global_content_tx_id_now(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -101,6 +106,7 @@ where
         if let Some(raw) = self
             .database
             .primary_key_get_raw(&deletion_current_table, &[Value::Uuid(row_uuid.0)])
+            .await
             .ok()?
         {
             let record = raw.record();
@@ -126,6 +132,7 @@ where
         let raw = self
             .database
             .primary_key_get_raw(&content_current_table, &[Value::Uuid(row_uuid.0)])
+            .await
             .ok()??;
         let record = raw.record();
         let tx_time = TxTime(
@@ -142,14 +149,15 @@ where
         Some(TxId::new(tx_time, tx_node))
     }
 
-    pub(super) fn global_current_updates_for_versions(
+    pub(super) async fn global_current_updates_for_versions(
         &mut self,
         tx_id: TxId,
         versions: &[VersionRow],
     ) -> Result<Vec<VersionRow>, Error> {
         let mut updates = BTreeMap::<(String, RowUuid, VersionLayer), VersionRow>::new();
         let version_made_at = self
-            .transaction_made_at(tx_id)?
+            .transaction_made_at(tx_id)
+            .await?
             .ok_or(Error::MissingTransaction(tx_id))?;
         for version in versions {
             let authored_schema = self
@@ -157,12 +165,14 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "global version schema alias must exist",
                 ))?;
-            let previous_current = self.query_global_layer_winner_in_schema(
-                authored_schema,
-                &version.table,
-                version.row_uuid(),
-                version.layer(),
-            )?;
+            let previous_current = self
+                .query_global_layer_winner_in_schema(
+                    authored_schema,
+                    &version.table,
+                    version.row_uuid(),
+                    version.layer(),
+                )
+                .await?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 Some((
                     previous,
