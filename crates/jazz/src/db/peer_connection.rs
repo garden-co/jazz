@@ -272,7 +272,7 @@ where
     /// Rebuild this subscriber's maintained views if its process-local claims
     /// changed. Policy claim values are bound when a maintained view opens, so
     /// retaining the old view after a claim change would retain its authority.
-    fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
+    async fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
         let connection_epoch = self.connection_epoch;
         let identity = match &self.link {
             ConnectionLink::Subscriber { ingest_context, .. } => ingest_context.identity,
@@ -311,8 +311,9 @@ where
             let branch_metadata = match coverage.opts.read_view.source {
                 ReadViewSourceSpec::Branch { branch } => {
                     let branch = crate::ids::BranchId(branch);
-                    let mut node = self.node.borrow_mut();
-                    node.branch_metadata_visible_to(branch, identity)?
+                    let mut node = self.node.lock().await;
+                    node.branch_metadata_visible_to(branch, identity)
+                        .await?
                         .then(|| {
                             node.branch_record(branch)
                                 .map(crate::protocol::BranchMetadata::from)
@@ -606,7 +607,7 @@ where
         let connection_epoch = self.connection_epoch;
         self.observe_shared_subscriber_dirty_epoch();
         self.bind_subscriber_session_claims();
-        self.rebind_subscriber_views_after_claim_change()?;
+        self.rebind_subscriber_views_after_claim_change().await?;
         match &mut self.link {
             ConnectionLink::Upstream {
                 local_receiver,
@@ -884,7 +885,8 @@ where
                                     &mut pending_initial_coverage_clears,
                                     &self.active_authority_view_receipts,
                                     self.connection_epoch,
-                                )?;
+                                )
+                                .await?;
                             }
                             self.node
                                 .borrow_mut()
@@ -899,7 +901,8 @@ where
                                     &mut pending_initial_coverage_clears,
                                     &self.active_authority_view_receipts,
                                     self.connection_epoch,
-                                )?;
+                                )
+                                .await?;
                             }
                             let Some(repair) = pending_row_version_repairs.pop_front() else {
                                 drop_peer_request(&self.node);
@@ -1135,7 +1138,8 @@ where
                                     &mut pending_initial_coverage_clears,
                                     &self.active_authority_view_receipts,
                                     self.connection_epoch,
-                                )?;
+                                )
+                                .await?;
                             }
                             let Some(expected) = expected_scope_authority.as_mut() else {
                                 drop_peer_request(&self.node);
@@ -1422,7 +1426,8 @@ where
                                     &mut pending_initial_coverage_clears,
                                     &self.active_authority_view_receipts,
                                     self.connection_epoch,
-                                )?;
+                                )
+                                .await?;
                             }
                             if *local_receiver {
                                 match message {
@@ -1503,7 +1508,8 @@ where
                         &mut pending_initial_coverage_clears,
                         &self.active_authority_view_receipts,
                         self.connection_epoch,
-                    )?;
+                    )
+                    .await?;
                 }
                 if applied {
                     stats.subscription_events += refresh_subscriptions_in(
@@ -1667,7 +1673,8 @@ where
                                 ingest_context.trust,
                                 authority_scope_hydrations,
                                 authority_scope_hydration_count,
-                            )?;
+                            )
+                            .await?;
                             continue;
                         }
                         // Legacy direct answers and caller-authored support
@@ -3032,7 +3039,7 @@ fn stage_initial_coverage_clear_for_update(
     }
 }
 
-fn apply_pending_authority_view_updates<S>(
+async fn apply_pending_authority_view_updates<S>(
     node: &SharedNodeState<S>,
     pending: &mut Vec<PendingAuthorityViewUpdate>,
     awaiting: &AwaitingInitialAuthorityCoverage,
@@ -3092,12 +3099,14 @@ where
         .into_iter()
         .map(|update| update.parts)
         .collect::<Vec<_>>();
-    let mut node_ref = node.borrow_mut();
+    let mut node_ref = node.lock().await;
     // Branch view payloads carry branch-target version witnesses. Provision
     // their sparse physical partitions before staging the receiver batch, so
     // a durable table exists before the selected result becomes observable.
-    node_ref.prepare_view_update_branch_partitions(&updates)?;
-    node_ref.apply_view_updates_in_batch(updates)?;
+    node_ref
+        .prepare_view_update_branch_partitions(&updates)
+        .await?;
+    node_ref.apply_view_updates_in_batch(updates).await?;
     drop(node_ref);
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()
         && receipts.connection_epoch == connection_epoch
@@ -3189,7 +3198,7 @@ where
 /// caller-provided subscription.  The authority allocates opaque usage-site
 /// keys, registers canonical shapes in the receiver, and only then sends the
 /// ordinary view updates in authority-scope envelopes.
-fn serve_authorization_scope_intent<S>(
+async fn serve_authorization_scope_intent<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -3205,7 +3214,7 @@ fn serve_authorization_scope_intent<S>(
     hydration_count: &mut u64,
 ) -> Result<(), Error>
 where
-    S: OrderedKvStorage,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     if !node.borrow().is_history_complete()
         || !subscriber_permissions_ready(node.borrow().permissions_ready(), trust)
@@ -3311,7 +3320,8 @@ where
             return Ok(());
         }
         let supported = node
-            .borrow_mut()
+            .lock()
+            .await
             .ensure_peer_maintained_subscription_view_supported(
                 shape,
                 binding,
@@ -3319,7 +3329,8 @@ where
                 identity,
                 &scope.options.read_view,
                 QueryAuthorizationMode::TrustedServing,
-            );
+            )
+            .await;
         if supported.is_err() {
             transport
                 .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
@@ -3949,7 +3960,7 @@ fn handle_write_state_update<S>(
 
     if handled_by_waiter {
         mutation_errors.borrow_mut().pending.remove(&tx_id);
-        if let Err(error) = node.borrow_mut().discard_rejection(tx_id) {
+        if let Err(error) = crate::db::block_on(node.borrow_mut().discard_rejection(tx_id)) {
             tracing::warn!(?tx_id, %error, "failed to acknowledge waited mutation error");
         }
         return;
