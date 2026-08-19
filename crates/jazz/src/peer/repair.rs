@@ -198,12 +198,14 @@ impl PeerState {
                     // transient client role would still bind policy claims as
                     // `SYSTEM` here.
                     self.permission_identity = Some(writer);
-                    let update = self.rehydrate_authorization_support_query(
+                    let update = self
+                        .rehydrate_authorization_support_query(
                         node,
                         &shape,
                         &binding,
                         scope.options.clone(),
-                    );
+                    )
+                    .await;
                     self.role = previous_role;
                     self.permission_identity = previous_permission_identity;
                     let SyncMessage::ViewUpdate {
@@ -302,12 +304,14 @@ impl PeerState {
                 let previous_permission_identity = self.permission_identity;
                 self.role = PeerRole::ClientLink { identity: writer };
                 self.permission_identity = Some(writer);
-                let rehydrate = self.rehydrate_authorization_support_query(
-                    node,
-                    &shape,
-                    &binding,
-                    scope.options.clone(),
-                );
+                let rehydrate = self
+                    .rehydrate_authorization_support_query(
+                        node,
+                        &shape,
+                        &binding,
+                        scope.options.clone(),
+                    )
+                    .await;
                 self.role = previous_role;
                 self.permission_identity = previous_permission_identity;
                 let update = rehydrate?;

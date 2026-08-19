@@ -227,7 +227,7 @@ where
                 let previous_made_at = if previous_tx_id == tx.tx_id {
                     tx.tx_id.time
                 } else {
-                    self.version_made_at(previous)?
+                    self.version_made_at(previous).await?
                 };
                 Some((previous, previous_tx_id, previous_made_at))
             } else {

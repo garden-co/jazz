@@ -177,7 +177,7 @@ where
                 Some((
                     previous,
                     self.version_tx_id(previous)?,
-                    self.version_made_at(previous)?,
+                    self.version_made_at(previous).await?,
                 ))
             } else {
                 None

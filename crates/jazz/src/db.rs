@@ -3030,8 +3030,9 @@ where
     if shape.query().flat_join.is_none() {
         return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
     }
-    let materialized =
-        node.materialize_local_maintained_relation_snapshot_with_occurrences(maintained)?;
+    let materialized = crate::db::block_on(
+        node.materialize_local_maintained_relation_snapshot_with_occurrences(maintained),
+    )?;
     if materialized.snapshot.root_count == snapshot.root_count {
         return relation_snapshot_index_with_root_occurrences(
             snapshot,

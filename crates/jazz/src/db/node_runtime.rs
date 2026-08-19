@@ -191,7 +191,10 @@ where
         for tx_id in pending {
             register_local_fate_route(&self.local_fate_routes, tx_id, downstream_fates);
         }
-        queue_local_acknowledgements(&self.local_fate_routes, &self.node);
+        crate::db::block_on(queue_local_acknowledgements(
+            &self.local_fate_routes,
+            &self.node,
+        ));
         Ok(())
     }
 
