@@ -1,6 +1,7 @@
 //! Prepared shapes, routed bindings, and subscription delivery state.
 
 use super::*;
+use std::sync::Mutex;
 
 /// Stable handle returned to callers for subscription management.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -92,14 +93,31 @@ impl Subscription {
     }
 
     pub fn recv(&self) -> Result<RecordDeltas, RecvError> {
+        if let Some(initial) = self.take_initial() {
+            return Ok(initial);
+        }
         self.inner
             .recv()
             .map(|deltas| self.extract_sink_deltas(deltas))
     }
 
     pub fn try_recv(&self) -> Result<RecordDeltas, TryRecvError> {
+        if let Some(initial) = self.take_initial() {
+            return Ok(initial);
+        }
         self.inner
             .try_recv()
+            .map(|deltas| self.extract_sink_deltas(deltas))
+    }
+
+    /// Take the complete value captured when this terminal session opened.
+    ///
+    /// Once this returns `Some`, every later value received from this session
+    /// is an incremental delta relative to that initial value and its preceding
+    /// deltas.
+    pub fn take_initial(&self) -> Option<RecordDeltas> {
+        self.inner
+            .take_initial()
             .map(|deltas| self.extract_sink_deltas(deltas))
     }
 
@@ -122,9 +140,10 @@ pub struct MultisinkDeltas {
 
 #[derive(Clone, Debug)]
 pub(super) struct QueuedMultisinkDeltas {
-    // Explicit fragment-output drain channel: once a tick or hydration computes
+    // Explicit fragment-output drain channel: once a tick computes incremental
     // subscription output, this queue owns delivery until the receiver drains
-    // it. Eval memo is only a recompute cache and may be evicted independently.
+    // it. The initial snapshot is owned separately by MultisinkSubscription.
+    // Eval memo is only a recompute cache and may be evicted independently.
     pub(super) deltas: MultisinkDeltas,
 }
 
@@ -149,6 +168,7 @@ impl MultisinkDeltas {
 #[derive(Debug)]
 pub struct MultisinkSubscription {
     pub(super) id: SubscriptionId,
+    pub(super) initial: Mutex<Option<MultisinkDeltas>>,
     pub(super) receiver: Receiver<QueuedMultisinkDeltas>,
     pub(super) _receiver_liveness: Arc<()>,
 }
@@ -159,11 +179,26 @@ impl MultisinkSubscription {
     }
 
     pub fn recv(&self) -> Result<MultisinkDeltas, RecvError> {
+        if let Some(initial) = self.take_initial() {
+            return Ok(initial);
+        }
         self.receiver.recv().map(|queued| queued.deltas)
     }
 
     pub fn try_recv(&self) -> Result<MultisinkDeltas, TryRecvError> {
+        if let Some(initial) = self.take_initial() {
+            return Ok(initial);
+        }
         self.receiver.try_recv().map(|queued| queued.deltas)
+    }
+
+    /// Take the complete multisink value captured when this terminal session
+    /// opened. The receiver contains only later incremental deltas.
+    pub fn take_initial(&self) -> Option<MultisinkDeltas> {
+        self.initial
+            .lock()
+            .expect("subscription initial snapshot mutex poisoned")
+            .take()
     }
 }
 
@@ -1649,16 +1684,9 @@ impl IvmRuntime {
                 return Err(error);
             }
         };
-        let queued = self.queued_multisink_deltas(initial);
-        let sent = self
-            .multisink_subscriptions
-            .get(&subscription_id)
-            .is_some_and(|subscription| subscription.sender.send(queued).is_ok());
-        if !sent {
-            self.unsubscribe(subscription_id);
-        }
         Ok(MultisinkSubscription {
             id: subscription_id,
+            initial: Mutex::new(Some(initial)),
             receiver,
             _receiver_liveness: receiver_liveness,
         })
@@ -1843,16 +1871,9 @@ impl IvmRuntime {
                 return Err(error);
             }
         };
-        let queued = self.queued_multisink_deltas(initial);
-        let sent = self
-            .multisink_subscriptions
-            .get(&subscription_id)
-            .is_some_and(|subscription| subscription.sender.send(queued).is_ok());
-        if !sent {
-            self.unsubscribe(subscription_id);
-        }
         Ok(MultisinkSubscription {
             id: subscription_id,
+            initial: Mutex::new(Some(initial)),
             receiver,
             _receiver_liveness: receiver_liveness,
         })

@@ -638,6 +638,46 @@ fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() {
 }
 
 #[test]
+fn subscription_owns_initial_snapshot_separately_from_incremental_receiver() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
+    let initial = subscription
+        .take_initial()
+        .expect("new terminal session owns one initial snapshot");
+    assert_eq!(
+        initial.to_values().unwrap(),
+        [(vec![7_u64.into(), "Blue Train".into()], 1)]
+    );
+    assert!(subscription.take_initial().is_none());
+    assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(8), Value::String("Giant Steps".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![8_u64.into(), "Giant Steps".into()], 1)]
+    );
+}
+
+#[test]
 fn subscribe_query_filters_current_rows_in_initial_message() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
