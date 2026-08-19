@@ -12,8 +12,8 @@ pub use opfs_btree::SyncPolicy as BtreeSyncPolicy;
 use opfs_btree::{BTreeOptions, OpfsBTree, SyncFile};
 
 use super::{
-    ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation,
-    apply_storage_delta, key_codec,
+    ColumnFamilyName, Error, Key, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
+    StorageFuture, StorageScan, Value, apply_storage_delta, key_codec,
 };
 
 #[derive(Clone)]
@@ -82,13 +82,13 @@ where
         key_codec::encode_column_family_key(cf, key)
     }
 
-    fn prevalidate_write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+    fn prevalidate_write_many(&self, operations: &[OwnedWriteOperation]) -> Result<(), Error> {
         let column_families = self.column_families.borrow();
         for operation in operations {
             let cf = match operation {
-                WriteOperation::Set { cf, .. }
-                | WriteOperation::Delete { cf, .. }
-                | WriteOperation::Delta { cf, .. } => *cf,
+                OwnedWriteOperation::Set { cf, .. }
+                | OwnedWriteOperation::Delete { cf, .. }
+                | OwnedWriteOperation::Delta { cf, .. } => cf,
             };
             if !column_families.contains(cf) {
                 return Err(Error::ColumnFamilyNotFound(cf.to_owned()));
@@ -146,169 +146,207 @@ impl<F> OrderedKvStorage for BtreeStorage<F>
 where
     F: SyncFile,
 {
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        let key = self.encoded_key(cf, key)?;
-        Ok(self.tree.borrow_mut().get(&key)?)
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async move {
+            let key = self.encoded_key(&cf, &key)?;
+            Ok(self.tree.borrow_mut().get(&key)?)
+        })
     }
 
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
-        let key = self.encoded_key(cf, key)?;
-        Ok(self.tree.borrow_mut().put(&key, value)?)
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            let key = self.encoded_key(&cf, &key)?;
+            Ok(self.tree.borrow_mut().put(&key, &value)?)
+        })
     }
 
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
-        let key = self.encoded_key(cf, key)?;
-        Ok(self.tree.borrow_mut().delete(&key)?)
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            let key = self.encoded_key(&cf, &key)?;
+            Ok(self.tree.borrow_mut().delete(&key)?)
+        })
     }
 
-    fn close(&self) -> Result<(), Error> {
-        Ok(self.tree.borrow_mut().close()?)
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move { Ok(self.tree.borrow_mut().close()?) })
     }
 
-    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
-        assert!(every > 0, "write flush cadence must be non-zero");
-        *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence { every, pending: 0 });
-        Ok(())
+    fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            assert!(every > 0, "write flush cadence must be non-zero");
+            *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence { every, pending: 0 });
+            Ok(())
+        })
     }
 
-    fn flush_write_boundary(&self) -> Result<(), Error> {
-        let mut tree = self.tree.borrow_mut();
-        tree.flush_wal()?;
-        tree.flush_file()?;
-        if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
-            cadence.pending = 0;
-        }
-        Ok(())
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            let mut tree = self.tree.borrow_mut();
+            tree.flush_wal()?;
+            tree.flush_file()?;
+            if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
+                cadence.pending = 0;
+            }
+            Ok(())
+        })
     }
 
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let start = self.encoded_key(cf, start)?;
-        let end = self.encoded_key(cf, end)?;
-        for (key, value) in self.tree.borrow_mut().range(&start, &end, usize::MAX)? {
-            let (_, user_key) = key_codec::decode_column_family_key(&key)?;
-            visit(user_key, &value)?;
-        }
-        Ok(())
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        Box::pin(async move {
+            let start = self.encoded_key(&cf, &start)?;
+            let end = self.encoded_key(&cf, &end)?;
+            let values = self
+                .tree
+                .borrow_mut()
+                .range(&start, &end, usize::MAX)?
+                .into_iter()
+                .map(|(key, value)| {
+                    let (_, user_key) = key_codec::decode_column_family_key(&key)?;
+                    Ok((user_key.to_vec(), value))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan)
+        })
     }
 
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let start = self.encoded_key(cf, prefix)?;
-        let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
-        for (key, value) in self.tree.borrow_mut().range(&start, &end, usize::MAX)? {
-            let (_, user_key) = key_codec::decode_column_family_key(&key)?;
-            visit(user_key, &value)?;
-        }
-        Ok(())
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        Box::pin(async move {
+            let start = self.encoded_key(&cf, &prefix)?;
+            let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
+            let values = self
+                .tree
+                .borrow_mut()
+                .range(&start, &end, usize::MAX)?
+                .into_iter()
+                .map(|(key, value)| {
+                    let (_, user_key) = key_codec::decode_column_family_key(&key)?;
+                    Ok((user_key.to_vec(), value))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan)
+        })
     }
 
     fn scan_prefix_reverse(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let start = self.encoded_key(cf, prefix)?;
-        let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
-        for (key, value) in self
-            .tree
-            .borrow_mut()
-            .range_reverse(&start, &end, usize::MAX)?
-        {
-            let (_, user_key) = key_codec::decode_column_family_key(&key)?;
-            visit(user_key, &value)?;
-        }
-        Ok(())
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        Box::pin(async move {
+            let start = self.encoded_key(&cf, &prefix)?;
+            let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
+            let values = self
+                .tree
+                .borrow_mut()
+                .range_reverse(&start, &end, usize::MAX)?
+                .into_iter()
+                .map(|(key, value)| {
+                    let (_, user_key) = key_codec::decode_column_family_key(&key)?;
+                    Ok((user_key.to_vec(), value))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan)
+        })
     }
 
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<super::KeyValue>, Error> {
-        let start = self.encoded_key(cf, prefix)?;
-        let upper_user_key = upper;
-        let upper = self.encoded_key(cf, upper_user_key)?;
-        let mut end = upper.clone();
-        end.push(0);
-        for (key, value) in self.tree.borrow_mut().range_reverse(&start, &end, 1)? {
-            let (_, user_key) = key_codec::decode_column_family_key(&key)?;
-            if user_key.starts_with(prefix) && user_key <= upper_user_key {
-                return Ok(Some((user_key.to_vec(), value)));
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<super::KeyValue>, Error>> {
+        Box::pin(async move {
+            let start = self.encoded_key(&cf, &prefix)?;
+            let encoded_upper = self.encoded_key(&cf, &upper)?;
+            let mut end = encoded_upper;
+            end.push(0);
+            for (key, value) in self.tree.borrow_mut().range_reverse(&start, &end, 1)? {
+                let (_, user_key) = key_codec::decode_column_family_key(&key)?;
+                if user_key.starts_with(&prefix) && user_key <= upper.as_slice() {
+                    return Ok(Some((user_key.to_vec(), value)));
+                }
             }
-        }
-        Ok(None)
+            Ok(None)
+        })
     }
 
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
-        self.prevalidate_write_many(operations)?;
-        let mut encoded_operations = Vec::with_capacity(operations.len());
-        for operation in operations {
-            encoded_operations.push(match operation {
-                WriteOperation::Set { cf, key, value } => {
-                    (self.encoded_key(cf, key)?, Some((*value).to_vec()))
-                }
-                WriteOperation::Delete { cf, key } => (self.encoded_key(cf, key)?, None),
-                WriteOperation::Delta { cf, key, delta } => {
-                    let key = self.encoded_key(cf, key)?;
-                    let existing = self.tree.borrow_mut().get(&key)?;
-                    let encoded = delta.encode()?;
-                    let merged = apply_storage_delta(existing.as_deref(), &encoded)?;
-                    (key, Some(merged))
-                }
-            });
-        }
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            self.prevalidate_write_many(&operations)?;
+            let mut encoded_operations = Vec::with_capacity(operations.len());
+            for operation in operations {
+                encoded_operations.push(match operation {
+                    OwnedWriteOperation::Set { cf, key, value } => {
+                        (self.encoded_key(&cf, &key)?, Some(value))
+                    }
+                    OwnedWriteOperation::Delete { cf, key } => (self.encoded_key(&cf, &key)?, None),
+                    OwnedWriteOperation::Delta { cf, key, delta } => {
+                        let key = self.encoded_key(&cf, &key)?;
+                        let existing = self.tree.borrow_mut().get(&key)?;
+                        let encoded = delta.encode()?;
+                        let merged = apply_storage_delta(existing.as_deref(), &encoded)?;
+                        (key, Some(merged))
+                    }
+                });
+            }
 
-        let mut tree = self.tree.borrow_mut();
-        for (key, value) in encoded_operations {
-            if let Some(value) = value {
-                tree.put(&key, &value)?;
-            } else {
-                tree.delete(&key)?;
-            }
-        }
-        let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
-            Some(cadence) => {
-                cadence.pending += 1;
-                if cadence.pending == cadence.every {
-                    cadence.pending = 0;
-                    true
+            let mut tree = self.tree.borrow_mut();
+            for (key, value) in encoded_operations {
+                if let Some(value) = value {
+                    tree.put(&key, &value)?;
                 } else {
-                    false
+                    tree.delete(&key)?;
                 }
             }
-            None => true,
-        };
-        if should_flush {
-            tree.flush_wal()?;
-            if self.write_flush_cadence.borrow().is_some() {
-                tree.flush_file()?;
+            let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
+                Some(cadence) => {
+                    cadence.pending += 1;
+                    if cadence.pending == cadence.every {
+                        cadence.pending = 0;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => true,
+            };
+            if should_flush {
+                tree.flush_wal()?;
+                if self.write_flush_cadence.borrow().is_some() {
+                    tree.flush_file()?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
 impl<F> super::ReopenableStorage for BtreeStorage<F>
 where
-    F: SyncFile,
+    F: SyncFile + 'static,
 {
-    fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
-        self.column_families
-            .borrow_mut()
-            .extend(column_families.iter().map(|cf| (*cf).to_owned()));
-        Ok(self)
+    fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
+        Box::pin(async move {
+            self.column_families.borrow_mut().extend(column_families);
+            Ok(self)
+        })
     }
 }
 

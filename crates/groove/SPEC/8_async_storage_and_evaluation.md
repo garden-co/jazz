@@ -17,7 +17,8 @@ Groove.
 1. `OrderedKvStorage` is the one storage interface for immediate and suspending
    backends. Memory storage completes the same operations immediately.
 2. Storage requests and results are owned across suspension. In particular, a
-   scan does not retain a borrowed visitor while its backend is suspended.
+   scan returns an owned, executor-local cursor yielding owned batches; it does
+   not retain a borrowed visitor or require complete-range materialization.
 3. Evaluation is explicitly interruptible. A recursively nested Rust future is
    not the durable representation of partially completed IVM work.
 4. Hash-equal graph nodes share one evaluation entry and one in-flight storage
@@ -146,9 +147,6 @@ must not be repaired with Groove compatibility layers.
 
 - Whether native and browser implementations should expose associated future
   types or one boxed local-future representation.
-- Whether large scans initially return one owned batch or an owned async cursor.
-  The choice must preserve bounded-memory operation where existing callers need
-  it, without retaining borrowed callbacks across suspension.
 - Whether tick persistence precedes publication for every current operation or
   whether Groove needs two explicitly named publication policies. Either way,
   no policy may suspend in the middle of visible IVM mutation.
