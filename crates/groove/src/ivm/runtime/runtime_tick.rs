@@ -106,13 +106,20 @@ impl EvaluationSession {
     }
 
     fn install(self, runtime: &mut IvmRuntime) {
-        runtime
-            .operator_states
-            .retain(|key, _| !self.relevant_nodes.contains(&key.node));
+        for node in &self.relevant_nodes {
+            runtime.operator_states.remove(&OperatorStateKey {
+                scope: ScopeId::root(),
+                node: *node,
+            });
+        }
         runtime.operator_states.extend(self.operator_states);
-        runtime
-            .arrangement_states
-            .retain(|key, _| !self.relevant_nodes.contains(&key.input));
+        for node in &self.relevant_nodes {
+            if let Some(keys) = runtime.arrangement_keys_by_input.get(node) {
+                for key in keys {
+                    runtime.arrangement_states.remove(key);
+                }
+            }
+        }
         runtime.arrangement_states.extend(self.arrangement_states);
         for node in &self.relevant_nodes {
             runtime.arrangement_keys_by_input.remove(node);
@@ -130,9 +137,9 @@ impl EvaluationSession {
             .map(|entry| entry.payload_bytes)
             .sum();
         runtime.memo_use_clock = self.memo_use_clock;
-        runtime
-            .node_meta
-            .retain(|node, _| !self.relevant_nodes.contains(node));
+        for node in &self.relevant_nodes {
+            runtime.node_meta.remove(node);
+        }
         runtime.node_meta.extend(self.node_meta);
     }
 }
