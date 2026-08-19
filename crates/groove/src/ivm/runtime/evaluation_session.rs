@@ -138,6 +138,10 @@ where
         self.ready.remove(key)
     }
 
+    pub(super) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     pub(super) fn drain_ready(
         &mut self,
     ) -> Result<BTreeMap<StorageRequestKey, StorageRequestOutput>, StorageError> {

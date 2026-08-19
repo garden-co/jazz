@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use groove::db::{Database, GraphBuilder};
+use groove::db::{Database, GraphBuilder, PrimaryKeyValue};
 use groove::ivm::{ProjectField, PublicationId};
 use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
@@ -254,6 +254,48 @@ fn blocked_recursive_index_source_retains_the_sessions_request() {
             .count(),
         1,
         "recursive fixpoint retries must reuse the retained index request"
+    );
+}
+
+#[test]
+fn recursive_retraction_loads_before_mutating_the_tick() {
+    let (storage, control) = TestStorage::controlled(&["edges"]);
+    let mut database = block_on(Database::new(edges_schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(batch)).unwrap();
+    let subscription = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 3);
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let mut batch = database.open_batch();
+    batch.delete("edges", PrimaryKeyValue::U64(2));
+    let mut commit = Box::pin(database.commit_batch(batch));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(commit.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1
+    );
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    block_on(commit).unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 2);
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1,
+        "recompute must consume the request retained before tick mutation"
     );
 }
 

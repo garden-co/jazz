@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use super::evaluation_session::{EvaluationInputs, StorageRequests};
+use super::evaluation_session::{EvaluationInputs, StorageRequestKey, StorageRequests};
 use super::*;
 use crate::storage::OwnedStorage;
 
@@ -208,6 +208,16 @@ impl IvmRuntime {
             pending.extend(binding_deltas);
             binding_deltas = pending;
         }
+        let needs_recompute_inputs = table_deltas
+            .iter()
+            .flat_map(|delta| &delta.deltas)
+            .chain(binding_deltas.iter().flat_map(|delta| &delta.deltas))
+            .any(|delta| delta.weight < 0);
+        let mut evaluation_inputs = if needs_recompute_inputs {
+            self.load_recursive_recompute_inputs(storage).await?
+        } else {
+            EvaluationInputs::default()
+        };
         let current_tick = self.advance_tick();
         self.bump_input_frontiers(&table_deltas, &binding_deltas);
         let table_delta_records = table_deltas
@@ -254,7 +264,7 @@ impl IvmRuntime {
             memo_use_clock: &mut self.memo_use_clock,
             node_meta: &mut self.node_meta,
             storage: Some(storage),
-            evaluation_inputs: None,
+            evaluation_inputs: needs_recompute_inputs.then_some(&mut evaluation_inputs),
             context: EvalContext::root(),
             metrics: &mut metrics,
             terminal_deltas: HashMap::default(),
@@ -373,6 +383,102 @@ impl IvmRuntime {
             self.cheap_stats()
         };
         Ok(metrics)
+    }
+
+    async fn load_recursive_recompute_inputs<S>(
+        &self,
+        storage: &S,
+    ) -> Result<EvaluationInputs, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let mut requests = std::collections::BTreeSet::new();
+        let mut pending = self
+            .graph
+            .nodes()
+            .iter()
+            .filter_map(|(node, graph_node)| {
+                (matches!(graph_node.descriptor.operator, OpType::Recursive(_))
+                    && self
+                        .node_meta
+                        .get(node)
+                        .is_some_and(|meta| !meta.retainers.is_empty()))
+                .then_some(*node)
+            })
+            .collect::<Vec<_>>();
+        let mut visited: HashSet<NodeId> = HashSet::default();
+        while let Some(node_id) = pending.pop() {
+            if !visited.insert(node_id) {
+                continue;
+            }
+            let node = self
+                .graph
+                .node(node_id)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node_id))?;
+            pending.extend(node.descriptor.inputs.iter().copied());
+            match &node.descriptor.operator {
+                OpType::TableSource(source) => {
+                    let request = match source.scan.as_ref().map(scan_bounds).transpose()? {
+                        None => StorageRequestKey::ScanPrefix {
+                            family: source.table.clone(),
+                            prefix: Vec::new(),
+                        },
+                        Some(StaticScanBounds::Prefix(prefix)) => StorageRequestKey::ScanPrefix {
+                            family: source.table.clone(),
+                            prefix,
+                        },
+                        Some(StaticScanBounds::Range { start, end }) if start < end => {
+                            StorageRequestKey::ScanRange {
+                                family: source.table.clone(),
+                                start,
+                                end,
+                            }
+                        }
+                        Some(StaticScanBounds::Range { .. }) => continue,
+                    };
+                    requests.insert(request);
+                }
+                OpType::IndexSource(source) => {
+                    let request = match persisted_index_scan_bounds(
+                        &source.table,
+                        &source.index,
+                        source.scan.as_ref(),
+                    )? {
+                        StaticScanBounds::Prefix(prefix) => StorageRequestKey::ScanPrefix {
+                            family: "indices".to_owned(),
+                            prefix,
+                        },
+                        StaticScanBounds::Range { start, end } if start < end => {
+                            StorageRequestKey::ScanRange {
+                                family: "indices".to_owned(),
+                                start,
+                                end,
+                            }
+                        }
+                        StaticScanBounds::Range { .. } => continue,
+                    };
+                    requests.insert(request);
+                }
+                _ => {}
+            }
+        }
+        let mut storage_requests = StorageRequests::new(OwnedStorage::new(Rc::new(storage)));
+        for request in requests {
+            storage_requests.request(request);
+        }
+        while storage_requests.has_pending() {
+            std::future::poll_fn(|cx| {
+                if storage_requests.poll(cx) > 0 {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+        }
+        let mut inputs = EvaluationInputs::default();
+        inputs.install(storage_requests.drain_ready()?);
+        Ok(inputs)
     }
 
     fn bump_input_frontiers(
