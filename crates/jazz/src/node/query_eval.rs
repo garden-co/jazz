@@ -2071,10 +2071,30 @@ where
             CurrentQueryProgramOutput::AppRows,
             access_paths,
         )?;
-        let deltas = self
-            .database
-            .query_graph(lowered_materialization_app_rows_graph(&program)?)
-            .map_err(Error::Groove)?;
+        // A policy can introduce claim parameters even though this physical
+        // row lookup has no public query parameters. Those programs must go
+        // through Groove's prepare/bind boundary just like ordinary serving
+        // reads; executing the lowered graph directly leaves its binding
+        // source unprepared and fails instead of representing a denied read.
+        let plan = self.prepared_query_plan_from_program(&program, shape, binding)?;
+        let policy = self.query_program_policy_context(identity);
+        let deltas = match plan {
+            PreparedQueryPlan::Prepared { shape, params } => {
+                let values = binding_values_for_plan(
+                    binding,
+                    &params,
+                    &policy,
+                    PreparedClaimBindingMode::Strict,
+                )?;
+                self.bind_disposable_shape_snapshot(shape, &values)?
+            }
+            PreparedQueryPlan::Graph(graph) => {
+                self.database.query_graph(graph).map_err(Error::Groove)?
+            }
+            PreparedQueryPlan::PeerMaintainedMarker => {
+                unreachable!("point reads never use peer-maintained plans")
+            }
+        };
         let mut rows = self.materialize_inline_current_query_rows(&table, deltas)?;
         self.finish_engine_query_rows_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         Ok(rows)
@@ -2695,6 +2715,37 @@ where
         let snapshot = subscription.recv().map_err(|_| Error::SubscriptionClosed);
         self.database.unsubscribe(subscription_id);
         snapshot
+    }
+
+    /// Bind and immediately retire a one-shot prepared graph. Point reads
+    /// compile a physical-row access path, so their graph cannot be safely
+    /// shared with later rows; retaining it would leak one shape per advice or
+    /// repair request.
+    fn bind_disposable_shape_snapshot(
+        &mut self,
+        shape: PreparedShapeId,
+        values: &[groove::records::Value],
+    ) -> Result<RecordDeltas, Error> {
+        let subscription = match self
+            .database
+            .bind_shape(shape, values)
+            .map_err(Error::Groove)
+        {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                self.database
+                    .retire_prepared_shape(shape)
+                    .map_err(Error::Groove)?;
+                return Err(error);
+            }
+        };
+        let subscription_id = subscription.id();
+        let snapshot = subscription.recv().map_err(|_| Error::SubscriptionClosed);
+        self.database.unsubscribe(subscription_id);
+        self.database
+            .retire_prepared_shape(shape)
+            .map_err(Error::Groove)?;
+        snapshot.and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))
     }
 }
 

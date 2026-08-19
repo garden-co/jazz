@@ -574,6 +574,115 @@ fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
 }
 
 #[test]
+fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::U64(7),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    let baseline = database.runtime_stats();
+
+    // These deliberately share an identical binding source and graph. Retiring
+    // the first must not remove the descriptor or retained graph used by its
+    // sibling.
+    let first = database
+        .prepare_one_sink(
+            artist_album_shape_graph(),
+            "artist_params",
+            artist_binding_descriptor(),
+            ["artist_id"],
+        )
+        .unwrap();
+    let second = database
+        .prepare_one_sink(
+            artist_album_shape_graph(),
+            "artist_params",
+            artist_binding_descriptor(),
+            ["artist_id"],
+        )
+        .unwrap();
+    let first_id = first.id();
+    let second_id = second.id();
+    let first_subscription = database
+        .bind_shape_one_sink(first_id, &[Value::U64(7)])
+        .unwrap();
+    assert!(matches!(
+        database.retire_prepared_shape(first_id),
+        Err(Error::IvmRuntime(IvmRuntimeError::PreparedShapeHasActiveBindings(id))) if id == first_id
+    ));
+    assert_eq!(
+        expect_try_recv_vals(&first_subscription),
+        vec![(
+            vec![
+                Value::U64(7),
+                Value::U64(1),
+                Value::String("Blue Train".to_owned())
+            ],
+            1,
+        )]
+    );
+    database.unsubscribe(first_subscription.id());
+    database.retire_prepared_shape(first_id).unwrap();
+
+    assert!(matches!(
+        database.bind_shape_one_sink(first_id, &[Value::U64(7)]),
+        Err(Error::IvmRuntime(IvmRuntimeError::PreparedShapeNotFound(id))) if id == first_id
+    ));
+    let second_subscription = database
+        .bind_shape_one_sink(second_id, &[Value::U64(7)])
+        .expect("retiring a sibling must preserve its shared binding source");
+    assert_eq!(
+        expect_try_recv_vals(&second_subscription),
+        vec![(
+            vec![
+                Value::U64(7),
+                Value::U64(1),
+                Value::String("Blue Train".to_owned())
+            ],
+            1,
+        )]
+    );
+    database.unsubscribe(second_subscription.id());
+    database.retire_prepared_shape(second_id).unwrap();
+
+    assert!(matches!(
+        database.retire_prepared_shape(second_id),
+        Err(Error::IvmRuntime(IvmRuntimeError::PreparedShapeNotFound(id))) if id == second_id
+    ));
+    assert!(matches!(
+        database.bind_shape_one_sink(second_id, &[Value::U64(7)]),
+        Err(Error::IvmRuntime(IvmRuntimeError::PreparedShapeNotFound(id))) if id == second_id
+    ));
+    let final_stats = database.runtime_stats();
+    assert_eq!(
+        final_stats.active_subscriptions,
+        baseline.active_subscriptions
+    );
+    assert_eq!(
+        final_stats.active_prepared_shapes,
+        baseline.active_prepared_shapes
+    );
+    assert_eq!(
+        final_stats.active_shape_params,
+        baseline.active_shape_params
+    );
+    assert_eq!(final_stats.graph_nodes, baseline.graph_nodes);
+    assert_eq!(final_stats.arrangement_count, baseline.arrangement_count);
+}
+
+#[test]
 fn prepared_subscription_matches_literal_subscription_without_param_columns() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestStorage::open(
