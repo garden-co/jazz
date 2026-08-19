@@ -8,6 +8,7 @@
 
 use bytes::Bytes;
 use rustc_hash::FxHashMap as HashMap;
+use std::rc::Rc;
 
 use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp};
 use crate::records::RecordDescriptor;
@@ -28,7 +29,7 @@ pub(super) struct RecursiveState {
     /// For now recursive outputs are set-style: each reachable record is kept
     /// at weight 1. Bag recursion can diverge on cycles, and non-monotone
     /// recursion needs a DRed/DBSP design before we accept negative frontiers.
-    accumulated: HashMap<Bytes, i64>,
+    accumulated: Rc<HashMap<Bytes, i64>>,
     /// Positive incremental ticks rely on step-side arrangements already
     /// containing the full base/accumulated state after a recompute.
     step_arrangements_hydrated: bool,
@@ -86,7 +87,7 @@ impl RecursiveState {
             if self.accumulated.contains_key(&delta.record) {
                 continue;
             }
-            self.accumulated.insert(delta.record.clone(), 1);
+            Rc::make_mut(&mut self.accumulated).insert(delta.record.clone(), 1);
             accepted.push(RecordDelta {
                 record: delta.record,
                 weight: 1,
@@ -97,7 +98,7 @@ impl RecursiveState {
 
     pub(super) fn replace_with(&mut self, next: HashMap<Bytes, i64>) -> Vec<RecordDelta> {
         let mut deltas = Vec::new();
-        for (record, old_weight) in &self.accumulated {
+        for (record, old_weight) in self.accumulated.iter() {
             let next_weight = next.get(record).copied().unwrap_or_default();
             let delta = next_weight - old_weight;
             if delta != 0 {
@@ -116,7 +117,7 @@ impl RecursiveState {
                 weight: *next_weight,
             });
         }
-        self.accumulated = next;
+        self.accumulated = Rc::new(next);
         self.step_arrangements_hydrated = false;
         consolidate_deltas(deltas)
     }
@@ -1130,5 +1131,22 @@ mod tests {
             ),
             Err(IvmRuntimeError::UnsupportedNonMonotoneRecursion)
         ));
+    }
+
+    #[test]
+    fn recursive_snapshot_clone_shares_payload_until_first_write() {
+        let mut original = RecursiveState::default();
+        original
+            .accept_positive(vec![delta(b"original", 1)])
+            .unwrap();
+        let mut prepared = original.clone();
+        assert!(Rc::ptr_eq(&original.accumulated, &prepared.accumulated));
+
+        prepared
+            .accept_positive(vec![delta(b"prepared", 1)])
+            .unwrap();
+        assert!(!Rc::ptr_eq(&original.accumulated, &prepared.accumulated));
+        assert_eq!(original.accumulated_row_count(), 1);
+        assert_eq!(prepared.accumulated_row_count(), 2);
     }
 }

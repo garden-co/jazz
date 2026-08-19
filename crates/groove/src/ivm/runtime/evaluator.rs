@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::storage::StorageFuture;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 #[derive(Clone, Debug)]
 pub(super) enum OperatorState {
@@ -15,8 +17,42 @@ pub(super) enum OperatorState {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct CollectByIncrementalState {
+    payload: Rc<CollectByIncrementalPayload>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct CollectByIncrementalPayload {
     pub(super) groups: CollectByGroups,
     pub(super) roots: BTreeMap<CollectByOrderKey, i64>,
+}
+
+impl Deref for CollectByIncrementalState {
+    type Target = CollectByIncrementalPayload;
+
+    fn deref(&self) -> &Self::Target {
+        &self.payload
+    }
+}
+
+impl DerefMut for CollectByIncrementalState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Rc::make_mut(&mut self.payload)
+    }
+}
+
+#[cfg(test)]
+mod collect_by_state_tests {
+    use super::*;
+
+    #[test]
+    fn collect_by_snapshot_clone_shares_payload_until_first_write() {
+        let original = CollectByIncrementalState::default();
+        let mut prepared = original.clone();
+        assert!(Rc::ptr_eq(&original.payload, &prepared.payload));
+
+        prepared.groups.clear();
+        assert!(!Rc::ptr_eq(&original.payload, &prepared.payload));
+    }
 }
 
 type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
