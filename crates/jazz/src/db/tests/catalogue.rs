@@ -79,7 +79,7 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
@@ -93,7 +93,7 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -192,7 +192,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
@@ -206,7 +206,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -235,7 +235,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(SchemaLineagePublication::new(
@@ -249,7 +249,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 2,
@@ -266,13 +266,13 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     db.node
         .node
         .borrow_mut()
-        .commit_mergeable(
-            MergeableCommit::new("items", row(0x5c), 10).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("items", row(0x5c), 10).cells(
+            BTreeMap::from([
                 ("title".to_owned(), Value::String("after".to_owned())),
                 ("status".to_owned(), Value::EnumTag(0)),
                 ("body".to_owned(), Value::String("new body".to_owned())),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     db.refresh_subscriptions().unwrap();
     let (added, updated, removed) = delta_rows(

@@ -694,7 +694,7 @@ fn oversized_register_shape_is_rejected_at_admission() {
     let error = server
         .node()
         .borrow_mut()
-        .apply_sync_message(SyncMessage::RegisterShape {
+        .apply_sync_message_settled(SyncMessage::RegisterShape {
             shape_id: ShapeId(uuid::Uuid::from_bytes([0x99; 16])),
             ast,
             opts: RegisterShapeOptions::default(),

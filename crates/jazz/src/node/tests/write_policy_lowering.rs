@@ -307,13 +307,13 @@ fn lowered_write_policy_operation_matrix() {
     let parent = row(0xd3);
     let old_child = row(0xd4);
     let access = row(0xd5);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("grandparents", grandparent, 1)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.0))])),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("parents", parent, 2)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([
@@ -323,7 +323,7 @@ fn lowered_write_policy_operation_matrix() {
             ])),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("access", access, 3)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([
@@ -337,7 +337,7 @@ fn lowered_write_policy_operation_matrix() {
         "optional_owner".to_owned(),
         Value::Nullable(Some(Box::new(Value::Uuid(owner.0)))),
     );
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("children", old_child, 4)
             .made_by(AuthorId::SYSTEM)
             .cells(old_cells.clone()),
@@ -814,7 +814,7 @@ fn lowered_write_policy_covers_deep_inherited_write_chains() {
     let grandparent = row(0xf4);
     let parent = row(0xf5);
     let child = row(0xf6);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("grandparents", grandparent, 1)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([(
@@ -823,7 +823,7 @@ fn lowered_write_policy_covers_deep_inherited_write_chains() {
             )])),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("parents", parent, 2)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([(
@@ -833,7 +833,7 @@ fn lowered_write_policy_covers_deep_inherited_write_chains() {
     )
     .unwrap();
     let cells = BTreeMap::from([("parent_id".to_owned(), Value::Uuid(parent.0))]);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("children", child, 3)
             .made_by(AuthorId::SYSTEM)
             .cells(cells.clone()),
@@ -982,7 +982,7 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
     core.create_root_branch(branch_id).unwrap();
     let access = row(0x45);
     let parent = row(0x47);
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("parents", parent, 1)
             .made_by(AuthorId::SYSTEM)
@@ -992,7 +992,7 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
             ])),
     )
     .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("access", access, 2)
             .made_by(AuthorId::SYSTEM)
@@ -1009,7 +1009,7 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
         ("access_id".to_owned(), Value::Uuid(access.0)),
         ("marker".to_owned(), Value::String("open".to_owned())),
     ]);
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("docs", doc, 3)
             .made_by(AuthorId::SYSTEM)
@@ -1186,7 +1186,7 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
 
     let admitted_doc = row(0x48);
     assert!(matches!(
-        core.commit_mergeable_on_branch(
+        core.commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("docs", admitted_doc, 4)
                 .made_by(owner)
@@ -1195,7 +1195,7 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
         Err(Error::AuthorizationDenied)
     ));
     let create = core
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("docs", admitted_doc, 5)
                 .made_by(editor)
@@ -1208,7 +1208,7 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
         Value::String("updated".to_owned()),
     );
     assert!(matches!(
-        core.commit_mergeable_on_branch(
+        core.commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("docs", admitted_doc, 6)
                 .made_by(owner)
@@ -1218,7 +1218,7 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
         Err(Error::AuthorizationDenied)
     ));
     let update = core
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("docs", admitted_doc, 7)
                 .made_by(editor)
@@ -1227,7 +1227,7 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
         )
         .unwrap();
     assert!(matches!(
-        core.commit_mergeable_on_branch(
+        core.commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("docs", admitted_doc, 8)
                 .made_by(owner)
@@ -1236,7 +1236,7 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
         ),
         Err(Error::AuthorizationDenied)
     ));
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("docs", admitted_doc, 9)
             .made_by(editor)
@@ -1279,7 +1279,7 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -1355,7 +1355,7 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
 
     let existing = row(0xe5);
     let existing_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("tasks", existing, 2)
                 .made_by(AuthorId::SYSTEM)
                 .cells(candidate.clone()),

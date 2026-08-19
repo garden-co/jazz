@@ -221,7 +221,7 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
             .node
             .node
             .borrow_mut()
-            .commit_mergeable(commit)
+            .commit_mergeable_settled(commit)
             .expect("commit root relation row");
         db.node
             .node
@@ -242,7 +242,7 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
     db.node
         .node
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch,
             MergeableCommit::new("users", row(0xa1), 10).cells(BTreeMap::from([(
                 "name".to_owned(),
@@ -1959,7 +1959,7 @@ fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
         .node
         .node
         .borrow_mut()
-        .apply_sync_message(SyncMessage::CommitUnit {
+        .apply_sync_message_settled(SyncMessage::CommitUnit {
             tx: tx.clone(),
             versions: versions.clone(),
         })
@@ -1968,7 +1968,7 @@ fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
         .node
         .node
         .borrow_mut()
-        .apply_sync_message(SyncMessage::CommitUnit { tx, versions })
+        .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
         .unwrap();
 
     assert_eq!(
@@ -2063,7 +2063,7 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
     db.node
         .node
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch,
             MergeableCommit::new("todos", row(0x42), 10)
                 .cells(doctest_support::todo_cells("branch-only", false)),
@@ -2079,7 +2079,7 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
     db.node
         .node
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch,
             MergeableCommit::new("todos", row(0x42), 11).deletion(DeletionEvent::Deleted),
         )
@@ -2093,7 +2093,7 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
     db.node
         .node
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch,
             MergeableCommit::new("todos", row(0x42), 12).deletion(DeletionEvent::Restored),
         )

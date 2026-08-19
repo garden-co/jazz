@@ -283,7 +283,7 @@ fn authoritative_reset_skips_stale_member_without_falling_back() {
         .node
         .node
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", live_row, client.next_now_ms())
                 .made_by(client_author)
                 .permission_subject(client_author)
@@ -368,7 +368,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
         .node
         .node
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", published, db.next_now_ms())
                 .made_by(client_author)
                 .permission_subject(client_author)
@@ -379,7 +379,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
         .node
         .node
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", server_overemitted, db.next_now_ms())
                 .made_by(client_author)
                 .permission_subject(client_author)
@@ -635,7 +635,7 @@ fn propagated_authoritative_reset_uses_delivered_binding_view() {
         .node
         .node
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", live_row, client.next_now_ms())
                 .made_by(client_author)
                 .permission_subject(client_author)

@@ -182,13 +182,13 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
         ),
     ] {
         let (tx_id, unit) = writer
-            .commit_mergeable_unit(
+            .commit_mergeable_unit_settled(
                 MergeableCommit::new("docs", doc, 50)
                     .made_by(reader)
                     .cells(recursive_doc_cells(title, "inserted")),
             )
             .unwrap();
-        let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+        let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
         assert_eq!(
             fate,
             SyncMessage::FateUpdate {
@@ -376,7 +376,7 @@ fn unbound_is_admin_claim_in_read_policy_denies_as_false() {
     ))]);
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x88), 10).cells(BTreeMap::from([
                 ("title".to_owned(), v("admin")),
                 ("requiresAdmin".to_owned(), Value::Bool(true)),
@@ -409,13 +409,13 @@ fn missing_read_or_write_policy_is_public_for_that_operation() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x85), 10)
                 .made_by(user(0xa1))
                 .cells(owner_cells(user(0xb2), "public write")),
         )
         .unwrap();
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {

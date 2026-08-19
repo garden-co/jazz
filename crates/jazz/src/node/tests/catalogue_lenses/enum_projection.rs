@@ -84,7 +84,7 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -101,7 +101,7 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
         (base_row, "base", 0, 2),
         (a_row, "a", 1, 3),
     ] {
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("items", row_uuid, tx_time).cells(BTreeMap::from([
                 ("title".to_owned(), v(title)),
                 ("status".to_owned(), Value::EnumTag(status)),
@@ -145,7 +145,7 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
             },
         ],
     );
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
@@ -154,7 +154,7 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
     })
     .unwrap();
     let b_row = row(0x7b);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", b_row, 4).cells(BTreeMap::from([
             ("title".to_owned(), v("b")),
             ("status".to_owned(), Value::EnumTag(1)),
@@ -278,7 +278,7 @@ fn direct_payload_enum_append_activates_and_recovers() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -290,7 +290,7 @@ fn direct_payload_enum_append_activates_and_recovers() {
         "note",
         groove::records::ValueType::String,
     )]);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", row(0x76), 1).cells(BTreeMap::from([
             ("title".to_owned(), v("new-case")),
             (
@@ -336,15 +336,15 @@ fn payload_enum_unknown_case_is_ignored_only_when_unselected() {
     let base = schema(false); let evolved = SchemaVersion::new(schema(true));
     let (_dir, mut core) = open_node_with_schema(node(0x76), base.clone());
     publish_schema_lineage(&mut core, evolved.clone(), MigrationLens::new(base.version_id(), evolved.id, vec![TableLens { source_table: "items".into(), target_table: "items".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] }]), Vec::<String>::new(), Vec::<String>::new()).unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema { author: AuthorId::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema { author: AuthorId::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
     let payload = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
     let unknown = row(0x76);
-    core.commit_mergeable(MergeableCommit::new("items", unknown, 1).cells(BTreeMap::from([
+    core.commit_mergeable_settled(MergeableCommit::new("items", unknown, 1).cells(BTreeMap::from([
         ("title".into(), v("ok")), ("status".into(), Value::Enum(groove::records::EnumValue::create(1, payload, &[v("closed")]).unwrap()))
     ]))).unwrap();
     let known = row(0x77);
     let known_payload = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
-    core.commit_mergeable(MergeableCommit::new("items", known, 2).cells(BTreeMap::from([
+    core.commit_mergeable_settled(MergeableCommit::new("items", known, 2).cells(BTreeMap::from([
         ("title".into(), v("known")), ("status".into(), Value::Enum(groove::records::EnumValue::create(0, known_payload, &[v("open")]).unwrap()))
     ]))).unwrap();
     let title = Query::from("items").select(["title"]).validate(&base).unwrap();
@@ -392,7 +392,7 @@ fn nested_scalar_enum_unknown_case_omits_only_that_row() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -406,7 +406,7 @@ fn nested_scalar_enum_unknown_case_omits_only_that_row() {
         (unknown, "new nested case", 1, 1),
         (known, "known nested case", 0, 2),
     ] {
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("items", row_uuid, tx_time).cells(BTreeMap::from([
                 ("title".to_owned(), v(title)),
                 (
@@ -467,7 +467,7 @@ fn nested_payload_enum_unknown_case_omits_only_that_row() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -485,7 +485,7 @@ fn nested_payload_enum_unknown_case_omits_only_that_row() {
         (unknown, "new nested case", 1, "closed", 1),
         (known, "known nested case", 0, "open", 2),
     ] {
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("items", row_uuid, tx_time).cells(BTreeMap::from([
                 ("title".to_owned(), v(title)),
                 (
@@ -548,7 +548,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
@@ -657,7 +657,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     // Maintained membership follows the same compatibility boundary on every
     // delta: a newer local/Ahead unknown winner retracts the older Global row,
     // then a newer known winner re-adds it without a subscription error.
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", known, 3).cells(BTreeMap::from([
             ("title".to_owned(), v("now incompatible")),
             ("status".to_owned(), Value::EnumTag(1)),
@@ -679,7 +679,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     assert!(result_member_removes.iter().any(|member| {
         member.as_row().is_some_and(|(_, row_uuid, _)| row_uuid == known)
     }));
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", known, 4).cells(BTreeMap::from([
             ("title".to_owned(), v("compatible again")),
             ("status".to_owned(), Value::EnumTag(0)),
@@ -727,7 +727,7 @@ fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
@@ -804,7 +804,7 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -813,7 +813,7 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
     })
     .unwrap();
     let closed = row(0x75);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", closed, 1).cells(BTreeMap::from([
             ("title".to_owned(), v("still-readable")),
             ("status".to_owned(), Value::EnumTag(1)),
@@ -821,7 +821,7 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
     )
     .unwrap();
     let open = row(0x76);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", open, 1).cells(BTreeMap::from([
             ("title".to_owned(), v("still-compatible")),
             ("status".to_owned(), Value::EnumTag(0)),
@@ -955,7 +955,7 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
@@ -968,7 +968,7 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
             ("status".to_owned(), Value::EnumTag(0)),
         ])),
     );
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", item, 2).cells(BTreeMap::from([
             ("title".to_owned(), v("new local case")),
             ("status".to_owned(), Value::EnumTag(1)),
@@ -1027,7 +1027,7 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
         .unwrap()
         .is_empty());
 
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", item, 3).cells(BTreeMap::from([
             ("title".to_owned(), v("local known again")),
             ("status".to_owned(), Value::EnumTag(0)),
@@ -1073,7 +1073,7 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
@@ -1100,7 +1100,7 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
         .unwrap()
         .is_empty());
 
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", global_row, 2).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
@@ -1118,7 +1118,7 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
 
     let branch_id = branch(0x7b);
     core.create_root_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("items", row(0x7c), 3).cells(BTreeMap::from([
             ("title".to_owned(), v("later branch case")),
@@ -1157,7 +1157,7 @@ fn old_enum_winner_projection_refreshes_after_later_registry_append() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: middle.id },
     })
@@ -1188,12 +1188,12 @@ fn old_enum_winner_projection_refreshes_after_later_registry_append() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema { revision: 2, schema: latest.id },
     })
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", item, 2).cells(BTreeMap::from([
             ("title".to_owned(), v("later archived case")),
             ("status".to_owned(), Value::EnumTag(2)),
@@ -1239,7 +1239,7 @@ fn old_enum_index_read_uses_global_index_before_post_winner_omission() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
@@ -1287,10 +1287,10 @@ fn enum_projection_requirement_none_allows_unused_relation_enum() {
             TableLens { source_table: "states".into(), target_table: "states".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] },
         ],
     ), Vec::<String>::new(), Vec::<String>::new()).unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema { author: AuthorId::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema { author: AuthorId::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
     let state = row(0x79);
-    core.commit_mergeable(MergeableCommit::new("states", state, 1).cells(BTreeMap::from([("status".into(), Value::EnumTag(1))]))).unwrap();
-    core.commit_mergeable(MergeableCommit::new("items", row(0x7a), 2).cells(BTreeMap::from([
+    core.commit_mergeable_settled(MergeableCommit::new("states", state, 1).cells(BTreeMap::from([("status".into(), Value::EnumTag(1))]))).unwrap();
+    core.commit_mergeable_settled(MergeableCommit::new("items", row(0x7a), 2).cells(BTreeMap::from([
         ("title".into(), v("root remains readable")), ("state".into(), Value::Uuid(state.0)),
     ]))).unwrap();
 
@@ -1310,7 +1310,7 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
     let a_evolved = SchemaVersion::new(independent_enum_schema(&["a0", "a1"], &["b0"]));
     let b_evolved = SchemaVersion::new(independent_enum_schema(&["a0", "a1"], &["b0", "b1"]));
     let (dir, mut core) = open_node_with_schema(node(0x72), base.clone());
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", row(0x72), 1).cells(BTreeMap::from([
             ("a".to_owned(), Value::EnumTag(0)),
             ("b".to_owned(), Value::EnumTag(0)),
@@ -1339,7 +1339,7 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -1347,7 +1347,7 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
         },
     })
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", row(0x73), 2).cells(BTreeMap::from([
             ("a".to_owned(), Value::EnumTag(1)),
             ("b".to_owned(), Value::EnumTag(0)),
@@ -1385,7 +1385,7 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
@@ -1393,7 +1393,7 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
         },
     })
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("items", row(0x74), 3).cells(BTreeMap::from([
             ("a".to_owned(), Value::EnumTag(1)),
             ("b".to_owned(), Value::EnumTag(1)),

@@ -10,7 +10,9 @@ use jazz_storage_rocksdb::RocksDbStorage;
 
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
-use crate::legacy_test_future::{OptionFutureExt as _, ResultFutureExt as _};
+use crate::legacy_test_future::{
+    OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+};
 use crate::protocol::{
     AuthorizationScopePurpose, AuthorizationScopeReceipt, AuthorizationSupportScopeKey,
     BindingViewKey, BranchMetadata, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration,

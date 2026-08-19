@@ -28,7 +28,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         .rehydrate_query_with_opts(&mut server, &shape, &binding, opts.clone())
         .expect("serve initial settled issues view");
     client
-        .apply_sync_message(initial)
+        .apply_sync_message_settled(initial)
         .expect("apply initial settled issues view");
     let binding_view = *client
         .query
@@ -62,7 +62,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     client.seed_local_maintained_authoritative_generation(&mut local, binding_view);
 
     let updated_tx = client
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("issues", issue, 2_000)
                 .made_by(AuthorId::SYSTEM)
                 .parents(vec![initial_tx])
@@ -154,7 +154,7 @@ fn branch_program_maintained_view_provides_branch_deletion_witness_source() {
     let (_dir, mut node) = open_node();
     let branch_id = BranchId::from_bytes([0x42; 16]);
     node.create_branch(branch_id).unwrap();
-    node.commit_mergeable_on_branch(
+    node.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("issues", row(1), 1_000).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("branch issue".to_owned())),
@@ -197,7 +197,7 @@ fn branch_program_maintained_view_tracks_local_overlay_replacement() {
     let branch_id = BranchId::from_bytes([0x43; 16]);
     node.create_branch(branch_id).unwrap();
     let issue = row(7);
-    node.commit_mergeable_on_branch(
+    node.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("issues", issue, 1_000).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("first title".to_owned())),
@@ -230,7 +230,7 @@ fn branch_program_maintained_view_tracks_local_overlay_replacement() {
         .unwrap();
     assert_eq!(initial.root_count, 1);
 
-    node.commit_mergeable_on_branch(
+    node.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("issues", issue, 2_000).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("second title".to_owned())),
@@ -249,7 +249,7 @@ fn branch_program_maintained_view_tracks_local_overlay_replacement() {
         "replacement must leave a current row in the maintained result"
     );
 
-    node.commit_mergeable_on_branch(
+    node.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("issues", issue, 3_000).deletion(DeletionEvent::Deleted),
     )
@@ -268,7 +268,7 @@ fn branch_program_maintained_view_tracks_local_overlay_replacement() {
         "branch deletion must retract the overlay row"
     );
 
-    node.commit_mergeable_on_branch(
+    node.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("issues", issue, 4_000).deletion(DeletionEvent::Restored),
     )
@@ -338,7 +338,7 @@ fn branch_program_maintained_view_survives_first_overlay_partition_write() {
     );
 
     let first_overlay = node
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("issues", issue, 2_000).cells(BTreeMap::from([
                 (
@@ -430,7 +430,7 @@ fn branch_program_maintained_views_isolate_sibling_first_writes() {
     assert_eq!(sibling_initial.root_count, 1);
 
     let first_write = node
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             first_branch,
             MergeableCommit::new("issues", issue, 2_000).cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("first branch".to_owned())),
@@ -483,7 +483,7 @@ fn branch_program_maintained_view_settles_overlay_fates_at_every_tier() {
         commit_global_issue(&mut node, 8, "open", author(0xa1), 2);
         node.create_branch(branch_id).unwrap();
         let initial_overlay = node
-            .commit_mergeable_on_branch(
+            .commit_mergeable_on_branch_settled(
                 branch_id,
                 MergeableCommit::new("issues", issue, 2_500).cells(BTreeMap::from([
                     (
@@ -531,7 +531,7 @@ fn branch_program_maintained_view_settles_overlay_fates_at_every_tier() {
         );
 
         let replacement = node
-            .commit_mergeable_on_branch(
+            .commit_mergeable_on_branch_settled(
                 branch_id,
                 MergeableCommit::new("issues", issue, 3_000).cells(BTreeMap::from([
                     (
@@ -575,7 +575,7 @@ fn branch_program_maintained_view_settles_overlay_fates_at_every_tier() {
         }
 
         let deletion = node
-            .commit_mergeable_on_branch(
+            .commit_mergeable_on_branch_settled(
                 branch_id,
                 MergeableCommit::new("issues", frozen_only_issue, 4_000)
                     .deletion(DeletionEvent::Deleted),
@@ -628,7 +628,7 @@ fn branch_program_maintained_view_settles_overlay_fates_at_every_tier() {
         }
 
         let restoration = node
-            .commit_mergeable_on_branch(
+            .commit_mergeable_on_branch_settled(
                 branch_id,
                 MergeableCommit::new("issues", frozen_only_issue, 5_000)
                     .deletion(DeletionEvent::Restored),
@@ -694,7 +694,7 @@ fn branch_program_maintained_view_retracts_rejected_pending_overlay_versions() {
         commit_global_issue(&mut node, 7, "open", author(0xa1), 1);
         node.create_branch(branch_id).unwrap();
         let accepted = node
-            .commit_mergeable_on_branch(
+            .commit_mergeable_on_branch_settled(
                 branch_id,
                 MergeableCommit::new("issues", issue, 2_500).cells(BTreeMap::from([
                     (
@@ -743,7 +743,7 @@ fn branch_program_maintained_view_retracts_rejected_pending_overlay_versions() {
         }));
 
         let rejected_replacement = node
-            .commit_mergeable_on_branch(
+            .commit_mergeable_on_branch_settled(
                 branch_id,
                 MergeableCommit::new("issues", issue, 3_000).cells(BTreeMap::from([
                     (
@@ -801,7 +801,7 @@ fn branch_program_maintained_view_retracts_rejected_pending_overlay_versions() {
         }
 
         let rejected_insert = node
-            .commit_mergeable_on_branch(
+            .commit_mergeable_on_branch_settled(
                 branch_id,
                 MergeableCommit::new("issues", rejected_only, 4_000).cells(BTreeMap::from([
                     (

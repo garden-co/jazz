@@ -197,7 +197,7 @@ fn fixed_schema_db_branch_and_bootstrap_writes_retain_authored_schema() {
         .node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
@@ -207,7 +207,7 @@ fn fixed_schema_db_branch_and_bootstrap_writes_retain_authored_schema() {
         .node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -657,7 +657,7 @@ fn session_branch_data_parks_until_authenticated_metadata_arrives() {
     let tx_id = writer
         .node()
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch,
             MergeableCommit::new("todos", row(0x47), 1)
                 .made_by(identity)
@@ -1007,7 +1007,7 @@ fn subscriber_connection_serves_branch_subscription_with_known_state_and_unsubsc
     server
         .node()
         .borrow_mut()
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch,
             MergeableCommit::new("todos", row(0x42), 10).cells(cells(
                 "branch-only",

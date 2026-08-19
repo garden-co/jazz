@@ -95,7 +95,7 @@ fn exclusive_join_shape_uses_shared_snapshot_lowering() {
         open_node_with_uuid(NodeUuid::from_bytes([1; 16]), schema.clone());
     let alice = author(1);
     client
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("issues", row(1), 10).cells(BTreeMap::from([(
                 "title".to_owned(),
                 Value::String("issue".to_owned()),
@@ -103,12 +103,12 @@ fn exclusive_join_shape_uses_shared_snapshot_lowering() {
         )
         .unwrap();
     client
-        .commit_mergeable(
-            MergeableCommit::new("issue_members", row(2), 11).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("issue_members", row(2), 11).cells(
+            BTreeMap::from([
                 ("issue".to_owned(), Value::Uuid(row(1).0)),
                 ("user".to_owned(), Value::Uuid(alice.0)),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
 
     let shape = Query::from("issues")

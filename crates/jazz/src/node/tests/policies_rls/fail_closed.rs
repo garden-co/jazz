@@ -13,7 +13,7 @@ fn unsupported_policy_predicates_deny_instead_of_allowing() {
     core.catalogue.schema.tables[0].read_policy =
         Some(Query::from("todos").filter(not(contains(col("title"), lit("a")))));
     let tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x83), 10).cells(owner_cells(user(0xa1), "z")),
         )
         .unwrap();
@@ -43,7 +43,7 @@ fn unresolved_policy_operands_deny_instead_of_allowing() {
     core.catalogue.schema.tables[0].read_policy =
         Some(Query::from("todos").filter(eq(col("title"), claim("missing"))));
     let tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row(0x84), 10).cells(title_cells("z")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(0x84), 10).cells(title_cells("z")))
         .unwrap();
     core.apply_fate_update(
         tx,
@@ -75,7 +75,7 @@ fn unbound_team_claim_in_composed_read_policy_denies_without_binding_error() {
     ))]);
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x87), 10).cells(BTreeMap::from([
                 ("title".to_owned(), v("team-owned")),
                 ("team".to_owned(), Value::Uuid(user(0xa1).0)),
@@ -113,7 +113,7 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
     let team_a = user(0xa1);
     let team_b = user(0xb2);
     let tx_a = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x87), 10).cells(BTreeMap::from([
                 ("title".to_owned(), v("team-a")),
                 ("team".to_owned(), Value::Uuid(team_a.0)),
@@ -128,7 +128,7 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
     )
     .unwrap();
     let tx_b = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x88), 11).cells(BTreeMap::from([
                 ("title".to_owned(), v("team-b")),
                 ("team".to_owned(), Value::Uuid(team_b.0)),
@@ -178,7 +178,7 @@ fn nullable_claim_equality_policy_branch_allows_matching_row() {
     let matching = row(0x91);
     let other = row(0x92);
     let tx_matching = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("chats", matching, 10).cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("matching".to_owned())),
                 (
@@ -196,7 +196,7 @@ fn nullable_claim_equality_policy_branch_allows_matching_row() {
     )
     .unwrap();
     let tx_other = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("chats", other, 11).cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("other".to_owned())),
                 (

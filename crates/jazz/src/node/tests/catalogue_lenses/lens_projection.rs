@@ -13,7 +13,7 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x3d), base.clone());
     let old_row = row(0x41);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", old_row, 10).cells(title_cells("old-title")),
     )
     .unwrap();
@@ -42,7 +42,7 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -51,7 +51,7 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
     })
     .unwrap();
     let new_row = row(0x42);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", new_row, 11).cells(BTreeMap::from([
             ("name".to_owned(), v("new-name")),
             ("body".to_owned(), v("new-body")),
@@ -109,7 +109,7 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
         ])
     );
 
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", new_row, 12).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
@@ -232,7 +232,7 @@ fn agreeing_cross_lens_keeps_the_authoritative_physical_mapping() {
     let authoritative = core.catalogue.physical_mappings[&v3_payload.id].clone();
     let published_lens_count = core.catalogue.catalogue_lenses.len();
 
-    core.apply_trusted_catalogue_message(SyncMessage::PublishLens {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::PublishLens {
         author: AuthorId::SYSTEM,
         lens: shortest.clone(),
     })
@@ -286,7 +286,7 @@ fn old_schema_commit_units_stay_in_authored_variant_after_pointer_flip() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -297,11 +297,11 @@ fn old_schema_commit_units_stay_in_authored_variant_after_pointer_flip() {
 
     let old_row = row(0x45);
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", old_row, 12).cells(title_cells("old-writer")),
         )
         .unwrap();
-    core.apply_sync_message(unit).unwrap();
+    core.apply_sync_message_settled(unit).unwrap();
 
     let stored = core.query_table_versions("todos").unwrap();
     assert_eq!(stored.len(), 1);
@@ -392,7 +392,7 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -403,7 +403,7 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
 
     let readable_row = row(0x48);
     let (_accepted_tx, accepted_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", readable_row, 21)
                 .made_by(author)
                 .cells(BTreeMap::from([
@@ -413,7 +413,7 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
                 ])),
         )
         .unwrap();
-    let updates = core.apply_sync_message(accepted_unit).unwrap();
+    let updates = core.apply_sync_message_settled(accepted_unit).unwrap();
     assert!(matches!(
         updates.as_slice(),
         [SyncMessage::FateUpdate {
@@ -439,7 +439,7 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
 
     let denied_row = row(0x49);
     let (_denied_tx, denied_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", denied_row, 22)
                 .made_by(author)
                 .cells(BTreeMap::from([
@@ -449,7 +449,7 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
                 ])),
         )
         .unwrap();
-    let updates = core.apply_sync_message(denied_unit).unwrap();
+    let updates = core.apply_sync_message_settled(denied_unit).unwrap();
     assert!(matches!(
         updates.as_slice(),
         [SyncMessage::FateUpdate {
@@ -466,7 +466,7 @@ fn registered_transform_column_identity_is_accepted_and_projected() {
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x4a), base.clone());
     let old_row = row(0x4b);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", old_row, 30).cells(title_cells("stable-title")),
     )
     .unwrap();
@@ -580,7 +580,7 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
     let (_dir, mut core) = open_node_with_schema(node(0x46), base.clone());
 
     let base_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row(0x46), 10).cells(title_cells("base")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(0x46), 10).cells(title_cells("base")))
         .unwrap();
     publish_schema_lineage(
         &mut core,
@@ -601,7 +601,7 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -610,7 +610,7 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
     })
     .unwrap();
     let evolved_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x47), 11).cells(BTreeMap::from([
                 ("title".to_owned(), v("evolved")),
                 ("body".to_owned(), v("partition")),
@@ -652,7 +652,7 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
     let (_dir, mut core) = open_node_with_schema(node(0x4a), base.clone());
 
     let base_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row(0x4a), 10).cells(title_cells("base")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(0x4a), 10).cells(title_cells("base")))
         .unwrap();
     publish_schema_lineage(
         &mut core,
@@ -673,7 +673,7 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -695,7 +695,7 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
         None,
     )
     .unwrap();
-    let (exclusive_tx, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 11).unwrap();
+    let (exclusive_tx, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 11).unwrap();
 
     let base_history_table = physical_history_table_name(
         core.catalogue.physical_mappings[&base.version_id()].tables["todos"].table_id,
@@ -748,7 +748,7 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -756,14 +756,14 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
         },
     })
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x48), 10).cells(BTreeMap::from([
             ("title".to_owned(), v("historical")),
             ("body".to_owned(), v("kept")),
         ])),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,

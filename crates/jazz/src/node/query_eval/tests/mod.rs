@@ -1,7 +1,9 @@
 //! Query-evaluation tests that exercise several pipeline stages together.
 
 use super::*;
-use crate::legacy_test_future::{OptionFutureExt as _, ResultFutureExt as _};
+use crate::legacy_test_future::{
+    OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+};
 
 mod authorization;
 mod bindings;
@@ -155,7 +157,7 @@ fn register_query_shape(
     shape: &ValidatedQuery,
     opts: RegisterShapeOptions,
 ) {
-    node.apply_sync_message(SyncMessage::RegisterShape {
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
         ast: ShapeAst::from_validated(shape),
         opts,
@@ -182,7 +184,7 @@ fn subscribe_query_binding_with_opts(
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    node.apply_sync_message(SyncMessage::Subscribe(Subscribe {
+    node.apply_sync_message_settled(SyncMessage::Subscribe(Subscribe {
         shape_id: shape.shape_id(),
         subscription: SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -313,7 +315,7 @@ fn evolved_todos_version() -> (
     );
     let evolved_payload = SchemaVersion::new(JazzSchema::new([evolved_todos.clone()]));
     let (dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe1; 16]), base.clone());
-    node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
@@ -335,7 +337,7 @@ fn evolved_todos_version() -> (
         )),
     })
     .unwrap();
-    node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -345,7 +347,7 @@ fn evolved_todos_version() -> (
     .unwrap();
     let todo = row(0xe2);
     let tx_id = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", todo, 0xe3).cells(BTreeMap::from([
                 (
                     "title".to_owned(),
@@ -492,7 +494,7 @@ fn commit_global_cells(
     global_seq: u64,
 ) -> TxId {
     let tx_id = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new(table, row_uuid, now_ms)
                 .made_by(AuthorId::SYSTEM)
                 .cells(cells),
@@ -557,7 +559,7 @@ fn delete_global(
     global_seq: u64,
 ) -> TxId {
     let tx_id = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new(table, row_uuid, now_ms)
                 .made_by(AuthorId::SYSTEM)
                 .deletion(crate::tx::DeletionEvent::Deleted),
@@ -578,7 +580,7 @@ fn author(byte: u8) -> AuthorId {
 }
 
 fn commit_issue(node: &mut NodeState<RocksDbStorage>, idx: usize, state: &str, assignee: AuthorId) {
-    node.commit_mergeable_unit(
+    node.commit_mergeable_unit_settled(
         MergeableCommit::new("issues", row(idx), 1_000 + idx as u64)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([
@@ -597,7 +599,7 @@ fn commit_signed_metric(
     bucket: &str,
     score: i64,
 ) {
-    node.commit_mergeable_unit(
+    node.commit_mergeable_unit_settled(
         MergeableCommit::new("metrics", row(idx), 1_000 + idx as u64)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([
@@ -616,7 +618,7 @@ fn commit_global_issue(
     seq: u64,
 ) -> TxId {
     let tx_id = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("issues", row(idx), 1_000 + idx as u64)
                 .made_by(AuthorId::SYSTEM)
                 .cells(BTreeMap::from([
@@ -638,7 +640,7 @@ fn commit_global_issue(
 }
 
 fn commit_member(node: &mut NodeState<RocksDbStorage>, idx: usize, issue: RowUuid, user: AuthorId) {
-    node.commit_mergeable_unit(
+    node.commit_mergeable_unit_settled(
         MergeableCommit::new("issue_members", row(10_000 + idx), 10_000 + idx as u64)
             .made_by(AuthorId::SYSTEM)
             .cells(BTreeMap::from([
@@ -651,7 +653,7 @@ fn commit_member(node: &mut NodeState<RocksDbStorage>, idx: usize, issue: RowUui
 
 fn commit_global_user(node: &mut NodeState<RocksDbStorage>, user: AuthorId, name: &str, seq: u64) {
     let tx_id = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("users", RowUuid(user.0), 2_000 + seq)
                 .made_by(AuthorId::SYSTEM)
                 .cells(BTreeMap::from([(
@@ -677,7 +679,7 @@ fn commit_global_member(
     seq: u64,
 ) {
     let tx_id = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("issue_members", row(10_000 + idx), 3_000 + seq)
                 .made_by(AuthorId::SYSTEM)
                 .cells(BTreeMap::from([

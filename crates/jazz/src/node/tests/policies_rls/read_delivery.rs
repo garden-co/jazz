@@ -428,7 +428,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
             ("text".to_owned(), Value::String("bob private message".to_owned())),
         ])),
     ] {
-        let tx_id = core.commit_mergeable_many(vec![commit]).unwrap();
+        let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
         core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
             .unwrap();
     }
@@ -589,12 +589,12 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
             ("userId".to_owned(), Value::String(alice.0.to_string())),
         ])),
     ] {
-        let tx_id = core.commit_mergeable_many(vec![commit]).unwrap();
+        let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
         core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
             .unwrap();
     }
     let seed_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("messages", seed_message, 12).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
                 ("text".to_owned(), Value::String("invite-only seed".to_owned())),
@@ -629,7 +629,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     assert_view_update_only_references_rows(&initial, BTreeSet::new());
 
     let bob_membership_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("chatMembers", bob_membership, 13).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
                 ("userId".to_owned(), Value::String(bob.0.to_string())),
@@ -738,12 +738,12 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
             ("userId".to_owned(), Value::String(alice.0.to_string())),
         ])),
     ] {
-        let tx_id = core.commit_mergeable_many(vec![commit]).unwrap();
+        let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
         core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
             .unwrap();
     }
     let seed_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("messages", seed_message, 12).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
                 ("text".to_owned(), Value::String("invite-only seed".to_owned())),
@@ -780,7 +780,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     ));
 
     let bob_membership_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("chatMembers", bob_membership, 13).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
                 ("userId".to_owned(), Value::String(bob.0.to_string())),
@@ -795,7 +795,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     )
     .unwrap();
     let bob_message_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("messages", bob_message, 14).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
                 ("text".to_owned(), Value::String("bob accepted invite".to_owned())),
@@ -863,7 +863,7 @@ fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
             ("owner_id".to_owned(), Value::String(alice.0.to_string())),
         ])),
     ] {
-        let tx_id = core.commit_mergeable_many(vec![commit]).unwrap();
+        let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
         core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
             .unwrap();
     }
@@ -933,7 +933,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
 };
 
     let canvas_tx =
-        core.commit_mergeable(MergeableCommit::new("canvases", canvas_row, 10).cells(
+        core.commit_mergeable_settled(MergeableCommit::new("canvases", canvas_row, 10).cells(
             BTreeMap::from([("title".to_owned(), Value::String("policy-row".to_owned()))]),
         ))
         .unwrap();
@@ -945,7 +945,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     )
     .unwrap();
     let shape_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("shapes", shape_row, 11).cells(BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas_row.0)),
                 ("title".to_owned(), Value::String("policy-row".to_owned())),
@@ -993,7 +993,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     );
 
     let invite_tx = core
-        .commit_mergeable(MergeableCommit::new("canvasInvites", invite_row, 12).cells(
+        .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 12).cells(
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas_row.0)),
                 ("userID".to_owned(), Value::Uuid(invited.0)),
@@ -1042,7 +1042,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     assert_eq!(spy_link.metrics.version_bundles_out, 0);
 
     let revoke_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("canvasInvites", invite_row, 13).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -1089,7 +1089,7 @@ fn system_identity_read_policy_sees_everything() {
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row(1), row(2)]));
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
 
     assert_eq!(
         reader
@@ -1314,7 +1314,7 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
     let bob = user(0xb2);
     let public_chat = row(0x11);
     let chat_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("chats", public_chat, 10)
                 .made_by(alice)
                 .cells(BTreeMap::from([
@@ -1466,7 +1466,7 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
     let chat = row(0x31);
     let join_code = "jazz-join-123";
     let tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("chats", chat, 10)
                 .made_by(alice)
                 .cells(BTreeMap::from([
@@ -1541,7 +1541,7 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
     let bob = user(0xb2);
     let private_chat = row(0x12);
     let tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("chats", private_chat, 10)
                 .made_by(alice)
                 .cells(BTreeMap::from([
@@ -1601,7 +1601,7 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
     let other = user(0xb2);
     let row_uuid = row(0x81);
     let content = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(owner_cells(owner, "visible")),
         )
         .unwrap();
@@ -1613,7 +1613,7 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
     )
     .unwrap();
     let deletion = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 11).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -1654,7 +1654,7 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
 
     let orphan_row = row(0x82);
     let orphan_deletion = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", orphan_row, 12).deletion(DeletionEvent::Deleted),
         )
         .unwrap();

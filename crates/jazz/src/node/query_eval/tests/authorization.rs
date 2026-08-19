@@ -248,7 +248,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     );
     let chat = row(0xaa);
     let chat_tx = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
                 ("name".to_owned(), Value::Nullable(None)),
                 ("isPublic".to_owned(), Value::Bool(false)),
@@ -272,13 +272,13 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     .unwrap();
     let profile = row(0xac);
     let profile_tx = node
-        .commit_mergeable(
-            MergeableCommit::new("profiles", profile, 11).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("profiles", profile, 11).cells(
+            BTreeMap::from([
                 ("userId".to_owned(), Value::String(identity.0.to_string())),
                 ("name".to_owned(), Value::String("Alice".to_owned())),
                 ("avatar".to_owned(), Value::Nullable(None)),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     node.apply_fate_update(
         profile_tx,
@@ -289,8 +289,8 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     .unwrap();
     let message = row(0xad);
     let message_tx = node
-        .commit_mergeable(
-            MergeableCommit::new("messages", message, 12).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("messages", message, 12).cells(
+            BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
                 ("senderId".to_owned(), Value::Uuid(profile.0)),
                 (
@@ -298,8 +298,8 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                     Value::String("invite-only seed".to_owned()),
                 ),
                 ("createdAt".to_owned(), Value::U64(1)),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     node.apply_fate_update(
         message_tx,
@@ -483,23 +483,23 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         )
         .expect("the serving maintained view must retain the invite claim route");
     client
-        .apply_sync_message(update)
+        .apply_sync_message_settled(update)
         .expect("the client must materialize the invited chat update");
 
     // The browser failure occurred only after the invite subscription was
     // live and accepting membership was committed. This must wake the
     // maintained graph without dropping its outer invite claim route.
     let member_tx = node
-        .commit_mergeable(
-            MergeableCommit::new("chatMembers", row(0xab), 11).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("chatMembers", row(0xab), 11).cells(
+            BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
                 ("userId".to_owned(), Value::String(identity.0.to_string())),
                 (
                     "joinCode".to_owned(),
                     Value::Nullable(Some(Box::new(Value::String("invite-123".to_owned())))),
                 ),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     node.apply_fate_update(
         member_tx,
@@ -566,7 +566,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     );
     let mut normal_membership_peer = PeerState::edge_client(identity);
     normal_client
-        .apply_sync_message(
+        .apply_sync_message_settled(
             normal_membership_peer
                 .current_rows_update(&mut node, "chatMembers")
                 .expect("serve the accepted membership to the normal client"),
@@ -597,7 +597,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     );
     let mut normal_simple_peer = PeerState::edge_client(identity);
     normal_client
-        .apply_sync_message(
+        .apply_sync_message_settled(
             normal_simple_peer
                 .rehydrate_query_with_opts(
                     &mut node,
@@ -704,7 +704,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             .expect("apply normal-member message include/order repair payloads");
     }
     normal_client
-        .apply_sync_message(normal_versions)
+        .apply_sync_message_settled(normal_versions)
         .expect("client applies normal-member message include/order snapshot");
     assert!(
         normal_client
@@ -979,7 +979,7 @@ fn branch_program_tier_filter_preserves_claim_policy_fields() {
     node.create_branch(branch_id).unwrap();
     let room = row(7);
     let tx_id = node
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("rooms", room, 1_000).cells(BTreeMap::from([
                 ("name".to_owned(), Value::String("branch room".to_owned())),

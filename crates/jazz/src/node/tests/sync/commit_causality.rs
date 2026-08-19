@@ -5,7 +5,7 @@ fn observed_global_seq_advances_authority_allocator() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let fixture_tx = core
-        .commit_mergeable(MergeableCommit::new("todos", row(1), 10).cells(title_cells("fixture")))
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(1), 10).cells(title_cells("fixture")))
         .unwrap();
     core.apply_fate_update(
         fixture_tx,
@@ -16,9 +16,9 @@ fn observed_global_seq_advances_authority_allocator() {
     .unwrap();
 
     let (tx_id, unit) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row(2), 11).cells(title_cells("new")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row(2), 11).cells(title_cells("new")))
         .unwrap();
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -37,7 +37,7 @@ fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
     let (root, root_unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, SKEW_TOLERANCE_MS + 1).cells(title_cells("root")),
         )
         .unwrap();
@@ -45,7 +45,7 @@ fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
         panic!("expected commit unit");
     };
     let [root_fate] = core
-        .ingest_commit_unit(tx, versions, 0)
+        .ingest_commit_unit_settled(tx, versions, 0)
         .unwrap()
         .try_into()
         .unwrap();
@@ -58,7 +58,7 @@ fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
     ));
 
     let (child, child_unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 10)
                 .parents(vec![root])
                 .cells(title_cells("child")),
@@ -68,7 +68,7 @@ fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
         panic!("expected commit unit");
     };
     let [child_fate] = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap()
         .try_into()
         .unwrap();
@@ -107,10 +107,10 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
     let (exclusive, exclusive_unit) = client
-        .commit_exclusive(tx_id, AuthorId::SYSTEM, SKEW_TOLERANCE_MS + 1)
+        .commit_exclusive_settled(tx_id, AuthorId::SYSTEM, SKEW_TOLERANCE_MS + 1)
         .unwrap();
     let (dependent, dependent_unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 2)
                 .parents(vec![exclusive])
                 .cells(BTreeMap::from([(
@@ -123,11 +123,11 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         panic!("expected commit unit");
     };
     let [exclusive_fate] = core
-        .ingest_commit_unit(tx, versions, 0)
+        .ingest_commit_unit_settled(tx, versions, 0)
         .unwrap()
         .try_into()
         .unwrap();
-    client.apply_sync_message(exclusive_fate).unwrap();
+    client.apply_sync_message_settled(exclusive_fate).unwrap();
     assert_eq!(
         client.transaction_state(exclusive).unwrap().0,
         Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
@@ -150,7 +150,7 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         panic!("expected commit unit");
     };
     let [dependent_fate] = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap()
         .try_into()
         .unwrap();
@@ -163,7 +163,7 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
             durability: None,
         }
     );
-    client.apply_sync_message(dependent_fate).unwrap();
+    client.apply_sync_message_settled(dependent_fate).unwrap();
     assert_eq!(
         client.transaction_state(dependent).unwrap().0,
         Fate::Rejected(RejectionReason::Cascade { root: exclusive })
@@ -179,9 +179,9 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
-    let (exclusive, exclusive_unit) = client.commit_exclusive(tx_id, AuthorId::SYSTEM, 1).unwrap();
+    let (exclusive, exclusive_unit) = client.commit_exclusive_settled(tx_id, AuthorId::SYSTEM, 1).unwrap();
     let (child, child_unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 2)
                 .parents(vec![exclusive])
                 .cells(title_cells("child")),
@@ -191,7 +191,7 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
         panic!("expected commit unit");
     };
     assert!(
-        core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
             .unwrap()
             .is_empty()
     );
@@ -200,7 +200,7 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
         panic!("expected commit unit");
     };
     let updates = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     assert_eq!(core.sync_metrics().parked_orphans_resolved, 1);
     assert_eq!(
@@ -235,7 +235,7 @@ fn duplicate_unknown_parent_commit_unit_parks_once() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let missing = TxId::new(TxTime::from(99), node(1));
     let (_child, child_unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(7), 2)
                 .parents(vec![missing])
                 .cells(title_cells("child")),
@@ -245,12 +245,12 @@ fn duplicate_unknown_parent_commit_unit_parks_once() {
         panic!("expected commit unit");
     };
     assert!(
-        core.ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        core.ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
             .unwrap()
             .is_empty()
     );
     assert!(
-        core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
             .unwrap()
             .is_empty()
     );
@@ -277,7 +277,7 @@ fn m2_writer_core_reader_converges_against_oracle() {
         let parents = commit.parents.clone();
         let cells = commit.cells.clone();
         let deletion = commit.deletion;
-        let (tx_id, commit_unit) = writer.commit_mergeable_unit(commit).unwrap();
+        let (tx_id, commit_unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
         let made_at = writer.transaction_record(tx_id).unwrap().tx_id.time;
         let mut version = ModelRowVersion::new(row_uuid, tx_id, made_at);
         version.parents = parents;
@@ -285,14 +285,14 @@ fn m2_writer_core_reader_converges_against_oracle() {
         version.deletion = deletion;
         oracle.add_version(version);
 
-        for message in core.apply_sync_message(commit_unit).unwrap() {
-            writer.apply_sync_message(message).unwrap();
+        for message in core.apply_sync_message_settled(commit_unit).unwrap() {
+            writer.apply_sync_message_settled(message).unwrap();
         }
         assert_current_rows_match_oracle(&mut core, &oracle);
         assert_view_update_result_set_matches_current_rows(&mut core);
 
         let update = peer.current_rows_update(&mut core, "todos").unwrap();
-        reader.apply_sync_message(update).unwrap();
+        reader.apply_sync_message_settled(update).unwrap();
         assert_current_rows_match_oracle(&mut reader, &oracle);
     }
 }
@@ -301,7 +301,7 @@ fn malformed_commit_unit_rejects_write_count_mismatch() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row(1), 10).cells(title_cells("one")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row(1), 10).cells(title_cells("one")))
         .unwrap();
     let SyncMessage::CommitUnit { mut tx, versions } = unit else {
         panic!("expected commit unit");
@@ -309,7 +309,7 @@ fn malformed_commit_unit_rejects_write_count_mismatch() {
     tx.n_total_writes = 2;
 
     let [fate] = core
-        .ingest_commit_unit(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap()
         .try_into()
         .unwrap();
@@ -332,7 +332,7 @@ fn over_limit_commit_unit_rejects_as_malformed_and_next_unit_still_applies() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(1), 10).cells(title_cells("oversized")),
         )
         .unwrap();
@@ -347,7 +347,7 @@ fn over_limit_commit_unit_rejects_as_malformed_and_next_unit_still_applies() {
     tx.n_total_writes = versions.len() as u32;
 
     let [fate] = core
-        .apply_sync_message(SyncMessage::CommitUnit {
+        .apply_sync_message_settled(SyncMessage::CommitUnit {
             tx: tx.clone(),
             versions,
         })
@@ -372,10 +372,10 @@ fn over_limit_commit_unit_rejects_as_malformed_and_next_unit_still_applies() {
     assert!(core.row_history("todos", row(1)).unwrap().is_empty());
 
     let (good_tx, good_unit) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row(2), 11).cells(title_cells("ok")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row(2), 11).cells(title_cells("ok")))
         .unwrap();
     let [good_fate] = core
-        .apply_sync_message(good_unit)
+        .apply_sync_message_settled(good_unit)
         .unwrap()
         .try_into()
         .unwrap();

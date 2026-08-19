@@ -22,12 +22,12 @@ fn branch_read_is_base_snapshot_plus_overlay_writes() {
         &mut oracle,
         MergeableCommit::new("todos", row(2), 20).cells(title_cells("after-branch")),
     );
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(1), 30).cells(title_cells("overlay-one")),
     )
     .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(3), 31).cells(title_cells("overlay-three")),
     )
@@ -91,13 +91,13 @@ fn branch_target_commit_unit_is_visible_after_global_acceptance() {
     writer.create_branch(branch_id).unwrap();
     core.create_branch(branch_id).unwrap();
     let tx_id = writer
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(1), 20).cells(title_cells("accepted overlay")),
         )
         .unwrap();
     let unit = writer.commit_unit_for(tx_id).unwrap();
-    let updates = core.apply_sync_message(unit).unwrap();
+    let updates = core.apply_sync_message_settled(unit).unwrap();
     let [fate] = updates.as_slice() else {
         panic!("core must emit exactly one branch fate update: {updates:?}");
     };
@@ -111,16 +111,16 @@ fn branch_target_commit_unit_is_visible_after_global_acceptance() {
         panic!("branch commit must be globally accepted: {fate:?}");
     };
     assert_eq!(*accepted, tx_id);
-    writer.apply_sync_message(fate.clone()).unwrap();
+    writer.apply_sync_message_settled(fate.clone()).unwrap();
 
     let update_tx = writer
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(1), 30).cells(title_cells("accepted update")),
         )
         .unwrap();
     let update_unit = writer.commit_unit_for(update_tx).unwrap();
-    let update_fates = core.apply_sync_message(update_unit).unwrap();
+    let update_fates = core.apply_sync_message_settled(update_unit).unwrap();
     let [update_fate] = update_fates.as_slice() else {
         panic!("core must emit exactly one update fate: {update_fates:?}");
     };
@@ -133,16 +133,16 @@ fn branch_target_commit_unit_is_visible_after_global_acceptance() {
             durability: Some(DurabilityTier::Global),
         } if *tx_id == update_tx
     ));
-    writer.apply_sync_message(update_fate.clone()).unwrap();
+    writer.apply_sync_message_settled(update_fate.clone()).unwrap();
 
     let delete_tx = writer
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(2), 40).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
     let delete_unit = writer.commit_unit_for(delete_tx).unwrap();
-    let delete_fates = core.apply_sync_message(delete_unit).unwrap();
+    let delete_fates = core.apply_sync_message_settled(delete_unit).unwrap();
     let [delete_fate] = delete_fates.as_slice() else {
         panic!("core must emit exactly one deletion fate: {delete_fates:?}");
     };
@@ -155,7 +155,7 @@ fn branch_target_commit_unit_is_visible_after_global_acceptance() {
             durability: Some(DurabilityTier::Global),
         } if *tx_id == delete_tx
     ));
-    writer.apply_sync_message(delete_fate.clone()).unwrap();
+    writer.apply_sync_message_settled(delete_fate.clone()).unwrap();
 
     let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -172,13 +172,13 @@ fn branch_target_commit_unit_is_visible_after_global_acceptance() {
     );
 
     let restore_tx = writer
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(2), 50).deletion(DeletionEvent::Restored),
         )
         .unwrap();
     let restore_unit = writer.commit_unit_for(restore_tx).unwrap();
-    let restore_fates = core.apply_sync_message(restore_unit).unwrap();
+    let restore_fates = core.apply_sync_message_settled(restore_unit).unwrap();
     let [restore_fate] = restore_fates.as_slice() else {
         panic!("core must emit exactly one restoration fate: {restore_fates:?}");
     };
@@ -191,7 +191,7 @@ fn branch_target_commit_unit_is_visible_after_global_acceptance() {
             durability: Some(DurabilityTier::Global),
         } if *tx_id == restore_tx
     ));
-    writer.apply_sync_message(restore_fate.clone()).unwrap();
+    writer.apply_sync_message_settled(restore_fate.clone()).unwrap();
     let restored_rows = core
         .query_rows_on_branch(branch_id, &shape, &binding)
         .unwrap()
@@ -213,7 +213,7 @@ fn branch_read_filter_shape_uses_shared_branch_source_lowering() {
     let (_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
     let branch_id = branch(0x41);
     core.create_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(1), 10).cells(title_cells("branch write")),
     )
@@ -295,7 +295,7 @@ fn branch_read_join_uses_shared_branch_sources() {
         "post-branch global join rows must not be visible in the branch view"
     );
 
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todo_members", row(3), 30).cells(BTreeMap::from([
             ("todo".to_owned(), Value::Uuid(row(1).0)),
@@ -406,7 +406,7 @@ fn branch_read_reachable_uses_shared_branch_sources() {
         "post-branch global reachable edges must not be visible in the branch view"
     );
 
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("teamTeamMemberships", row(0x33), 14).cells(BTreeMap::from([
             ("member".to_owned(), Value::Uuid(team2.0)),
@@ -448,12 +448,12 @@ fn branches_do_not_observe_sibling_overlays_and_recover_metadata() {
     let right = branch(3);
     core.create_branch(left).unwrap();
     core.create_branch(right).unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         left,
         MergeableCommit::new("todos", row(1), 20).cells(title_cells("left")),
     )
     .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         right,
         MergeableCommit::new("todos", row(1), 21).cells(title_cells("right")),
     )
@@ -559,12 +559,12 @@ fn branch_read_requires_branch_row_read_then_branch_local_row_policy() {
 
     seed_branch_acl(&mut core, branch_id, allowed, row(70), 10);
     core.create_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(71), 20).cells(owner_cells(denied, "hidden row")),
     )
     .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(72), 21).cells(owner_cells(allowed, "visible row")),
     )
@@ -602,7 +602,7 @@ fn branch_write_requires_branch_row_write_then_branch_local_write_policy() {
     core.create_branch(branch_id).unwrap();
 
     assert!(matches!(
-        core.commit_mergeable_on_branch(
+        core.commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(81), 20)
                 .made_by(denied)
@@ -612,7 +612,7 @@ fn branch_write_requires_branch_row_write_then_branch_local_write_policy() {
     ));
 
     assert!(matches!(
-        core.commit_mergeable_on_branch(
+        core.commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(82), 21)
                 .made_by(allowed)
@@ -622,14 +622,14 @@ fn branch_write_requires_branch_row_write_then_branch_local_write_policy() {
     ));
 
     let create = core
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(83), 22)
                 .made_by(allowed)
                 .cells(owner_cells(allowed, "branch-local owner")),
         )
         .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(83), 23)
             .made_by(allowed)
@@ -676,7 +676,7 @@ fn seed_branch_acl(
     now_ms: u64,
 ) {
     let tx_id = core
-        .commit_mergeable(MergeableCommit::new("branchAccess", row_uuid, now_ms).cells(
+        .commit_mergeable_settled(MergeableCommit::new("branchAccess", row_uuid, now_ms).cells(
             BTreeMap::from([
                 ("branch_id".to_owned(), Value::Uuid(branch_id.0)),
                 ("userID".to_owned(), Value::Uuid(author.0)),
@@ -705,7 +705,7 @@ fn branch_creation_persists_no_overlay_partition_until_first_write() {
         "INV-BRANCH-12: branch creation must not eagerly create overlay partitions"
     );
 
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(1), 10).cells(title_cells("branch write")),
     )
@@ -729,7 +729,7 @@ fn branch_overlay_partition_creation_rebuilds_live_database_without_storage_reop
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     core.create_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(0x22), 10).cells(title_cells("branch partition write")),
     )
@@ -777,7 +777,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     let (dir, mut core) = open_history_complete_node_with_schema(node(0x23), base.clone());
     let branch_id = branch(0x23);
     core.create_root_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(0x23), 10).cells(BTreeMap::from([
             ("title".to_owned(), v("before rename")),
@@ -785,7 +785,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
         ])),
     )
     .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(0x26), 11).cells(title_cells("deleted after rename")),
     )
@@ -824,7 +824,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -832,7 +832,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
         },
     })
     .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("tasks", row(0x24), 12)
             .cells(BTreeMap::from([
@@ -841,7 +841,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
             ])),
     )
     .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("tasks", row(0x26), 13).deletion(DeletionEvent::Deleted),
     )
@@ -927,7 +927,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
             .collect::<BTreeMap<_, _>>(),
         expected_overlay
     );
-    let merge_back = reopened.merge_back_branch(branch_id).unwrap();
+    let merge_back = reopened.merge_back_branch_settled(branch_id).unwrap();
     assert_eq!(
         reopened
             .current_rows("todos", DurabilityTier::Local)
@@ -965,13 +965,13 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     // the known target-source dot set. Both paths must decode the old authored
     // descriptor before projecting contribution columns to the write schema.
     reopened
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("tasks", row(0x24), 14)
                 .cells(BTreeMap::from([("name".to_owned(), v("second merge"))])),
         )
         .unwrap();
-    let second_merge = reopened.merge_back_branch(branch_id).unwrap();
+    let second_merge = reopened.merge_back_branch_settled(branch_id).unwrap();
     assert!(reopened
         .transaction_record(second_merge)
         .unwrap()
@@ -984,7 +984,7 @@ fn branch_writes_reject_unknown_and_closed_branches() {
     let (_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
     let unknown = branch(0x14);
     assert!(matches!(
-        core.commit_mergeable_on_branch(
+        core.commit_mergeable_on_branch_settled(
             unknown,
             MergeableCommit::new("todos", row(1), 10).cells(title_cells("implicit branch")),
         ),
@@ -1003,7 +1003,7 @@ fn branch_writes_reject_unknown_and_closed_branches() {
         },
     );
     assert!(matches!(
-        core.commit_mergeable_on_branch(
+        core.commit_mergeable_on_branch_settled(
             closed,
             MergeableCommit::new("todos", row(2), 11).cells(title_cells("closed branch")),
         ),
@@ -1022,7 +1022,7 @@ fn discard_branch_closes_branch_for_writes_and_merge_back() {
     let (_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
     let branch_id = branch(0x16);
     core.create_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(1), 10).cells(title_cells("branch write")),
     )
@@ -1034,14 +1034,14 @@ fn discard_branch_closes_branch_for_writes_and_merge_back() {
         codec::BranchState::Discarded
     );
     assert!(matches!(
-        core.commit_mergeable_on_branch(
+        core.commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(2), 11).cells(title_cells("late write")),
         ),
         Err(Error::BranchClosed(id)) if id == branch_id
     ));
     assert!(matches!(
-        core.merge_back_branch(branch_id),
+        core.merge_back_branch_settled(branch_id),
         Err(Error::BranchClosed(id)) if id == branch_id
     ));
 }
@@ -1067,19 +1067,19 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
     core.create_branch(branch_id).unwrap();
 
     let branch_update = core
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(1), 20).cells(title_cells("branch update")),
         )
         .unwrap();
     let branch_insert = core
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(3), 21).cells(title_cells("branch insert")),
         )
         .unwrap();
     let branch_delete = core
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(2), 22).deletion(DeletionEvent::Deleted),
         )
@@ -1089,7 +1089,7 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
     // The fixture schema has no read policy, so use the trusted system form;
     // identity-aware merge authorization is covered separately.
     let merger = AuthorId::SYSTEM;
-    let squash = core.merge_back_branch(branch_id).unwrap();
+    let squash = core.merge_back_branch_settled(branch_id).unwrap();
     assert_eq!(
         core.branch_record(branch_id).unwrap().state,
         codec::BranchState::Open
@@ -1172,11 +1172,11 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
         .collect::<BTreeSet<_>>();
     for parent in parent_ids {
         receiver
-            .apply_sync_message(core.commit_unit_for(parent).unwrap())
+            .apply_sync_message_settled(core.commit_unit_for(parent).unwrap())
             .unwrap();
     }
     receiver
-        .apply_sync_message(core.commit_unit_for(squash).unwrap())
+        .apply_sync_message_settled(core.commit_unit_for(squash).unwrap())
         .unwrap();
     let received = receiver
         .transaction_record(squash)
@@ -1186,12 +1186,12 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
     assert_eq!(received, provenance.clone());
     assert!(!received.substitutions.is_empty());
     let late_write = core
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(4), 23).cells(title_cells("late write")),
         )
         .unwrap();
-    let second_merge = core.merge_back_branch(branch_id).unwrap();
+    let second_merge = core.merge_back_branch_settled(branch_id).unwrap();
     let second_versions = core.query_versions_for_tx(second_merge).unwrap();
     assert_eq!(second_versions.len(), 1);
     assert_eq!(second_versions[0].row_uuid(), row(4));
@@ -1226,22 +1226,22 @@ fn merge_back_parents_every_concurrent_target_head() {
     core.create_root_branch(branch_id).unwrap();
 
     let (left, _) = core
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("left")),
         )
         .unwrap();
     let (right, _) = core
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("right")),
         )
         .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row_uuid, 12).cells(title_cells("branch")),
     )
     .unwrap();
 
-    let merge = core.merge_back_branch(branch_id).unwrap();
+    let merge = core.merge_back_branch_settled(branch_id).unwrap();
     let version = core
         .query_versions_for_tx(merge)
         .unwrap()
@@ -1286,7 +1286,7 @@ fn merge_back_accumulates_authored_columns_across_successive_branch_patches() {
     let branch_id = branch(0x83);
     core.create_branch(branch_id).unwrap();
     let title_patch = core
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row_uuid, 20)
                 .parents(vec![base])
@@ -1297,7 +1297,7 @@ fn merge_back_accumulates_authored_columns_across_successive_branch_patches() {
                 .authored_columns(BTreeSet::from(["title".to_owned()])),
         )
         .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row_uuid, 30)
             .parents(vec![title_patch])
@@ -1309,7 +1309,7 @@ fn merge_back_accumulates_authored_columns_across_successive_branch_patches() {
     )
     .unwrap();
 
-    core.merge_back_branch(branch_id).unwrap();
+    core.merge_back_branch_settled(branch_id).unwrap();
     let rows = core.current_rows("todos", DurabilityTier::Local).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -1334,7 +1334,7 @@ fn legacy_target_version_without_authored_columns_contributes_present_cells() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x91), schema.clone());
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0x92), schema.clone());
     let root_tx = writer
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x91), 10).cells(title_cells("legacy root")),
         )
         .unwrap();
@@ -1380,18 +1380,18 @@ fn legacy_target_version_without_authored_columns_contributes_present_cells() {
         },
     }));
 
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(0x92), 20).cells(title_cells("first")),
     )
     .unwrap();
-    core.merge_back_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
+    core.merge_back_branch_settled(branch_id).unwrap();
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(0x93), 21).cells(title_cells("second")),
     )
     .unwrap();
-    assert!(core.merge_back_branch(branch_id).is_ok());
+    assert!(core.merge_back_branch_settled(branch_id).is_ok());
 }
 
 #[test]
@@ -1401,12 +1401,12 @@ fn merge_back_deduplicates_shared_transaction_parent_edges() {
     core.create_root_branch(branch_id).unwrap();
 
     let shared_parent = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", row(0x42), 10).cells(title_cells("root-one")),
             MergeableCommit::new("todos", row(0x43), 10).cells(title_cells("root-two")),
         ])
         .unwrap();
-    core.commit_mergeable_many_on_branch(
+    core.commit_mergeable_many_on_branch_settled(
         branch_id,
         vec![
             MergeableCommit::new("todos", row(0x42), 20).cells(title_cells("branch-one")),
@@ -1415,7 +1415,7 @@ fn merge_back_deduplicates_shared_transaction_parent_edges() {
     )
     .unwrap();
 
-    let merge = core.merge_back_branch(branch_id).unwrap();
+    let merge = core.merge_back_branch_settled(branch_id).unwrap();
     let versions = core.query_versions_for_tx(merge).unwrap();
     assert_eq!(versions.len(), 2);
     assert!(
@@ -1441,7 +1441,7 @@ fn branch_target_is_canonical_atomic_transaction_state_across_reopen() {
     let branch_id = branch(0x61);
     core.create_root_branch(branch_id).unwrap();
     let tx_id = core
-        .commit_mergeable_many_on_branch(
+        .commit_mergeable_many_on_branch_settled(
             branch_id,
             vec![
                 MergeableCommit::new("todos", row(0x61), 10)
@@ -1463,7 +1463,7 @@ fn branch_target_is_canonical_atomic_transaction_state_across_reopen() {
     };
     assert_eq!(tx.target_lineage, crate::tx::BranchLineage::Branch(branch_id));
     assert_eq!(versions.len(), 2);
-    core.finalize_local_mergeable_commit(tx_id).unwrap();
+    core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
     assert_eq!(core.transaction_record(tx_id).unwrap().fate, Fate::Accepted);
     assert!(
         core.current_rows("todos", DurabilityTier::Global)
@@ -1490,12 +1490,12 @@ fn root_branch_transitive_merge_expands_provenance_without_echo() {
     core.create_root_branch(branch_c).unwrap();
 
     let root_native = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x70), 10).cells(title_cells("root")),
         )
         .unwrap();
     let root_to_b = core
-        .merge_lineage_into(
+        .merge_lineage_into_settled(
             crate::tx::BranchLineage::Root,
             crate::tx::BranchLineage::Branch(branch_b),
         )
@@ -1505,7 +1505,7 @@ fn root_branch_transitive_merge_expands_provenance_without_echo() {
         crate::tx::BranchLineage::Branch(branch_b)
     );
     let b_to_c = core
-        .merge_lineage_into(
+        .merge_lineage_into_settled(
             crate::tx::BranchLineage::Branch(branch_b),
             crate::tx::BranchLineage::Branch(branch_c),
         )
@@ -1522,13 +1522,13 @@ fn root_branch_transitive_merge_expands_provenance_without_echo() {
         crate::tx::BranchLineage::Root
     );
 
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_c,
         MergeableCommit::new("todos", row(0x71), 20).cells(title_cells("from-c")),
     )
     .unwrap();
     let c_to_root = core
-        .merge_lineage_into(
+        .merge_lineage_into_settled(
             crate::tx::BranchLineage::Branch(branch_c),
             crate::tx::BranchLineage::Root,
         )
@@ -1550,14 +1550,14 @@ fn ordinary_commit_unit_routes_to_branch_target_without_touching_root() {
     writer.create_root_branch(branch_id).unwrap();
     receiver.create_root_branch(branch_id).unwrap();
     let tx_id = writer
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(0x81), 10).cells(title_cells("synced")),
         )
         .unwrap();
 
     let unit = writer.commit_unit_for(tx_id).unwrap();
-    let updates = receiver.apply_sync_message(unit.clone()).unwrap();
+    let updates = receiver.apply_sync_message_settled(unit.clone()).unwrap();
     assert!(updates.iter().any(|message| matches!(
         message,
         SyncMessage::FateUpdate {
@@ -1589,11 +1589,11 @@ fn ordinary_commit_unit_routes_to_branch_target_without_touching_root() {
             .all(|current| current.row_uuid() != row(0x81))
     );
     let root_tx = receiver
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x81), 30).cells(title_cells("root-after-branch")),
         )
         .unwrap();
-    receiver.finalize_local_mergeable_commit(root_tx).unwrap();
+    receiver.finalize_local_mergeable_commit_settled(root_tx).unwrap();
     receiver
         .assert_merge_heads_match_history_for_test("todos", row(0x81))
         .unwrap();
@@ -1604,7 +1604,7 @@ fn ordinary_commit_unit_routes_to_branch_target_without_touching_root() {
             .unwrap(),
         title_cells("root-after-branch")
     );
-    receiver.apply_sync_message(unit).unwrap();
+    receiver.apply_sync_message_settled(unit).unwrap();
     let SyncMessage::CommitUnit {
         mut tx,
         versions,
@@ -1614,7 +1614,7 @@ fn ordinary_commit_unit_routes_to_branch_target_without_touching_root() {
     };
     tx.target_lineage = crate::tx::BranchLineage::Root;
     assert!(matches!(
-        receiver.apply_sync_message(SyncMessage::CommitUnit { tx, versions }),
+        receiver.apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions }),
         Err(Error::ConflictingCommitUnit(candidate)) if candidate == tx_id
     ));
 }
@@ -1625,7 +1625,7 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
     let branch_id = branch(0x65);
     writer.create_root_branch(branch_id).unwrap();
     let tx_id = writer
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(0x82), 10).cells(title_cells("candidate")),
         )
@@ -1645,7 +1645,7 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
         version.record().clone(),
     );
     unknown_schema
-        .apply_sync_message(SyncMessage::CommitUnit {
+        .apply_sync_message_settled(SyncMessage::CommitUnit {
             tx: tx.clone(),
             versions: vec![unknown_schema_record],
         })
@@ -1677,7 +1677,7 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
         version.record().clone(),
     );
     let updates = unknown_table
-        .apply_sync_message(SyncMessage::CommitUnit {
+        .apply_sync_message_settled(SyncMessage::CommitUnit {
             tx: tx.clone(),
             versions: vec![unknown_table_record],
         })
@@ -1714,7 +1714,7 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
     let mut oversized_tx = tx;
     oversized_tx.n_total_writes = oversized_versions.len() as u32;
     let updates = oversized
-        .apply_sync_message(SyncMessage::CommitUnit {
+        .apply_sync_message_settled(SyncMessage::CommitUnit {
             tx: oversized_tx,
             versions: oversized_versions,
         })
@@ -1758,7 +1758,7 @@ fn ordinary_branch_target_ingest_applies_target_authorization() {
     writer.create_branch(branch_id).unwrap();
     receiver.create_branch(branch_id).unwrap();
     let tx_id = writer
-        .commit_mergeable_on_branch(
+        .commit_mergeable_on_branch_settled(
             branch_id,
             MergeableCommit::new("todos", row(0x91), 10)
                 .made_by(allowed)
@@ -1774,7 +1774,7 @@ fn ordinary_branch_target_ingest_applies_target_authorization() {
     };
     tx.made_by = denied;
     let updates = receiver
-        .apply_sync_message(SyncMessage::CommitUnit { tx, versions })
+        .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
         .unwrap();
     assert!(updates.iter().any(|message| matches!(
         message,
@@ -1805,14 +1805,14 @@ fn merge_back_fails_whole_calculation_when_source_row_is_not_readable() {
     let outsider = user(0x72);
     let branch_id = branch(0x42);
     core.create_root_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(0x42), 10)
             .made_by(owner)
             .cells(owner_cells(owner, "private")),
     )
     .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(0x42), 11)
             .made_by(owner)
@@ -1821,10 +1821,10 @@ fn merge_back_fails_whole_calculation_when_source_row_is_not_readable() {
     .unwrap();
 
     assert!(matches!(
-        core.merge_back_branch_as(branch_id, outsider),
+        core.merge_back_branch_as_settled(branch_id, outsider),
         Err(Error::AuthorizationDenied)
     ));
-    let merged = core.merge_back_branch_as(branch_id, owner).unwrap();
+    let merged = core.merge_back_branch_as_settled(branch_id, owner).unwrap();
     assert_eq!(core.transaction_record(merged).unwrap().made_by, owner);
 }
 
@@ -1834,18 +1834,18 @@ fn identity_merge_back_of_public_deleted_row_preserves_initiator() {
     let merger = user(0x73);
     let branch_id = branch(0x44);
     core.create_root_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(0x44), 10).cells(title_cells("public deleted")),
     )
     .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("todos", row(0x44), 11).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
 
-    let merged = core.merge_back_branch_as(branch_id, merger).unwrap();
+    let merged = core.merge_back_branch_as_settled(branch_id, merger).unwrap();
     assert_eq!(core.transaction_record(merged).unwrap().made_by, merger);
 }
 
@@ -1883,7 +1883,7 @@ fn deleted_merge_witness_uses_inherited_select_not_update_permission() {
     let (_dir, mut core) = open_history_complete_node_with_schema(node(0x76), schema);
     let parent = row(0x74);
     let parent_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("parents", parent, 1)
                 .made_by(AuthorId::SYSTEM)
                 .cells(BTreeMap::from([
@@ -1902,7 +1902,7 @@ fn deleted_merge_witness_uses_inherited_select_not_update_permission() {
     let branch_id = branch(0x76);
     core.create_branch(branch_id).unwrap();
     let doc = row(0x76);
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("docs", doc, 2)
             .made_by(AuthorId::SYSTEM)
@@ -1912,7 +1912,7 @@ fn deleted_merge_witness_uses_inherited_select_not_update_permission() {
             ])),
     )
     .unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("docs", doc, 3)
             .made_by(AuthorId::SYSTEM)
@@ -1921,10 +1921,10 @@ fn deleted_merge_witness_uses_inherited_select_not_update_permission() {
     .unwrap();
 
     assert!(matches!(
-        core.merge_back_branch_as(branch_id, editor),
+        core.merge_back_branch_as_settled(branch_id, editor),
         Err(Error::AuthorizationDenied)
     ));
-    let merged = core.merge_back_branch_as(branch_id, reader).unwrap();
+    let merged = core.merge_back_branch_as_settled(branch_id, reader).unwrap();
     assert_eq!(core.transaction_record(merged).unwrap().made_by, reader);
 }
 
@@ -1934,7 +1934,7 @@ fn merge_back_fails_closed_for_strategy_without_contribution_capabilities() {
         open_history_complete_node_with_schema(node(2), counter_schema());
     let branch_id = branch(0x43);
     core.create_root_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch_settled(
         branch_id,
         MergeableCommit::new("counters", row(0x43), 10)
             .cell("count", Value::U64(1))
@@ -1942,7 +1942,7 @@ fn merge_back_fails_closed_for_strategy_without_contribution_capabilities() {
     )
     .unwrap();
     assert!(matches!(
-        core.merge_back_branch(branch_id),
+        core.merge_back_branch_settled(branch_id),
         Err(Error::BranchMergeCalculation(
             "column strategy lacks branch contribution capabilities"
         ))
@@ -2050,7 +2050,7 @@ fn run_merge_back_oracle_seed(seed: u64, include_restore: bool) -> MergeBackOrac
             let previous = branch_parents.get(&(action.row(), action.layer())).copied();
             let branch_tx = parent_pair
                 .merged
-                .commit_mergeable_on_branch(
+                .commit_mergeable_on_branch_settled(
                     branch_id,
                     action.commit(now_ms, previous.into_iter().collect()),
                 )
@@ -2077,7 +2077,7 @@ fn run_merge_back_oracle_seed(seed: u64, include_restore: bool) -> MergeBackOrac
         }
     }
 
-    let merge_back_tx = merged.merge_back_branch(branch_id).unwrap();
+    let merge_back_tx = merged.merge_back_branch_settled(branch_id).unwrap();
     let direct_txs = apply_direct_net_effects(&mut direct, seed, include_restore, branch_parents);
     MergeBackOracleRun {
         merged,
@@ -2116,13 +2116,13 @@ impl ParentPair<'_> {
     fn commit_parent_local(&mut self, row_uuid: RowUuid, now_ms: u64, title: impl Into<String>) {
         let title = title.into();
         self.merged
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row_uuid, now_ms)
                     .cells(title_cells(title.clone())),
             )
             .unwrap();
         self.direct
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row_uuid, now_ms).cells(title_cells(title)),
             )
             .unwrap();
@@ -2228,7 +2228,7 @@ fn apply_direct_net_effects(
             .collect();
         direct_txs.push(
             direct
-                .commit_mergeable(effect.commit(80 + seed * 10 + idx as u64, parents))
+                .commit_mergeable_settled(effect.commit(80 + seed * 10 + idx as u64, parents))
                 .unwrap(),
         );
     }

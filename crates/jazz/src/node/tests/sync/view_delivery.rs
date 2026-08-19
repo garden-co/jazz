@@ -8,7 +8,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
     let row = row(7);
 
     let (_, commit_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
                 "title".to_owned(),
                 "replicate me".to_owned(),
@@ -18,7 +18,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
     let update = core.view_update_for_current_rows("todos").unwrap();
@@ -85,12 +85,12 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     let row = row(7);
 
     let (tx_id, commit_unit) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(title_cells("known")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("known")))
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
     let initial = core.view_update_for_current_rows("todos").unwrap();
@@ -221,13 +221,13 @@ fn wire_record_round_trips_through_history_bytes() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
     let (_tx_id, message) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(title_cells("wire")))
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("wire")))
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
     let original = versions[0].clone();
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     let stored = core.query_row_versions("todos", row).unwrap();
     let projected = core.version_record_from_row(&stored[0]).unwrap();
@@ -242,7 +242,7 @@ fn sync_message_dispatches_commit_fate_and_view_updates() {
     let row = row(7);
 
     let (tx_id, commit_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
                 "title".to_owned(),
                 "dispatch".to_owned(),
@@ -250,16 +250,16 @@ fn sync_message_dispatches_commit_fate_and_view_updates() {
         )
         .unwrap();
 
-    let out = core.apply_sync_message(commit_unit).unwrap();
+    let out = core.apply_sync_message_settled(commit_unit).unwrap();
     let [fate_update] = out.as_slice() else {
         panic!("expected one fate update");
     };
-    writer.apply_sync_message(fate_update.clone()).unwrap();
+    writer.apply_sync_message_settled(fate_update.clone()).unwrap();
     let (fate, _, _) = writer.transaction_state(tx_id).unwrap();
     assert_eq!(fate, Fate::Accepted);
 
     let view_update = core.view_update_for_current_rows("todos").unwrap();
-    assert!(reader.apply_sync_message(view_update).unwrap().is_empty());
+    assert!(reader.apply_sync_message_settled(view_update).unwrap().is_empty());
     assert_eq!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Local)
@@ -291,13 +291,13 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         version_record(row(1), Vec::new(), title_cells("a"), None),
         version_record(row(2), Vec::new(), title_cells("b"), None),
     ];
-    core.ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     let mut reversed = versions;
     reversed.reverse();
 
     assert!(
-        core.ingest_commit_unit(tx, reversed, u64::MAX - SKEW_TOLERANCE_MS)
+        core.ingest_commit_unit_settled(tx, reversed, u64::MAX - SKEW_TOLERANCE_MS)
             .is_ok()
     );
 }
@@ -329,18 +329,18 @@ fn reopened_pending_partial_update_upload_preserves_authored_columns() {
     let row_uuid = row(0x91);
 
     let (base, base_unit) = bob
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("base".to_owned())),
                 ("completed".to_owned(), Value::Bool(false)),
             ])),
         )
         .unwrap();
-    let [base_fate] = core.apply_sync_message(base_unit).unwrap().try_into().unwrap();
-    bob.apply_sync_message(base_fate).unwrap();
+    let [base_fate] = core.apply_sync_message_settled(base_unit).unwrap().try_into().unwrap();
+    bob.apply_sync_message_settled(base_fate).unwrap();
 
     let (_alice_tx, alice_unit) = alice
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 20)
                 .parents(vec![base])
                 .cells(BTreeMap::from([(
@@ -349,10 +349,10 @@ fn reopened_pending_partial_update_upload_preserves_authored_columns() {
                 )])),
         )
         .unwrap();
-    core.apply_sync_message(alice_unit).unwrap();
+    core.apply_sync_message_settled(alice_unit).unwrap();
 
     let bob_tx = bob
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 30)
                 .parents(vec![base])
                 .cells(BTreeMap::from([
@@ -366,7 +366,7 @@ fn reopened_pending_partial_update_upload_preserves_authored_columns() {
 
     let mut reopened = reopen_node_at(&bob_dir, node(0x91), schema);
     let rebuilt = reopened.commit_unit_for(bob_tx).unwrap();
-    core.apply_sync_message(rebuilt).unwrap();
+    core.apply_sync_message_settled(rebuilt).unwrap();
 
     let rows = core.current_rows("todos", DurabilityTier::Local).unwrap();
     assert_eq!(rows.len(), 1);

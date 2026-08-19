@@ -31,7 +31,7 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
     };
 
     let ack = core
-        .apply_trusted_catalogue_message(publish.clone())
+        .apply_trusted_catalogue_message_settled(publish.clone())
         .unwrap();
     assert!(matches!(
         ack.as_slice(),
@@ -44,7 +44,7 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
     assert!(core.catalogue_schemas().contains_key(&payload.id));
 
     let second = core
-        .apply_trusted_catalogue_message(publish.clone())
+        .apply_trusted_catalogue_message_settled(publish.clone())
         .unwrap();
     assert!(matches!(
         second.as_slice(),
@@ -56,7 +56,7 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
     ));
     assert_eq!(core.catalogue_schemas().len(), 2);
 
-    client.apply_trusted_catalogue_message(publish).unwrap();
+    client.apply_trusted_catalogue_message_settled(publish).unwrap();
     assert_eq!(
         client
             .catalogue_schemas()
@@ -91,7 +91,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
         Vec::<String>::new(),
         Vec::<String>::new(),
     );
-    let non_admin = core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+    let non_admin = core.apply_sync_message_settled(SyncMessage::PublishSchemaWithLens {
         author: user(7),
         catalogue_seq: 1,
         publication: Box::new(publication.clone()),
@@ -103,7 +103,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
         SchemaVersionId::from_bytes([0x99; 16]),
         Vec::new(),
     );
-    let unknown_result = core.apply_trusted_catalogue_message(SyncMessage::PublishLens {
+    let unknown_result = core.apply_trusted_catalogue_message_settled(SyncMessage::PublishLens {
         author: AuthorId::SYSTEM,
         lens: unknown,
     });
@@ -113,7 +113,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
     ));
 
     let ack = core
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
@@ -145,7 +145,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x36), evolved.clone());
     let (core_dir, mut core) = open_node_with_schema(node(0x37), base.clone());
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x55), 1_000).cells(evolved_cells.clone()),
         )
         .unwrap();
@@ -154,7 +154,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     };
 
     assert!(
-        core.apply_sync_message(SyncMessage::CommitUnit {
+        core.apply_sync_message_settled(SyncMessage::CommitUnit {
             tx: tx.clone(),
             versions,
         })
@@ -241,7 +241,7 @@ fn catalogue_arrival_rejects_incomplete_row_claiming_evolved_schema() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x58), base.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0x59), base.clone());
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x58), 1_003).cells(title_cells("invalid")),
         )
         .unwrap();
@@ -268,7 +268,7 @@ fn catalogue_arrival_rejects_incomplete_row_claiming_evolved_schema() {
         .collect();
 
     assert!(core
-        .apply_sync_message(SyncMessage::CommitUnit {
+        .apply_sync_message_settled(SyncMessage::CommitUnit {
             tx: tx.clone(),
             versions: incomplete,
         })
@@ -321,7 +321,7 @@ fn catalogue_arrival_drops_incomplete_relay_row_without_failing_publication() {
     let (_relay_dir, mut relay) =
         open_history_complete_node_with_schema(node(0x6b), base.clone());
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x6a), 1_004).cells(title_cells("invalid relay")),
         )
         .unwrap();
@@ -491,7 +491,7 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
 
     let (_reader_dir, mut reader) = open_node_with_schema(node(0x6f), base);
     assert!(matches!(
-        reader.apply_sync_message(SyncMessage::ViewUpdate {
+        reader.apply_sync_message_settled(SyncMessage::ViewUpdate {
             subscription,
             settled_through,
             reset_result_set,

@@ -7,7 +7,7 @@ fn core_creates_merge_versions_for_concurrent_heads() {
     let row = row(7);
 
     let (left, left_message) = writer_a
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
                 "title".to_owned(),
                 "older-title".to_owned(),
@@ -15,7 +15,7 @@ fn core_creates_merge_versions_for_concurrent_heads() {
         )
         .unwrap();
     let (right, right_message) = writer_b
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
                 "body".to_owned(),
                 "right-body".to_owned(),
@@ -23,8 +23,8 @@ fn core_creates_merge_versions_for_concurrent_heads() {
         )
         .unwrap();
 
-    core.apply_sync_message(right_message).unwrap();
-    core.apply_sync_message(left_message).unwrap();
+    core.apply_sync_message_settled(right_message).unwrap();
+    core.apply_sync_message_settled(left_message).unwrap();
 
     let update = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&update);
@@ -80,7 +80,7 @@ fn counter_merge_sums_concurrent_deltas_and_keeps_lww_columns() {
         ])),
     );
     let (left, left_message) = writer_a
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("counters", row, 20)
                 .parents(vec![base])
                 .cells(BTreeMap::from([
@@ -90,7 +90,7 @@ fn counter_merge_sums_concurrent_deltas_and_keeps_lww_columns() {
         )
         .unwrap();
     let (right, right_message) = writer_b
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("counters", row, 21)
                 .parents(vec![base])
                 .cells(BTreeMap::from([
@@ -100,8 +100,8 @@ fn counter_merge_sums_concurrent_deltas_and_keeps_lww_columns() {
         )
         .unwrap();
 
-    core.apply_sync_message(left_message).unwrap();
-    core.apply_sync_message(right_message).unwrap();
+    core.apply_sync_message_settled(left_message).unwrap();
+    core.apply_sync_message_settled(right_message).unwrap();
 
     let merge = core
         .query_all_versions()
@@ -152,7 +152,7 @@ fn counter_merge_seeded_concurrent_increments_converge_to_exact_sum() {
             let delta = ((seed + idx as u64 * 3) % 5) + 1;
             expected += delta;
             let (_tx, message) = writer
-                .commit_mergeable_unit(
+                .commit_mergeable_unit_settled(
                     MergeableCommit::new("counters", row, 20 + idx as u64)
                         .parents(vec![base])
                         .cells(BTreeMap::from([(
@@ -164,13 +164,13 @@ fn counter_merge_seeded_concurrent_increments_converge_to_exact_sum() {
             messages.push(message);
         }
         for message in messages {
-            core.apply_sync_message(message).unwrap();
+            core.apply_sync_message_settled(message).unwrap();
         }
 
         for (_, writer) in &mut writers {
             let mut peer = PeerState::new();
             writer
-                .apply_sync_message(peer.current_rows_update(&mut core, "counters").unwrap())
+                .apply_sync_message_settled(peer.current_rows_update(&mut core, "counters").unwrap())
                 .unwrap();
             let current = writer
                 .current_rows("counters", DurabilityTier::Local)
@@ -453,12 +453,12 @@ fn core_local_currency_uses_argmax_not_sender_arrival_order() {
     let shared_row = row(7);
 
     let (tx_a, unit_a) = client_a
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", shared_row, 10).cells(title_cells("a")),
         )
         .unwrap();
     let (tx_b, unit_b) = client_b
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", shared_row, 11).cells(title_cells("b")),
         )
         .unwrap();
@@ -472,7 +472,7 @@ fn core_local_currency_uses_argmax_not_sender_arrival_order() {
     else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx_a_payload, versions_a, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx_a_payload, versions_a, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     let SyncMessage::CommitUnit {
         tx: tx_b_payload,
@@ -481,7 +481,7 @@ fn core_local_currency_uses_argmax_not_sender_arrival_order() {
     else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx_b_payload, versions_b, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx_b_payload, versions_b, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
     let merge_tx = core

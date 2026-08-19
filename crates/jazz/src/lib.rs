@@ -99,6 +99,13 @@
 pub(crate) mod legacy_test_future {
     use std::future::Future;
 
+    use crate::ids::{AuthorId, BranchId};
+    use crate::node::{Error, MergeableCommit, NodeState};
+    use crate::protocol::{SyncMessage, VersionRecord};
+    use crate::tools::OpenTransactionId;
+    use crate::tx::{BranchLineage, Fate, Transaction, TxId};
+    use groove::storage::{OrderedKvStorage, ReopenableStorage};
+
     pub(crate) trait ResultFutureExt<T, E>: Future<Output = Result<T, E>> {
         fn unwrap(self) -> T
         where
@@ -182,6 +189,214 @@ pub(crate) mod legacy_test_future {
     }
 
     impl<F, T> OptionFutureExt<T> for F where F: Future<Output = Option<T>> {}
+
+    pub(crate) trait SettledNodeTestExt {
+        fn commit_mergeable_settled(&mut self, commit: MergeableCommit) -> Result<TxId, Error>;
+        fn commit_mergeable_unit_settled(
+            &mut self,
+            commit: MergeableCommit,
+        ) -> Result<(TxId, SyncMessage), Error>;
+        fn commit_mergeable_many_settled(
+            &mut self,
+            commits: Vec<MergeableCommit>,
+        ) -> Result<TxId, Error>;
+        fn commit_mergeable_on_branch_settled(
+            &mut self,
+            branch: BranchId,
+            commit: MergeableCommit,
+        ) -> Result<TxId, Error>;
+        fn commit_mergeable_many_on_branch_settled(
+            &mut self,
+            branch: BranchId,
+            commits: Vec<MergeableCommit>,
+        ) -> Result<TxId, Error>;
+        fn merge_back_branch_settled(&mut self, branch: BranchId) -> Result<TxId, Error>;
+        fn merge_back_branch_as_settled(
+            &mut self,
+            branch: BranchId,
+            identity: AuthorId,
+        ) -> Result<TxId, Error>;
+        fn merge_lineage_into_settled(
+            &mut self,
+            source: BranchLineage,
+            target: BranchLineage,
+        ) -> Result<TxId, Error>;
+        fn commit_exclusive_settled(
+            &mut self,
+            tx_id: OpenTransactionId,
+            author: AuthorId,
+            now_ms: u64,
+        ) -> Result<(TxId, SyncMessage), Error>;
+        fn apply_sync_message_settled(
+            &mut self,
+            message: SyncMessage,
+        ) -> Result<Vec<SyncMessage>, Error>;
+        fn apply_trusted_catalogue_message_settled(
+            &mut self,
+            message: SyncMessage,
+        ) -> Result<Vec<SyncMessage>, Error>;
+        fn ingest_commit_unit_settled(
+            &mut self,
+            tx: Transaction,
+            versions: Vec<VersionRecord>,
+            now_ms: u64,
+        ) -> Result<Vec<SyncMessage>, Error>;
+        fn finalize_local_mergeable_commit_settled(&mut self, tx_id: TxId) -> Result<(), Error>;
+        fn finalize_local_exclusive_commit_settled(
+            &mut self,
+            tx: Transaction,
+            versions: Vec<VersionRecord>,
+        ) -> Result<Fate, Error>;
+    }
+
+    impl<S> SettledNodeTestExt for NodeState<S>
+    where
+        S: OrderedKvStorage + ReopenableStorage,
+    {
+        fn commit_mergeable_settled(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable(commit).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn commit_mergeable_unit_settled(
+            &mut self,
+            commit: MergeableCommit,
+        ) -> Result<(TxId, SyncMessage), Error> {
+            crate::db::block_on(async {
+                let (published, unit) = self.commit_mergeable_unit(commit).await?;
+                let tx_id = self.persist_and_settle_transaction(published).await?;
+                Ok((tx_id, unit))
+            })
+        }
+
+        fn commit_mergeable_many_settled(
+            &mut self,
+            commits: Vec<MergeableCommit>,
+        ) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable_many(commits).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn commit_mergeable_on_branch_settled(
+            &mut self,
+            branch: BranchId,
+            commit: MergeableCommit,
+        ) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable_on_branch(branch, commit).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn commit_mergeable_many_on_branch_settled(
+            &mut self,
+            branch: BranchId,
+            commits: Vec<MergeableCommit>,
+        ) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self
+                    .commit_mergeable_many_on_branch(branch, commits)
+                    .await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn merge_back_branch_settled(&mut self, branch: BranchId) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.merge_back_branch(branch).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn merge_back_branch_as_settled(
+            &mut self,
+            branch: BranchId,
+            identity: AuthorId,
+        ) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.merge_back_branch_as(branch, identity).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn merge_lineage_into_settled(
+            &mut self,
+            source: BranchLineage,
+            target: BranchLineage,
+        ) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.merge_lineage_into(source, target).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn commit_exclusive_settled(
+            &mut self,
+            tx_id: OpenTransactionId,
+            author: AuthorId,
+            now_ms: u64,
+        ) -> Result<(TxId, SyncMessage), Error> {
+            crate::db::block_on(async {
+                let (published, unit) = self.commit_exclusive(tx_id, author, now_ms).await?;
+                let tx_id = self.persist_and_settle_transaction(published).await?;
+                Ok((tx_id, unit))
+            })
+        }
+
+        fn apply_sync_message_settled(
+            &mut self,
+            message: SyncMessage,
+        ) -> Result<Vec<SyncMessage>, Error> {
+            crate::db::block_on(async {
+                let outcome = self.apply_sync_message(message).await?;
+                self.persist_and_settle_outcome(outcome).await
+            })
+        }
+
+        fn apply_trusted_catalogue_message_settled(
+            &mut self,
+            message: SyncMessage,
+        ) -> Result<Vec<SyncMessage>, Error> {
+            crate::db::block_on(async {
+                let outcome = self.apply_trusted_catalogue_message(message).await?;
+                self.persist_and_settle_outcome(outcome).await
+            })
+        }
+
+        fn ingest_commit_unit_settled(
+            &mut self,
+            tx: Transaction,
+            versions: Vec<VersionRecord>,
+            now_ms: u64,
+        ) -> Result<Vec<SyncMessage>, Error> {
+            crate::db::block_on(async {
+                let outcome = self.ingest_commit_unit(tx, versions, now_ms).await?;
+                self.persist_and_settle_outcome(outcome).await
+            })
+        }
+
+        fn finalize_local_mergeable_commit_settled(&mut self, tx_id: TxId) -> Result<(), Error> {
+            crate::db::block_on(async {
+                let outcome = self.finalize_local_mergeable_commit(tx_id).await?;
+                self.persist_and_settle_outcome(outcome).await
+            })
+        }
+
+        fn finalize_local_exclusive_commit_settled(
+            &mut self,
+            tx: Transaction,
+            versions: Vec<VersionRecord>,
+        ) -> Result<Fate, Error> {
+            crate::db::block_on(async {
+                let outcome = self.finalize_local_exclusive_commit(tx, versions).await?;
+                self.persist_and_settle_outcome(outcome).await
+            })
+        }
+    }
 }
 
 /// Re-export of the underlying groove crate used for storage setup.

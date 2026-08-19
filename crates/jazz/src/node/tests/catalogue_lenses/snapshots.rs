@@ -13,14 +13,14 @@ fn schema_version_id_round_trips_through_wire_ingest_and_recovery() {
             "title".to_owned(),
             Value::String("lens hook".to_owned()),
         )]));
-    let (_tx_id, unit) = writer.commit_mergeable_unit(commit).unwrap();
+    let (_tx_id, unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
     let SyncMessage::CommitUnit { versions, .. } = &unit else {
         panic!("commit unit expected");
     };
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0].schema_version(), expected_schema_version);
 
-    core.apply_sync_message(unit).unwrap();
+    core.apply_sync_message_settled(unit).unwrap();
     let versions = core.query_all_versions().unwrap();
     assert_eq!(versions.len(), 1);
     let wire = core.version_record_from_row(&versions[0]).unwrap();
@@ -62,7 +62,7 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -71,7 +71,7 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
         })
         .unwrap();
     let (_, authored) = authority
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x36), 10).cells(BTreeMap::from([
                 ("title".to_owned(), v("authored")),
                 ("body".to_owned(), v("under-evolved-schema")),
@@ -82,14 +82,14 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x37), base);
     let snapshot = authority.catalogue_snapshot().unwrap();
     assert!(matches!(
-        receiver.apply_sync_message(SyncMessage::CatalogueSnapshot(Box::new(snapshot.clone()))),
+        receiver.apply_sync_message_settled(SyncMessage::CatalogueSnapshot(Box::new(snapshot.clone()))),
         Err(Error::UnsupportedSyncMessage(
             "catalogue snapshot requires a trusted upstream link"
         ))
     ));
     receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
     assert_eq!(receiver.current_write_schema().unwrap().schema, evolved.id);
-    receiver.apply_sync_message(authored).unwrap();
+    receiver.apply_sync_message_settled(authored).unwrap();
     let versions = receiver.query_all_versions().unwrap();
     assert_eq!(versions.len(), 1);
     assert_eq!(
@@ -127,7 +127,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -141,7 +141,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     let local_alias = receiver.catalogue.current_schema_version_alias.unwrap();
     let local_mapping = receiver.catalogue.physical_mappings[&evolved.id].clone();
     let (tx_id, _) = receiver
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x62), 10).cells(BTreeMap::from([
                 ("title".to_owned(), v("before-snapshot")),
                 ("body".to_owned(), v("authored-evolved")),
@@ -190,7 +190,7 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -878,7 +878,7 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.commit_mergeable(MergeableCommit::new("todos", row(0x92), 1).cells(BTreeMap::from([
+        edge.commit_mergeable_settled(MergeableCommit::new("todos", row(0x92), 1).cells(BTreeMap::from([
             ("title".to_owned(), v("must not write before catalogue bootstrap")),
         ]))),
         Err(Error::CatalogueUninitialized)
@@ -1016,7 +1016,7 @@ fn dynamic_edge_reopen_rejects_catalogue_prefix_without_bootstrap_marker() {
 fn dynamic_edge_reopen_rejects_catalogue_stripped_history() {
     let base = schema();
     let (temp_dir, mut durable_node) = open_node_with_schema(node(0x9e), base.clone());
-    durable_node.commit_mergeable(
+    durable_node.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x9f), 10).cells(title_cells("durable history")),
     )
     .unwrap();
@@ -1179,7 +1179,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
     );
     edge.set_catalogue_activation_failpoint(CatalogueActivationFailpoint::AfterStaged);
     assert!(matches!(
-        edge.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
@@ -1266,7 +1266,7 @@ fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue
         .expect("open explicit uninitialized edge");
 
     assert!(matches!(
-        edge.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        edge.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -1292,7 +1292,7 @@ fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue
 fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
     let (_source_dir, mut source) = open_node_with_schema(node(0x97), schema());
     let (_tx_id, unit) = source
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x98), 10).cells(title_cells("valid source unit")),
         )
         .unwrap();
@@ -1313,7 +1313,7 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.ingest_commit_unit(tx.clone(), versions.clone(), 20),
+        edge.ingest_commit_unit_settled(tx.clone(), versions.clone(), 20),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
@@ -1474,7 +1474,7 @@ fn trusted_catalogue_snapshot_activation_failure_never_exposes_a_prefix_and_reop
     assert_eq!(core.catalogue_schemas().len(), 1);
     assert_eq!(core.current_write_schema().unwrap().revision, 0);
     assert!(matches!(
-        core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,

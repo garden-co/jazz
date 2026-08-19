@@ -651,7 +651,7 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
     );
 
     let sibling_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", sibling_match, 2_100)
                 .cells(owner_cells(alice, "match")),
             MergeableCommit::new("todos", sibling_nonmatch, 2_100)
@@ -696,7 +696,7 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
     }
 
     let multi_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", multi_match_a, 2_200)
                 .cells(owner_cells(alice, "match")),
             MergeableCommit::new("todos", multi_match_b, 2_200)
@@ -1597,7 +1597,7 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
     assert_tick(&mut core, &mut peer, &txs, &add_rows, &[], "add");
 
     let sibling_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", sibling_match, 2_100)
                 .cells(owner_cells(alice, "match")),
             MergeableCommit::new("todos", sibling_nonmatch, 2_100)
@@ -1624,7 +1624,7 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
     assert_tick(&mut core, &mut peer, &txs, &sibling_add_rows, &[], "sibling-add");
 
     let multi_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", multi_match_a, 2_200)
                 .cells(owner_cells(alice, "match")),
             MergeableCommit::new("todos", multi_match_b, 2_200)

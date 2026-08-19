@@ -63,7 +63,7 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     core.server
         .node()
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
@@ -452,7 +452,7 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
     let tx_id = edge
         .node()
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x91), 1).cells(cells("handoff", false, identity)),
         )
         .unwrap();
@@ -764,7 +764,7 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
     let tx_id = edge
         .node()
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x44), 1).cells(cells("pending", false, identity)),
         )
         .unwrap();
