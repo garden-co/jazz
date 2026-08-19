@@ -1,4 +1,5 @@
-use jazz::tools::{JazzClient, QueryBuilder, Value};
+use jazz::query::OrderDirection;
+use jazz::tools::{JazzClient, Value};
 use jazz_server::JazzServer;
 
 use crate::common::{
@@ -89,7 +90,7 @@ async fn subscribe_all_cold_ordered_subscription_supports_offset_and_limit() {
 
     wait_for_rows(
         &writer,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "writer sees all rows before cold paginated subscriber connects",
         |rows| {
             (rows.iter().any(|(id, _)| *id == a_id)
@@ -108,11 +109,10 @@ async fn subscribe_all_cold_ordered_subscription_supports_offset_and_limit() {
         .ready_on("todos", READY_TIMEOUT)
         .connect()
         .await;
-    let query = QueryBuilder::new("todos")
-        .order_by("priority")
+    let query = jazz::query::Query::from("todos")
+        .order_by("priority", OrderDirection::Asc)
         .offset(2)
-        .limit(1)
-        .build();
+        .limit(1);
     let mut stream = subscriber
         .subscribe(query.clone())
         .await
@@ -211,7 +211,7 @@ async fn subscribe_all_cold_ordered_subscription_supports_offset_without_limit()
 
     wait_for_rows(
         &writer,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "writer sees all rows before cold offset subscriber connects",
         |rows| {
             (rows.iter().any(|(id, _)| *id == a_id)
@@ -230,10 +230,9 @@ async fn subscribe_all_cold_ordered_subscription_supports_offset_without_limit()
         .ready_on("todos", READY_TIMEOUT)
         .connect()
         .await;
-    let query = QueryBuilder::new("todos")
-        .order_by("priority")
-        .offset(2)
-        .build();
+    let query = jazz::query::Query::from("todos")
+        .order_by("priority", OrderDirection::Asc)
+        .offset(2);
     let mut stream = subscriber
         .subscribe(query.clone())
         .await
@@ -275,10 +274,9 @@ local_tokio_test! {
 /// when a new row sorts ahead of the existing page.
 async fn subscribe_all_sorted_limited_subscription_reorders_when_new_top_row_arrives() {
     let pair = ClientPair::start().await;
-    let query = QueryBuilder::new("todos")
-        .order_by_desc("priority")
-        .limit(2)
-        .build();
+    let query = jazz::query::Query::from("todos")
+        .order_by("priority", OrderDirection::Desc)
+        .limit(2);
 
     let mut stream = pair
         .subscriber
@@ -386,11 +384,10 @@ local_tokio_test! {
 #[ignore = "projected ordered subscription emits no delta when its sort key changes"]
 async fn subscribe_all_preserves_sorting_on_sort_key_changes() {
     let client = JazzClient::test_client(subscription_schema()).await;
-    let query = QueryBuilder::new("todos")
-        .select(&["title", "priority", "$createdAt", "$updatedAt"])
-        .order_by("priority")
-        .limit(3)
-        .build();
+    let query = jazz::query::Query::from("todos")
+        .select(["title", "priority", "$createdAt", "$updatedAt"])
+        .order_by("priority", OrderDirection::Asc)
+        .limit(3);
     let mut stream = client
         .subscribe(query.clone())
         .await
@@ -496,11 +493,10 @@ local_tokio_test! {
 #[ignore = "local query reapplies pagination to the subscription's already-windowed rows"]
 async fn subscribe_all_offset_limited_subscription_shifts_window_when_deleting_row_before_window() {
     let pair = ClientPair::start().await;
-    let query = QueryBuilder::new("todos")
-        .order_by("priority")
+    let query = jazz::query::Query::from("todos")
+        .order_by("priority", OrderDirection::Asc)
         .offset(1)
-        .limit(2)
-        .build();
+        .limit(2);
 
     let mut stream = pair
         .subscriber
@@ -613,11 +609,10 @@ local_tokio_test! {
 #[ignore = "local query reapplies pagination to the subscription's already-windowed rows"]
 async fn subscribe_all_supports_order_by_limit_and_offset() {
     let pair = ClientPair::start().await;
-    let query = QueryBuilder::new("todos")
-        .order_by_desc("priority")
+    let query = jazz::query::Query::from("todos")
+        .order_by("priority", OrderDirection::Desc)
         .offset(1)
-        .limit(1)
-        .build();
+        .limit(1);
 
     let mut stream = pair
         .subscriber

@@ -3,10 +3,11 @@
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use jazz::query::Query;
 use jazz::tools::sync::ClientId;
 use jazz::tools::{
-    AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
-    QueryBuilder, Schema, SubscriptionStream, SubscriptionStreamItem, Value,
+    AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Schema,
+    SubscriptionStream, SubscriptionStreamItem, Value,
 };
 use jazz_server::JazzServer;
 use jsonwebtoken::{EncodingKey, Header, encode};
@@ -424,7 +425,7 @@ mod tests {
 pub async fn wait_for_edge_query_ready(client: &JazzClient, table: &str, timeout: Duration) {
     wait_for_query(
         client,
-        QueryBuilder::new(table).build(),
+        Query::from(table),
         Some(DurabilityTier::EdgeServer),
         timeout,
         format!("EdgeServer query readiness for {table}"),

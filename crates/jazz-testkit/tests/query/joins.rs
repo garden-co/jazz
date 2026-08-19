@@ -1,4 +1,5 @@
-use jazz::tools::{DurabilityTier, OrderedRowDelta, QueryBuilder, QueryResult, ResultKey, Value};
+use jazz::query::{Query, col, eq, lit, table};
+use jazz::tools::{DurabilityTier, OrderedRowDelta, QueryResult, ResultKey, Value};
 
 use crate::common::{
     ClientPair, QUERY_TIMEOUT, create_file, create_file_part, create_org, create_post, create_team,
@@ -48,16 +49,13 @@ async fn subscribe_all_join_emits_when_matching_joined_row_is_inserted() {
     let user_id = create_user(&pair.writer, "Alice", None).await;
     wait_for_rows(
         &pair.subscriber,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         "subscriber sees base join user before joined-table insert",
         |rows| rows.iter().any(|(id, _)| *id == user_id).then_some(rows),
     )
     .await;
 
-    let query = QueryBuilder::new("users")
-        .join("posts")
-        .on("users.name", "posts.author_name")
-        .build();
+    let query = Query::from("users").flat_join("posts", "users.name", "posts.author_name");
     let mut stream = pair
         .subscriber
         .subscribe(query.clone())
@@ -116,10 +114,7 @@ async fn subscribe_all_join_returns_base_and_joined_table_values() {
     let user_id = create_user(&pair.writer, "Alice", None).await;
     let post_id = create_post(&pair.writer, 100, "Hello World", "Alice").await;
 
-    let query = QueryBuilder::new("users")
-        .join("posts")
-        .on("users.name", "posts.author_name")
-        .build();
+    let query = Query::from("users").flat_join("posts", "users.name", "posts.author_name");
     let rows = wait_for_query_results(
         &pair.subscriber,
         query,
@@ -163,11 +158,9 @@ async fn subscribe_all_join_filter_on_joined_table_column() {
     create_post(&pair.writer, 100, "Hello World", "Alice").await;
     create_post(&pair.writer, 101, "Learning Rust", "Bob").await;
 
-    let query = QueryBuilder::new("users")
-        .join("posts")
-        .on("users.name", "posts.author_name")
-        .filter_eq("title", Value::Text("Learning Rust".to_string()))
-        .build();
+    let query = Query::from("users")
+        .flat_join("posts", "users.name", "posts.author_name")
+        .filter(eq(col("title"), lit("Learning Rust")));
     let rows = wait_for_query_results(
         &pair.subscriber,
         query,
@@ -204,14 +197,10 @@ async fn subscribe_all_join_filter_on_scoped_alias_columns() {
     create_post(&pair.writer, 100, "Hello World", "Alice").await;
     create_post(&pair.writer, 101, "Learning Rust", "Bob").await;
 
-    let query = QueryBuilder::new("users")
-        .alias("u")
-        .join("posts")
-        .alias("p")
-        .on("u.name", "p.author_name")
-        .filter_eq("u.name", Value::Text("Bob".to_string()))
-        .filter_eq("p.title", Value::Text("Learning Rust".to_string()))
-        .build();
+    let query = Query::from(table("users").alias("u"))
+        .flat_join(table("posts").alias("p"), "u.name", "p.author_name")
+        .filter(eq(col("u.name"), lit("Bob")))
+        .filter(eq(col("p.title"), lit("Learning Rust")));
     let rows = wait_for_query_results(
         &pair.subscriber,
         query,
@@ -252,12 +241,9 @@ local_tokio_test! {
 /// ```
 async fn subscribe_all_supports_hop_queries_via_projected_joins() {
     let pair = ClientPair::start().await;
-    let query = QueryBuilder::new("users")
-        .join("teams")
-        .on("users.team_id", "teams.id")
-        .join("orgs")
-        .on("teams.org_id", "orgs.id")
-        .build();
+    let query = Query::from("users")
+        .flat_join("teams", "users.team_id", "teams.id")
+        .flat_join("orgs", "teams.org_id", "orgs.id");
 
     let mut stream = pair
         .subscriber
@@ -325,10 +311,7 @@ async fn subscribe_all_reacts_to_scalar_fk_updates_in_projected_join_queries() {
     let team_b = create_team(&pair.writer, "Team B", Some(org_b), None).await;
     let user_id = create_user(&pair.writer, "Mover", Some(team_a)).await;
 
-    let query = QueryBuilder::new("users")
-        .join("teams")
-        .on("users.team_id", "teams.id")
-        .build();
+    let query = Query::from("users").flat_join("teams", "users.team_id", "teams.id");
 
     let mut stream = pair
         .subscriber
@@ -412,10 +395,8 @@ async fn subscribe_all_reacts_to_uuid_array_fk_updates_in_projected_join_queries
     let part_b = create_file_part(&pair.writer, "B").await;
     let file_id = create_file(&pair.writer, "File", &[part_a]).await;
 
-    let query = QueryBuilder::new("files")
-        .join("file_parts")
-        .on("files.parts", "file_parts.id")
-        .build();
+    let query =
+        Query::from("files").flat_join("file_parts", "files.parts", "file_parts.id");
 
     let mut stream = pair
         .subscriber

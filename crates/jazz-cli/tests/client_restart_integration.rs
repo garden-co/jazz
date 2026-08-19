@@ -10,7 +10,7 @@ use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jazz::tools::{
     AppContext, AppId, ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient,
-    QueryBuilder, SchemaBuilder, TableSchema, Value,
+    SchemaBuilder, TableSchema, Value,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::Client;
@@ -285,7 +285,7 @@ async fn wait_for_todos_count(
     timeout: Duration,
     durability_tier: Option<DurabilityTier>,
 ) -> Vec<(jazz::tools::ObjectId, Vec<Value>)> {
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last = Vec::new();
 
@@ -311,7 +311,7 @@ async fn wait_for_todos_count(
 }
 
 async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     let deadline = tokio::time::Instant::now() + timeout;
 
     while tokio::time::Instant::now() < deadline {
@@ -499,7 +499,7 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         .expect("create todo");
 
     let initial_rows = client
-        .query(QueryBuilder::new("todos").build(), None)
+        .query(jazz::query::Query::from("todos"), None)
         .await
         .expect("query rows before restart");
     assert_eq!(
@@ -527,7 +527,7 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         .await
         .expect("reconnect memory client");
     let rows_after_restart = restarted
-        .query(QueryBuilder::new("todos").build(), None)
+        .query(jazz::query::Query::from("todos"), None)
         .await
         .expect("query rows after restart");
     assert_eq!(

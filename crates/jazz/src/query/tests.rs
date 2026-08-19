@@ -388,19 +388,7 @@ mod tests {
     #[test]
     fn flat_join_rejects_combinations_outside_its_executable_envelope() {
         fn flat() -> Query {
-            let mut query = Query::from("issues");
-            query.flat_join = Some(FlatJoin {
-                root_alias: None,
-                sources: vec![FlatJoinSource {
-                    table: "issue_tags".to_owned(),
-                    alias: None,
-                    on: FlatJoinOn {
-                        left: "issues.id".to_owned(),
-                        right: "issue_tags.issue".to_owned(),
-                    },
-                }],
-            });
-            query
+            Query::from("issues").flat_join("issue_tags", "issues.id", "issue_tags.issue")
         }
 
         let mut cases = Vec::new();

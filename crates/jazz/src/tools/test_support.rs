@@ -1,9 +1,9 @@
 #[cfg(feature = "testing")]
 use std::time::Duration;
 
-use crate::tools::object::ObjectId;
 #[cfg(feature = "testing")]
-use crate::tools::public_api::query::Query;
+use crate::query::Query;
+use crate::tools::object::ObjectId;
 #[cfg(feature = "testing")]
 use crate::tools::public_api::types::Value;
 #[cfg(feature = "testing")]

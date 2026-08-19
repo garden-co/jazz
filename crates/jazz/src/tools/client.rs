@@ -21,16 +21,14 @@ use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as 
 use crate::protocol::{
     ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
 };
+use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
 use crate::tools::OpenTransactionId;
 use crate::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
-use crate::tools::public_api::query::{
-    Condition as PublicCondition, SortDirection as PublicSortDirection,
-};
 use crate::tools::public_api::types::{
     OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
 };
 use crate::tools::public_schema::TableName;
-use crate::tools::public_schema::{ColumnType, Query, Session, TableSchema, Value, WriteContext};
+use crate::tools::public_schema::{ColumnType, Session, TableSchema, Value, WriteContext};
 use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::tools::public_schema::{Schema, validate_json_value};
 use crate::tools::public_schema_convert::convert_public_schema;
@@ -1739,147 +1737,19 @@ fn core_row_provenance_to_public(
     }
 }
 
-fn public_to_core_literal_for_column(value: &Value, column_type: &ColumnType) -> Result<CoreValue> {
-    match (value, column_type) {
-        (Value::Integer(value), ColumnType::BigInt) => Ok(CoreValue::I64(i64::from(*value))),
-        (Value::BigInt(value), ColumnType::BigInt) => Ok(CoreValue::I64(*value)),
-        (Value::BigInt(value), ColumnType::Integer) => {
-            i32::try_from(*value).map(CoreValue::I32).map_err(|_| {
-                JazzError::Query(format!(
-                    "BIGINT literal {value} is outside INTEGER range for core query"
-                ))
-            })
-        }
-        _ => public_to_core_value_for_column_type(value.clone(), column_type),
-    }
-}
-
-fn core_literal_operand(value: &Value, column_type: &ColumnType) -> Result<crate::query::Operand> {
-    public_to_core_literal_for_column(value, column_type).map(crate::query::Operand::Literal)
-}
-
-fn core_query_condition(
-    condition: &PublicCondition,
-    table_schema: &TableSchema,
-) -> Result<Vec<crate::query::Predicate>> {
-    let column = condition.column();
-    let column_schema = table_schema
-        .columns
-        .columns
-        .iter()
-        .find(|schema| schema.name.as_str() == column)
-        .ok_or_else(|| JazzError::Query(format!("unknown column {column}")))?;
-    let column_operand = || crate::query::Operand::Column(column.to_owned());
-    let literal_operand = |value: &Value| core_literal_operand(value, &column_schema.column_type);
-
-    let predicate = match condition {
-        PublicCondition::Eq { value, .. } if value.is_null() => {
-            crate::query::is_null(column_operand())
-        }
-        PublicCondition::Ne { value, .. } if value.is_null() => {
-            crate::query::not(crate::query::is_null(column_operand()))
-        }
-        PublicCondition::Eq { value, .. } => {
-            crate::query::eq(column_operand(), literal_operand(value)?)
-        }
-        PublicCondition::Ne { value, .. } => {
-            crate::query::ne(column_operand(), literal_operand(value)?)
-        }
-        PublicCondition::Lt { value, .. } => {
-            crate::query::lt(column_operand(), literal_operand(value)?)
-        }
-        PublicCondition::Le { value, .. } => {
-            crate::query::lte(column_operand(), literal_operand(value)?)
-        }
-        PublicCondition::Gt { value, .. } => {
-            crate::query::gt(column_operand(), literal_operand(value)?)
-        }
-        PublicCondition::Ge { value, .. } => {
-            crate::query::gte(column_operand(), literal_operand(value)?)
-        }
-        PublicCondition::Contains { value, .. } => {
-            crate::query::contains(column_operand(), literal_operand(value)?)
-        }
-        PublicCondition::In { values, .. } => crate::query::in_list(
-            column_operand(),
-            values
-                .iter()
-                .map(&literal_operand)
-                .collect::<Result<Vec<_>>>()?,
-        ),
-        PublicCondition::IsNull { .. } => crate::query::is_null(column_operand()),
-        PublicCondition::IsNotNull { .. } => {
-            crate::query::not(crate::query::is_null(column_operand()))
-        }
-        PublicCondition::Between { min, max, .. } => {
-            return Ok(vec![
-                crate::query::gte(column_operand(), literal_operand(min)?),
-                crate::query::lte(column_operand(), literal_operand(max)?),
-            ]);
-        }
-    };
-    Ok(vec![predicate])
-}
-
-fn aggregate_output_name(output: &crate::tools::public_api::query::AggregateOutput) -> String {
-    match output.function {
-        crate::tools::public_api::query::AggregateFunction::Count => "count".to_owned(),
-        crate::tools::public_api::query::AggregateFunction::Sum => {
-            format!(
-                "sum_{}",
-                output
-                    .column
-                    .as_deref()
-                    .expect("sum aggregate has an input column")
-            )
-        }
-        crate::tools::public_api::query::AggregateFunction::Avg => {
-            format!(
-                "avg_{}",
-                output
-                    .column
-                    .as_deref()
-                    .expect("avg aggregate has an input column")
-            )
-        }
-        crate::tools::public_api::query::AggregateFunction::Min => {
-            format!(
-                "min_{}",
-                output
-                    .column
-                    .as_deref()
-                    .expect("min aggregate has an input column")
-            )
-        }
-        crate::tools::public_api::query::AggregateFunction::Max => {
-            format!(
-                "max_{}",
-                output
-                    .column
-                    .as_deref()
-                    .expect("max aggregate has an input column")
-            )
-        }
-    }
-}
-
 fn aggregate_output_column_type(
-    output: &crate::tools::public_api::query::AggregateOutput,
+    output: &CoreAggregate,
     table_schema: &TableSchema,
     table: &str,
 ) -> Result<Option<ColumnType>> {
     match output.function {
-        crate::tools::public_api::query::AggregateFunction::Count => {
-            Ok(Some(ColumnType::Timestamp))
-        }
-        crate::tools::public_api::query::AggregateFunction::Avg => Ok(Some(ColumnType::Double)),
-        crate::tools::public_api::query::AggregateFunction::Sum
-        | crate::tools::public_api::query::AggregateFunction::Min
-        | crate::tools::public_api::query::AggregateFunction::Max => {
+        CoreAggregateFunction::Count => Ok(Some(ColumnType::Timestamp)),
+        CoreAggregateFunction::Avg => Ok(Some(ColumnType::Double)),
+        CoreAggregateFunction::Sum | CoreAggregateFunction::Min | CoreAggregateFunction::Max => {
             let column = output
                 .column
                 .as_deref()
-                .expect("aggregate has an input column");
+                .expect("non-count aggregate has an input column");
             let idx = table_schema.columns.column_index(column).ok_or_else(|| {
                 JazzError::Query(format!(
                     "unknown aggregate column {column} on table {table}"
@@ -1916,8 +1786,10 @@ fn aggregate_public_values(
             Some(table_schema.columns.columns[idx].column_type.clone()),
         ));
     }
-    for output in &aggregate.outputs {
-        let public_name = aggregate_output_name(output);
+    let mut outputs = aggregate.aggregates.iter().collect::<Vec<_>>();
+    outputs.sort_by_key(|output| crate::query::canonical_aggregate_key(output));
+    for output in outputs {
+        let public_name = output.alias.clone();
         columns.push((
             public_name.clone(),
             crate::node::query_engine::aggregate_output_app_field(&public_name),
@@ -1978,70 +1850,6 @@ fn transaction_rejected_before_tier_message(
     )
 }
 
-fn core_array_subquery(
-    subquery: &crate::tools::public_api::query::ArraySubquerySpec,
-    schema: &Schema,
-) -> Result<crate::query::ArraySubquery> {
-    fn local_column(column: &str) -> &str {
-        column.rsplit_once('.').map_or(column, |(_, local)| local)
-    }
-    if !subquery.joins.is_empty() {
-        return Err(JazzError::Query(format!(
-            "array relation {} contains joins, which are not supported",
-            subquery.column_name
-        )));
-    }
-    let table = schema.get(&subquery.table).ok_or_else(|| {
-        JazzError::Query(format!("unknown array relation table {}", subquery.table))
-    })?;
-    let mut filters = Vec::new();
-    for condition in &subquery.filters {
-        filters.extend(core_query_condition(condition, table)?);
-    }
-    let order_by = subquery
-        .order_by
-        .iter()
-        .map(|(column, direction)| crate::query::OrderBy {
-            column: column.clone(),
-            direction: match direction {
-                PublicSortDirection::Ascending => crate::query::OrderDirection::Asc,
-                PublicSortDirection::Descending => crate::query::OrderDirection::Desc,
-            },
-        })
-        .collect();
-    let requirement = match subquery.requirement {
-        crate::tools::public_api::query::ArraySubqueryRequirement::Optional => {
-            crate::query::ArraySubqueryRequirement::Optional
-        }
-        crate::tools::public_api::query::ArraySubqueryRequirement::AtLeastOne => {
-            crate::query::ArraySubqueryRequirement::AtLeastOne
-        }
-        crate::tools::public_api::query::ArraySubqueryRequirement::MatchCorrelationCardinality => {
-            crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality
-        }
-    };
-    Ok(crate::query::ArraySubquery {
-        column_name: subquery.column_name.clone(),
-        table: subquery.table.as_str().to_owned(),
-        // The public builder retains table qualification to make correlation
-        // intent explicit. Core array scopes are already typed by their parent
-        // and child tables, so their column references must be scope-local.
-        inner_column: local_column(&subquery.inner_column).to_owned(),
-        outer_column: local_column(&subquery.outer_column).to_owned(),
-        filters,
-        select: subquery.select_columns.clone(),
-        order_by,
-        limit: subquery.limit,
-        offset: subquery.offset,
-        requirement,
-        nested_arrays: subquery
-            .nested_arrays
-            .iter()
-            .map(|nested| core_array_subquery(nested, schema))
-            .collect::<Result<Vec<_>>>()?,
-    })
-}
-
 impl JazzClient {
     fn write_identity(&self) -> Option<CoreAuthorId> {
         self.write_context
@@ -2060,161 +1868,16 @@ impl JazzClient {
         }
         Ok(())
     }
-    fn core_read_opts(
-        query: &Query,
-        durability_tier: Option<DurabilityTier>,
-    ) -> Result<CoreReadOpts> {
-        let read_view = match query.branches.as_slice() {
-            // Existing public callers did not have to name the root before the
-            // branch facade existed. Keep that spelling (and the documented
-            // `main` spelling) as the ordinary current view.
-            [] => CoreReadViewSpec::default(),
-            [branch] if branch == "main" => CoreReadViewSpec::default(),
-            [branch] => {
-                let branch = uuid::Uuid::parse_str(branch).map_err(|_| {
-                    JazzError::Query(format!("branch {branch:?} must be `main` or a branch UUID"))
-                })?;
-                CoreReadViewSpec {
-                    source: CoreReadViewSourceSpec::Branch { branch },
-                    ..CoreReadViewSpec::default()
-                }
-            }
-            branches => {
-                // Public QueryBuilder retains its historical plural syntax,
-                // but v1's core serving contract transports exactly one branch
-                // metadata prerequisite. Do not lower this to an unsupported
-                // MergedBranches read view and fail later/opaqely.
-                return Err(JazzError::Query(format!(
-                    "multi-branch read views are not supported yet (requested {} branches)",
-                    branches.len()
-                )));
-            }
-        };
-        Ok(CoreReadOpts {
+    fn core_read_opts(durability_tier: Option<DurabilityTier>) -> CoreReadOpts {
+        CoreReadOpts {
             tier: durability_tier
                 .map(core_tier)
                 .unwrap_or(CoreDurabilityTier::Local),
             local_updates: CoreLocalUpdates::Immediate,
             propagation: CorePropagation::Full,
-            include_deleted: query.include_deleted,
-            read_view,
-        })
-    }
-    fn core_query(&self, query: &Query) -> Result<crate::query::Query> {
-        if query.disjuncts.len() != 1
-            || query.recursive.is_some()
-            || query.result_element_index.is_some()
-            || (query.aggregate.is_some() && query.select_columns.is_some())
-            || (!query.joins.is_empty()
-                && (query.select_columns.is_some()
-                    || !query.order_by.is_empty()
-                    || query.limit.is_some()
-                    || query.offset != 0
-                    || query.aggregate.is_some()))
-        {
-            return Err(JazzError::Query(
-                "JazzClient currently supports simple table queries only".to_string(),
-            ));
+            include_deleted: false,
+            read_view: CoreReadViewSpec::default(),
         }
-        let mut core_query = crate::query::Query::from(query.table.as_str());
-        if !query.joins.is_empty() {
-            core_query.flat_join = Some(crate::query::FlatJoin {
-                root_alias: query.alias.clone(),
-                sources: query
-                    .joins
-                    .iter()
-                    .map(|join| {
-                        let (left, right) = join.on.clone().ok_or_else(|| {
-                            JazzError::Query(format!(
-                                "flat join {} is missing an ON equality",
-                                join.effective_name()
-                            ))
-                        })?;
-                        Ok(crate::query::FlatJoinSource {
-                            table: join.table.as_str().to_owned(),
-                            alias: join.alias.clone(),
-                            on: crate::query::FlatJoinOn { left, right },
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            });
-        }
-        let schema = self.schema()?;
-        let table_schema = schema
-            .get(&TableName::new(query.table.as_str()))
-            .ok_or_else(|| JazzError::Query(format!("unknown table {}", query.table.as_str())))?;
-        for condition in &query.disjuncts[0].conditions {
-            for predicate in core_query_condition(condition, table_schema)? {
-                core_query = core_query.filter(predicate);
-            }
-        }
-        core_query.array_subqueries = query
-            .array_subqueries
-            .iter()
-            .map(|subquery| core_array_subquery(subquery, &schema))
-            .collect::<Result<Vec<_>>>()?;
-        if let Some(aggregate) = &query.aggregate {
-            let outputs = aggregate
-                .outputs
-                .iter()
-                .map(|output| match output.function {
-                    crate::tools::public_api::query::AggregateFunction::Count => {
-                        crate::query::Aggregate::count()
-                    }
-                    crate::tools::public_api::query::AggregateFunction::Sum => {
-                        crate::query::Aggregate::sum(
-                            output
-                                .column
-                                .as_deref()
-                                .expect("sum aggregate has an input column"),
-                        )
-                    }
-                    crate::tools::public_api::query::AggregateFunction::Avg => {
-                        crate::query::Aggregate::avg(
-                            output
-                                .column
-                                .as_deref()
-                                .expect("avg aggregate has an input column"),
-                        )
-                    }
-                    crate::tools::public_api::query::AggregateFunction::Min => {
-                        crate::query::Aggregate::min(
-                            output
-                                .column
-                                .as_deref()
-                                .expect("min aggregate has an input column"),
-                        )
-                    }
-                    crate::tools::public_api::query::AggregateFunction::Max => {
-                        crate::query::Aggregate::max(
-                            output
-                                .column
-                                .as_deref()
-                                .expect("max aggregate has an input column"),
-                        )
-                    }
-                });
-            core_query = core_query.aggregate(outputs);
-            if let Some(group_by) = &aggregate.group_by {
-                core_query = core_query.group_by(group_by.clone());
-            }
-        } else if let Some(columns) = query.select_columns.clone() {
-            core_query = core_query.select(columns);
-        }
-        for (column, direction) in &query.order_by {
-            let direction = match direction {
-                PublicSortDirection::Ascending => crate::query::OrderDirection::Asc,
-                PublicSortDirection::Descending => crate::query::OrderDirection::Desc,
-            };
-            core_query = core_query.order_by(column.clone(), direction);
-        }
-        if let Some(limit) = query.limit {
-            core_query = core_query.limit(limit);
-        }
-        if query.offset != 0 {
-            core_query = core_query.offset(query.offset);
-        }
-        Ok(core_query)
     }
     fn core_rows_to_public(
         &self,
@@ -2236,18 +1899,24 @@ impl JazzClient {
                 })
                 .collect();
         }
-        if !query.joins.is_empty() {
+        if let Some(flat_join) = &query.flat_join {
             let mut output_columns = Vec::new();
-            let mut sources = vec![(query.effective_name().to_owned(), query.table.clone())];
-            sources.extend(
-                query
-                    .joins
-                    .iter()
-                    .map(|join| (join.effective_name().to_owned(), join.table.clone())),
-            );
+            let mut sources = vec![(
+                flat_join
+                    .root_alias
+                    .clone()
+                    .unwrap_or_else(|| query.table.clone()),
+                query.table.clone(),
+            )];
+            sources.extend(flat_join.sources.iter().map(|source| {
+                (
+                    source.alias.clone().unwrap_or_else(|| source.table.clone()),
+                    source.table.clone(),
+                )
+            }));
             for (source, table) in sources {
                 let table_schema = schema
-                    .get(&table)
+                    .get(&TableName::new(&table))
                     .ok_or_else(|| JazzError::Query(format!("unknown flat join table {table}")))?;
                 for column in &table_schema.columns.columns {
                     output_columns.push((
@@ -2274,7 +1943,7 @@ impl JazzClient {
                 })
                 .collect();
         }
-        let columns = query.select_columns.clone().unwrap_or_else(|| {
+        let columns = query.select.clone().unwrap_or_else(|| {
             table_schema
                 .columns
                 .columns
@@ -2367,21 +2036,29 @@ impl JazzClient {
             .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
         if let Some(aggregate) = &query.aggregate {
             let mut names = aggregate.group_by.iter().cloned().collect::<Vec<_>>();
-            names.extend(aggregate.outputs.iter().map(aggregate_output_name));
+            let mut outputs = aggregate.aggregates.iter().collect::<Vec<_>>();
+            outputs.sort_by_key(|output| crate::query::canonical_aggregate_key(output));
+            names.extend(outputs.into_iter().map(|output| output.alias.clone()));
             return Ok(names);
         }
-        if !query.joins.is_empty() {
+        if let Some(flat_join) = &query.flat_join {
             let mut names = Vec::new();
-            let mut sources = vec![(query.effective_name().to_owned(), query.table.clone())];
-            sources.extend(
-                query
-                    .joins
-                    .iter()
-                    .map(|join| (join.effective_name().to_owned(), join.table.clone())),
-            );
+            let mut sources = vec![(
+                flat_join
+                    .root_alias
+                    .clone()
+                    .unwrap_or_else(|| query.table.clone()),
+                query.table.clone(),
+            )];
+            sources.extend(flat_join.sources.iter().map(|source| {
+                (
+                    source.alias.clone().unwrap_or_else(|| source.table.clone()),
+                    source.table.clone(),
+                )
+            }));
             for (source, table) in sources {
                 let source_schema = schema
-                    .get(&table)
+                    .get(&TableName::new(&table))
                     .ok_or_else(|| JazzError::Query(format!("unknown flat join table {table}")))?;
                 names.extend(
                     source_schema
@@ -2393,7 +2070,7 @@ impl JazzClient {
             }
             return Ok(names);
         }
-        let mut names = query.select_columns.clone().unwrap_or_else(|| {
+        let mut names = query.select.clone().unwrap_or_else(|| {
             table_schema
                 .columns
                 .columns
@@ -2779,8 +2456,11 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        let opts = Self::core_read_opts(&query, Some(DurabilityTier::EdgeServer))?;
-        self.subscribe_with_opts(query, opts).await
+        self.subscribe_with_opts(
+            query,
+            Self::core_read_opts(Some(DurabilityTier::EdgeServer)),
+        )
+        .await
     }
 
     /// Subscribe to a query with explicit core read options.
@@ -2789,10 +2469,9 @@ impl JazzClient {
         query: Query,
         opts: CoreReadOpts,
     ) -> Result<SubscriptionStream> {
-        let table = query.table.as_str().to_string();
-        let core_query = self.core_query(&query)?;
+        let table = query.table.clone();
         let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
-        self.db.subscribe(core_query, opts, table, tx).await?;
+        self.db.subscribe(query, opts, table, tx).await?;
         Ok(SubscriptionStream::new(rx))
     }
 
@@ -2804,27 +2483,35 @@ impl JazzClient {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        {
-            if !query.joins.is_empty() {
-                return Err(JazzError::Query(
-                    "joined results require query_results(), which returns stable ResultKey values"
-                        .to_owned(),
-                ));
-            }
-            let results = self.query_results(query, durability_tier).await?;
-            results
-                .into_iter()
-                .map(|result| {
-                    let row_id = result.key.row_id().ok_or_else(|| {
-                        JazzError::Query(
-                            "joined result cannot be represented by the legacy row-id query API"
-                                .to_owned(),
-                        )
-                    })?;
-                    Ok((row_id, result.into_values()))
-                })
-                .collect()
+        self.query_with_opts(query, Self::core_read_opts(durability_tier))
+            .await
+    }
+
+    /// Execute a row-id query using the canonical core read options.
+    pub async fn query_with_opts(
+        &self,
+        query: Query,
+        opts: CoreReadOpts,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+        if query.flat_join.is_some() {
+            return Err(JazzError::Query(
+                "joined results require query_results(), which returns stable ResultKey values"
+                    .to_owned(),
+            ));
         }
+        let results = self.query_results_with_opts(query, opts).await?;
+        results
+            .into_iter()
+            .map(|result| {
+                let row_id = result.key.row_id().ok_or_else(|| {
+                    JazzError::Query(
+                        "joined result cannot be represented by the legacy row-id query API"
+                            .to_owned(),
+                    )
+                })?;
+                Ok((row_id, result.into_values()))
+            })
+            .collect()
     }
 
     /// One-shot query with a stable key for every result, including flat joins.
@@ -2833,43 +2520,36 @@ impl JazzClient {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<QueryResult>> {
+        self.query_results_with_opts(query, Self::core_read_opts(durability_tier))
+            .await
+    }
+
+    /// Execute a query using the canonical core read options.
+    pub async fn query_results_with_opts(
+        &self,
+        query: Query,
+        opts: CoreReadOpts,
+    ) -> Result<Vec<QueryResult>> {
+        let table = query.table.clone();
+        let rows = if let Some(transaction_id) = self
+            .write_context
+            .as_ref()
+            .and_then(|ctx| ctx.transaction_id)
         {
-            let core_query = self.core_query(&query)?;
-            let table = query.table.as_str().to_string();
-            let rows = if let Some(transaction_id) = self
-                .write_context
-                .as_ref()
-                .and_then(|ctx| ctx.transaction_id)
-            {
-                let author = self
-                    .write_identity()
-                    .unwrap_or_else(|| self.db.inner.borrow().identity.author);
-                self.db.query_transaction_rows(
-                    core_query,
-                    Self::core_read_opts(&query, durability_tier)?,
-                    transaction_id,
-                    table,
-                    author,
-                )?
-            } else {
-                let opts = Self::core_read_opts(&query, durability_tier)?;
-                let requires_branch_coverage =
-                    matches!(opts.read_view.source, CoreReadViewSourceSpec::Branch { .. });
-                self.db
-                    .query_rows(
-                        core_query,
-                        opts,
-                        table,
-                        requires_branch_coverage
-                            || matches!(
-                                durability_tier,
-                                Some(DurabilityTier::EdgeServer | DurabilityTier::GlobalServer)
-                            ),
-                    )
-                    .await?
-            };
-            self.core_rows_to_query_results(&query, rows)
-        }
+            let author = self
+                .write_identity()
+                .unwrap_or_else(|| self.db.inner.borrow().identity.author);
+            self.db
+                .query_transaction_rows(query.clone(), opts, transaction_id, table, author)?
+        } else {
+            let wait_for_coverage =
+                matches!(opts.read_view.source, CoreReadViewSourceSpec::Branch { .. })
+                    || matches!(opts.tier, CoreDurabilityTier::Global);
+            self.db
+                .query_rows(query.clone(), opts, table, wait_for_coverage)
+                .await?
+        };
+        self.core_rows_to_query_results(&query, rows)
     }
 
     /// Create a new row in a table.
@@ -3118,7 +2798,7 @@ mod tests {
     use crate::ids::NodeUuid;
     use crate::tools::AppId;
     use crate::tools::public_schema::Schema;
-    use crate::tools::{ClientStorage, ColumnType, QueryBuilder, SchemaBuilder, TableSchema};
+    use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -3130,22 +2810,6 @@ mod tests {
                     .column("completed", ColumnType::Boolean),
             )
             .build()
-    }
-
-    #[test]
-    fn multi_branch_facade_query_fails_loudly_until_merged_view_transport_exists() {
-        let query = QueryBuilder::new("todos")
-            .branches(&[
-                "00000000-0000-0000-0000-000000000001",
-                "00000000-0000-0000-0000-000000000002",
-            ])
-            .build();
-        let error = JazzClient::core_read_opts(&query, None)
-            .expect_err("v1 must not lower plural branches to unsupported MergedBranches");
-        assert!(
-            matches!(error, JazzError::Query(ref message) if message.contains("multi-branch read views are not supported")),
-            "unexpected multi-branch capability error: {error}"
-        );
     }
 
     fn make_offline_context(
@@ -3354,7 +3018,7 @@ mod tests {
             .record_tick_driver_failure(error.to_string());
 
         let error = client
-            .query(Query::new("todos"), Some(DurabilityTier::Local))
+            .query(Query::from("todos"), Some(DurabilityTier::Local))
             .await
             .expect_err("a stopped tick driver must be visible to the caller");
         assert!(
@@ -3396,7 +3060,7 @@ mod tests {
             .await
             .expect("reconnect offline persistent client");
         let rows = restarted
-            .query(Query::new("todos"), Some(DurabilityTier::Local))
+            .query(Query::from("todos"), Some(DurabilityTier::Local))
             .await
             .expect("query rehydrated rows");
 

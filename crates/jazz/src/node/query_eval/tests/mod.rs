@@ -27,12 +27,10 @@ use crate::protocol::{
     ShapeAst, Subscribe, SyncMessage, TableLens,
 };
 use crate::query::{
-    Aggregate, ArraySubquery, FlatJoin, FlatJoinOn, FlatJoinSource, JoinSourceLookup,
-    OrderDirection, PolicyBranch, Query, claim, col, contains, eq, gt, in_list, lit, lte, param,
+    Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, PolicyBranch, Query, claim, col,
+    contains, eq, gt, in_list, lit, lte, param,
 };
 use crate::schema::{JazzSchema, Policy, TableSchema};
-
-use super::*;
 
 /// A coalesced authority re-entry for Alice's document must replace only
 /// that exact member; Bob's ordinary content update in the same batch must

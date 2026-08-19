@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use jazz::db::ReadOpts;
-use jazz::tools::{JazzClient, Query, QueryBuilder, Value};
+use jazz::query::{Query, col, contains, eq, gt, gte, is_null, lit, lt, lte, ne};
+use jazz::tools::{JazzClient, Value};
 use jazz_server::JazzServer;
 
 use crate::common::{
@@ -43,9 +44,8 @@ local_tokio_test! {
 /// ```
 async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
     let pair = ClientPair::start().await;
-    let query = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false))
-        .build();
+    let query = jazz::query::Query::from("todos")
+        .filter(eq(col("done"), lit(false)));
 
     let mut stream = pair
         .subscriber
@@ -174,7 +174,7 @@ async fn subscribe_all_only_returns_rows_that_match_query() {
 
     wait_for_rows(
         &writer,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "writer sees all seeded todos before cold subscriber connects",
         |rows| {
             (rows.iter().any(|(id, _)| *id == alice_id)
@@ -192,9 +192,8 @@ async fn subscribe_all_only_returns_rows_that_match_query() {
         .ready_on("todos", READY_TIMEOUT)
         .connect()
         .await;
-    let query = QueryBuilder::new("todos")
-        .filter_gt("priority", Value::Integer(50))
-        .build();
+    let query = jazz::query::Query::from("todos")
+        .filter(gt(col("priority"), lit(50)));
     let mut stream = subscriber
         .subscribe(query.clone())
         .await
@@ -238,7 +237,7 @@ async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
     const RAPID_UPDATES: usize = 500;
 
     let pair = ClientPair::start().await;
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     let descriptor = todo_subscription_record_descriptor();
 
     let todo_id = create_todo(
@@ -355,9 +354,8 @@ async fn subscribe_all_supports_condition_filters() {
     let cases = vec![
         ConditionCase {
             name: "eq",
-            query: QueryBuilder::new("todos")
-                .filter_eq("title", Value::Text("eq-hit".to_string()))
-                .build(),
+            query: jazz::query::Query::from("todos")
+                .filter(eq(col("title"), lit("eq-hit"))),
             insert: TodoSeed {
                 title: "eq-hit",
                 done: false,
@@ -368,9 +366,8 @@ async fn subscribe_all_supports_condition_filters() {
         },
         ConditionCase {
             name: "ne",
-            query: QueryBuilder::new("todos")
-                .filter_ne("title", Value::Text("blocked".to_string()))
-                .build(),
+            query: jazz::query::Query::from("todos")
+                .filter(ne(col("title"), lit("blocked"))),
             insert: TodoSeed {
                 title: "ne-hit",
                 done: false,
@@ -381,9 +378,8 @@ async fn subscribe_all_supports_condition_filters() {
         },
         ConditionCase {
             name: "gt",
-            query: QueryBuilder::new("todos")
-                .filter_gt("priority", Value::Integer(10))
-                .build(),
+            query: jazz::query::Query::from("todos")
+                .filter(gt(col("priority"), lit(10))),
             insert: TodoSeed {
                 title: "gt-hit",
                 done: false,
@@ -394,9 +390,8 @@ async fn subscribe_all_supports_condition_filters() {
         },
         ConditionCase {
             name: "gte",
-            query: QueryBuilder::new("todos")
-                .filter_ge("priority", Value::Integer(10))
-                .build(),
+            query: jazz::query::Query::from("todos")
+                .filter(gte(col("priority"), lit(10))),
             insert: TodoSeed {
                 title: "gte-hit",
                 done: false,
@@ -407,9 +402,8 @@ async fn subscribe_all_supports_condition_filters() {
         },
         ConditionCase {
             name: "lt",
-            query: QueryBuilder::new("todos")
-                .filter_lt("priority", Value::Integer(0))
-                .build(),
+            query: jazz::query::Query::from("todos")
+                .filter(lt(col("priority"), lit(0))),
             insert: TodoSeed {
                 title: "lt-hit",
                 done: false,
@@ -420,9 +414,8 @@ async fn subscribe_all_supports_condition_filters() {
         },
         ConditionCase {
             name: "lte",
-            query: QueryBuilder::new("todos")
-                .filter_le("priority", Value::Integer(0))
-                .build(),
+            query: jazz::query::Query::from("todos")
+                .filter(lte(col("priority"), lit(0))),
             insert: TodoSeed {
                 title: "lte-hit",
                 done: false,
@@ -433,9 +426,7 @@ async fn subscribe_all_supports_condition_filters() {
         },
         ConditionCase {
             name: "is_null",
-            query: QueryBuilder::new("todos")
-                .filter_is_null("priority")
-                .build(),
+            query: jazz::query::Query::from("todos").filter(is_null(col("priority"))),
             insert: TodoSeed {
                 title: "null-hit",
                 done: false,
@@ -446,9 +437,8 @@ async fn subscribe_all_supports_condition_filters() {
         },
         ConditionCase {
             name: "contains_array",
-            query: QueryBuilder::new("todos")
-                .filter_contains("tags", Value::Text("needle".to_string()))
-                .build(),
+            query: jazz::query::Query::from("todos")
+                .filter(contains(col("tags"), lit("needle"))),
             insert: TodoSeed {
                 title: "contains-array-hit",
                 done: false,
@@ -459,9 +449,8 @@ async fn subscribe_all_supports_condition_filters() {
         },
         ConditionCase {
             name: "contains_text",
-            query: QueryBuilder::new("todos")
-                .filter_contains("title", Value::Text("needle".to_string()))
-                .build(),
+            query: jazz::query::Query::from("todos")
+                .filter(contains(col("title"), lit("needle"))),
             insert: TodoSeed {
                 title: "hay-needle-title",
                 done: false,
@@ -472,9 +461,8 @@ async fn subscribe_all_supports_condition_filters() {
         },
         ConditionCase {
             name: "contains_text_empty",
-            query: QueryBuilder::new("todos")
-                .filter_contains("title", Value::Text(String::new()))
-                .build(),
+            query: jazz::query::Query::from("todos")
+                .filter(contains(col("title"), lit(String::new()))),
             insert: TodoSeed {
                 title: "any-title",
                 done: false,
@@ -485,9 +473,8 @@ async fn subscribe_all_supports_condition_filters() {
         },
         ConditionCase {
             name: "eq_bytea",
-            query: QueryBuilder::new("todos")
-                .filter_eq("payload", Value::Bytea(vec![1, 2, 3]))
-                .build(),
+            query: jazz::query::Query::from("todos")
+                .filter(eq(col("payload"), lit(vec![1_u8, 2, 3]))),
             insert: TodoSeed {
                 title: "eq-bytea-hit",
                 done: false,
@@ -561,7 +548,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
     const RAPID_UPDATES: usize = 100;
 
     let client = JazzClient::test_client(subscription_schema()).await;
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     let descriptor = todo_subscription_record_descriptor();
 
     let mut stream = client
@@ -656,9 +643,8 @@ local_tokio_test! {
 /// be identical at every stage — zero bytes must not truncate the value.
 async fn subscribe_all_preserves_bytea_values() {
     let pair = ClientPair::start().await;
-    let query = QueryBuilder::new("todos")
-        .filter_eq("title", Value::Text("bytes-hit".to_string()))
-        .build();
+    let query = jazz::query::Query::from("todos")
+        .filter(eq(col("title"), lit("bytes-hit")));
 
     let mut stream = pair
         .subscriber
@@ -715,9 +701,8 @@ local_tokio_test! {
 /// ```
 async fn subscribe_all_does_not_emit_add_for_non_matching_contains_query() {
     let pair = ClientPair::start().await;
-    let query = QueryBuilder::new("todos")
-        .filter_contains("title", Value::Text("needle".to_string()))
-        .build();
+    let query = jazz::query::Query::from("todos")
+        .filter(contains(col("title"), lit("needle")));
 
     let mut stream = pair
         .subscriber

@@ -146,18 +146,7 @@ fn declared_id_join_types_and_flat_join_physical_alias_validate() {
             .is_err()
     );
 
-    let mut flat = Query::from("parents");
-    flat.flat_join = Some(FlatJoin {
-        root_alias: None,
-        sources: vec![FlatJoinSource {
-            table: "children".to_owned(),
-            alias: None,
-            on: FlatJoinOn {
-                left: "parents._id".to_owned(),
-                right: "children.parent".to_owned(),
-            },
-        }],
-    });
+    let flat = Query::from("parents").flat_join("children", "parents._id", "children.parent");
     assert!(flat.validate(&schema).is_ok());
 }
 

@@ -8,14 +8,13 @@ use jazz_testkit as support;
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
+use jazz::query::{ArraySubquery, Query};
 use jazz::row_input;
 use jazz::tools::public_schema::PolicyExpr;
 use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::public_schema::TablePolicies;
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
-use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{ColumnType, DurabilityTier, JazzClient, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -598,7 +597,7 @@ async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
 
 async fn assert_edge_query_does_not_include_row(
     client: &JazzClient,
-    query: jazz::tools::Query,
+    query: jazz::query::Query,
     row_id: jazz::tools::ObjectId,
     timeout: Duration,
     description: &str,
@@ -828,7 +827,7 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
 
     let rows = wait_for_query(
         &alice,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "peer edge serves the row written after catalogue replication",
@@ -932,7 +931,7 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
         .expect("v2 write settles after catalogue replay");
     let rows = wait_for_query(
         &alice_v2,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "restarted edge serves row written with replayed v2 schema",
@@ -1074,7 +1073,7 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let mut alice_stream = alice
         .subscribe(query.clone())
         .await
@@ -1321,7 +1320,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
         tokio::time::timeout(
             Duration::from_secs(3),
             reader.query(
-                QueryBuilder::new("users").build(),
+                jazz::query::Query::from("users"),
                 Some(DurabilityTier::EdgeServer),
             ),
         )
@@ -1364,7 +1363,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
 
     let rows_after_permissions = wait_for_query(
         &reader,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "reader sees row after permissions head publish",
@@ -1395,7 +1394,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let observer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1581,7 +1580,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
     let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let observer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1677,7 +1676,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
 
     let reader = TestingClient::builder()
         .with_server(&server)
@@ -1846,7 +1845,7 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
 
     let bob_rows = wait_for_query(
         &bob,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees alice's user with email column",
@@ -1939,7 +1938,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         ))
         .await
         .expect("connect bob with unpublished draft schema");
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let pre_lens_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let mut pre_lens_attempts = 0;
     while tokio::time::Instant::now() < pre_lens_deadline {
@@ -2095,7 +2094,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
 
     let rows = wait_for_query(
         &charlie,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "charlie sees all rows transformed to v3",
@@ -2230,7 +2229,7 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
 
     let rows = wait_for_query(
         &bob,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees alice row through chained column renames",
@@ -2319,7 +2318,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
 
     let rows = wait_for_query(
         &alice,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "alice sees bob row through chained column renames",
@@ -2411,7 +2410,7 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
 
     let rows = wait_for_query(
         &bob,
-        QueryBuilder::new("people").build(),
+        jazz::query::Query::from("people"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees alice row through table rename",
@@ -2472,7 +2471,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
-    let query = QueryBuilder::new("people").build();
+    let query = jazz::query::Query::from("people");
     let mut stream = bob
         .subscribe(query.clone())
         .await
@@ -2594,7 +2593,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let mut stream = alice
         .subscribe(query.clone())
         .await
@@ -2692,9 +2691,6 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_copy_on_write_schema_v2();
-    // The public branch grammar accepts `main` or a UUID. The former
-    // schema-hash-derived client branch spelling was never a valid branch id.
-    let v2_branch = "main".to_owned();
 
     push_catalogue_in_memory(
         server.server_state(),
@@ -2781,9 +2777,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
 
     let rows_after_update = wait_for_query(
         &bob,
-        QueryBuilder::new("people")
-            .branch(v2_branch.clone())
-            .build(),
+        jazz::query::Query::from("people"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees copied row on renamed table after update",
@@ -2812,7 +2806,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
 
     let rows_after_delete = wait_for_query(
         &bob,
-        QueryBuilder::new("people").branch(v2_branch).build(),
+        jazz::query::Query::from("people"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees renamed row deleted",
@@ -2907,10 +2901,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
-    let query = QueryBuilder::new("posts")
-        .join("people")
-        .on("posts.author_id", "people.id")
-        .build();
+    let query = Query::from("posts").flat_join("people", "posts.author_id", "people.id");
     let rows = wait_for_query_results(
         &bob,
         query,
@@ -3026,14 +3017,14 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
-    let query = QueryBuilder::new("people")
-        .with_array("posts", |sub| {
-            // INV-QUERY-29: this lookup intentionally selects every related
-            // post, so preserve that unbounded query at the public
-            // query boundary.
-            sub.from("posts").correlate("author_id", "people.id")
-        })
-        .build();
+    // INV-QUERY-29: this lookup intentionally selects every related post, so
+    // preserve that unbounded query at the public query boundary.
+    let query = Query::from("people").array_subquery(ArraySubquery::new(
+        "posts",
+        "posts",
+        "author_id",
+        "people.id",
+    ));
     let rows = wait_for_query(
         &bob,
         query,
@@ -3180,10 +3171,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .await;
     wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
-    let query = QueryBuilder::new("users")
-        .join("posts")
-        .on("users.name", "posts.owner_name")
-        .build();
+    let query = Query::from("users").flat_join("posts", "users.name", "posts.owner_name");
 
     let bob_rows = wait_for_query_results(
         &bob,
@@ -3381,7 +3369,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
 
     let rows = wait_for_query(
         &carol,
-        QueryBuilder::new("members").build(),
+        jazz::query::Query::from("members"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "carol sees every schema version projected to members",
@@ -3512,7 +3500,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
 
     let rows = wait_for_query(
         &bob,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "v3 users query only sees rows from the re-added table lineage",
@@ -3602,7 +3590,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
 
     wait_for_query(
         &bob,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob's v2 user settled at edge",
@@ -3621,7 +3609,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
 
     let alice_rows = wait_for_query(
         &alice,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "alice sees bob's user without email column",
@@ -3663,7 +3651,7 @@ async fn keeps_authorization_through_v1_head() {
 
 async fn keeps_authorization_through_v1_head_impl() {
     let server = JazzServer::start().await;
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let v1_schema = schema_v1();
     push_catalogue_in_memory(
         server.server_state(),

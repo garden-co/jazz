@@ -225,7 +225,7 @@ fn validate_query_canonical_parts(
     query: &Query,
     schema: &JazzSchema,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
-    let root = table(schema, &query.table)?;
+    let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
     for join in &query.joins {
@@ -315,11 +315,11 @@ fn flat_join_source_tables(
     flat_join: &FlatJoin,
 ) -> Result<BTreeMap<String, TableSchema>, QueryError> {
     let root_name = flat_join_source_name(root_table, &flat_join.root_alias);
-    let mut sources = BTreeMap::from([(root_name, table(schema, root_table)?)]);
+    let mut sources = BTreeMap::from([(root_name, schema_table(schema, root_table)?)]);
     for source in &flat_join.sources {
         let name = flat_join_source_name(&source.table, &source.alias);
         if sources
-            .insert(name.clone(), table(schema, &source.table)?)
+            .insert(name.clone(), schema_table(schema, &source.table)?)
             .is_some()
         {
             return Err(QueryError::UnknownColumn {
@@ -477,7 +477,7 @@ fn validate_flat_join(
                 column: name,
             });
         }
-        table(schema, &source.table)?;
+        schema_table(schema, &source.table)?;
         let (left_source, left_column) = flat_join_qualified_field(&source.on.left)?;
         let (right_source, right_column) = flat_join_qualified_field(&source.on.right)?;
         let left_table = sources
@@ -492,8 +492,8 @@ fn validate_flat_join(
                 column: right_source.to_owned(),
             });
         }
-        let left_schema = table(schema, left_table)?;
-        let right_schema = table(schema, &source.table)?;
+        let left_schema = schema_table(schema, left_table)?;
+        let right_schema = schema_table(schema, &source.table)?;
         if !flat_join_key_types_compatible(
             flat_join_column_type(&left_schema, left_column)?,
             flat_join_column_type(&right_schema, right_column)?,
@@ -512,7 +512,7 @@ fn validate_join(
     join: &JoinVia,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
-    let join_table = table(schema, &join.table)?;
+    let join_table = schema_table(schema, &join.table)?;
     match join.target {
         JoinTarget::Column => {
             planner_column_type(&join_table, &join.on_column)?;
@@ -528,7 +528,7 @@ fn validate_join(
     }
     let target_table = if let Some(lookup) = &join.source_lookup {
         planner_column_type(root, &lookup.row_id_source_column)?;
-        let lookup_table = table(schema, &lookup.table)?;
+        let lookup_table = schema_table(schema, &lookup.table)?;
         match root.references.get(&lookup.row_id_source_column) {
             Some(target) if target == &lookup.table => {}
             _ => {
@@ -695,7 +695,7 @@ fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), Query
     }
 }
 
-fn table(schema: &JazzSchema, name: &str) -> Result<TableSchema, QueryError> {
+fn schema_table(schema: &JazzSchema, name: &str) -> Result<TableSchema, QueryError> {
     if name == "jazz_branches" {
         return Ok(branch_metadata_table_schema());
     }
@@ -771,7 +771,7 @@ fn validate_include(schema: &JazzSchema, root: &TableSchema, path: &str) -> Resu
                 path: path.to_owned(),
             });
         };
-        current = table(schema, target)?;
+        current = schema_table(schema, target)?;
     }
     Ok(())
 }
@@ -803,7 +803,7 @@ fn validate_array_subquery(
     params: &mut BTreeMap<String, ColumnType>,
     relation_path: &str,
 ) -> Result<(), QueryError> {
-    let child = table(schema, &subquery.table)?;
+    let child = schema_table(schema, &subquery.table)?;
     let parent_type = planner_column_type(parent, &subquery.outer_column)?;
     let child_type = planner_column_type(&child, &subquery.inner_column)?;
     if !array_correlation_types_compatible(parent_type, child_type) {
@@ -839,7 +839,7 @@ fn validate_reachable(
     reachable: &ReachableVia,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
-    let access = table(schema, &reachable.access_table)?;
+    let access = schema_table(schema, &reachable.access_table)?;
     planner_column_type(&access, &reachable.access_row_column)?;
     planner_column_type(&access, &reachable.access_team_column)?;
     let root_key_type = if has_declared_id(root) {
@@ -902,7 +902,7 @@ fn validate_reachable(
             &access.name
         }
     };
-    let edge = table(schema, &reachable.edge_table)?;
+    let edge = schema_table(schema, &reachable.edge_table)?;
     for column in [&reachable.edge_member_column, &reachable.edge_parent_column] {
         planner_column_type(&edge, column)?;
         if *column == "id" && !has_declared_id(&edge) && edge.name == *team_table {
@@ -920,7 +920,7 @@ fn validate_reachable(
         }
     }
     if let Some(seed) = &reachable.seed {
-        let seed_table = table(schema, &seed.table)?;
+        let seed_table = schema_table(schema, &seed.table)?;
         if planner_column_type(&seed_table, &seed.team_column)? != &ColumnType::Uuid {
             return Err(QueryError::OperandTypeMismatch);
         }

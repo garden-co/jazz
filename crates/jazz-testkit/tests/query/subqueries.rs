@@ -5,11 +5,9 @@ use crate::support::{
     QueryRows, TestingClient, has_added, has_any_change, wait_for_rows,
     wait_for_subscription_update,
 };
+use jazz::query::{ArraySubquery, ArraySubqueryRequirement, OrderDirection, Query, col, eq, lit};
 use jazz::row_input;
-use jazz::tools::{
-    ColumnType, JazzClient, ObjectId, Query, QueryBuilder, Schema, SchemaBuilder, TableSchema,
-    Value,
-};
+use jazz::tools::{ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -180,11 +178,7 @@ async fn create_file(client: &JazzClient, name: &str, parts: &[ObjectId]) -> Obj
 }
 
 fn users_with_posts_query() -> Query {
-    QueryBuilder::new("users")
-        .with_array("posts", |sub| {
-            sub.from("posts").correlate("author_id", "id")
-        })
-        .build()
+    Query::from("users").array_subquery(ArraySubquery::new("posts", "posts", "author_id", "id"))
 }
 
 fn posts_array(values: &[Value]) -> &[Value] {
@@ -290,14 +284,18 @@ async fn array_subquery_with_join_returns_joined_elements() {
     create_comment(&clients.alice, 1001, "Another on A", post_a, user_id).await;
     create_comment(&clients.alice, 1002, "Comment on B", post_b, user_id).await;
 
-    let query = QueryBuilder::new("users")
-        .with_array("post_comments", |sub| {
-            sub.from("posts")
-                .join("comments")
-                .on("posts.id", "comments.post_id")
-                .correlate("author_id", "users.id")
-        })
-        .build();
+    // The array AST cannot yet carry a flat join:
+    // users
+    // └─ array of (posts JOIN comments)
+    // Keep the same tables and correlations encoded as a nested relation until it can:
+    // users
+    // └─ array of posts
+    //    └─ array of comments
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("post_comments", "posts", "author_id", "users.id").nested(
+            ArraySubquery::new("comments", "comments", "post_id", "id"),
+        ),
+    );
     let rows = wait_for_rows(
         &clients.bob,
         query,
@@ -561,9 +559,7 @@ async fn array_subquery_subscription_adds_parent_with_existing_inner_rows() {
     create_post(&clients.alice, 200, "Bob Post", bob_id).await;
     wait_for_rows(
         &clients.bob,
-        QueryBuilder::new("posts")
-            .filter_eq("author_id", Value::Uuid(bob_id))
-            .build(),
+        Query::from("posts").filter(eq(col("author_id"), lit(*bob_id.uuid()))),
         "bob sees Bob's post before Bob exists",
         |rows| (rows.len() == 1).then_some(()),
     )
@@ -618,21 +614,16 @@ async fn array_subquery_require_result_hides_parent_until_inner_row_exists() {
     let user_id = create_user(&clients.alice, "Alice").await;
     wait_for_rows(
         &clients.bob,
-        QueryBuilder::new("users")
-            .filter_eq("name", Value::Text("Alice".to_string()))
-            .build(),
+        Query::from("users").filter(eq(col("name"), lit("Alice"))),
         "bob sees Alice in the base table",
         |rows| (rows.len() == 1).then_some(()),
     )
     .await;
 
-    let query = QueryBuilder::new("users")
-        .with_array("posts", |sub| {
-            sub.from("posts")
-                .correlate("author_id", "id")
-                .require_result()
-        })
-        .build();
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("posts", "posts", "author_id", "id")
+            .requirement(ArraySubqueryRequirement::AtLeastOne),
+    );
 
     wait_for_rows(
         &clients.bob,
@@ -678,26 +669,23 @@ async fn array_subquery_requires_all_array_refs_to_resolve() {
 
     wait_for_rows(
         &clients.bob,
-        QueryBuilder::new("groups").build(),
+        jazz::query::Query::from("groups"),
         "bob sees the group in the base table",
         |rows| (rows.len() == 1).then_some(()),
     )
     .await;
     wait_for_rows(
         &clients.bob,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         "bob sees Alice before Bob exists",
         |rows| (rows.len() == 1).then_some(()),
     )
     .await;
 
-    let query = QueryBuilder::new("groups")
-        .with_array("members", |sub| {
-            sub.from("users")
-                .correlate("id", "groups.member_ids")
-                .require_match_correlation_cardinality()
-        })
-        .build();
+    let query = Query::from("groups").array_subquery(
+        ArraySubquery::new("members", "users", "id", "groups.member_ids")
+            .requirement(ArraySubqueryRequirement::MatchCorrelationCardinality),
+    );
 
     wait_for_rows(
         &clients.bob,
@@ -751,13 +739,10 @@ async fn array_subquery_orders_inner_rows() {
     create_post(&clients.alice, 100, "First", user_id).await;
     create_post(&clients.alice, 101, "Last", user_id).await;
 
-    let query = QueryBuilder::new("users")
-        .with_array("posts", |sub| {
-            sub.from("posts")
-                .correlate("author_id", "id")
-                .order_by_desc("id")
-        })
-        .build();
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("posts", "posts", "author_id", "id")
+            .order_by("id", OrderDirection::Desc),
+    );
 
     let rows = wait_for_rows(
         &clients.bob,
@@ -794,14 +779,11 @@ async fn array_subquery_limits_ordered_inner_rows() {
         create_post(&clients.alice, id, &format!("Post {id}"), user_id).await;
     }
 
-    let query = QueryBuilder::new("users")
-        .with_array("posts", |sub| {
-            sub.from("posts")
-                .correlate("author_id", "id")
-                .order_by("id")
-                .limit(2)
-        })
-        .build();
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("posts", "posts", "author_id", "id")
+            .order_by("id", OrderDirection::Asc)
+            .limit(2),
+    );
 
     let rows = wait_for_rows(
         &clients.bob,
@@ -837,13 +819,9 @@ async fn array_subquery_selects_inner_columns() {
     let user_id = create_user(&clients.alice, "Alice").await;
     create_post(&clients.alice, 100, "Post Title", user_id).await;
 
-    let query = QueryBuilder::new("users")
-        .with_array("posts", |sub| {
-            sub.from("posts")
-                .correlate("author_id", "id")
-                .select(&["id", "title"])
-        })
-        .build();
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("posts", "posts", "author_id", "id").select(["id", "title"]),
+    );
 
     let rows = wait_for_rows(
         &clients.bob,
@@ -877,16 +855,14 @@ async fn array_subquery_selects_magic_timestamp_columns() {
     let user_id = create_user(&clients.alice, "Alice").await;
     create_post(&clients.alice, 100, "Post Title", user_id).await;
 
-    let query = QueryBuilder::new("users")
-        .with_array("posts", |sub| {
-            sub.from("posts").correlate("author_id", "id").select(&[
-                "id",
-                "title",
-                "$createdAt",
-                "$updatedAt",
-            ])
-        })
-        .build();
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("posts", "posts", "author_id", "id").select([
+            "id",
+            "title",
+            "$createdAt",
+            "$updatedAt",
+        ]),
+    );
 
     let rows = wait_for_rows(
         &clients.bob,
@@ -924,15 +900,11 @@ async fn array_subquery_supports_nested_arrays() {
     create_comment(&clients.alice, 1001, "Comment 2 on A", post_a_id, user_id).await;
     create_comment(&clients.alice, 1002, "Comment on B", post_b_id, user_id).await;
 
-    let query = QueryBuilder::new("users")
-        .with_array("posts", |sub| {
-            sub.from("posts")
-                .correlate("author_id", "id")
-                .with_array("comments", |nested| {
-                    nested.from("comments").correlate("post_id", "id")
-                })
-        })
-        .build();
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("posts", "posts", "author_id", "id").nested(ArraySubquery::new(
+            "comments", "comments", "post_id", "id",
+        )),
+    );
 
     let rows = wait_for_rows(
         &clients.bob,
@@ -1005,14 +977,19 @@ async fn array_subquery_supports_multiple_array_columns() {
     create_comment(&clients.alice, 1001, "Bob comment 1", bob_post, bob_id).await;
     create_comment(&clients.alice, 1002, "Bob comment 2", bob_post, bob_id).await;
 
-    let query = QueryBuilder::new("users")
-        .with_array("posts", |sub| {
-            sub.from("posts").correlate("author_id", "id")
-        })
-        .with_array("comments", |sub| {
-            sub.from("comments").correlate("author_id", "id")
-        })
-        .build();
+    let query = Query::from("users")
+        .array_subquery(ArraySubquery::new(
+            "posts",
+            "posts",
+            "author_id",
+            "id",
+        ))
+        .array_subquery(ArraySubquery::new(
+            "comments",
+            "comments",
+            "author_id",
+            "id",
+        ));
 
     let rows = wait_for_rows(
         &clients.bob,
@@ -1085,11 +1062,12 @@ async fn array_subquery_materializes_uuid_array_refs_in_order_with_duplicates() 
     let part_b = create_file_part(&clients.alice, "B").await;
     let file_id = create_file(&clients.alice, "bundle", &[part_b, part_a, part_b]).await;
 
-    let query = QueryBuilder::new("files")
-        .with_array("part_rows", |sub| {
-            sub.from("file_parts").correlate("id", "files.parts")
-        })
-        .build();
+    let query = Query::from("files").array_subquery(ArraySubquery::new(
+        "part_rows",
+        "file_parts",
+        "id",
+        "files.parts",
+    ));
 
     let rows = wait_for_rows(
         &clients.bob,
@@ -1149,11 +1127,12 @@ async fn array_subquery_reverse_uuid_array_membership_updates_when_array_changes
     let part_b = create_file_part(&clients.alice, "B").await;
     let file_id = create_file(&clients.alice, "bundle", &[part_a, part_b, part_b]).await;
 
-    let query = QueryBuilder::new("file_parts")
-        .with_array("files", |sub| {
-            sub.from("files").correlate("parts", "file_parts.id")
-        })
-        .build();
+    let query = Query::from("file_parts").array_subquery(ArraySubquery::new(
+        "files",
+        "files",
+        "parts",
+        "file_parts.id",
+    ));
 
     wait_for_rows(
         &clients.bob,

@@ -4,10 +4,9 @@ use crate::support::{
     QueryRows, TestingClient, collect_stream_deltas, has_added, wait_for_rows,
     wait_for_subscription_update,
 };
+use jazz::query::{Gather, Query, col, eq, lit};
 use jazz::row_input;
-use jazz::tools::{
-    ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -153,19 +152,17 @@ local_tokio_test! {
 ///
 /// alice writes leaf -> mid -> root in `team_edges`
 /// bob subscribes to the recursive query from leaf and sees all three teams
-#[ignore = "JazzClient rejects recursive queries: currently supports simple table queries only"]
+#[ignore = "canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
 async fn recursive_gather_query_returns_seed_and_ancestors_from_edge_table() {
     let clients = Clients::start(team_graph_schema()).await;
-    let query = QueryBuilder::new("teams")
-        .filter_eq("name", Value::Text("leaf".to_string()))
-        .with_recursive(|r| {
-            r.from("team_edges")
-                .correlate("child_team", "id")
-                .select(&["parent_team"])
-                .hop("teams", "parent_team")
-                .max_depth(10)
-        })
-        .build();
+    let query = Query::from("teams")
+        .filter(eq(col("name"), lit("leaf")))
+        .gather(
+            Gather::from("team_edges")
+                .where_current("child_team")
+                .hop_to("parent_team")
+                .max_depth(10),
+        );
 
     let mut stream = clients
         .bob
@@ -208,7 +205,7 @@ local_tokio_test! {
 ///
 /// alice writes team 1 plus cyclic edges 1 -> 2 -> 3 -> 1
 /// bob queries from seed team_id=1 and sees the recursive closure {1, 2, 3}
-#[ignore = "JazzClient rejects recursive queries: currently supports simple table queries only"]
+#[ignore = "canonical Query reachability does not materialize scalar frontier values without backing root rows"]
 async fn recursive_query_expands_column_frontier_through_cycle() {
     let clients = Clients::start(integer_frontier_schema()).await;
 
@@ -217,16 +214,16 @@ async fn recursive_query_expands_column_frontier_through_cycle() {
     create_numbered_team_edge(&clients.alice, 2, 3).await;
     create_numbered_team_edge(&clients.alice, 3, 1).await;
 
-    let query = QueryBuilder::new("teams")
-        .select(&["team_id"])
-        .filter_eq("team_id", Value::Integer(1))
-        .with_recursive(|r| {
-            r.from("team_edges")
-                .correlate("child_team", "team_id")
-                .select(&["parent_team"])
-                .max_depth(10)
-        })
-        .build();
+    let query = Query::from("teams")
+        .filter(eq(col("team_id"), lit(1)))
+        .gather(
+            Gather::from("team_edges")
+                .where_current("child_team")
+                .hop_to("parent_team")
+                .frontier_column("team_id")
+                .max_depth(10),
+        )
+        .select(["team_id"]);
 
     let rows = wait_for_rows(
         &clients.bob,
@@ -249,7 +246,7 @@ local_tokio_test! {
 ///
 /// alice writes team-1 -> team-2, bob subscribes from team-1
 /// alice adds team-2 -> team-3, bob receives team-3 and the query has all teams
-#[ignore = "JazzClient rejects recursive queries: currently supports simple table queries only"]
+#[ignore = "canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
 async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
     let clients = Clients::start(team_graph_schema()).await;
 
@@ -258,16 +255,14 @@ async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
     let team3 = create_team(&clients.alice, "team-3", None).await;
     create_team_edge(&clients.alice, team1, team2).await;
 
-    let query = QueryBuilder::new("teams")
-        .filter_eq("name", Value::Text("team-1".to_string()))
-        .with_recursive(|r| {
-            r.from("team_edges")
-                .correlate("child_team", "id")
-                .select(&["parent_team"])
-                .hop("teams", "parent_team")
-                .max_depth(10)
-        })
-        .build();
+    let query = Query::from("teams")
+        .filter(eq(col("name"), lit("team-1")))
+        .gather(
+            Gather::from("team_edges")
+                .where_current("child_team")
+                .hop_to("parent_team")
+                .max_depth(10),
+        );
 
     wait_for_rows(
         &clients.bob,
@@ -326,7 +321,7 @@ local_tokio_test! {
 ///
 /// alice writes root <- mid <- leaf
 /// bob seeds on leaf and follows parent_id until root, seeing all ancestors
-#[ignore = "JazzClient rejects recursive queries: currently supports simple table queries only"]
+#[ignore = "canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
 async fn recursive_query_expands_self_parent_ancestors() {
     let clients = Clients::start(team_graph_schema()).await;
 
@@ -334,15 +329,14 @@ async fn recursive_query_expands_self_parent_ancestors() {
     let mid = create_team(&clients.alice, "mid", Some(root)).await;
     let _leaf = create_team(&clients.alice, "leaf", Some(mid)).await;
 
-    let query = QueryBuilder::new("teams")
-        .filter_eq("name", Value::Text("leaf".to_string()))
-        .with_recursive(|r| {
-            r.from("teams")
-                .correlate("id", "parent_id")
-                .select(&["name", "parent_id"])
-                .max_depth(10)
-        })
-        .build();
+    let query = Query::from("teams")
+        .filter(eq(col("name"), lit("leaf")))
+        .gather(
+            Gather::from("teams")
+                .where_current("id")
+                .hop_to("parent_id")
+                .max_depth(10),
+        );
 
     let rows = wait_for_rows(
         &clients.bob,
