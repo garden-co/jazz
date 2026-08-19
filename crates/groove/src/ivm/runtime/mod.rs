@@ -164,6 +164,7 @@ pub struct IvmRuntime {
     /// never leak a speculative subscription delta.
     staged_subscription_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
     defer_subscription_notifications: bool,
+    pending_incremental: runtime_tick::PendingIncrementalEvaluation,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
     binding_sources: HashMap<String, BindingSourceState>,
@@ -216,6 +217,7 @@ impl IvmRuntime {
             multisink_subscriptions: HashMap::default(),
             staged_subscription_notifications: Vec::new(),
             defer_subscription_notifications: false,
+            pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
             arrangement_keys_by_input: HashMap::default(),

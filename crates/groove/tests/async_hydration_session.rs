@@ -375,19 +375,64 @@ fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked()
     let mut publication = Box::pin(database.publish_batch(batch));
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    assert!(matches!(
-        publication.as_mut().poll(&mut context),
-        Poll::Pending
-    ));
+    let Poll::Ready(published) = publication.as_mut().poll(&mut context) else {
+        panic!("resident publication must not wait for independent hydration");
+    };
+    let published = published.unwrap();
 
     assert_eq!(albums.try_recv().unwrap().deltas.len(), 1);
     assert!(reach.try_recv().is_err());
 
     control.resume_operation(TestStorageOperation::ScanOpen);
-    let published = block_on(publication).unwrap();
+    drop(publication);
+    block_on(database.flush()).unwrap();
     assert_eq!(reach.recv().unwrap().deltas.len(), 2);
     let persistence = block_on(published.persist());
     database.settle_publication(persistence).unwrap();
+}
+
+#[test]
+fn resident_publication_returns_before_independent_recursive_hydration() {
+    let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage)).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+
+    let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(albums.recv().unwrap().is_empty());
+    let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(reach.recv().unwrap().deltas.len(), 3);
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Speak No Evil".into())],
+    );
+    batch.delete("edges", PrimaryKeyValue::U64(2));
+    let mut publication = Box::pin(database.publish_batch(batch));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let Poll::Ready(result) = publication.as_mut().poll(&mut context) else {
+        panic!("resident publication must not wait for independent hydration");
+    };
+    let _published = result.unwrap();
+    drop(publication);
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    let mut query = Box::pin(database.query_graph(GraphBuilder::table("albums")));
+    let Poll::Ready(rows) = query.as_mut().poll(&mut context) else {
+        panic!("resident one-shot query must complete in its first poll");
+    };
+    let rows = rows.unwrap();
+    assert_eq!(rows.deltas.len(), 1);
+    drop(query);
+
+    block_on(database.flush()).unwrap();
+    assert_eq!(reach.recv().unwrap().deltas.len(), 2);
 }
 
 #[test]

@@ -1461,9 +1461,34 @@ impl OwnedWriteOperation {
     }
 }
 
+enum OverlayHandle<'a, T> {
+    Borrowed(&'a T),
+    Owned(Rc<T>),
+}
+
+impl<T> Clone for OverlayHandle<'_, T> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Borrowed(value) => Self::Borrowed(value),
+            Self::Owned(value) => Self::Owned(Rc::clone(value)),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for OverlayHandle<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
+
 pub struct StagedWriteOverlay<'a, S> {
-    base: &'a S,
-    staged_writes: &'a RefCell<StagedWriteState>,
+    base: OverlayHandle<'a, S>,
+    staged_writes: OverlayHandle<'a, RefCell<StagedWriteState>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1667,8 +1692,21 @@ where
 impl<'a, S> StagedWriteOverlay<'a, S> {
     pub(crate) fn new(base: &'a S, staged_writes: &'a RefCell<StagedWriteState>) -> Self {
         Self {
-            base,
-            staged_writes,
+            base: OverlayHandle::Borrowed(base),
+            staged_writes: OverlayHandle::Borrowed(staged_writes),
+        }
+    }
+
+    pub(crate) fn new_owned(
+        base: Rc<S>,
+        staged_writes: Rc<RefCell<StagedWriteState>>,
+    ) -> StagedWriteOverlay<'static, S>
+    where
+        S: 'static,
+    {
+        StagedWriteOverlay {
+            base: OverlayHandle::Owned(base),
+            staged_writes: OverlayHandle::Owned(staged_writes),
         }
     }
 
@@ -1690,12 +1728,12 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
     where
         S: OrderedKvStorage,
     {
-        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
             operation.cf() == cf
                 && operation.key() >= start.as_slice()
                 && operation.key() < end.as_slice()
         });
-        let base = self.base;
+        let base = self.base.clone();
         Box::pin(async move {
             let mut values = collect_scan(
                 base.scan_range(cf.clone(), start.clone(), end.clone())
@@ -1722,10 +1760,10 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
     where
         S: OrderedKvStorage,
     {
-        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
             operation.cf() == cf && operation.key().starts_with(&prefix)
         });
-        let base = self.base;
+        let base = self.base.clone();
         Box::pin(async move {
             let mut values =
                 collect_scan(base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
@@ -1858,7 +1896,7 @@ where
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
-        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
             operation.cf() == cf && operation.key().starts_with(&prefix)
         });
         Box::pin(async move {
@@ -1901,7 +1939,7 @@ where
         prefix: Vec<u8>,
         upper: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
-        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
             operation.cf() == cf
                 && operation.key().starts_with(&prefix)
                 && operation.key() <= upper.as_slice()
