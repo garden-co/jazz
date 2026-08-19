@@ -81,6 +81,7 @@ where
                     tx.tx_id.time.physical_ms()
                 };
                 self.ingest_commit_unit_with_context(tx, versions, now_ms, ingest_context)
+                    .await
             }
             SyncMessage::FateUpdate {
                 tx_id,
@@ -156,7 +157,7 @@ where
             )),
             SyncMessage::Unsubscribe { subscription } => {
                 self.apply_unsubscribe(subscription);
-                Ok(Vec::new())
+                Ok(PublicationOutcome::settled(Vec::new()))
             }
             SyncMessage::PublishSchema { author, schema } => {
                 self.apply_publish_schema(author, ingest_context, *schema)
@@ -175,16 +176,14 @@ where
                 )
                 .await
             }
-            SyncMessage::PublishLens { author, lens } => {
-                self.apply_publish_lens(author, ingest_context, lens)
-                    .await
-                    .map(PublicationOutcome::settled)
-            }
-            SyncMessage::SetCurrentWriteSchema { author, pointer } => {
-                self.apply_set_current_write_schema(author, ingest_context, pointer)
-                    .await
-                    .map(PublicationOutcome::settled)
-            }
+            SyncMessage::PublishLens { author, lens } => self
+                .apply_publish_lens(author, ingest_context, lens)
+                .await
+                .map(PublicationOutcome::settled),
+            SyncMessage::SetCurrentWriteSchema { author, pointer } => self
+                .apply_set_current_write_schema(author, ingest_context, pointer)
+                .await
+                .map(PublicationOutcome::settled),
             SyncMessage::CatalogueAck(_) => Ok(PublicationOutcome::settled(Vec::new())),
             SyncMessage::PermissionAdviceRequest { .. }
             | SyncMessage::PermissionAdviceResponse { .. }
@@ -249,12 +248,15 @@ where
         let mut outcome = self.drain_parked_commit_units().await?;
         self.drain_parked_relay_commit_units().await?;
         self.drain_parked_shape_registrations()?;
-        outcome.value.insert(0, SyncMessage::CatalogueAck(CatalogueAck {
-            revision: None,
-            schema: Some(schema.id),
-            lens: None,
-            applied: true,
-        }));
+        outcome.value.insert(
+            0,
+            SyncMessage::CatalogueAck(CatalogueAck {
+                revision: None,
+                schema: Some(schema.id),
+                lens: None,
+                applied: true,
+            }),
+        );
         Ok(outcome)
     }
 
@@ -283,12 +285,14 @@ where
                     "schema lineage publication conflicts with catalogue",
                 ));
             }
-            return Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
-                revision: None,
-                schema: Some(schema.id),
-                lens: Some(lens.id),
-                applied: true,
-            })]);
+            return Ok(PublicationOutcome::settled(vec![
+                SyncMessage::CatalogueAck(CatalogueAck {
+                    revision: None,
+                    schema: Some(schema.id),
+                    lens: Some(lens.id),
+                    applied: true,
+                }),
+            ]));
         }
 
         if catalogue_seq <= self.catalogue.active_catalogue_seq {
@@ -340,7 +344,10 @@ where
         self.drain_pending_schema_lineages().await
     }
 
-    pub(super) async fn recover_pending_schema_lineages(&mut self) -> Result<(), Error> {
+    pub(super) async fn recover_pending_schema_lineages(&mut self) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
         self.activate_pending_schema_lineages(CatalogueActivationMode::ColdOpen)
             .await
             .map(|_| ())
@@ -348,7 +355,7 @@ where
 
     pub(super) async fn drain_pending_schema_lineages(
         &mut self,
-    ) -> Result<Vec<SyncMessage>, Error>
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,
     {
@@ -359,8 +366,11 @@ where
     async fn activate_pending_schema_lineages(
         &mut self,
         mode: CatalogueActivationMode,
-    ) -> Result<Vec<SyncMessage>, Error> {
-        let mut out = Vec::new();
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let mut outcome = PublicationOutcome::settled(Vec::new());
         loop {
             let next = self.catalogue.active_catalogue_seq.saturating_add(1);
             let Some(pending) = self.catalogue.pending_lineages.get(&next).cloned() else {
@@ -468,11 +478,7 @@ where
             // than reopening the database: a reopen drops active history and
             // maintained-subscription receivers even when their output shape
             // remains compatible.
-            if self
-                .synchronize_physical_version_tables()
-                .await
-                .is_err()
-            {
+            if self.synchronize_physical_version_tables().await.is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
                 return Err(Error::CatalogueActivationFailed);
@@ -529,19 +535,21 @@ where
                 self.groove_runtime_token = next_groove_runtime_token();
             }
             if mode == CatalogueActivationMode::Live {
-                out.push(SyncMessage::CatalogueAck(CatalogueAck {
+                outcome.value.push(SyncMessage::CatalogueAck(CatalogueAck {
                     revision: Some(next),
                     schema: Some(staged.publication.schema.id),
                     lens: Some(staged.publication.lens.id),
                     applied: true,
                 }));
-                out.extend(self.drain_parked_commit_units()?);
-                self.drain_parked_relay_commit_units()?;
+                outcome.extend(self.drain_parked_commit_units().await?);
+                self.drain_parked_relay_commit_units().await?;
                 self.drain_parked_shape_registrations()?;
-                out.extend(self.drain_pending_catalogue_pointers().await?);
+                outcome
+                    .value
+                    .extend(self.drain_pending_catalogue_pointers().await?);
             }
         }
-        Ok(out)
+        Ok(outcome)
     }
 
     fn install_staged_schema_lineage_in_memory(&mut self, staged: &StagedSchemaLineage) {
