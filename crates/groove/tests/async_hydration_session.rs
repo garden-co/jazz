@@ -10,7 +10,7 @@ use groove::db::{Database, GraphBuilder};
 use groove::ivm::ProjectField;
 use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
-    ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
+    ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
 use groove::storage::{TestStorage, TestStorageOperation};
 
@@ -181,4 +181,65 @@ fn cancelled_storage_commit_does_not_publish_the_staged_tick() {
     );
     block_on(database.commit_batch(retry)).unwrap();
     assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+}
+
+#[test]
+fn cancelled_live_index_backfill_publishes_neither_schema_nor_durable_rows() {
+    let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    block_on(database.commit_batch(batch)).unwrap();
+    let before = database.runtime_stats();
+
+    control.take_observed();
+    control.pause();
+    let index = IndexSchema::new("albums_by_title", ["title"]);
+    let mut registration = Box::pin(database.register_table_index("albums", index.clone()));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    for _ in 0..16 {
+        assert!(matches!(
+            Pin::new(&mut registration).poll(&mut context),
+            Poll::Pending
+        ));
+        if control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany)
+        {
+            break;
+        }
+        control.release_one();
+    }
+    assert!(
+        control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany),
+        "live index backfill must cross the atomic durable-write boundary"
+    );
+    drop(registration);
+
+    let after = database.runtime_stats();
+    assert_eq!(after.graph_nodes, before.graph_nodes);
+    control.resume();
+    assert!(
+        block_on(database.index_get(
+            "albums",
+            "albums_by_title",
+            &[Value::String("Kind of Blue".into())],
+        ))
+        .is_err()
+    );
+
+    block_on(database.register_table_index("albums", index)).unwrap();
+    let rows = block_on(database.index_get(
+        "albums",
+        "albums_by_title",
+        &[Value::String("Kind of Blue".into())],
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), 1);
 }
