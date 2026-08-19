@@ -1,7 +1,10 @@
 //! Tick orchestration, hydration, memo eviction, and durable-node evaluation.
 
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll};
 
 use super::evaluation_session::{EvaluationInputs, StorageRequestKey, StorageRequests};
 use super::*;
@@ -12,7 +15,7 @@ use crate::storage::OwnedStorage;
 /// Storage suspension lives in `EvaluationWorkQueue`; the recursive evaluator
 /// is entered only for a root whose complete source frontier is ready, so its
 /// future is a short-lived execution frame rather than retained blocked work.
-struct EvaluationSession {
+struct EvaluationSession<'a> {
     relevant_nodes: HashSet<NodeId>,
     roots: HashSet<NodeId>,
     outputs: HashMap<NodeId, RecordDeltas>,
@@ -23,6 +26,10 @@ struct EvaluationSession {
     eval_memo_bytes: usize,
     memo_use_clock: u64,
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+    storage: OwnedStorage<'a>,
+    storage_requests: StorageRequests<'a>,
+    evaluation_inputs: EvaluationInputs,
+    work_queue: EvaluationWorkQueue,
 }
 
 /// Discovers storage leaves for all reachable siblings without recursively
@@ -145,13 +152,18 @@ impl EvaluationWorkQueue {
     }
 }
 
-impl EvaluationSession {
+impl<'a> EvaluationSession<'a> {
     fn hydration(
         runtime: &IvmRuntime,
         roots: VecDeque<NodeId>,
-    ) -> Result<(Self, EvaluationWorkQueue), IvmRuntimeError> {
+        storage: OwnedStorage<'a>,
+    ) -> Result<Self, IvmRuntimeError> {
         let (relevant_nodes, work_queue) =
             EvaluationWorkQueue::new(roots.iter().copied()).discover(&runtime.graph)?;
+        let mut storage_requests = StorageRequests::new();
+        for request in work_queue.requests().cloned().collect::<Vec<_>>() {
+            storage_requests.request(request, &storage);
+        }
         // Installed operator state is root-scoped. Recursive child scopes are
         // scratch state and are cleared before an evaluation is installed.
         // Probe by reachable node instead of scanning state owned by unrelated
@@ -203,21 +215,95 @@ impl EvaluationSession {
                     .map(|meta| (*node, meta))
             })
             .collect();
-        Ok((
-            Self {
-                relevant_nodes,
-                roots: roots.into_iter().collect(),
-                outputs: HashMap::default(),
-                operator_states,
-                arrangement_states,
-                arrangement_keys_by_input,
-                eval_memo,
-                eval_memo_bytes,
-                memo_use_clock: runtime.memo_use_clock,
-                node_meta,
-            },
+        Ok(Self {
+            relevant_nodes,
+            roots: roots.into_iter().collect(),
+            outputs: HashMap::default(),
+            operator_states,
+            arrangement_states,
+            arrangement_keys_by_input,
+            eval_memo,
+            eval_memo_bytes,
+            memo_use_clock: runtime.memo_use_clock,
+            node_meta,
+            storage,
+            storage_requests,
+            evaluation_inputs: EvaluationInputs::default(),
             work_queue,
-        ))
+        })
+    }
+
+    fn poll(
+        &mut self,
+        runtime: &IvmRuntime,
+        binding_snapshots: &HashMap<String, RecordDeltas>,
+        hydrate_arrangements: bool,
+        metrics: &mut TickMetrics,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
+        self.storage_requests.poll(cx);
+        let ready = match self.storage_requests.drain_ready() {
+            Ok(ready) => ready,
+            Err(error) => return Poll::Ready(Err(error.into())),
+        };
+        self.work_queue.storage_ready(ready.keys().cloned());
+        self.evaluation_inputs.install(ready);
+
+        while let Some(node) = self.work_queue.runnable.pop_front() {
+            let context = if hydrate_arrangements {
+                EvalContext::root_subscription_snapshot()
+            } else {
+                EvalContext::root_snapshot()
+            };
+            let result = {
+                let mut evaluator = TickEvaluator {
+                    schema: &runtime.schema,
+                    graph: &runtime.graph,
+                    variant_projections: &runtime.variant_projections,
+                    table_deltas: &[],
+                    binding_deltas: &[],
+                    binding_snapshots,
+                    current_tick: runtime.current_tick,
+                    operator_states: &mut self.operator_states,
+                    arrangement_states: &mut self.arrangement_states,
+                    arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
+                    eval_memo: &mut self.eval_memo,
+                    eval_memo_bytes: &mut self.eval_memo_bytes,
+                    table_frontiers: &runtime.table_frontiers,
+                    binding_frontiers: &runtime.binding_frontiers,
+                    memo_use_clock: &mut self.memo_use_clock,
+                    node_meta: &mut self.node_meta,
+                    storage: Some(self.storage.as_ref()),
+                    evaluation_inputs: Some(&mut self.evaluation_inputs),
+                    context,
+                    metrics,
+                    terminal_deltas: HashMap::default(),
+                    root_ordering_windows: HashMap::default(),
+                };
+                let mut evaluation = evaluator.update_node(node);
+                match Pin::new(&mut evaluation).poll(cx) {
+                    Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
+                    Poll::Pending => return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked)),
+                }
+            };
+            match result {
+                Ok(records) => {
+                    if self.work_queue.is_root(node) {
+                        self.outputs.insert(node, records);
+                    }
+                    self.work_queue.complete(node);
+                }
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+        }
+
+        if self.outputs.len() == self.roots.len() {
+            Poll::Ready(Ok(()))
+        } else if self.storage_requests.has_pending() {
+            Poll::Pending
+        } else {
+            Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked))
+        }
     }
 
     fn install(self, runtime: &mut IvmRuntime) {
@@ -788,6 +874,16 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        self.hydration_roots_owned(roots, OwnedStorage::new(Rc::new(storage)), mode)
+            .await
+    }
+
+    async fn hydration_roots_owned<'a>(
+        &mut self,
+        roots: impl IntoIterator<Item = NodeId>,
+        owned_storage: OwnedStorage<'a>,
+        mode: HydrationMode,
+    ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut metrics = TickMetrics::default();
@@ -798,81 +894,17 @@ impl IvmRuntime {
             && roots.iter().copied().try_fold(false, |found, root| {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
-        let (mut session, mut work_queue) = EvaluationSession::hydration(self, roots)?;
-        let mut evaluation_inputs = EvaluationInputs::default();
-        let owned_storage = OwnedStorage::new(Rc::new(storage));
-        let mut storage_requests = StorageRequests::new();
-        for request in work_queue.requests().cloned().collect::<Vec<_>>() {
-            storage_requests.request(request, &owned_storage);
-        }
-        while session.outputs.len() < session.roots.len() {
-            while let Some(node) = work_queue.runnable.pop_front() {
-                let context = if hydrate_arrangements {
-                    EvalContext::root_subscription_snapshot()
-                } else {
-                    EvalContext::root_snapshot()
-                };
-                let result = {
-                    let mut evaluator = TickEvaluator {
-                        schema: &self.schema,
-                        graph: &self.graph,
-                        variant_projections: &self.variant_projections,
-                        table_deltas: &[],
-                        binding_deltas: &[],
-                        binding_snapshots: &binding_snapshots,
-                        current_tick: self.current_tick,
-                        operator_states: &mut session.operator_states,
-                        arrangement_states: &mut session.arrangement_states,
-                        arrangement_keys_by_input: &mut session.arrangement_keys_by_input,
-                        eval_memo: &mut session.eval_memo,
-                        eval_memo_bytes: &mut session.eval_memo_bytes,
-                        table_frontiers: &self.table_frontiers,
-                        binding_frontiers: &self.binding_frontiers,
-                        memo_use_clock: &mut session.memo_use_clock,
-                        node_meta: &mut session.node_meta,
-                        storage: Some(storage),
-                        evaluation_inputs: Some(&mut evaluation_inputs),
-                        context,
-                        metrics: &mut metrics,
-                        terminal_deltas: HashMap::default(),
-                        root_ordering_windows: HashMap::default(),
-                    };
-                    evaluator
-                        .update_node(node)
-                        .await
-                        .map(|records| records.as_ref().clone())
-                };
-                match result {
-                    Ok(records) => {
-                        if work_queue.is_root(node) {
-                            session.outputs.insert(node, records);
-                        }
-                        work_queue.complete(node);
-                    }
-                    Err(IvmRuntimeError::EvaluationBlocked) => {
-                        return Err(IvmRuntimeError::EvaluationBlocked);
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            if session.outputs.len() == session.roots.len() {
-                break;
-            }
-            if !storage_requests.has_pending() {
-                return Err(IvmRuntimeError::EvaluationBlocked);
-            }
-            std::future::poll_fn(|cx| {
-                if storage_requests.poll(cx) > 0 {
-                    std::task::Poll::Ready(())
-                } else {
-                    std::task::Poll::Pending
-                }
-            })
-            .await;
-            let ready = storage_requests.drain_ready()?;
-            work_queue.storage_ready(ready.keys().cloned());
-            evaluation_inputs.install(ready);
-        }
+        let mut session = EvaluationSession::hydration(self, roots, owned_storage)?;
+        std::future::poll_fn(|cx| {
+            session.poll(
+                self,
+                &binding_snapshots,
+                hydrate_arrangements,
+                &mut metrics,
+                cx,
+            )
+        })
+        .await?;
         let outputs = std::mem::take(&mut session.outputs);
         session.install(self);
         self.record_hydration_memo_metrics(&metrics);
