@@ -47,12 +47,13 @@ where
     ///
     /// Creation writes only one metadata row; overlay tables are created lazily
     /// on the first branch write.
-    pub fn create_branch(&mut self, branch_id: BranchId) -> Result<BranchRecord, Error> {
+    pub async fn create_branch(&mut self, branch_id: BranchId) -> Result<BranchRecord, Error> {
         self.create_branch_as(branch_id, AuthorId(uuid::Uuid::nil()))
+            .await
     }
 
     /// Create a snapshot-base branch attributed to an authenticated session.
-    pub fn create_branch_as(
+    pub async fn create_branch_as(
         &mut self,
         branch_id: BranchId,
         created_by: AuthorId,
@@ -83,13 +84,13 @@ where
             ),
             state: codec::BranchState::Open,
         };
-        self.persist_branch_record(&record, true)?;
+        self.persist_branch_record(&record, true).await?;
         self.branches.branches.insert(branch_id, record.clone());
         Ok(record)
     }
 
     /// Declare a root branch with no parent fallback.
-    pub fn create_root_branch(&mut self, branch_id: BranchId) -> Result<BranchRecord, Error> {
+    pub async fn create_root_branch(&mut self, branch_id: BranchId) -> Result<BranchRecord, Error> {
         self.require_catalogue_ready()?;
         let record = BranchRecord {
             branch_id,
@@ -100,7 +101,7 @@ where
         };
         // The distinguished root is local storage scaffolding, not session-authored
         // branch metadata, so it must never enter the sync outbox.
-        self.persist_branch_record(&record, false)?;
+        self.persist_branch_record(&record, false).await?;
         self.branches.branches.insert(branch_id, record.clone());
         Ok(record)
     }
@@ -122,7 +123,7 @@ where
     }
 
     /// Clear a durable metadata outbox item after an exact upstream echo.
-    pub fn acknowledge_branch_metadata(
+    pub async fn acknowledge_branch_metadata(
         &mut self,
         metadata: &crate::protocol::BranchMetadata,
     ) -> Result<(), Error> {
@@ -144,22 +145,23 @@ where
                 "branch metadata acknowledgement does not match local record",
             ));
         }
-        self.persist_branch_record(&record, false)?;
+        self.persist_branch_record(&record, false).await?;
         Ok(())
     }
 
     /// Idempotently admit durable branch routing metadata received before a
     /// branch-target unit. Conflicting redefinitions are rejected: branch
     /// identity is immutable once observed.
-    pub fn admit_branch_metadata(
+    pub async fn admit_branch_metadata(
         &mut self,
         metadata: crate::protocol::BranchMetadata,
     ) -> Result<(), Error> {
         self.require_catalogue_ready()?;
         self.admit_branch_metadata_with_upstream_relay(metadata, false)
+            .await
     }
 
-    fn admit_branch_metadata_with_upstream_relay(
+    async fn admit_branch_metadata_with_upstream_relay(
         &mut self,
         metadata: crate::protocol::BranchMetadata,
         relay_upstream: bool,
@@ -186,13 +188,13 @@ where
                 && existing.state == codec::BranchState::Open
                 && record.state == codec::BranchState::Discarded
             {
-                self.persist_branch_record(&record, relay_upstream)?;
+                self.persist_branch_record(&record, relay_upstream).await?;
                 self.branches.branches.insert(record.branch_id, record);
                 return Ok(());
             }
             return Err(Error::InvalidStoredValue("conflicting branch metadata"));
         }
-        self.persist_branch_record(&record, relay_upstream)?;
+        self.persist_branch_record(&record, relay_upstream).await?;
         self.branches.branches.insert(record.branch_id, record);
         Ok(())
     }
@@ -200,7 +202,7 @@ where
     /// Admit locally-authored branch metadata from an authenticated session.
     /// The link identity, not the self-asserted payload alone, authenticates the
     /// immutable creator. Dependencies must already be locally readable.
-    pub fn admit_session_branch_metadata(
+    pub async fn admit_session_branch_metadata(
         &mut self,
         metadata: crate::protocol::BranchMetadata,
         identity: AuthorId,
@@ -241,12 +243,13 @@ where
         // become a durable upstream relay. Exact downstream retries preserve
         // the existing pending/acknowledged state instead of reopening a
         // completed relay and creating an echo loop.
-        self.admit_branch_metadata_with_upstream_relay(metadata, true)?;
+        self.admit_branch_metadata_with_upstream_relay(metadata, true)
+            .await?;
         Ok(true)
     }
 
     /// Discard an open branch without deleting its overlay history.
-    pub fn discard_branch(&mut self, branch_id: BranchId) -> Result<(), Error> {
+    pub async fn discard_branch(&mut self, branch_id: BranchId) -> Result<(), Error> {
         self.require_catalogue_ready()?;
         let mut record = self
             .branches
@@ -258,7 +261,7 @@ where
             return Err(Error::BranchClosed(branch_id));
         }
         record.state = codec::BranchState::Discarded;
-        self.persist_branch_record(&record, true)?;
+        self.persist_branch_record(&record, true).await?;
         self.branches.branches.insert(branch_id, record);
         Ok(())
     }
@@ -362,12 +365,12 @@ where
             .ok_or(Error::InvalidStoredValue("branch write schema missing"))?
             .schema
             .clone();
-        let known_source_dots = self.validated_target_source_dots(source, target)?;
+        let known_source_dots = self.validated_target_source_dots(source, target).await?;
         for table in write_schema.tables.clone() {
             let table_schema = self
                 .table_in_schema(&table.name, write_schema_version)?
                 .clone();
-            let overlay_rows = self.lineage_row_ids(&table.name, source)?;
+            let overlay_rows = self.lineage_row_ids(&table.name, source).await?;
             if identity != AuthorId::SYSTEM && !overlay_rows.is_empty() {
                 let shape = crate::query::Query::from(table.name.as_str())
                     .validate(&write_schema)
@@ -380,7 +383,8 @@ where
                         self.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)?
                     }
                     BranchLineage::Branch(branch_id) => {
-                        self.query_rows_on_branch_for_link(branch_id, &shape, &binding, identity)?
+                        self.query_rows_on_branch_for_link(branch_id, &shape, &binding, identity)
+                            .await?
                     }
                 }
                 .into_iter()
@@ -400,19 +404,22 @@ where
                                 VersionLayer::Deletion,
                                 branch.branch_id,
                                 write_schema_version,
-                            )?
+                            )
+                            .await?
                             .is_some_and(|winner| {
                                 winner.deletion() == Some(DeletionEvent::Deleted)
                             });
                         if !deleted {
                             continue;
                         }
-                        let Some(subject) = self.branch_selected_content_witness(
-                            branch,
-                            &table_schema,
-                            row_uuid,
-                            write_schema_version,
-                        )?
+                        let Some(subject) = self
+                            .branch_selected_content_witness(
+                                branch,
+                                &table_schema,
+                                row_uuid,
+                                write_schema_version,
+                            )
+                            .await?
                         else {
                             continue;
                         };
@@ -449,8 +456,9 @@ where
             }
             for row_uuid in overlay_rows {
                 for layer in [VersionLayer::Content, VersionLayer::Deletion] {
-                    let source_versions =
-                        self.lineage_layer_versions(&table.name, row_uuid, layer, source)?;
+                    let source_versions = self
+                        .lineage_layer_versions(&table.name, row_uuid, layer, source)
+                        .await?;
                     let candidates = (0..source_versions.len()).collect::<Vec<_>>();
                     let Some(winner_idx) = current_version_index(
                         &source_versions,
@@ -462,7 +470,9 @@ where
                     };
                     let winner = source_versions[winner_idx].clone();
                     through_frontier.insert(self.version_tx_id(&winner)?);
-                    let parents = self.target_layer_heads(&table.name, row_uuid, layer, target)?;
+                    let parents = self
+                        .target_layer_heads(&table.name, row_uuid, layer, target)
+                        .await?;
                     let (_, winner_cells, _) =
                         self.project_branch_version(&winner, write_schema_version, &table.name)?;
                     let cells = table_schema
@@ -534,11 +544,13 @@ where
                                         layer: MergeAspect::Content,
                                         component: ContributionComponent::Column(column.clone()),
                                     };
-                                    let source_dots = self.expanded_contribution_dots(
-                                        source,
-                                        source_tx_id,
-                                        source_coordinate,
-                                    )?;
+                                    let source_dots = self
+                                        .expanded_contribution_dots(
+                                            source,
+                                            source_tx_id,
+                                            source_coordinate,
+                                        )
+                                        .await?;
                                     let novel = source_dots
                                         .into_iter()
                                         .filter(|dot| !known_source_dots.contains(dot))
@@ -561,11 +573,13 @@ where
                                     layer: MergeAspect::Deletion,
                                     component: ContributionComponent::Register,
                                 };
-                                let source_dots = self.expanded_contribution_dots(
-                                    source,
-                                    source_tx_id,
-                                    target.clone(),
-                                )?;
+                                let source_dots = self
+                                    .expanded_contribution_dots(
+                                        source,
+                                        source_tx_id,
+                                        target.clone(),
+                                    )
+                                    .await?;
                                 let novel = source_dots
                                     .into_iter()
                                     .filter(|dot| !known_source_dots.contains(dot))
@@ -739,7 +753,8 @@ where
             .map(|commit| commit.table.clone())
             .collect::<BTreeSet<_>>()
         {
-            self.persist_branch_partition(table, schema_version, branch_id)?;
+            self.persist_branch_partition(table, schema_version, branch_id)
+                .await?;
         }
         let made_at = self.mint_tx_time(commits[0].now_ms);
         self.commit_mergeable_many_on_branch_at(branch_id, schema_version, commits, made_at, None)
@@ -767,12 +782,15 @@ where
         for commit in &commits {
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let version = VersionRecord::from_commit(commit, &table_schema, write_schema_version)?;
-            if !self.branch_table_write_policy_allows_version_record(
-                &branch,
-                &table_schema,
-                &version,
-                permission_subject,
-            )? {
+            if !self
+                .branch_table_write_policy_allows_version_record(
+                    &branch,
+                    &table_schema,
+                    &version,
+                    permission_subject,
+                )
+                .await?
+            {
                 return Err(Error::AuthorizationDenied);
             }
         }
@@ -781,7 +799,8 @@ where
             .map(|commit| commit.table.clone())
             .collect::<BTreeSet<_>>()
         {
-            self.persist_branch_partition(table, write_schema_version, branch_id)?;
+            self.persist_branch_partition(table, write_schema_version, branch_id)
+                .await?;
         }
         let tx_id = TxId::new(made_at, self.node_uuid);
         let tx = Transaction {
@@ -858,13 +877,14 @@ where
 
     /// Read a validated query in a branch view: overlay rows first, then the
     /// frozen parent `at(base)` read for rows absent from the overlay.
-    pub fn query_rows_on_branch(
+    pub async fn query_rows_on_branch(
         &mut self,
         branch_id: BranchId,
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_on_branch_for_link(branch_id, shape, binding, AuthorId::SYSTEM)
+            .await
     }
 
     /// Read a validated query in a branch view for a peer identity. The branch
@@ -872,7 +892,7 @@ where
     /// branch overlay/base view is exposed. Rows that pass the branch row gate
     /// are then narrowed by ordinary table read policy evaluated in the branch
     /// view.
-    pub fn query_rows_on_branch_for_link(
+    pub async fn query_rows_on_branch_for_link(
         &mut self,
         branch_id: BranchId,
         shape: &ValidatedQuery,
@@ -899,7 +919,7 @@ where
 
     /// Client-local branch reads operate only on data already available to the
     /// client and never re-evaluate branch or row policy.
-    pub fn query_rows_on_branch_for_client(
+    pub async fn query_rows_on_branch_for_client(
         &mut self,
         branch_id: BranchId,
         shape: &ValidatedQuery,
@@ -980,7 +1000,7 @@ where
         )
     }
 
-    pub(super) fn branch_table_write_policy_allows_version_record(
+    pub(super) async fn branch_table_write_policy_allows_version_record(
         &mut self,
         branch: &BranchRecord,
         table: &TableSchema,
@@ -994,7 +1014,10 @@ where
             let Some(policy) = table.write_policies.delete_using.clone() else {
                 return Ok(false);
             };
-            let Some(row) = self.branch_delete_subject_row(branch, table, version)? else {
+            let Some(row) = self
+                .branch_delete_subject_row(branch, table, version)
+                .await?
+            else {
                 return Ok(false);
             };
             let cells = table
@@ -1015,7 +1038,9 @@ where
                 false,
             );
         }
-        let previous = self.branch_delete_subject_row(branch, table, version)?;
+        let previous = self
+            .branch_delete_subject_row(branch, table, version)
+            .await?;
         if let Some(previous) = previous {
             let previous_cells = table
                 .columns
@@ -1086,14 +1111,15 @@ where
         )
     }
 
-    fn branch_delete_subject_row(
+    async fn branch_delete_subject_row(
         &mut self,
         branch: &BranchRecord,
         table: &TableSchema,
         version: &VersionRecord,
     ) -> Result<Option<CurrentRow>, Error> {
         if let Some(row) = self
-            .branch_current_rows_for_schema(&table.name, branch, version.schema_version())?
+            .branch_current_rows_for_schema(&table.name, branch, version.schema_version())
+            .await?
             .into_iter()
             .find(|row| row.row_uuid() == version.row_uuid())
         {
@@ -1101,7 +1127,7 @@ where
         }
 
         for parent in version.parents() {
-            for parent_version in self.query_versions_for_tx(parent)? {
+            for parent_version in self.query_versions_for_tx(parent).await? {
                 if parent_version.table() != table.name
                     || parent_version.row_uuid() != version.row_uuid()
                     || parent_version.layer() != VersionLayer::Content
@@ -1117,20 +1143,23 @@ where
         Ok(None)
     }
 
-    fn branch_selected_content_witness(
+    async fn branch_selected_content_witness(
         &mut self,
         branch: &BranchRecord,
         table: &TableSchema,
         row_uuid: RowUuid,
         read_schema_version: SchemaVersionId,
     ) -> Result<Option<CurrentRow>, Error> {
-        if let Some(content) = self.branch_overlay_layer_winner_for_schema(
-            &table.name,
-            row_uuid,
-            VersionLayer::Content,
-            branch.branch_id,
-            read_schema_version,
-        )? {
+        if let Some(content) = self
+            .branch_overlay_layer_winner_for_schema(
+                &table.name,
+                row_uuid,
+                VersionLayer::Content,
+                branch.branch_id,
+                read_schema_version,
+            )
+            .await?
+        {
             let source_schema = self
                 .schema_version_for_alias(content.schema_version_alias())
                 .ok_or(Error::InvalidStoredValue(
@@ -1151,7 +1180,8 @@ where
             }
         }
         Ok(self
-            .branch_base_rows_for_schema(&table.name, branch, read_schema_version)?
+            .branch_base_rows_for_schema(&table.name, branch, read_schema_version)
+            .await?
             .into_iter()
             .find(|row| row.row_uuid() == row_uuid))
     }
@@ -1165,15 +1195,16 @@ where
         self.branch_write_policy_allows(branch_id, identity)
     }
 
-    pub(super) fn branch_current_rows_for_schema(
+    pub(super) async fn branch_current_rows_for_schema(
         &mut self,
         table: &str,
         branch: &BranchRecord,
         read_schema_version: SchemaVersionId,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, read_schema_version)?.clone();
-        let overlay =
-            self.branch_overlay_rows(table, &table_schema, branch.branch_id, read_schema_version)?;
+        let overlay = self
+            .branch_overlay_rows(table, &table_schema, branch.branch_id, read_schema_version)
+            .await?;
         let overlay_row_ids = overlay
             .iter()
             .map(CurrentRow::row_uuid)
@@ -1206,7 +1237,7 @@ where
     /// Resolve only the frozen root contribution of a parentless snapshot-base
     /// branch.  Maintained branch-current reads keep this portion immutable
     /// while an IVM graph follows the branch overlay in front of it.
-    pub(super) fn branch_base_rows_for_schema(
+    pub(super) async fn branch_base_rows_for_schema(
         &mut self,
         table: &str,
         branch: &BranchRecord,
@@ -1232,7 +1263,7 @@ where
     }
 
     #[cfg(test)]
-    pub(super) fn branch_current_rows(
+    pub(super) async fn branch_current_rows(
         &mut self,
         table: &str,
         branch: &BranchRecord,
@@ -1249,7 +1280,7 @@ where
             .collect()
     }
 
-    fn branch_overlay_rows(
+    async fn branch_overlay_rows(
         &mut self,
         table: &str,
         table_schema: &TableSchema,
@@ -1257,8 +1288,9 @@ where
         read_schema_version: SchemaVersionId,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut rows = Vec::new();
-        for row_uuid in
-            self.branch_overlay_row_ids_for_schema(table, branch_id, read_schema_version)?
+        for row_uuid in self
+            .branch_overlay_row_ids_for_schema(table, branch_id, read_schema_version)
+            .await?
         {
             if self
                 .branch_overlay_layer_winner_for_schema(
@@ -1267,18 +1299,21 @@ where
                     VersionLayer::Deletion,
                     branch_id,
                     read_schema_version,
-                )?
+                )
+                .await?
                 .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
             {
                 continue;
             }
-            let Some(content) = self.branch_overlay_layer_winner_for_schema(
-                table,
-                row_uuid,
-                VersionLayer::Content,
-                branch_id,
-                read_schema_version,
-            )?
+            let Some(content) = self
+                .branch_overlay_layer_winner_for_schema(
+                    table,
+                    row_uuid,
+                    VersionLayer::Content,
+                    branch_id,
+                    read_schema_version,
+                )
+                .await?
             else {
                 continue;
             };
@@ -1310,7 +1345,7 @@ where
         Ok(rows)
     }
 
-    fn branch_overlay_row_ids_for_schema(
+    async fn branch_overlay_row_ids_for_schema(
         &mut self,
         table: &str,
         branch_id: BranchId,
@@ -1325,10 +1360,14 @@ where
             return Ok(BTreeSet::new());
         }
         let mut row_ids = BTreeSet::new();
-        for raw in self.database.primary_key_scan_raw(
-            &physical_branch_history_table_name(table_id, branch_id),
-            &[],
-        )? {
+        for raw in self
+            .database
+            .primary_key_scan_raw(
+                &physical_branch_history_table_name(table_id, branch_id),
+                &[],
+            )
+            .await?
+        {
             row_ids.insert(RowUuid(
                 raw.record()
                     .get_uuid(HistoryRowRecord::FIELD_ROW_UUID_IDX)?,
@@ -1336,20 +1375,24 @@ where
         }
         let (branch_kind, branch_lineage_id) =
             shared_deletion_lineage_values(BranchLineage::Branch(branch_id));
-        for raw in self.database.primary_key_scan_raw(
-            SHARED_DELETION_HISTORY_TABLE,
-            &[
-                Value::U8(branch_kind),
-                Value::Uuid(branch_lineage_id),
-                Value::U64(table_id.0),
-            ],
-        )? {
+        for raw in self
+            .database
+            .primary_key_scan_raw(
+                SHARED_DELETION_HISTORY_TABLE,
+                &[
+                    Value::U8(branch_kind),
+                    Value::Uuid(branch_lineage_id),
+                    Value::U64(table_id.0),
+                ],
+            )
+            .await?
+        {
             row_ids.insert(RowUuid(raw.record().get_uuid(3)?));
         }
         Ok(row_ids)
     }
 
-    fn branch_overlay_row_ids(
+    async fn branch_overlay_row_ids(
         &mut self,
         table: &str,
         branch_id: BranchId,
@@ -1359,24 +1402,26 @@ where
             branch_id,
             self.catalogue.current_write_schema.schema,
         )
+        .await
     }
 
-    fn lineage_row_ids(
+    async fn lineage_row_ids(
         &mut self,
         table: &str,
         lineage: BranchLineage,
     ) -> Result<BTreeSet<RowUuid>, Error> {
         match lineage {
             BranchLineage::Root => Ok(self
-                .query_table_versions(table)?
+                .query_table_versions(table)
+                .await?
                 .into_iter()
                 .map(|version| version.row_uuid())
                 .collect()),
-            BranchLineage::Branch(branch_id) => self.branch_overlay_row_ids(table, branch_id),
+            BranchLineage::Branch(branch_id) => self.branch_overlay_row_ids(table, branch_id).await,
         }
     }
 
-    fn lineage_layer_versions(
+    async fn lineage_layer_versions(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -1385,23 +1430,25 @@ where
     ) -> Result<Vec<VersionRow>, Error> {
         match lineage {
             BranchLineage::Root => Ok(self
-                .query_row_versions(table, row_uuid)?
+                .query_row_versions(table, row_uuid)
+                .await?
                 .into_iter()
                 .filter(|version| version.layer() == layer)
                 .collect()),
             BranchLineage::Branch(branch_id) => {
                 self.branch_overlay_layer_versions(table, row_uuid, layer, branch_id)
+                    .await
             }
         }
     }
 
-    fn expanded_contribution_dots(
+    async fn expanded_contribution_dots(
         &mut self,
         lineage: BranchLineage,
         tx_id: TxId,
         coordinate: ContributionCoordinate,
     ) -> Result<BTreeSet<ContributionDot>, Error> {
-        let Some(stored) = self.query_transaction(tx_id)? else {
+        let Some(stored) = self.query_transaction(tx_id).await? else {
             return Err(Error::BranchMergeCalculation(
                 "source contribution transaction is unavailable",
             ));
@@ -1418,13 +1465,16 @@ where
                 .find(|substitution| substitution.target == coordinate)
                 .cloned()
         {
-            let emitted = self.query_versions_for_tx(tx_id)?;
-            if !self.validate_lww_branch_substitution(
-                provenance.source_lineage,
-                provenance,
-                &substitution,
-                &emitted,
-            )? {
+            let emitted = self.query_versions_for_tx(tx_id).await?;
+            if !self
+                .validate_lww_branch_substitution(
+                    provenance.source_lineage,
+                    provenance,
+                    &substitution,
+                    &emitted,
+                )
+                .await?
+            {
                 return Err(Error::BranchMergeCalculation(
                     "branch merge provenance cannot be validated",
                 ));
@@ -1529,7 +1579,7 @@ where
         Ok((projected_table, cells, authored))
     }
 
-    fn branch_overlay_layer_winner_for_schema(
+    async fn branch_overlay_layer_winner_for_schema(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -1537,13 +1587,15 @@ where
         branch_id: BranchId,
         schema_version: SchemaVersionId,
     ) -> Result<Option<VersionRow>, Error> {
-        let versions = self.branch_overlay_layer_versions_for_schema(
-            table,
-            row_uuid,
-            layer,
-            branch_id,
-            schema_version,
-        )?;
+        let versions = self
+            .branch_overlay_layer_versions_for_schema(
+                table,
+                row_uuid,
+                layer,
+                branch_id,
+                schema_version,
+            )
+            .await?;
         let candidates = (0..versions.len()).collect::<Vec<_>>();
         Ok(
             current_version_index(&versions, &candidates, layer, &self.node_aliases)
@@ -1551,21 +1603,23 @@ where
         )
     }
 
-    fn target_layer_heads(
+    async fn target_layer_heads(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
         layer: VersionLayer,
         target: BranchLineage,
     ) -> Result<Vec<TxId>, Error> {
-        let versions = self.lineage_layer_versions(table, row_uuid, layer, target)?;
+        let versions = self
+            .lineage_layer_versions(table, row_uuid, layer, target)
+            .await?;
         let mut candidates = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             if version.layer() != layer {
                 continue;
             }
             let tx_id = self.version_tx_id(version)?;
-            let Some(tx) = self.transaction_record(tx_id) else {
+            let Some(tx) = self.transaction_record(tx_id).await else {
                 continue;
             };
             if matches!(tx.fate, Fate::Accepted | Fate::Pending) {
@@ -1581,14 +1635,15 @@ where
         Ok(heads)
     }
 
-    pub(super) fn validated_target_source_dots(
+    pub(super) async fn validated_target_source_dots(
         &mut self,
         source: BranchLineage,
         target: BranchLineage,
     ) -> Result<BTreeSet<ContributionDot>, Error> {
         let records = self
             .database
-            .primary_key_scan_raw("jazz_transactions", &[])?
+            .primary_key_scan_raw("jazz_transactions", &[])
+            .await?
             .into_iter()
             .filter_map(|raw| {
                 let record = raw.record();
@@ -1630,22 +1685,20 @@ where
                 continue;
             };
             let tx_id = TxId::new(TxTime(time), node_uuid);
-            let Some(target_tx) = self.query_transaction(tx_id)? else {
+            let Some(target_tx) = self.query_transaction(tx_id).await? else {
                 continue;
             };
             if target_tx.tx.target_lineage != target {
                 continue;
             }
-            let emitted = self.query_versions_for_tx(tx_id)?;
+            let emitted = self.query_versions_for_tx(tx_id).await?;
             let mut validated = BTreeSet::new();
             let mut valid = true;
             for substitution in &provenance.substitutions {
-                if !self.validate_lww_branch_substitution(
-                    source,
-                    &provenance,
-                    substitution,
-                    &emitted,
-                )? {
+                if !self
+                    .validate_lww_branch_substitution(source, &provenance, substitution, &emitted)
+                    .await?
+                {
                     valid = false;
                     break;
                 }
@@ -1668,10 +1721,11 @@ where
             .tables
             .clone();
         for table in write_tables {
-            for row_uuid in self.lineage_row_ids(&table.name, target)? {
+            for row_uuid in self.lineage_row_ids(&table.name, target).await? {
                 for layer in [VersionLayer::Content, VersionLayer::Deletion] {
-                    for version in
-                        self.lineage_layer_versions(&table.name, row_uuid, layer, target)?
+                    for version in self
+                        .lineage_layer_versions(&table.name, row_uuid, layer, target)
+                        .await?
                     {
                         let tx_id = self.version_tx_id(&version)?;
                         let coordinates = match layer {
@@ -1702,7 +1756,10 @@ where
                         };
                         for coordinate in coordinates {
                             known.extend(
-                                self.expanded_contribution_dots(target, tx_id, coordinate)?,
+                                Box::pin(
+                                    self.expanded_contribution_dots(target, tx_id, coordinate),
+                                )
+                                .await?,
                             );
                         }
                     }
@@ -1712,7 +1769,7 @@ where
         Ok(known)
     }
 
-    pub(super) fn validate_lww_branch_substitution(
+    pub(super) async fn validate_lww_branch_substitution(
         &mut self,
         source: impl Into<BranchLineage>,
         provenance: &BranchMergeProvenance,
@@ -1732,8 +1789,9 @@ where
         }) else {
             return Ok(false);
         };
-        let source_versions =
-            self.lineage_layer_versions(&target.table, target.row_uuid, layer, source)?;
+        let source_versions = self
+            .lineage_layer_versions(&target.table, target.row_uuid, layer, source)
+            .await?;
         let through = provenance
             .through_frontier
             .iter()
@@ -1765,11 +1823,10 @@ where
             if !authored {
                 continue;
             }
-            expected.extend(self.expanded_contribution_dots(
-                source,
-                source_tx_id,
-                target.clone(),
-            )?);
+            expected.extend(
+                Box::pin(self.expanded_contribution_dots(source, source_tx_id, target.clone()))
+                    .await?,
+            );
             if winning_source
                 .as_ref()
                 .is_none_or(|(winner, _)| source_tx_id > *winner)
@@ -1807,7 +1864,7 @@ where
         }
     }
 
-    fn branch_overlay_layer_versions(
+    async fn branch_overlay_layer_versions(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -1821,9 +1878,10 @@ where
             branch_id,
             self.catalogue.current_write_schema.schema,
         )
+        .await
     }
 
-    fn branch_overlay_layer_versions_for_schema(
+    async fn branch_overlay_layer_versions_for_schema(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -1852,7 +1910,8 @@ where
                         Value::U64(table_id.0),
                         Value::Uuid(row_uuid.0),
                     ],
-                )?
+                )
+                .await?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -1863,6 +1922,7 @@ where
                 let tx_id = self.version_tx_id(&version)?;
                 if self
                     .transaction_record(tx_id)
+                    .await
                     .is_some_and(|tx| !matches!(tx.fate, Fate::Rejected(_)))
                 {
                     versions.push(version);
@@ -1873,7 +1933,8 @@ where
         let storage_table = physical_branch_version_storage_table_name(table_id, layer, branch_id);
         let raws = self
             .database
-            .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
+            .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])
+            .await?
             .into_iter()
             .map(|raw| {
                 (
@@ -1902,6 +1963,7 @@ where
             let tx_id = self.version_tx_id(&version)?;
             if self
                 .transaction_record(tx_id)
+                .await
                 .is_some_and(|tx| !matches!(tx.fate, Fate::Rejected(_)))
             {
                 versions.push(version);
@@ -1944,7 +2006,8 @@ where
                     .map(|commit| commit.table.clone())
                     .collect::<BTreeSet<_>>()
                 {
-                    self.persist_branch_partition(table, write_schema_version, branch_id)?;
+                    self.persist_branch_partition(table, write_schema_version, branch_id)
+                        .await?;
                 }
                 let made_at = self.mint_tx_time(0);
                 self.commit_mergeable_many_on_branch_at(
@@ -1959,7 +2022,7 @@ where
         }
     }
 
-    fn persist_branch_record(
+    async fn persist_branch_record(
         &mut self,
         record: &BranchRecord,
         metadata_pending: bool,
@@ -1980,7 +2043,7 @@ where
                 Value::Bool(metadata_pending),
             ],
         );
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         if metadata_pending {
             self.branches
                 .pending_metadata_uploads
@@ -2028,7 +2091,7 @@ where
         Ok(())
     }
 
-    fn persist_branch_partition(
+    async fn persist_branch_partition(
         &mut self,
         table: String,
         schema_version: SchemaVersionId,
@@ -2047,8 +2110,8 @@ where
             "jazz_branch_partitions",
             vec![Value::U64(table_id.0), Value::Uuid(branch_id.0)],
         );
-        self.database.commit_batch(batch)?;
-        if let Err(sync_error) = self.synchronize_physical_version_tables() {
+        self.database.commit_batch(batch).await?;
+        if let Err(sync_error) = self.synchronize_physical_version_tables().await {
             self.branches
                 .branch_partitions
                 .remove(&(table_id, branch_id));
@@ -2060,7 +2123,7 @@ where
                     PrimaryKeyValue::Uuid(branch_id.0),
                 ]),
             );
-            self.database.commit_batch(rollback)?;
+            self.database.commit_batch(rollback).await?;
             return Err(sync_error);
         }
         Ok(())
@@ -2071,7 +2134,7 @@ where
     /// absent until its first branch write, but the IVM graph can subscribe to
     /// a real empty table and therefore survives that first write without a
     /// database rebuild or a source-shaped metadata oracle.
-    pub(super) fn prepare_branch_subscription_source_partition(
+    pub(super) async fn prepare_branch_subscription_source_partition(
         &mut self,
         table: &str,
         schema_version: SchemaVersionId,
@@ -2088,7 +2151,7 @@ where
         self.branches
             .branch_partitions
             .insert((table_id, branch_id));
-        let result = self.synchronize_physical_version_tables();
+        let result = self.synchronize_physical_version_tables().await;
         self.branches
             .branch_partitions
             .remove(&(table_id, branch_id));
@@ -2111,7 +2174,7 @@ where
             })
     }
 
-    pub(super) fn ensure_branch_target_partitions(
+    pub(super) async fn ensure_branch_target_partitions(
         &mut self,
         branch_id: BranchId,
         versions: &[VersionRecord],
@@ -2127,7 +2190,8 @@ where
             self.table_in_schema(table, *schema_version)?;
         }
         for (table, schema_version) in partitions {
-            self.persist_branch_partition(table, schema_version, branch_id)?;
+            self.persist_branch_partition(table, schema_version, branch_id)
+                .await?;
         }
         Ok(())
     }
