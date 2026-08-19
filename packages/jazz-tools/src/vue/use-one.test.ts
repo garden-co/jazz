@@ -42,6 +42,7 @@ describe("vue/useOne", () => {
 
     expectTypeOf(result).toEqualTypeOf<UseOneResult<Todo>>();
     expect(result.data.value).toBeNull();
+    expect(result.isLoading.value).toBe(false);
     const limitedQuery = (mocks.makeQueryKey.mock.calls as any[][])[0]![0];
     expect(JSON.parse(limitedQuery._build()).limit).toBe(1);
     scope.stop();
