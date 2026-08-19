@@ -59,7 +59,7 @@ pub(crate) struct ClaimParameter {
 pub(crate) type QueryCompileResult = CapabilityResult<QueryProgram>;
 
 /// Lower one Jazz query program into the unified Groove-backed program.
-pub(crate) fn lower_query_program(
+pub(crate) async fn lower_query_program(
     request: QueryProgramRequest,
     source_resolver: &mut impl SourceResolver,
 ) -> QueryCompileResult {
@@ -92,7 +92,7 @@ pub(crate) fn lower_query_program(
             authorization: source_authorization_for_source(&request, &source)?,
             requirements,
         };
-        let resolved_source = match source_resolver.resolve_source(&source_request) {
+        let resolved_source = match source_resolver.resolve_source(&source_request).await {
             Ok(resolved_source) => resolved_source,
             Err(err) => {
                 let mut failure_explain = explain.clone();

@@ -109,7 +109,7 @@ pub(crate) enum FieldRequirement {
 /// Resolver that turns logical Jazz source requests into concrete groove inputs.
 pub(crate) trait SourceResolver {
     /// Resolve a source request into a concrete groove graph and row shape.
-    fn resolve_source(
+    async fn resolve_source(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError>;
