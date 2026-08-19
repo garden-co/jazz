@@ -67,6 +67,8 @@ pub(crate) enum ProgramFactTerminal {
     /// Primary terminal for facts with a single output stream.
     #[default]
     Primary,
+    /// Supporting row membership needed to materialize a public result.
+    SupportMembership,
     /// Content-register version witnesses.
     VersionWitnessContent,
     /// Deletion-register version witnesses.

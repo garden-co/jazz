@@ -348,7 +348,6 @@ local_tokio_test! {
 ///
 /// alice writes root <- mid <- leaf
 /// bob seeds on leaf and follows parent_id until root, seeing all ancestors
-#[ignore = "canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
 async fn recursive_query_expands_self_parent_ancestors() {
     let clients = Clients::start(team_graph_schema()).await;
 

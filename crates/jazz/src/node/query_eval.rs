@@ -138,7 +138,10 @@ fn is_public_result_member(
     result_table: &str,
     aggregate_query: bool,
 ) -> bool {
-    member.table_name() == Some(result_table)
+    (member.table_name() == Some(result_table)
+        && !member
+            .as_real_row()
+            .is_some_and(|row| row.source.is_supporting()))
         || is_public_aggregate_result_member(member, result_table, aggregate_query)
 }
 
