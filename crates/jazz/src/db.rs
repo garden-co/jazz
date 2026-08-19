@@ -406,12 +406,22 @@ async fn queue_local_acknowledgements<S>(routes: &LocalFateRoutes, node: &Shared
 where
     S: OrderedKvStorage,
 {
-    let mut routes = routes.borrow_mut();
+    let tx_ids = routes.borrow().keys().copied().collect::<Vec<_>>();
+    let mut durable = BTreeSet::new();
     let mut node = node.lock().await;
+    for tx_id in tx_ids {
+        if node
+            .transaction_state(tx_id)
+            .await
+            .is_some_and(|(_, _, durability)| durability >= DurabilityTier::Local)
+        {
+            durable.insert(tx_id);
+        }
+    }
+    drop(node);
+    let mut routes = routes.borrow_mut();
     routes.retain(|tx_id, pending| {
-        let locally_durable = node
-            .transaction_state(*tx_id)
-            .is_some_and(|(_, _, durability)| durability >= DurabilityTier::Local);
+        let locally_durable = durable.contains(tx_id);
         pending.retain_mut(|route| {
             let Some(queue) = route.queue.upgrade() else {
                 return false;
@@ -458,7 +468,7 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
     }
 }
 
-fn collect_local_replay_commit_units<S>(
+async fn collect_local_replay_commit_units<S>(
     node: &mut NodeState<S>,
     tx_id: TxId,
     visited: &mut BTreeSet<TxId>,
@@ -470,7 +480,7 @@ where
     if !visited.insert(tx_id) {
         return Ok(());
     }
-    let unit = node.commit_unit_for(tx_id)?;
+    let unit = node.commit_unit_for(tx_id).await?;
     let SyncMessage::CommitUnit { versions, .. } = &unit else {
         unreachable!("commit_unit_for always returns a commit unit")
     };
@@ -479,7 +489,10 @@ where
         .flat_map(crate::protocol::VersionRecord::parents)
         .collect::<BTreeSet<_>>();
     for parent in parents {
-        collect_local_replay_commit_units(node, parent, visited, units)?;
+        Box::pin(collect_local_replay_commit_units(
+            node, parent, visited, units,
+        ))
+        .await?;
     }
     units.push((tx_id, unit));
     Ok(())
@@ -1428,19 +1441,25 @@ where
     fn tx_id(&self) -> OpenTransactionId;
 
     /// Stage an insert with a generated row id.
-    fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
+    async fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
         let row = self.db().row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id(table, row, cells)?;
+        self.insert_with_id(table, row, cells).await?;
         Ok(row)
     }
 
     /// Stage an insert with a caller-supplied row id.
-    fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+    async fn insert_with_id(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
         self.insert_with_id_at_ms_option(table, row, cells, None)
+            .await
     }
 
     /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
-    fn insert_with_id_at_ms(
+    async fn insert_with_id_at_ms(
         &self,
         table: &str,
         row: RowUuid,
@@ -1448,15 +1467,16 @@ where
         now_ms: u64,
     ) -> Result<(), Error> {
         self.insert_with_id_at_ms_option(table, row, cells, Some(now_ms))
+            .await
     }
 
     /// Stage an update; omitted fields keep the transaction-local value.
-    fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
-        self.update_at_ms_option(table, row, patch, None)
+    async fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+        self.update_at_ms_option(table, row, patch, None).await
     }
 
     /// Stage an update with an explicit millisecond provenance time.
-    fn update_at_ms(
+    async fn update_at_ms(
         &self,
         table: &str,
         row: RowUuid,
@@ -1464,25 +1484,26 @@ where
         now_ms: u64,
     ) -> Result<(), Error> {
         self.update_at_ms_option(table, row, patch, Some(now_ms))
+            .await
     }
 
     /// Stage a soft delete.
-    fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
-        self.delete_at_ms_option(table, row, None)
+    async fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.delete_at_ms_option(table, row, None).await
     }
 
     /// Stage a soft delete with explicit millisecond provenance time.
-    fn delete_at_ms(&self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
-        self.delete_at_ms_option(table, row, Some(now_ms))
+    async fn delete_at_ms(&self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
+        self.delete_at_ms_option(table, row, Some(now_ms)).await
     }
 
     /// Stage a restore, applying defaults for omitted columns.
-    fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        self.restore_at_ms_option(table, row, cells, None)
+    async fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.restore_at_ms_option(table, row, cells, None).await
     }
 
     /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
-    fn restore_at_ms(
+    async fn restore_at_ms(
         &self,
         table: &str,
         row: RowUuid,
@@ -1490,43 +1511,50 @@ where
         now_ms: u64,
     ) -> Result<(), Error> {
         self.restore_at_ms_option(table, row, cells, Some(now_ms))
+            .await
     }
 
     /// Read one row with this transaction's pending writes overlaid.
-    fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
+    async fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
         self.db()
             .node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .tx_read_in_schema(self.tx_id(), self.db().schema_version_id, table, row)
+            .await
             .map_err(Into::into)
     }
 
     /// Read a prepared query with this transaction's pending writes overlaid.
-    fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+    async fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_with_opts(prepared, ReadOpts::default())
+            .await
     }
 
     /// Read a prepared query with transaction-local writes and explicit read semantics.
-    fn all_prepared_with_opts(
+    async fn all_prepared_with_opts(
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.db().transaction_all(self.tx_id(), prepared, opts)
+        self.db()
+            .transaction_all(self.tx_id(), prepared, opts)
+            .await
     }
 
     /// Read a prepared query inside this transaction as `author`.
-    fn all_prepared_for_identity(
+    async fn all_prepared_for_identity(
         &self,
         prepared: &PreparedQuery,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
+            .await
     }
 
     /// Read a prepared query as `author` with explicit read semantics.
-    fn all_prepared_for_identity_with_opts(
+    async fn all_prepared_for_identity_with_opts(
         &self,
         prepared: &PreparedQuery,
         author: AuthorId,
@@ -1534,10 +1562,11 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
             .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
+            .await
     }
 
     /// Stage an insert with an optional explicit provenance time.
-    fn insert_with_id_at_ms_option(
+    async fn insert_with_id_at_ms_option(
         &self,
         table: &str,
         row: RowUuid,
@@ -1546,10 +1575,11 @@ where
     ) -> Result<(), Error> {
         self.db()
             .stage_mergeable_insert(self.tx_id(), table, row, cells, now_ms)
+            .await
     }
 
     /// Stage an update with an optional explicit provenance time.
-    fn update_at_ms_option(
+    async fn update_at_ms_option(
         &self,
         table: &str,
         row: RowUuid,
@@ -1558,10 +1588,11 @@ where
     ) -> Result<(), Error> {
         self.db()
             .stage_mergeable_update(self.tx_id(), table, row, patch, now_ms)
+            .await
     }
 
     /// Stage a deletion with an optional explicit provenance time.
-    fn delete_at_ms_option(
+    async fn delete_at_ms_option(
         &self,
         table: &str,
         row: RowUuid,
@@ -1569,10 +1600,11 @@ where
     ) -> Result<(), Error> {
         self.db()
             .stage_mergeable_delete(self.tx_id(), table, row, now_ms)
+            .await
     }
 
     /// Stage a restore with an optional explicit provenance time.
-    fn restore_at_ms_option(
+    async fn restore_at_ms_option(
         &self,
         table: &str,
         row: RowUuid,
@@ -1581,6 +1613,7 @@ where
     ) -> Result<(), Error> {
         self.db()
             .stage_mergeable_restore(self.tx_id(), table, row, cells, now_ms)
+            .await
     }
 }
 
@@ -1612,8 +1645,8 @@ where
     /// Once the commit succeeds, dropping this handle does not abandon the
     /// already-committed transaction. If it fails, dropping the handle attempts
     /// to abandon any transaction that remains open.
-    pub fn commit(mut self) -> Result<TxId, Error> {
-        let result = self.db.commit_mergeable_handle(self.tx_id);
+    pub async fn commit(mut self) -> Result<TxId, Error> {
+        let result = self.db.commit_mergeable_handle(self.tx_id).await;
         if result.is_ok() {
             self.committed = true;
         }
@@ -1687,45 +1720,51 @@ where
     fn tx_id(&self) -> OpenTransactionId;
 
     /// Read one row inside the exclusive transaction.
-    fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
-        self.db().exclusive_read(self.tx_id(), table, row)
+    async fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
+        self.db().exclusive_read(self.tx_id(), table, row).await
     }
 
     /// Read all current rows in a table inside the exclusive transaction.
-    fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
+    async fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
         self.db()
             .node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .tx_current_rows(self.tx_id(), table)
+            .await
             .map_err(Into::into)
     }
 
     /// Read a prepared query inside the exclusive transaction.
-    fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+    async fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_with_opts(prepared, ReadOpts::default())
+            .await
     }
 
     /// Read a prepared query with transaction-local writes and explicit read semantics.
-    fn all_prepared_with_opts(
+    async fn all_prepared_with_opts(
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.db().transaction_all(self.tx_id(), prepared, opts)
+        self.db()
+            .transaction_all(self.tx_id(), prepared, opts)
+            .await
     }
 
     /// Read a prepared query inside the exclusive transaction as `author`.
-    fn all_prepared_for_identity(
+    async fn all_prepared_for_identity(
         &self,
         prepared: &PreparedQuery,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
+            .await
     }
 
     /// Read a prepared query as `author` with explicit read semantics.
-    fn all_prepared_for_identity_with_opts(
+    async fn all_prepared_for_identity_with_opts(
         &self,
         prepared: &PreparedQuery,
         author: AuthorId,
@@ -1733,37 +1772,47 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
             .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
+            .await
     }
 
     /// Stage an insert with a generated row id.
-    fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
+    async fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
         let row = self.db().row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id(table, row, cells)?;
+        self.insert_with_id(table, row, cells).await?;
         Ok(row)
     }
 
     /// Stage an insert with a caller-supplied row id.
-    fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+    async fn insert_with_id(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
         self.db()
             .stage_exclusive_insert(self.tx_id(), table, row, cells)
+            .await
     }
 
     /// Stage an update; omitted fields keep the transaction-local value.
-    fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
-        let mut cells = self.read(table, row)?.unwrap_or_default();
+    async fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+        let mut cells = self.read(table, row).await?.unwrap_or_default();
         cells.extend(patch);
-        self.insert_with_id(table, row, cells)
+        self.insert_with_id(table, row, cells).await
     }
 
     /// Stage a soft delete.
-    fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
-        self.db().stage_exclusive_delete(self.tx_id(), table, row)
+    async fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.db()
+            .stage_exclusive_delete(self.tx_id(), table, row)
+            .await
     }
 
     /// Stage a restore, applying defaults for omitted columns.
-    fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+    async fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
         self.db()
             .stage_exclusive_restore(self.tx_id(), table, row, cells)
+            .await
     }
 }
 
@@ -1790,8 +1839,8 @@ where
     /// Once the commit succeeds, dropping this handle does not abandon the
     /// already-committed transaction. If it fails, dropping the handle attempts
     /// to abandon any transaction that remains open.
-    pub fn commit(mut self) -> Result<TxId, Error> {
-        let result = self.db.commit_exclusive_handle(self.tx_id);
+    pub async fn commit(mut self) -> Result<TxId, Error> {
+        let result = self.db.commit_exclusive_handle(self.tx_id).await;
         if result.is_ok() {
             self.committed = true;
         }
@@ -1923,7 +1972,8 @@ where
                 "database handle was dropped",
             ));
         };
-        let Some((fate, _, durability)) = node.lock().await.transaction_state(self.tx_id) else {
+        let Some((fate, _, durability)) = node.lock().await.transaction_state(self.tx_id).await
+        else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("transaction {:?} is not known locally", self.tx_id),
