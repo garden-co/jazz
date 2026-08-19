@@ -6,6 +6,10 @@ use groove::schema::{
 use groove::storage::MemoryStorage;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    futures::executor::block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let schema = DatabaseSchema::new([TableSchema::new(
         "albums",
         [
@@ -18,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
 
     let storage = MemoryStorage::new(&["albums", "indices"]);
-    let mut database = Database::new(schema, storage)?;
+    let mut database = Database::new(schema, storage).await?;
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -45,24 +49,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Value::U64(1965),
         ],
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
 
-    let rows = database.query_graph(
-        GraphBuilder::table("albums")
-            .filter(PredicateExpr::eq("year", Value::U64(1959)))
-            .project(["id", "title", "year"]),
-    )?;
+    let rows = database
+        .query_graph(
+            GraphBuilder::table("albums")
+                .filter(PredicateExpr::eq("year", Value::U64(1959)))
+                .project(["id", "title", "year"]),
+        )
+        .await?;
     println!("query rows:");
     for (values, weight) in rows.to_values()? {
         println!("  {values:?} weight={weight}");
     }
 
-    let index_rows = database.index_scan_range(
-        "albums",
-        "albums_by_year",
-        &[Value::U64(1957)],
-        &[Value::U64(1960)],
-    )?;
+    let index_rows = database
+        .index_scan_range(
+            "albums",
+            "albums_by_year",
+            &[Value::U64(1957)],
+            &[Value::U64(1960)],
+        )
+        .await?;
     println!("index scan rows:");
     for row in index_rows {
         println!("  {:?}", row.to_values()?);
