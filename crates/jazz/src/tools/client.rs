@@ -2779,19 +2779,21 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        {
-            let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
-            let core_query = self.core_query(&query)?;
-            self.db
-                .subscribe(
-                    core_query,
-                    Self::core_read_opts(&query, Some(DurabilityTier::EdgeServer))?,
-                    query.table.as_str().to_string(),
-                    tx,
-                )
-                .await?;
-            Ok(SubscriptionStream::new(rx))
-        }
+        let opts = Self::core_read_opts(&query, Some(DurabilityTier::EdgeServer))?;
+        self.subscribe_with_opts(query, opts).await
+    }
+
+    /// Subscribe to a query with explicit core read options.
+    pub async fn subscribe_with_opts(
+        &self,
+        query: Query,
+        opts: CoreReadOpts,
+    ) -> Result<SubscriptionStream> {
+        let table = query.table.as_str().to_string();
+        let core_query = self.core_query(&query)?;
+        let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
+        self.db.subscribe(core_query, opts, table, tx).await?;
+        Ok(SubscriptionStream::new(rx))
     }
 
     /// One-shot query, optionally waiting for a durability tier.
