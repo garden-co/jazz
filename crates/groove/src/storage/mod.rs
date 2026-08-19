@@ -43,6 +43,44 @@ pub type KeyValue = (Vec<u8>, Vec<u8>);
 /// Storage is permitted to be executor-local (notably in browsers), so this
 /// deliberately does not impose `Send`.
 pub type StorageFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+pub type StorageScan = Box<dyn StorageCursor>;
+
+/// Owned, executor-local cursor over an ordered scan.
+///
+/// Backends choose their own batch size. An empty batch is not an end marker;
+/// only `None` completes the scan.
+pub trait StorageCursor {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>>;
+}
+
+pub(crate) struct ReadyStorageCursor {
+    values: std::vec::IntoIter<KeyValue>,
+}
+
+impl ReadyStorageCursor {
+    pub(crate) fn new(values: Vec<KeyValue>) -> Self {
+        Self {
+            values: values.into_iter(),
+        }
+    }
+}
+
+impl StorageCursor for ReadyStorageCursor {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+        Box::pin(async move {
+            let batch = self.values.by_ref().take(256).collect::<Vec<_>>();
+            Ok((!batch.is_empty()).then_some(batch))
+        })
+    }
+}
+
+async fn collect_scan(mut scan: StorageScan) -> Result<Vec<KeyValue>, Error> {
+    let mut values = Vec::new();
+    while let Some(batch) = scan.next_batch().await? {
+        values.extend(batch);
+    }
+    Ok(values)
+}
 const STAGED_POINT_READS_BEFORE_INDEX: usize = 16;
 const STAGED_OPS_BEFORE_POINT_INDEX: usize = 64;
 /// Callback form used by scans so storage implementations do not have to
@@ -252,21 +290,21 @@ pub trait OrderedKvStorage {
         cf: String,
         start: Vec<u8>,
         end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>>;
+    ) -> StorageFuture<'_, Result<StorageScan, Error>>;
     fn scan_prefix(
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>>;
+    ) -> StorageFuture<'_, Result<StorageScan, Error>>;
     fn scan_prefix_reverse(
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
         Box::pin(async move {
-            let mut values = self.scan_prefix(cf, prefix).await?;
+            let mut values = collect_scan(self.scan_prefix(cf, prefix).await?).await?;
             values.reverse();
-            Ok(values)
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan)
         })
     }
     fn last_with_prefix(
@@ -274,7 +312,11 @@ pub trait OrderedKvStorage {
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
-        Box::pin(async move { Ok(self.scan_prefix(cf, prefix).await?.pop()) })
+        Box::pin(async move {
+            Ok(collect_scan(self.scan_prefix(cf, prefix).await?)
+                .await?
+                .pop())
+        })
     }
     fn last_with_prefix_before_or_at(
         &self,
@@ -283,8 +325,7 @@ pub trait OrderedKvStorage {
         upper: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
-            Ok(self
-                .scan_prefix(cf, prefix)
+            Ok(collect_scan(self.scan_prefix(cf, prefix).await?)
                 .await?
                 .into_iter()
                 .take_while(|(key, _)| key <= &upper)
@@ -310,16 +351,12 @@ pub trait OrderedKvStorage {
         cf: String,
         start: Vec<u8>,
         end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
-        self.scan_range(cf, start, end)
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        Box::pin(async move { collect_scan(self.scan_range(cf, start, end).await?).await })
     }
 
-    fn prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
-        self.scan_prefix(cf, prefix)
+    fn prefix(&self, cf: String, prefix: Vec<u8>) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        Box::pin(async move { collect_scan(self.scan_prefix(cf, prefix).await?).await })
     }
 }
 
@@ -423,6 +460,33 @@ struct PhysicalCf<'a> {
     logical_prefix: Option<&'a str>,
 }
 
+struct MappedStorageCursor {
+    inner: StorageScan,
+    strip_len: usize,
+}
+
+impl StorageCursor for MappedStorageCursor {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+        Box::pin(async move {
+            let Some(batch) = self.inner.next_batch().await? else {
+                return Ok(None);
+            };
+            batch
+                .into_iter()
+                .map(|(key, value)| {
+                    let logical = key.get(self.strip_len..).ok_or_else(|| {
+                        Error::InvalidStorageKey(
+                            "physical layout key shorter than logical prefix".to_owned(),
+                        )
+                    })?;
+                    Ok((logical.to_vec(), value))
+                })
+                .collect::<Result<Vec<_>, Error>>()
+                .map(Some)
+        })
+    }
+}
+
 fn is_jazz_history_table(name: &str) -> bool {
     name.starts_with("jazz_") && name.ends_with("_history")
 }
@@ -479,9 +543,9 @@ impl<S> LayoutStorage<S>
 where
     S: OrderedKvStorage,
 {
-    pub fn new(inner: S, layout: StorageLayout) -> Result<Self, Error> {
+    pub async fn new(inner: S, layout: StorageLayout) -> Result<Self, Error> {
         let storage = Self { inner, layout };
-        storage.ensure_layout_marker()?;
+        storage.ensure_layout_marker().await?;
         Ok(storage)
     }
 
@@ -489,32 +553,38 @@ where
         self.inner
     }
 
-    fn ensure_layout_marker(&self) -> Result<(), Error> {
+    async fn ensure_layout_marker(&self) -> Result<(), Error> {
         if !self.layout.validates_marker() {
             return Ok(());
         }
 
-        match self.inner.get(CLASS_META_CF, CLASS_LAYOUT_MARKER_KEY)? {
+        match self
+            .inner
+            .get(CLASS_META_CF.to_owned(), CLASS_LAYOUT_MARKER_KEY.to_vec())
+            .await?
+        {
             Some(value) if value == CLASS_LAYOUT_MARKER_VALUE => Ok(()),
             Some(_) => Err(Error::InvalidStorageLayout(
                 "unsupported class-CF storage layout marker".to_owned(),
             )),
             None => {
-                if self.has_class_data_or_legacy_layout()? {
+                if self.has_class_data_or_legacy_layout().await? {
                     return Err(Error::InvalidStorageLayout(
                         "missing class-CF storage layout marker in non-empty store".to_owned(),
                     ));
                 }
-                self.inner.set(
-                    CLASS_META_CF,
-                    CLASS_LAYOUT_MARKER_KEY,
-                    CLASS_LAYOUT_MARKER_VALUE,
-                )
+                self.inner
+                    .set(
+                        CLASS_META_CF.to_owned(),
+                        CLASS_LAYOUT_MARKER_KEY.to_vec(),
+                        CLASS_LAYOUT_MARKER_VALUE.to_vec(),
+                    )
+                    .await
             }
         }
     }
 
-    fn has_class_data_or_legacy_layout(&self) -> Result<bool, Error> {
+    async fn has_class_data_or_legacy_layout(&self) -> Result<bool, Error> {
         if let Some(names) = self.inner.column_family_names()
             && names.iter().any(|name| self.layout.mapped_legacy_cf(name))
         {
@@ -529,7 +599,7 @@ where
             CLASS_INDICES_CF,
             CLASS_META_CF,
         ] {
-            match self.inner.last_with_prefix(cf, b"") {
+            match self.inner.last_with_prefix(cf.to_owned(), Vec::new()).await {
                 Ok(Some(_)) => return Ok(true),
                 Ok(None) | Err(Error::ColumnFamilyNotFound(_)) => {}
                 Err(error) => return Err(error),
@@ -574,171 +644,187 @@ impl<S> OrderedKvStorage for LayoutStorage<S>
 where
     S: OrderedKvStorage,
 {
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        let (physical_cf, physical_key) = self.physical_key(cf, key);
-        self.inner.get(&physical_cf, &physical_key)
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
+        self.inner.get(physical_cf, physical_key)
     }
 
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
-        let (physical_cf, physical_key) = self.physical_key(cf, key);
-        self.inner.set(&physical_cf, &physical_key, value)
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
+        self.inner.set(physical_cf, physical_key, value)
     }
 
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
-        let (physical_cf, physical_key) = self.physical_key(cf, key);
-        self.inner.delete(&physical_cf, &physical_key)
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
+        self.inner.delete(physical_cf, physical_key)
     }
 
-    fn close(&self) -> Result<(), Error> {
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.close()
     }
 
-    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+    fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.set_write_flush_cadence(every)
     }
 
-    fn flush_write_boundary(&self) -> Result<(), Error> {
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.flush_write_boundary()
     }
 
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let (physical_cf, physical_start, strip_len) = self.physical_prefix(cf, start);
-        let (_, physical_end, _) = self.physical_prefix(cf, end);
-        self.inner.scan_range(
-            &physical_cf,
-            &physical_start,
-            &physical_end,
-            &mut |key, value| visit(self.strip_key(key, strip_len)?, value),
-        )
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        let (physical_cf, physical_start, strip_len) = self.physical_prefix(&cf, &start);
+        let (_, physical_end, _) = self.physical_prefix(&cf, &end);
+        Box::pin(async move {
+            let inner = self
+                .inner
+                .scan_range(physical_cf, physical_start, physical_end)
+                .await?;
+            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan)
+        })
     }
 
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
-        self.inner
-            .scan_prefix(&physical_cf, &physical_prefix, &mut |key, value| {
-                visit(self.strip_key(key, strip_len)?, value)
-            })
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
+        Box::pin(async move {
+            let inner = self.inner.scan_prefix(physical_cf, physical_prefix).await?;
+            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan)
+        })
     }
 
     fn scan_prefix_reverse(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
-        self.inner
-            .scan_prefix_reverse(&physical_cf, &physical_prefix, &mut |key, value| {
-                visit(self.strip_key(key, strip_len)?, value)
-            })
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
+        Box::pin(async move {
+            let inner = self
+                .inner
+                .scan_prefix_reverse(physical_cf, physical_prefix)
+                .await?;
+            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan)
+        })
     }
 
     fn last_with_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
-        Ok(self
-            .inner
-            .last_with_prefix(&physical_cf, &physical_prefix)?
-            .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
+        Box::pin(async move {
+            Ok(self
+                .inner
+                .last_with_prefix(physical_cf, physical_prefix)
+                .await?
+                .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+        })
     }
 
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
-        let (_, physical_upper, _) = self.physical_prefix(cf, upper);
-        Ok(self
-            .inner
-            .last_with_prefix_before_or_at(&physical_cf, &physical_prefix, &physical_upper)?
-            .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
+        let (_, physical_upper, _) = self.physical_prefix(&cf, &upper);
+        Box::pin(async move {
+            Ok(self
+                .inner
+                .last_with_prefix_before_or_at(physical_cf, physical_prefix, physical_upper)
+                .await?
+                .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+        })
     }
 
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
         let translated = operations
-            .iter()
+            .into_iter()
             .map(|operation| match operation {
-                WriteOperation::Set { cf, key, value } => {
-                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                OwnedWriteOperation::Set { cf, key, value } => {
+                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
                     OwnedWriteOperation::Set {
                         cf: physical_cf,
                         key: physical_key,
-                        value: (*value).to_vec(),
+                        value,
                     }
                 }
-                WriteOperation::Delete { cf, key } => {
-                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                OwnedWriteOperation::Delete { cf, key } => {
+                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
                     OwnedWriteOperation::Delete {
                         cf: physical_cf,
                         key: physical_key,
                     }
                 }
-                WriteOperation::Delta { cf, key, delta } => {
-                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                OwnedWriteOperation::Delta { cf, key, delta } => {
+                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
                     OwnedWriteOperation::Delta {
                         cf: physical_cf,
                         key: physical_key,
-                        delta: (*delta).clone(),
+                        delta,
                     }
                 }
             })
             .collect::<Vec<_>>();
-        let borrowed = translated
-            .iter()
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        self.inner.write_many(&borrowed)
+        self.inner.write_many(translated)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.inner.column_family_names()
     }
 
-    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
-        let physical_cf = self.layout.map_cf(cf).physical_cf.to_owned();
-        self.inner.approximate_class_bytes(&physical_cf)
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        let physical_cf = self.layout.map_cf(&cf).physical_cf.to_owned();
+        self.inner.approximate_class_bytes(physical_cf)
     }
 }
 
 /// Storage that can be reconstructed with an expanded table/column-family set.
 pub trait ReopenableStorage: OrderedKvStorage + Sized {
-    fn reopen(self, column_families: &[&str]) -> Result<Self, Error>;
+    fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>>
+    where
+        Self: 'static;
 }
 
 /// Object-safe form of [`ReopenableStorage`] used at runtime adapter
 /// boundaries.
-pub trait ErasedReopenableStorage: OrderedKvStorage + Send {
+pub trait ErasedReopenableStorage: OrderedKvStorage {
     fn reopen_boxed(
         self: Box<Self>,
-        column_families: &[&str],
-    ) -> Result<Box<dyn ErasedReopenableStorage>, Error>;
+        column_families: Vec<String>,
+    ) -> StorageFuture<'static, Result<Box<dyn ErasedReopenableStorage>, Error>>;
 }
 
 impl<S> ErasedReopenableStorage for S
 where
-    S: ReopenableStorage + Send + 'static,
+    S: ReopenableStorage + 'static,
 {
     fn reopen_boxed(
         self: Box<Self>,
-        column_families: &[&str],
-    ) -> Result<Box<dyn ErasedReopenableStorage>, Error> {
-        Ok(Box::new((*self).reopen(column_families)?))
+        column_families: Vec<String>,
+    ) -> StorageFuture<'static, Result<Box<dyn ErasedReopenableStorage>, Error>> {
+        Box::pin(async move {
+            Ok(Box::new((*self).reopen(column_families).await?)
+                as Box<dyn ErasedReopenableStorage>)
+        })
     }
 }
 
@@ -750,7 +836,7 @@ pub struct BoxedStorage {
 impl BoxedStorage {
     pub fn new<S>(storage: S) -> Self
     where
-        S: ReopenableStorage + Send + 'static,
+        S: ReopenableStorage + 'static,
     {
         Self {
             inner: Box::new(storage),
@@ -759,80 +845,85 @@ impl BoxedStorage {
 }
 
 impl OrderedKvStorage for BoxedStorage {
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         self.inner.get(cf, key)
     }
 
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.set(cf, key, value)
     }
 
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.delete(cf, key)
     }
 
-    fn close(&self) -> Result<(), Error> {
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.close()
     }
 
-    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+    fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.set_write_flush_cadence(every)
     }
 
-    fn flush_write_boundary(&self) -> Result<(), Error> {
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.flush_write_boundary()
     }
 
-    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
         self.inner.approximate_class_bytes(cf)
     }
 
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        self.inner.scan_range(cf, start, end, visit)
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        self.inner.scan_range(cf, start, end)
     }
 
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        self.inner.scan_prefix(cf, prefix, visit)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        self.inner.scan_prefix(cf, prefix)
     }
 
     fn scan_prefix_reverse(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        self.inner.scan_prefix_reverse(cf, prefix, visit)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan, Error>> {
+        self.inner.scan_prefix_reverse(cf, prefix)
     }
 
     fn last_with_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         self.inner.last_with_prefix(cf, prefix)
     }
 
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
     }
 
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.write_many(operations)
     }
 
@@ -842,17 +933,22 @@ impl OrderedKvStorage for BoxedStorage {
 }
 
 impl ReopenableStorage for BoxedStorage {
-    fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
-        Ok(Self {
-            inner: self.inner.reopen_boxed(column_families)?,
+    fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
+        Box::pin(async move {
+            Ok(Self {
+                inner: self.inner.reopen_boxed(column_families).await?,
+            })
         })
     }
 }
 
 /// Opens a persistent ordered-KV backend at an exact target-owned path.
-pub trait StorageFactory: std::fmt::Debug + Send + Sync {
-    fn open(&self, path: &std::path::Path, column_families: &[&str])
-    -> Result<BoxedStorage, Error>;
+pub trait StorageFactory: std::fmt::Debug {
+    fn open(
+        &self,
+        path: std::path::PathBuf,
+        column_families: Vec<String>,
+    ) -> StorageFuture<'_, Result<BoxedStorage, Error>>;
 }
 
 /// Typed view over one storage column family.
