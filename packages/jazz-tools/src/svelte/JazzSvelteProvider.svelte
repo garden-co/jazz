@@ -5,10 +5,8 @@ serialises shutdown before starting a replacement.
 -->
 <script lang="ts">
 	import type { Db, DbConfig } from '../runtime/db.js';
-	import { getSubscriptionStore } from '../subscription-store-internal.js';
-	import { initJazzContext } from './context.svelte.js';
+	import JazzSvelteClientProvider from './JazzSvelteClientProvider.svelte';
 	import { createJazzClient, type JazzClient } from './create-jazz-client.js';
-	import { startInspectorOnce } from '../dev-tools/auto-attach.js';
 
 	interface Props {
 		config: DbConfig;
@@ -19,24 +17,17 @@ serialises shutdown before starting a replacement.
 
 	let { config, children, fallback, autoAttachDevTools = true }: Props = $props();
 
-	const ctx = initJazzContext();
 	let error = $state<Error | null>(null);
+	let client = $state<JazzClient | null>(null);
 	let activeClient: JazzClient | null = null;
-	let stopSessionSync: (() => void) | null = null;
 	let handover = Promise.resolve();
-
-	function clearContext(): void {
-		ctx.db = null;
-		ctx.session = null;
-		ctx.subscriptionStore = null;
-	}
 
 	$effect(() => {
 		let cancelled = false;
 		const nextConfig = config;
 
 		error = null;
-		clearContext();
+		client = null;
 
 		handover = handover
 			.then(async () => {
@@ -44,27 +35,14 @@ serialises shutdown before starting a replacement.
 					return;
 				}
 
-				const client = await createJazzClient(nextConfig);
+				const createdClient = await createJazzClient(nextConfig);
 				if (cancelled) {
-					await client.shutdown();
+					await createdClient.shutdown();
 					return;
 				}
 
-				activeClient = client;
-				ctx.db = client.db;
-				ctx.session = client.session ?? null;
-				ctx.subscriptionStore = getSubscriptionStore(client);
-				stopSessionSync = client.db.onAuthChanged(({ session }) => {
-					if (cancelled) {
-						return;
-					}
-
-					ctx.session = session ?? null;
-				});
-
-				if (process.env.NODE_ENV !== 'production' && autoAttachDevTools) {
-					startInspectorOnce(client.db);
-				}
+				activeClient = createdClient;
+				client = createdClient;
 			})
 			.catch((reason) => {
 				if (cancelled) {
@@ -76,12 +54,10 @@ serialises shutdown before starting a replacement.
 
 		return () => {
 			cancelled = true;
-			clearContext();
-			stopSessionSync?.();
-			stopSessionSync = null;
-			const client = activeClient;
+			client = null;
+			const clientToShutdown = activeClient;
 			activeClient = null;
-			const shuttingDown = handover.then(() => client?.shutdown());
+			const shuttingDown = handover.then(() => clientToShutdown?.shutdown());
 			shuttingDown.catch(() => {});
 			handover = shuttingDown;
 		};
@@ -91,8 +67,12 @@ serialises shutdown before starting a replacement.
 {#if error}
 	<!-- Re-throw so an error boundary can catch it -->
 	{(() => { throw error; })()}
-{:else if ctx.db}
-	{@render children({ db: ctx.db })}
+{:else if client}
+	<JazzSvelteClientProvider {client} {fallback} {autoAttachDevTools}>
+		{#snippet children({ db })}
+			{@render children({ db })}
+		{/snippet}
+	</JazzSvelteClientProvider>
 {:else if fallback}
 	{@render fallback()}
 {/if}

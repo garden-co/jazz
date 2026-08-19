@@ -22,6 +22,8 @@ full details.
 ## Provider setup
 
 Wrap your app in a provider to make the database available to every component.
+Svelte callers that create their own client can use `JazzSvelteClientProvider`
+instead; it accepts a client or client promise and leaves shutdown to the caller.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
