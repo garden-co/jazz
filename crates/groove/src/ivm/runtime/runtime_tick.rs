@@ -208,13 +208,19 @@ impl IvmRuntime {
             pending.extend(binding_deltas);
             binding_deltas = pending;
         }
-        let needs_recompute_inputs = table_deltas
+        let negative_tables = table_deltas
+            .iter()
+            .filter(|delta| delta.deltas.iter().any(|record| record.weight < 0))
+            .map(|delta| delta.table.as_str())
+            .collect::<HashSet<_>>();
+        let has_negative_bindings = binding_deltas
             .iter()
             .flat_map(|delta| &delta.deltas)
-            .chain(binding_deltas.iter().flat_map(|delta| &delta.deltas))
             .any(|delta| delta.weight < 0);
+        let needs_recompute_inputs = !negative_tables.is_empty() || has_negative_bindings;
         let mut evaluation_inputs = if needs_recompute_inputs {
-            self.load_recursive_recompute_inputs(storage).await?
+            self.load_recursive_recompute_inputs(storage, &negative_tables, has_negative_bindings)
+                .await?
         } else {
             EvaluationInputs::default()
         };
@@ -388,6 +394,8 @@ impl IvmRuntime {
     async fn load_recursive_recompute_inputs<S>(
         &self,
         storage: &S,
+        negative_tables: &HashSet<&str>,
+        has_negative_bindings: bool,
     ) -> Result<EvaluationInputs, IvmRuntimeError>
     where
         S: OrderedKvStorage,
@@ -398,11 +406,18 @@ impl IvmRuntime {
             .nodes()
             .iter()
             .filter_map(|(node, graph_node)| {
-                (matches!(graph_node.descriptor.operator, OpType::Recursive(_))
-                    && self
-                        .node_meta
-                        .get(node)
-                        .is_some_and(|meta| !meta.retainers.is_empty()))
+                let OpType::Recursive(recursive) = &graph_node.descriptor.operator else {
+                    return None;
+                };
+                (self
+                    .node_meta
+                    .get(node)
+                    .is_some_and(|meta| !meta.retainers.is_empty())
+                    && (has_negative_bindings
+                        || recursive
+                            .read_tables
+                            .iter()
+                            .any(|table| negative_tables.contains(table.as_str()))))
                 .then_some(*node)
             })
             .collect::<Vec<_>>();
