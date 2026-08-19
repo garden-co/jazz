@@ -1518,6 +1518,95 @@ where
         })
     }
 
+    fn last_with_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        let operations = self.staged_writes.borrow().operations.clone();
+        Box::pin(async move {
+            let staged = RefCell::new(StagedWriteState::from(operations));
+            let needs_full_merge = staged.borrow().operations.iter().any(|operation| {
+                operation.cf() == cf
+                    && operation.key().starts_with(&prefix)
+                    && matches!(
+                        operation,
+                        OwnedWriteOperation::Delete { .. } | OwnedWriteOperation::Delta { .. }
+                    )
+            });
+
+            if !needs_full_merge {
+                let largest_staged_set = staged_prefix_overlay_desc(&cf, &prefix, &staged)
+                    .into_iter()
+                    .find_map(|(key, value)| value.map(|value| (key, value)));
+                return match (
+                    self.base
+                        .last_with_prefix(cf.clone(), prefix.clone())
+                        .await?,
+                    largest_staged_set,
+                ) {
+                    (Some(base), Some(staged)) if staged.0 >= base.0 => Ok(Some(staged)),
+                    (Some(base), _) => Ok(Some(base)),
+                    (None, staged) => Ok(staged),
+                };
+            }
+
+            let mut values =
+                collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
+            overlay_values(&mut values, &cf, |key| key.starts_with(&prefix), &staged)?;
+            Ok(values.pop())
+        })
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        let operations = self.staged_writes.borrow().operations.clone();
+        Box::pin(async move {
+            let staged = RefCell::new(StagedWriteState::from(operations));
+            let needs_full_merge = staged.borrow().operations.iter().any(|operation| {
+                operation.cf() == cf
+                    && operation.key().starts_with(&prefix)
+                    && operation.key() <= upper.as_slice()
+                    && matches!(
+                        operation,
+                        OwnedWriteOperation::Delete { .. } | OwnedWriteOperation::Delta { .. }
+                    )
+            });
+
+            if !needs_full_merge {
+                let largest_staged_set =
+                    staged_prefix_overlay_desc_before_or_at(&cf, &prefix, &upper, &staged)
+                        .into_iter()
+                        .find_map(|(key, value)| value.map(|value| (key, value)));
+                return match (
+                    self.base
+                        .last_with_prefix_before_or_at(cf.clone(), prefix.clone(), upper.clone())
+                        .await?,
+                    largest_staged_set,
+                ) {
+                    (Some(base), Some(staged)) if staged.0 >= base.0 => Ok(Some(staged)),
+                    (Some(base), _) => Ok(Some(base)),
+                    (None, staged) => Ok(staged),
+                };
+            }
+
+            let mut values =
+                collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
+            values.retain(|(key, _)| key <= &upper);
+            overlay_values(
+                &mut values,
+                &cf,
+                |key| key.starts_with(&prefix) && key <= upper.as_slice(),
+                &staged,
+            )?;
+            Ok(values.pop())
+        })
+    }
+
     fn write_many(
         &self,
         operations: Vec<OwnedWriteOperation>,
@@ -1976,7 +2065,6 @@ fn overlay_values(
     Ok(())
 }
 
-#[cfg(any())]
 fn staged_prefix_overlay_desc(
     cf: &ColumnFamilyName,
     prefix: &Key,
@@ -2000,7 +2088,6 @@ fn staged_prefix_overlay_desc(
     overlay.into_iter().rev().collect()
 }
 
-#[cfg(any())]
 fn staged_prefix_overlay_desc_before_or_at(
     cf: &ColumnFamilyName,
     prefix: &Key,

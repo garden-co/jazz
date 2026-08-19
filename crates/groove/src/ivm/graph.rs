@@ -23,6 +23,7 @@ use super::op_types::*;
 /// prepared.
 ///
 /// ```rust
+/// # futures::executor::block_on(async {
 /// use groove::db::{Database, GraphBuilder, PredicateExpr};
 /// use groove::ivm::ProjectField;
 /// use groove::records::Value;
@@ -44,14 +45,14 @@ use super::op_types::*;
 ///     ])
 ///     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
 /// ]);
-/// let mut database = Database::new(schema, MemoryStorage::new(&["albums", "artists"]))?;
+/// let mut database = Database::new(schema, MemoryStorage::new(&["albums", "artists"])).await?;
 ///
 /// let mut batch = database.open_batch();
 /// batch.insert("artists", vec![Value::U64(1), Value::String("Wayne Shorter".into())]);
 /// batch.insert("artists", vec![Value::U64(2), Value::String("McCoy Tyner".into())]);
 /// batch.insert("albums", vec![Value::U64(10), Value::U64(1), Value::String("Speak No Evil".into())]);
 /// batch.insert("albums", vec![Value::U64(11), Value::U64(2), Value::String("Expansions".into())]);
-/// database.commit_batch(batch)?;
+/// database.commit_batch(batch).await?;
 ///
 /// let albums = GraphBuilder::table("albums")
 ///     .filter(PredicateExpr::eq("title", Value::String("Speak No Evil".into())));
@@ -61,7 +62,7 @@ use super::op_types::*;
 ///     ProjectField::renamed("right.name", "artist"),
 /// ]);
 ///
-/// let rows = database.query_graph(graph)?;
+/// let rows = database.query_graph(graph).await?;
 /// assert_eq!(
 ///     rows.to_values()?,
 ///     vec![(
@@ -73,6 +74,7 @@ use super::op_types::*;
 ///     )]
 /// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # }).unwrap();
 /// ```
 ///
 /// Prepared graph shapes use a named [`GraphBuilder::binding_source`] node. The
@@ -80,6 +82,7 @@ use super::op_types::*;
 /// the graph.
 ///
 /// ```rust
+/// # futures::executor::block_on(async {
 /// use groove::db::{Database, GraphBuilder};
 /// use groove::ivm::ProjectField;
 /// use groove::records::{RecordDescriptor, Value};
@@ -94,7 +97,7 @@ use super::op_types::*;
 ///     ColumnSchema::new("title", ColumnType::String),
 /// ])
 /// .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-/// let mut database = Database::new(schema, MemoryStorage::new(&["albums"]))?;
+/// let mut database = Database::new(schema, MemoryStorage::new(&["albums"])).await?;
 ///
 /// let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]);
 /// let graph = GraphBuilder::join(
@@ -109,14 +112,14 @@ use super::op_types::*;
 ///     ProjectField::renamed("right.title", "title"),
 /// ]);
 ///
-/// let shape = database.prepare_one_sink(graph, "artist_params", binding_descriptor, ["artist_id"])?;
-/// let subscription = database.bind_shape_one_sink(shape.id(), &[Value::U64(1)])?;
+/// let shape = database.prepare_one_sink(graph, "artist_params", binding_descriptor, ["artist_id"]).await?;
+/// let subscription = database.bind_shape_one_sink(shape.id(), &[Value::U64(1)]).await?;
 /// assert!(subscription.recv()?.is_empty());
 ///
 /// let mut batch = database.open_batch();
 /// batch.insert("albums", vec![Value::U64(10), Value::U64(1), Value::String("Speak No Evil".into())]);
 /// batch.insert("albums", vec![Value::U64(11), Value::U64(2), Value::String("Expansions".into())]);
-/// database.commit_batch(batch)?;
+/// database.commit_batch(batch).await?;
 ///
 /// assert_eq!(
 ///     subscription.recv()?.to_values()?,
@@ -130,6 +133,7 @@ use super::op_types::*;
 ///     )]
 /// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # }).unwrap();
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GraphBuilder {

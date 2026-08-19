@@ -3,6 +3,7 @@ use super::*;
 /// Typed facade over one schema-declared direct record store.
 ///
 /// ```
+/// # futures::executor::block_on(async {
 /// use groove::db::Database;
 /// use groove::records::{RecordDescriptor, Value, ValueType};
 /// use groove::schema::{DatabaseSchema, DirectRecordStoreSchema};
@@ -15,15 +16,16 @@ use super::*;
 /// ));
 /// let column_families = schema.column_families();
 /// let storage = MemoryStorage::new(&column_families);
-/// let database = Database::new(schema, storage)?;
+/// let database = Database::new(schema, storage).await?;
 /// let art = database.direct_record_store("album_art")?;
 ///
-/// art.set(&[Value::U64(1)], &[Value::Bytes(b"front-cover-bytes".to_vec())])?;
+/// art.set(&[Value::U64(1)], &[Value::Bytes(b"front-cover-bytes".to_vec())]).await?;
 /// assert_eq!(
-///     art.get(&[Value::U64(1)])?.unwrap().get("bytes")?,
+///     art.get(&[Value::U64(1)]).await?.unwrap().get("bytes")?,
 ///     Value::Bytes(b"front-cover-bytes".to_vec())
 /// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # }).unwrap();
 /// ```
 pub struct DirectRecordStore<'a, S> {
     pub(super) storage: &'a LayoutStorage<S>,

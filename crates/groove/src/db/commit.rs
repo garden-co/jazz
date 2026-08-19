@@ -11,6 +11,7 @@ where
     /// the same public tick path.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::{Database, GraphBuilder};
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
     /// # use groove::storage::MemoryStorage;
@@ -20,13 +21,14 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
-    /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums"))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums")).await?;
     /// assert!(subscription.recv()?.is_empty());
     ///
-    /// database.flush()?;
+    /// database.flush().await?;
     /// assert!(database.last_tick_metrics().is_some());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn flush(&mut self) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
@@ -65,6 +67,7 @@ where
     /// Commit a batch of table writes and synchronously tick maintained views.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
@@ -75,18 +78,19 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// let mut batch = database.open_batch();
     /// batch.insert(
     ///     "albums",
     ///     vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)],
     /// );
-    /// database.commit_batch(batch)?;
+    /// database.commit_batch(batch).await?;
     ///
-    /// let rows = database.primary_key_scan("albums", &[Value::U64(1)])?;
+    /// let rows = database.primary_key_scan("albums", &[Value::U64(1)]).await?;
     /// assert_eq!(rows[0].get("title")?, Value::String("Kind of Blue".into()));
     /// assert_eq!(database.last_commit_metrics().unwrap().storage_write_count, 2);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
     pub async fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
         let pending_writes = self.pending_writes_from_batch(batch)?;
