@@ -472,7 +472,7 @@ where
         result.map_err(|report| Error::QueryCapability(format!("{report:?}")))
     }
 
-    pub(super) fn prepared_query_plan_from_program(
+    pub(super) async fn prepared_query_plan_from_program(
         &mut self,
         program: &QueryProgram,
         _shape: &ValidatedQuery,
@@ -515,17 +515,20 @@ where
                 .unwrap_or_else(|| query_binding_source_shape_for_prepared_params(&params));
             let route_fields = route_params;
             let route_value_indices = prepared_route_value_indices(&params, &route_fields);
-            let prepared = self.database.prepare(
-                [groove::ivm::RoutedMultisinkTerminal::new(
-                    JAZZ_APP_ROWS_SINK,
-                    graph,
-                    route_fields,
-                    app_row_fields,
+            let prepared = self
+                .database
+                .prepare(
+                    [groove::ivm::RoutedMultisinkTerminal::new(
+                        JAZZ_APP_ROWS_SINK,
+                        graph,
+                        route_fields,
+                        app_row_fields,
+                    )
+                    .with_route_value_indices(route_value_indices)],
+                    binding_source_shape,
+                    binding_descriptor,
                 )
-                .with_route_value_indices(route_value_indices)],
-                binding_source_shape,
-                binding_descriptor,
-            )?;
+                .await?;
             Ok(PreparedQueryPlan::Prepared {
                 shape: prepared.id(),
                 params,
@@ -533,7 +536,7 @@ where
         }
     }
 
-    pub(super) fn subscribe_lowered_program(
+    pub(super) async fn subscribe_lowered_program(
         &mut self,
         program: QueryProgram,
         binding: &Binding,
@@ -549,7 +552,7 @@ where
                 .into_iter()
                 .map(|terminal| (terminal.sink, terminal.graph))
                 .collect();
-            return self.database.subscribe(sinks).map_err(Error::Groove);
+            return self.database.subscribe(sinks).await.map_err(Error::Groove);
         }
         let param_names = params
             .iter()
@@ -587,11 +590,13 @@ where
                 .with_route_value_indices(route_value_indices))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let prepared =
-            self.database
-                .prepare(terminals, binding_source_shape, binding_descriptor)?;
+        let prepared = self
+            .database
+            .prepare(terminals, binding_source_shape, binding_descriptor)
+            .await?;
         self.database
             .bind_shape(prepared.id(), &values)
+            .await
             .map_err(Error::Groove)
     }
 }
