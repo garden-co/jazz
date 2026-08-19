@@ -48,9 +48,60 @@ where
             return self.reject_malformed_commit(tx, reason);
         }
         self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
-        let mut updates = self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context)?;
+        let clock_before_ingest = self.clock.clone();
+        // One incoming authority unit can durably stage its source before a
+        // derived merge is discovered. Keep their subscription publication
+        // private until the complete authority operation succeeds, so a later
+        // derived failure fail-stops rather than exposing a partial unit.
+        let publication_scope = self.database.begin_durable_publication_scope()?;
+        let mut updates = match self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context) {
+            Ok(updates) => updates,
+            Err(error) => {
+                publication_scope.abort(&mut self.database);
+                self.restore_clock_after_failed_authority_ingest(clock_before_ingest);
+                return Err(error);
+            }
+        };
+        publication_scope.finish(&mut self.database);
         updates.extend(self.drain_parked_commit_units()?);
         Ok(updates)
+    }
+
+    /// Undo speculative authority clock work after a rejected ingest without
+    /// reusing a sequence that became durable before a later derived write
+    /// failed. `ingest_commit_unit_once` records applied global progress only
+    /// after the source transaction's canonical batch commits, so a changed
+    /// progress set is the durable boundary: retain that state, discard any
+    /// later speculative allocation, and resume immediately after the highest
+    /// recovered sequence. If no global progress changed, the old full-clock
+    /// restoration preserves retryability for a definitely-uncommitted batch.
+    fn restore_clock_after_failed_authority_ingest(&mut self, before: Clock) {
+        if self.clock.applied_global_watermark == before.applied_global_watermark
+            && self.clock.applied_global_above_watermark == before.applied_global_above_watermark
+        {
+            self.clock = before;
+            return;
+        }
+
+        let highest_recovered = self
+            .clock
+            .applied_global_above_watermark
+            .iter()
+            .next_back()
+            .copied()
+            .unwrap_or(self.clock.applied_global_watermark);
+        if highest_recovered >= before.next_global_seq {
+            if highest_recovered == GlobalSeq(u64::MAX) {
+                self.clock.next_global_seq = GlobalSeq(u64::MAX);
+                self.clock.global_seq_exhausted = true;
+            } else {
+                self.clock.next_global_seq = highest_recovered.next();
+                self.clock.global_seq_exhausted = false;
+            }
+        } else {
+            self.clock.next_global_seq = before.next_global_seq;
+            self.clock.global_seq_exhausted = before.global_seq_exhausted;
+        }
     }
 
     /// Ingest a mergeable commit unit as an edge authority.

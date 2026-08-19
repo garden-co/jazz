@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::WriteManyOutcome;
 
 impl<S> Database<S>
 where
@@ -143,6 +144,20 @@ where
             .collect::<Vec<_>>();
         let tick_start = Instant::now();
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        // A storage transaction can fail after the runtime has applied the
+        // corresponding tick. Keep the inverse delta so a rare failure can
+        // undo just this tick without cloning all retained runtime state on
+        // every successful commit.
+        let rollback_deltas = table_deltas
+            .iter()
+            .cloned()
+            .map(|mut delta| {
+                for record in &mut delta.deltas {
+                    record.weight = -record.weight;
+                }
+                delta
+            })
+            .collect::<Vec<_>>();
         let tick = self
             .ivm_runtime
             .tick_staged(table_deltas, &storage, &mut staged_operations)
@@ -159,13 +174,30 @@ where
         let txn = self.storage.begin_txn();
         drop(operations);
         txn.stage_owned_operations(staged_operations);
-        if let Err(error) = txn.commit() {
-            // The runtime has already advanced in memory by this point. The v0
-            // policy is to make the Database instance fatal on final commit
-            // failure rather than serve possibly torn in-memory state.
-            self.ivm_runtime.discard_staged_subscription_notifications();
-            self.poisoned = true;
-            return Err(Error::from(error));
+        match txn.commit_outcome() {
+            WriteManyOutcome::Committed => {}
+            WriteManyOutcome::DefinitelyNotCommitted(error) => {
+                self.ivm_runtime.discard_staged_subscription_notifications();
+                let mut rollback_operations = Vec::new();
+                if self
+                    .ivm_runtime
+                    .tick_staged(rollback_deltas, &storage, &mut rollback_operations)
+                    .is_err()
+                {
+                    self.poisoned = true;
+                }
+                self.ivm_runtime.discard_staged_subscription_notifications();
+                return Err(Error::from(error));
+            }
+            WriteManyOutcome::PossiblyCommitted(error) => {
+                // The batch might be durable even though its acknowledgement
+                // failed. Replaying or rolling back in-process would split
+                // durable history from IVM/subscription state, so fail closed
+                // until a fresh open reconstructs the runtime from storage.
+                self.ivm_runtime.discard_staged_subscription_notifications();
+                self.poisoned = true;
+                return Err(Error::from(error));
+            }
         }
         if self
             .durable_publication_state
@@ -175,6 +207,11 @@ where
             == 0
         {
             self.ivm_runtime.publish_staged_subscription_notifications();
+        } else {
+            self.durable_publication_state
+                .lock()
+                .expect("durable publication state mutex poisoned")
+                .successful_commits += 1;
         }
         let storage_write_time = storage_start.elapsed();
         self.last_tick_metrics = Some(tick.clone());
