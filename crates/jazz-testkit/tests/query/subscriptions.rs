@@ -8,7 +8,6 @@ use jazz_server::JazzServer;
 use crate::common::{
     ClientPair, NO_DELTA_WINDOW, QUERY_TIMEOUT, READY_TIMEOUT, TodoSeed, create_todo,
     last_row_bearing_todo_title, last_updated_todo_title, subscription_schema,
-    todo_subscription_record_descriptor,
 };
 use crate::support::{
     TestingClient, collect_stream_deltas, has_added, has_added_id, has_any_change, has_removed,
@@ -246,7 +245,6 @@ async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
 
     let pair = ClientPair::start().await;
     let query = jazz::query::Query::from("todos");
-    let descriptor = todo_subscription_record_descriptor();
 
     let todo_id = create_todo(
         &pair.writer,
@@ -311,14 +309,13 @@ async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
         QUERY_TIMEOUT,
         "final row-bearing bulk update delta",
         |log| {
-            last_updated_todo_title(log, &descriptor, todo_id).as_deref()
-                == Some(final_title.as_str())
+            last_updated_todo_title(log, todo_id).as_deref() == Some(final_title.as_str())
         },
     )
     .await;
     collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
 
-    let latest_delta_title = last_updated_todo_title(&log, &descriptor, todo_id);
+    let latest_delta_title = last_updated_todo_title(&log, todo_id);
     assert_eq!(
         latest_delta_title.as_deref(),
         Some(final_title.as_str()),
@@ -557,7 +554,6 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
 
     let client = JazzClient::test_client(subscription_schema()).await;
     let query = jazz::query::Query::from("todos");
-    let descriptor = todo_subscription_record_descriptor();
 
     let mut stream = client
         .subscribe_with_opts(query.clone(), ReadOpts::default())
@@ -624,14 +620,13 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
         QUERY_TIMEOUT,
         "local stream carries the final row-bearing delta after rapid updates",
         |log| {
-            last_row_bearing_todo_title(log, &descriptor, todo_id).as_deref()
-                == Some(final_title.as_str())
+            last_row_bearing_todo_title(log, todo_id).as_deref() == Some(final_title.as_str())
         },
     )
     .await;
     collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
 
-    let latest_delta_title = last_row_bearing_todo_title(&log, &descriptor, todo_id);
+    let latest_delta_title = last_row_bearing_todo_title(&log, todo_id);
     assert_eq!(
         latest_delta_title.as_deref(),
         Some(final_title.as_str()),

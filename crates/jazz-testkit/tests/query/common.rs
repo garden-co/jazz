@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
 use jazz::row_input;
 use jazz::tools::{
     AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Row,
@@ -250,63 +249,15 @@ pub(crate) async fn create_file(client: &JazzClient, name: &str, parts: &[Object
         .0
 }
 
-/// Exact maintained-output record layout for the unprojected `todos` query.
-///
-/// Subscription row bytes use Groove's app-row terminal codec. Every source
-/// cell has an outer presence wrapper; nullable table columns therefore have
-/// a second, inner nullable wrapper. Maintained rows also retain provenance
-/// and transaction fields, which are part of the physical record layout even
-/// when this helper only reads the title.
-pub(crate) fn todo_subscription_record_descriptor() -> RecordDescriptor {
-    RecordDescriptor::new([
-        ("row_uuid", ValueType::Uuid),
-        (
-            "user_title",
-            ValueType::Nullable(Box::new(ValueType::String)),
-        ),
-        ("user_done", ValueType::Nullable(Box::new(ValueType::Bool))),
-        (
-            "user_priority",
-            ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(ValueType::I32)))),
-        ),
-        (
-            "user_owner_id",
-            ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(ValueType::Uuid)))),
-        ),
-        (
-            "user_tags",
-            ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::String)))),
-        ),
-        (
-            "user_payload",
-            ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(ValueType::Bytes)))),
-        ),
-        ("$createdBy", ValueType::Uuid),
-        ("$createdAt", ValueType::U64),
-        ("$updatedBy", ValueType::Uuid),
-        ("$updatedAt", ValueType::U64),
-        ("tx_time", ValueType::U64),
-        ("tx_node_id", ValueType::U64),
-    ])
-}
-
-fn todo_title_from_subscription_row(row: &Row, descriptor: &RecordDescriptor) -> Option<String> {
-    let title_index = descriptor.field_index("user_title")?;
-    let value = BorrowedRecord::new(row.data.as_ref(), descriptor)
-        .get_idx(title_index)
-        .unwrap_or_else(|error| panic!("decode maintained todo title: {error}"));
-    match value {
-        GrooveValue::Nullable(Some(value)) => match *value {
-            GrooveValue::String(title) => Some(title),
-            _ => None,
-        },
+fn todo_title_from_subscription_row(row: &Row) -> Option<String> {
+    match row.get("title") {
+        Some(Value::Text(title)) => Some(title.clone()),
         _ => None,
     }
 }
 
 pub(crate) fn last_updated_todo_title(
     log: &[OrderedRowDelta],
-    descriptor: &RecordDescriptor,
     todo_id: ObjectId,
 ) -> Option<String> {
     log.iter().rev().find_map(|delta| {
@@ -314,14 +265,13 @@ pub(crate) fn last_updated_todo_title(
             (change.id == todo_id)
                 .then_some(change.row.as_ref())
                 .flatten()
-                .and_then(|row| todo_title_from_subscription_row(row, descriptor))
+                .and_then(todo_title_from_subscription_row)
         })
     })
 }
 
 pub(crate) fn last_row_bearing_todo_title(
     log: &[OrderedRowDelta],
-    descriptor: &RecordDescriptor,
     todo_id: ObjectId,
 ) -> Option<String> {
     log.iter().rev().find_map(|delta| {
@@ -333,12 +283,12 @@ pub(crate) fn last_row_bearing_todo_title(
                 (change.id == todo_id)
                     .then_some(change.row.as_ref())
                     .flatten()
-                    .and_then(|row| todo_title_from_subscription_row(row, descriptor))
+                    .and_then(todo_title_from_subscription_row)
             })
             .or_else(|| {
                 delta.added.iter().rev().find_map(|change| {
                     (change.id == todo_id)
-                        .then(|| todo_title_from_subscription_row(&change.row, descriptor))
+                        .then(|| todo_title_from_subscription_row(&change.row))
                         .flatten()
                 })
             })
