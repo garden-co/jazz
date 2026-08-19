@@ -189,14 +189,18 @@ where
             .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
     }
 
-    pub(super) fn resolve_node_alias(
+    pub(super) async fn resolve_node_alias(
         &mut self,
         alias: NodeAlias,
     ) -> Result<Option<NodeUuid>, Error> {
         if let Some(node) = self.node_for_alias(alias) {
             return Ok(Some(node));
         }
-        for raw in self.database.primary_key_scan_raw("jazz_nodes", &[])? {
+        for raw in self
+            .database
+            .primary_key_scan_raw("jazz_nodes", &[])
+            .await?
+        {
             let record = raw.record();
             if NodeAlias(record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?) != alias {
                 continue;
@@ -220,9 +224,10 @@ where
         Ok(TxId::new(version.tx_time(), node))
     }
 
-    fn version_made_at(&mut self, version: &VersionRow) -> Result<TxTime, Error> {
+    async fn version_made_at(&mut self, version: &VersionRow) -> Result<TxTime, Error> {
         let tx_id = self.version_tx_id(version)?;
-        self.transaction_made_at(tx_id)?
+        self.transaction_made_at(tx_id)
+            .await?
             .ok_or(Error::MissingTransaction(tx_id))
     }
 
@@ -236,7 +241,7 @@ where
         VersionRecord::from_stored(version, &table, schema_version)
     }
 
-    pub(crate) fn row_version_payloads_for_refs(
+    pub(crate) async fn row_version_payloads_for_refs(
         &mut self,
         requests: &[RowVersionRef],
         identity: AuthorId,
@@ -269,7 +274,8 @@ where
             }
             let tx_id = request.tx_id();
             let matching_versions = self
-                .query_versions_for_tx(tx_id)?
+                .query_versions_for_tx(tx_id)
+                .await?
                 .into_iter()
                 .filter_map(|version| {
                     let table_id = self.physical_table_id_for_version(&version).ok()?;
@@ -319,7 +325,9 @@ where
                 request.row_uuid,
                 request_schema,
                 identity,
-            )? {
+            )
+            ?
+            {
                 continue;
             }
             for (table_id, version) in matching_versions {
@@ -332,18 +340,19 @@ where
         let mut out = Vec::new();
         for (tx_id, versions) in by_tx {
             let stored = self
-                .query_transaction(tx_id)?
+                .query_transaction(tx_id)
+                .await?
                 .ok_or(Error::MissingTransaction(tx_id))?;
-            out.push(self.version_bundle_for_maintained_view_versions_with_tx(
-                &stored,
-                &versions,
-            )?);
+            out.push(
+                self.version_bundle_for_maintained_view_versions_with_tx(&stored, &versions)
+                    .await?,
+            );
         }
         Ok(out)
     }
 
     #[allow(dead_code)]
-    pub(crate) fn apply_row_version_payloads_for_requests(
+    pub(crate) async fn apply_row_version_payloads_for_requests(
         &mut self,
         requests: &[RowVersionRef],
         version_bundles: Vec<VersionBundle>,
@@ -425,13 +434,14 @@ where
                 bundle.fate,
                 bundle.global_time,
                 bundle.durability,
-            )?;
+            )
+            .await?;
         }
         Ok(())
     }
 
     #[allow(dead_code)]
-    pub(crate) fn missing_known_state_row_version_refs(
+    pub(crate) async fn missing_known_state_row_version_refs(
         &mut self,
         message: &SyncMessage,
     ) -> Result<Vec<RowVersionRef>, Error> {
@@ -507,11 +517,11 @@ where
             )? {
                 continue;
             }
-            let has_body = self.local_version_row_for_ref(&version_ref)?.is_some()
-                && self.query_transaction(tx_id)?.is_some();
+            let has_body = self.local_version_row_for_ref(&version_ref).await?.is_some()
+                && self.query_transaction(tx_id).await?.is_some();
             if !has_body {
                 missing.insert(version_ref);
-            } else if let Some(version) = self.local_version_record_for_ref(&version_ref)? {
+            } else if let Some(version) = self.local_version_record_for_ref(&version_ref).await? {
                 self.collect_missing_text_ancestor_refs(
                     &version,
                     &mut missing,
@@ -556,11 +566,11 @@ where
             )? {
                 continue;
             }
-            let has_body = self.local_version_row_for_ref(&version_ref)?.is_some()
-                && self.query_transaction(tx_id)?.is_some();
+            let has_body = self.local_version_row_for_ref(&version_ref).await?.is_some()
+                && self.query_transaction(tx_id).await?.is_some();
             if !has_body {
                 missing.insert(version_ref);
-            } else if let Some(version) = self.local_version_record_for_ref(&version_ref)? {
+            } else if let Some(version) = self.local_version_record_for_ref(&version_ref).await? {
                 self.collect_missing_text_ancestor_refs(
                     &version,
                     &mut missing,
@@ -631,17 +641,17 @@ where
         Ok(())
     }
 
-    fn local_version_record_for_ref(
+    async fn local_version_record_for_ref(
         &mut self,
         version_ref: &RowVersionRef,
     ) -> Result<Option<VersionRecord>, Error> {
-        let Some(version) = self.local_version_row_for_ref(version_ref)? else {
+        let Some(version) = self.local_version_row_for_ref(version_ref).await? else {
             return Ok(None);
         };
         self.version_record_from_row(&version).map(Some)
     }
 
-    fn local_version_row_for_ref(
+    async fn local_version_row_for_ref(
         &mut self,
         version_ref: &RowVersionRef,
     ) -> Result<Option<VersionRow>, Error> {
@@ -655,7 +665,9 @@ where
                 layer,
                 version_ref.tx_time,
                 tx_node_alias,
-            )? {
+            )
+            .await?
+            {
                 return Ok(Some(version));
             }
         }
