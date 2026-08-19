@@ -21,10 +21,10 @@ fn versioned_schema() -> DatabaseSchema {
     .with_variant(2, ["id", "title", "completed"])])
 }
 
-fn open_database() -> Result<Database<MemoryStorage>, Error> {
+async fn open_database() -> Result<Database<MemoryStorage>, Error> {
     let schema = versioned_schema();
     let storage = MemoryStorage::new(&schema.column_families());
-    Database::new(schema, storage)
+    Database::new(schema, storage).await
 }
 
 fn row(version: u32, values: &[Value]) -> VariantRecord {
@@ -50,8 +50,8 @@ fn row_for(
     VariantRecord::create(version, descriptor, values)
 }
 
-#[test]
-fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
+#[futures_test::test]
+async fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
 -> Result<(), Box<dyn std::error::Error>> {
     let table = TableSchema::new(
         "items",
@@ -65,7 +65,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     .with_variant(1, ["title", "id"]);
     let schema = DatabaseSchema::new([table]);
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema, storage)?;
+    let mut database = Database::new(schema, storage).await?;
     let output = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
     database.define_variant_projection("items", "reader-v1", output)?;
     database.register_variant_projection_case(
@@ -75,8 +75,9 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
         [ProjectField::named("id"), ProjectField::named("title")],
     )?;
 
-    let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_source("items", "reader-v1"))?;
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::variant_source("items", "reader-v1"))
+        .await?;
     let subscription_id = subscription.id();
     assert!(subscription.recv()?.is_empty());
 
@@ -86,7 +87,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
         "items",
         VariantRecord::create(1, v1, &[Value::String("first".into()), Value::U64(1)])?,
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
     assert_eq!(
         subscription.recv()?.to_values()?,
         vec![(vec![Value::U64(1), Value::String("first".into())], 1,)]
@@ -120,7 +121,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
             ],
         )?,
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
 
     let mut deltas = subscription.recv()?.to_values()?;
     deltas.sort_by_key(|(_, weight)| *weight);
@@ -136,7 +137,8 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     );
     assert_eq!(
         database
-            .query_graph(GraphBuilder::variant_source("items", "reader-v1"))?
+            .query_graph(GraphBuilder::variant_source("items", "reader-v1"))
+            .await?
             .to_values()?,
         vec![(
             vec![Value::U64(1), Value::String("first, revised".into())],
@@ -146,12 +148,12 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     Ok(())
 }
 
-#[test]
-fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
+#[futures_test::test]
+async fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
 -> Result<(), Box<dyn std::error::Error>> {
     let schema = versioned_schema();
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema.clone(), storage)?;
+    let mut database = Database::new(schema.clone(), storage).await?;
     let output = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
     database.define_variant_projection("items", "v1-only", output)?;
     database.register_variant_projection_case(
@@ -162,8 +164,9 @@ fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
     )?;
     database.register_variant_projection_ignore_case("items", "v1-only", 2)?;
 
-    let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_source("items", "v1-only"))?;
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::variant_source("items", "v1-only"))
+        .await?;
     assert!(subscription.recv()?.is_empty());
 
     let mut batch = database.open_batch();
@@ -179,17 +182,20 @@ fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
             ],
         )?,
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
     assert!(subscription.try_recv().is_err());
     assert!(
         database
-            .query_graph(GraphBuilder::variant_source("items", "v1-only"))?
+            .query_graph(GraphBuilder::variant_source("items", "v1-only"))
+            .await?
             .is_empty()
     );
 
     database.define_variant_projection("items", "unregistered", output)?;
     assert!(matches!(
-        database.query_graph(GraphBuilder::variant_source("items", "unregistered")),
+        database
+            .query_graph(GraphBuilder::variant_source("items", "unregistered"))
+            .await,
         Err(Error::IvmRuntime(
             IvmRuntimeError::VariantProjectionCaseNotFound { version: 2, .. }
         ))
@@ -219,14 +225,15 @@ fn indexed_versioned_schema(unique_email: bool) -> DatabaseSchema {
     .with_variant(2, ["id", "email", "active"])])
 }
 
-#[test]
-fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
+#[futures_test::test]
+async fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
 -> Result<(), Box<dyn std::error::Error>> {
     let schema = indexed_versioned_schema(false);
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema.clone(), storage)?;
-    let active_subscription =
-        database.subscribe_one_sink(GraphBuilder::index("items", "items_by_active"))?;
+    let mut database = Database::new(schema.clone(), storage).await?;
+    let active_subscription = database
+        .subscribe_one_sink(GraphBuilder::index("items", "items_by_active"))
+        .await?;
     assert!(active_subscription.recv()?.is_empty());
 
     let mut batch = database.open_batch();
@@ -250,21 +257,24 @@ fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
             ],
         )?,
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
 
     let active_delta = active_subscription.recv()?.to_values()?;
     assert_eq!(active_delta.len(), 1);
     assert_eq!(active_delta[0].1, 1);
-    let first = database.index_get(
-        "items",
-        "items_by_email",
-        &[Value::String("first@example.com".into())],
-    )?;
+    let first = database
+        .index_get(
+            "items",
+            "items_by_email",
+            &[Value::String("first@example.com".into())],
+        )
+        .await?;
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].variant_tag(), 1);
     assert_eq!(
         database
-            .index_get("items", "items_by_active", &[Value::Bool(true)])?
+            .index_get("items", "items_by_active", &[Value::Bool(true)])
+            .await?
             .len(),
         1
     );
@@ -293,7 +303,7 @@ fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
             ],
         )?,
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
 
     let mut active_deltas = active_subscription.recv()?.to_values()?;
     active_deltas.sort_by_key(|(_, weight)| *weight);
@@ -306,40 +316,45 @@ fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
                 "items",
                 "items_by_email",
                 &[Value::String("first@example.com".into())],
-            )?
+            )
+            .await?
             .is_empty()
     );
     assert_eq!(
         database
-            .index_get("items", "items_by_active", &[Value::Bool(true)])?
+            .index_get("items", "items_by_active", &[Value::Bool(true)])
+            .await?
             .len(),
         1
     );
 
     let storage = database.into_storage();
-    let reopened = Database::new(schema, storage)?;
-    let second = reopened.index_get(
-        "items",
-        "items_by_email",
-        &[Value::String("second+old@example.com".into())],
-    )?;
+    let reopened = Database::new(schema, storage).await?;
+    let second = reopened
+        .index_get(
+            "items",
+            "items_by_email",
+            &[Value::String("second+old@example.com".into())],
+        )
+        .await?;
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].variant_tag(), 1);
     assert_eq!(
         reopened
-            .index_get("items", "items_by_active", &[Value::Bool(true)])?
+            .index_get("items", "items_by_active", &[Value::Bool(true)])
+            .await?
             .len(),
         1
     );
     Ok(())
 }
 
-#[test]
-fn unique_variant_index_rejects_conflicts_across_versions() -> Result<(), Box<dyn std::error::Error>>
-{
+#[futures_test::test]
+async fn unique_variant_index_rejects_conflicts_across_versions()
+-> Result<(), Box<dyn std::error::Error>> {
     let schema = indexed_versioned_schema(true);
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema.clone(), storage)?;
+    let mut database = Database::new(schema.clone(), storage).await?;
     let mut batch = database.open_batch();
     batch.insert(
         "items",
@@ -349,7 +364,7 @@ fn unique_variant_index_rejects_conflicts_across_versions() -> Result<(), Box<dy
             &[Value::String("same@example.com".into()), Value::U64(1)],
         )?,
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -365,7 +380,7 @@ fn unique_variant_index_rejects_conflicts_across_versions() -> Result<(), Box<dy
         )?,
     );
     assert!(matches!(
-        database.commit_batch(batch),
+        database.commit_batch(batch).await,
         Err(Error::IvmRuntime(
             IvmRuntimeError::UniqueIndexViolation { .. }
         ))
@@ -373,8 +388,8 @@ fn unique_variant_index_rejects_conflicts_across_versions() -> Result<(), Box<dy
     Ok(())
 }
 
-#[test]
-fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
+#[futures_test::test]
+async fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
 -> Result<(), Box<dyn std::error::Error>> {
     let table = TableSchema::new(
         "items",
@@ -389,9 +404,10 @@ fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
     .with_variant(1, ["email", "id"]);
     let schema = DatabaseSchema::new([table]);
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema, storage)?;
-    let subscription =
-        database.subscribe_one_sink(GraphBuilder::index("items", "items_by_active"))?;
+    let mut database = Database::new(schema, storage).await?;
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::index("items", "items_by_active"))
+        .await?;
     let subscription_id = subscription.id();
     assert!(subscription.recv()?.is_empty());
 
@@ -416,22 +432,23 @@ fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
             ],
         )?,
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
 
     let deltas = subscription.recv()?.to_values()?;
     assert_eq!(deltas.len(), 1);
     assert_eq!(deltas[0].1, 1);
     assert_eq!(
         database
-            .index_get("items", "items_by_active", &[Value::Bool(true)])?
+            .index_get("items", "items_by_active", &[Value::Bool(true)])
+            .await?
             .len(),
         1
     );
     Ok(())
 }
 
-#[test]
-fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
+#[futures_test::test]
+async fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
 -> Result<(), Box<dyn std::error::Error>> {
     let table = TableSchema::new(
         "items",
@@ -448,7 +465,7 @@ fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
     let mut column_families = schema.column_families();
     column_families.push("indices");
     let storage = MemoryStorage::new(&column_families);
-    let mut database = Database::new(schema.clone(), storage)?;
+    let mut database = Database::new(schema.clone(), storage).await?;
     let projection = RecordDescriptor::new([("id", ValueType::U64), ("email", ValueType::String)]);
     database.define_variant_projection("items", "reader", projection)?;
     for version in [1, 2] {
@@ -459,8 +476,9 @@ fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
             [ProjectField::named("id"), ProjectField::named("email")],
         )?;
     }
-    let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_source("items", "reader"))?;
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::variant_source("items", "reader"))
+        .await?;
     assert!(subscription.recv()?.is_empty());
 
     let mut batch = database.open_batch();
@@ -484,13 +502,17 @@ fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
             ],
         )?,
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
     assert_eq!(subscription.recv()?.deltas.len(), 2);
 
     let index = IndexSchema::new("items_by_active", ["active"]);
-    database.register_table_index("items", index.clone())?;
+    database
+        .register_table_index("items", index.clone())
+        .await?;
     assert!(subscription.try_recv().is_err());
-    let indexed = database.index_get("items", "items_by_active", &[Value::Bool(true)])?;
+    let indexed = database
+        .index_get("items", "items_by_active", &[Value::Bool(true)])
+        .await?;
     assert_eq!(indexed.len(), 1);
     assert_eq!(indexed[0].variant_tag(), 2);
     assert_eq!(indexed[0].get("id")?, Value::U64(2));
@@ -508,35 +530,38 @@ fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
             ],
         )?,
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
     assert!(
         database
-            .index_get("items", "items_by_active", &[Value::Bool(true)])?
+            .index_get("items", "items_by_active", &[Value::Bool(true)])
+            .await?
             .is_empty()
     );
     assert_eq!(
         database
-            .index_get("items", "items_by_active", &[Value::Bool(false)])?
+            .index_get("items", "items_by_active", &[Value::Bool(false)])
+            .await?
             .len(),
         1
     );
 
     let storage = database.into_storage();
     let reopened_schema = DatabaseSchema::new([table.with_index(index)]);
-    let reopened = Database::new(reopened_schema, storage)?;
+    let reopened = Database::new(reopened_schema, storage).await?;
     assert_eq!(
         reopened
-            .index_get("items", "items_by_active", &[Value::Bool(false)])?
+            .index_get("items", "items_by_active", &[Value::Bool(false)])
+            .await?
             .len(),
         1
     );
     Ok(())
 }
 
-#[test]
-fn mixed_schema_versions_survive_replacement_and_reopen() -> Result<(), Box<dyn std::error::Error>>
-{
-    let mut database = open_database()?;
+#[futures_test::test]
+async fn mixed_schema_versions_survive_replacement_and_reopen()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut database = open_database().await?;
     let mut batch = database.open_batch();
     batch.insert(
         "items",
@@ -553,9 +578,9 @@ fn mixed_schema_versions_survive_replacement_and_reopen() -> Result<(), Box<dyn 
             ],
         ),
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
 
-    let rows = database.primary_key_scan("items", &[])?;
+    let rows = database.primary_key_scan("items", &[]).await?;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].variant_tag(), 1);
     assert_eq!(rows[0].get("title")?, Value::String("first".into()));
@@ -575,9 +600,10 @@ fn mixed_schema_versions_survive_replacement_and_reopen() -> Result<(), Box<dyn 
             ],
         ),
     );
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
     let replaced = database
-        .primary_key_get("items", &[Value::U64(1)])?
+        .primary_key_get("items", &[Value::U64(1)])
+        .await?
         .expect("updated row exists");
     assert_eq!(replaced.variant_tag(), 2);
     assert_eq!(
@@ -587,8 +613,8 @@ fn mixed_schema_versions_survive_replacement_and_reopen() -> Result<(), Box<dyn 
     assert_eq!(replaced.get("completed")?, Value::Bool(true));
 
     let storage = database.into_storage();
-    let reopened = Database::new(versioned_schema(), storage)?;
-    let rows = reopened.primary_key_scan("items", &[])?;
+    let reopened = Database::new(versioned_schema(), storage).await?;
+    let rows = reopened.primary_key_scan("items", &[]).await?;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].variant_tag(), 2);
     assert_eq!(rows[1].variant_tag(), 2);
@@ -596,26 +622,28 @@ fn mixed_schema_versions_survive_replacement_and_reopen() -> Result<(), Box<dyn 
     Ok(())
 }
 
-#[test]
-fn variant_header_is_canonical_varint_and_validated_on_read()
+#[futures_test::test]
+async fn variant_header_is_canonical_varint_and_validated_on_read()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut database = open_database()?;
+    let mut database = open_database().await?;
     let record = row(1, &[Value::String("first".into()), Value::U64(1)]);
     let payload_len = record.raw().len();
     let mut batch = database.open_batch();
     batch.insert("items", record);
-    database.commit_batch(batch)?;
+    database.commit_batch(batch).await?;
 
     let storage = database.into_storage();
-    let entries = storage.prefix("items", b"")?;
+    let entries = storage.prefix("items".to_owned(), Vec::new()).await?;
     let (key, stored) = entries.first().expect("stored row");
     assert_eq!(stored[0], 1);
     assert_eq!(stored.len(), payload_len + 1);
 
-    storage.set("items", key, &[0x80, 0x00])?;
-    let reopened = Database::new(versioned_schema(), storage)?;
+    storage
+        .set("items".to_owned(), key.clone(), vec![0x80, 0x00])
+        .await?;
+    let reopened = Database::new(versioned_schema(), storage).await?;
     assert!(matches!(
-        reopened.primary_key_get("items", &[Value::U64(1)]),
+        reopened.primary_key_get("items", &[Value::U64(1)]).await,
         Err(Error::RecordEncoding(
             groove::records::Error::InvalidSchemaVersionHeader
         ))
@@ -623,9 +651,9 @@ fn variant_header_is_canonical_varint_and_validated_on_read()
     Ok(())
 }
 
-#[test]
-fn writes_reject_unregistered_schema_versions() -> Result<(), Box<dyn std::error::Error>> {
-    let mut database = open_database()?;
+#[futures_test::test]
+async fn writes_reject_unregistered_schema_versions() -> Result<(), Box<dyn std::error::Error>> {
+    let mut database = open_database().await?;
     let mut batch = database.open_batch();
     batch.insert(
         "items",
@@ -638,15 +666,15 @@ fn writes_reject_unregistered_schema_versions() -> Result<(), Box<dyn std::error
         ),
     );
     assert!(matches!(
-        database.commit_batch(batch),
+        database.commit_batch(batch).await,
         Err(Error::UnknownTableVariant { table, version })
             if table == "items" && version == 3
     ));
     Ok(())
 }
 
-#[test]
-fn explicit_registries_cannot_claim_reserved_version_zero() {
+#[futures_test::test]
+async fn explicit_registries_cannot_claim_reserved_version_zero() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "items",
         [ColumnSchema::new("id", ColumnType::U64)],
@@ -655,7 +683,7 @@ fn explicit_registries_cannot_claim_reserved_version_zero() {
     .with_variant(0, ["id"])]);
     let storage = MemoryStorage::new(&schema.column_families());
     assert!(matches!(
-        Database::new(schema, storage),
+        Database::new(schema, storage).await,
         Err(Error::ReservedTableVariant(table)) if table == "items"
     ));
 }
