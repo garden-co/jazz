@@ -1,4 +1,5 @@
 import type { Session } from "./context.js";
+import { isUsableSubject } from "./author-id.js";
 
 export interface ClientSessionInput {
   appId: string;
@@ -34,9 +35,11 @@ function trimOptional(value?: string): string | undefined {
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
-  // Subjects are opaque identity bytes: whitespace makes a subject unusable
-  // only when it is all whitespace, never by normalizing a valid principal.
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function asUsableSubjectString(value: unknown): string | undefined {
+  return typeof value === "string" && isUsableSubject(value) ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -101,7 +104,7 @@ export function parseJwtPayload(jwtToken: string): JwtPayload | null {
 }
 
 export function sessionFromJwtPayload(payload: JwtPayload): Session | null {
-  const subject = asNonEmptyString(payload.sub);
+  const subject = asUsableSubjectString(payload.sub);
   if (!subject) return null;
 
   const issuer = asNonEmptyString(payload.iss);
