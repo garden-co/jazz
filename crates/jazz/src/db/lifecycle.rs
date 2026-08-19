@@ -37,7 +37,8 @@ where
             SchemaViewId::for_schema(&config.schema),
             config.schema.clone(),
         )])));
-        let node = NodeState::new(config.identity.node, config.schema.clone(), config.storage)?;
+        let node =
+            NodeState::new(config.identity.node, config.schema.clone(), config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
         Ok(Self {
@@ -71,7 +72,8 @@ where
             config.schema.clone(),
             config.storage,
             false,
-        )?;
+        )
+        .await?;
         let db = Self {
             schema: config.schema,
             schema_version_id,
@@ -103,7 +105,8 @@ where
             config.identity.node,
             config.schema.clone(),
             config.storage,
-        )?;
+        )
+        .await?;
         Ok(Self {
             schema: config.schema,
             schema_version_id,
@@ -136,7 +139,8 @@ where
             SchemaViewId::for_schema(&bootstrap_schema),
             bootstrap_schema.clone(),
         )])));
-        let node = NodeState::new_catalogue_uninitialized(config.identity.node, config.storage)?;
+        let node =
+            NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
         Ok(Self {

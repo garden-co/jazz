@@ -18,7 +18,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn persist_clean_close_marker(&self) -> Result<(), Error> {
+    pub(super) async fn persist_clean_close_marker(&self) -> Result<(), Error> {
         self.database
             .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?
             .set(
@@ -27,19 +27,20 @@ where
                     Value::U64(CLEAN_CLOSE_MARKER_VERSION),
                     Value::Uuid(self.node_uuid.0),
                 ],
-            )?;
+            )
+            .await?;
         Ok(())
     }
 
-    fn take_valid_clean_close_marker(&mut self) -> Result<bool, Error> {
+    async fn take_valid_clean_close_marker(&mut self) -> Result<bool, Error> {
         let store = self
             .database
             .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?;
         let key = clean_close_marker_key();
-        let Some(record) = store.get(&key)? else {
+        let Some(record) = store.get(&key).await? else {
             return Ok(false);
         };
-        store.delete(&key)?;
+        store.delete(&key).await?;
 
         let version = match record.get_idx(0)? {
             Value::U64(value) => value,
@@ -52,7 +53,7 @@ where
         Ok(version == CLEAN_CLOSE_MARKER_VERSION && node == self.node_uuid.0)
     }
 
-    pub(super) fn persist_storage_consistency_marker_through(
+    pub(super) async fn persist_storage_consistency_marker_through(
         &self,
         tx_time: TxTime,
     ) -> Result<(), Error> {
@@ -60,7 +61,7 @@ where
             .database
             .direct_record_store(STORAGE_CONSISTENCY_MARKERS_STORE)?;
         let key = storage_consistency_marker_key();
-        if let Some(record) = store.get(&key)?
+        if let Some(record) = store.get(&key).await?
             && matches!(
                 record.get_idx(0)?,
                 Value::U64(STORAGE_CONSISTENCY_MARKER_VERSION)
@@ -71,22 +72,24 @@ where
         {
             return Ok(());
         }
-        store.set(
-            &key,
-            &[
-                Value::U64(STORAGE_CONSISTENCY_MARKER_VERSION),
-                Value::Uuid(self.node_uuid.0),
-                Value::U64(tx_time.0),
-            ],
-        )?;
+        store
+            .set(
+                &key,
+                &[
+                    Value::U64(STORAGE_CONSISTENCY_MARKER_VERSION),
+                    Value::Uuid(self.node_uuid.0),
+                    Value::U64(tx_time.0),
+                ],
+            )
+            .await?;
         Ok(())
     }
 
-    fn valid_storage_consistency_marker(&self) -> Result<Option<TxTime>, Error> {
+    async fn valid_storage_consistency_marker(&self) -> Result<Option<TxTime>, Error> {
         let store = self
             .database
             .direct_record_store(STORAGE_CONSISTENCY_MARKERS_STORE)?;
-        let Some(record) = store.get(&storage_consistency_marker_key())? else {
+        let Some(record) = store.get(&storage_consistency_marker_key()).await? else {
             return Ok(None);
         };
         let version = match record.get_idx(0)? {
@@ -108,7 +111,7 @@ where
         }
     }
 
-    pub(super) fn rejected_versions_for(
+    pub(super) async fn rejected_versions_for(
         &mut self,
         alias: NodeAlias,
         tx_id: TxId,
@@ -116,10 +119,14 @@ where
         let mut versions = Vec::new();
         for table_id in self.physical_table_ids() {
             let storage_table = physical_rejected_versions_table_name(table_id);
-            for raw in self.database.primary_key_scan_raw(
-                &storage_table,
-                &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
-            )? {
+            for raw in self
+                .database
+                .primary_key_scan_raw(
+                    &storage_table,
+                    &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
+                )
+                .await?
+            {
                 let record = raw.record();
                 let node_id = record.get_u64(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?;
                 let time = record.get_u64(RejectedVersionRowRecord::FIELD_TX_TIME_IDX)?;
@@ -152,36 +159,40 @@ where
         Ok(versions)
     }
 
-    pub(super) fn recover_from_storage(&mut self) -> Result<(), Error> {
+    pub(super) async fn recover_from_storage(&mut self) -> Result<(), Error> {
         #[cfg(feature = "testing")]
         {
-            self.recover_from_storage_inner(None)
+            self.recover_from_storage_inner(None).await
         }
         #[cfg(not(feature = "testing"))]
-        self.recover_from_storage_inner()
+        self.recover_from_storage_inner().await
     }
 
     #[cfg(feature = "testing")]
-    pub(super) fn recover_from_storage_with_receipt(
+    pub(super) async fn recover_from_storage_with_receipt(
         &mut self,
         receipt: &mut NodeOpenReceipt,
     ) -> Result<(), Error> {
-        self.recover_from_storage_inner(Some(receipt))
+        self.recover_from_storage_inner(Some(receipt)).await
     }
 
-    fn recover_from_storage_inner(
+    async fn recover_from_storage_inner(
         &mut self,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<(), Error> {
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| web_time::Instant::now());
-        let cleanly_closed = self.take_valid_clean_close_marker()?;
+        let cleanly_closed = self.take_valid_clean_close_marker().await?;
         let storage_consistent_through = if cleanly_closed {
             None
         } else {
-            self.valid_storage_consistency_marker()?
+            self.valid_storage_consistency_marker().await?
         };
-        for raw in self.database.primary_key_scan_raw("jazz_nodes", &[])? {
+        for raw in self
+            .database
+            .primary_key_scan_raw("jazz_nodes", &[])
+            .await?
+        {
             let record = raw.record();
             let alias = record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?;
             let uuid = NodeUuid(record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)?);
@@ -195,7 +206,8 @@ where
 
         if let Some(raw) = self
             .database
-            .primary_key_last_raw("jazz_transactions", &[])?
+            .primary_key_last_raw("jazz_transactions", &[])
+            .await?
         {
             self.merge_tx_time(TxTime(
                 raw.record().get_u64(TransactionRowRecord::FIELD_TIME_IDX)?,
@@ -208,19 +220,20 @@ where
             .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
             .collect::<BTreeSet<_>>();
         for table_id in physical_table_ids {
-            if let Some(raw) = self.database.index_last_raw(
-                &physical_history_table_name(table_id),
-                "by_tx",
-                &[],
-            )? {
+            if let Some(raw) = self
+                .database
+                .index_last_raw(&physical_history_table_name(table_id), "by_tx", &[])
+                .await?
+            {
                 self.merge_tx_time(TxTime(
                     raw.record().get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
                 ));
             }
         }
-        if let Some(raw) =
-            self.database
-                .index_last_raw(SHARED_DELETION_HISTORY_TABLE, "by_tx", &[])?
+        if let Some(raw) = self
+            .database
+            .index_last_raw(SHARED_DELETION_HISTORY_TABLE, "by_tx", &[])
+            .await?
         {
             self.merge_tx_time(TxTime(
                 raw.record()
@@ -242,17 +255,24 @@ where
         // the separate exact lookup preserves the prior u64::MAX behavior.
         let first_global_time = Value::Nullable(Some(Box::new(Value::U64(0))));
         let last_global_time = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
-        let mut sequenced_transactions = self.database.index_scan_range_raw(
-            "jazz_transactions",
-            "by_global_time",
-            std::slice::from_ref(&first_global_time),
-            std::slice::from_ref(&last_global_time),
-        )?;
-        sequenced_transactions.extend(self.database.index_scan_raw(
-            "jazz_transactions",
-            "by_global_time",
-            std::slice::from_ref(&last_global_time),
-        )?);
+        let mut sequenced_transactions = self
+            .database
+            .index_scan_range_raw(
+                "jazz_transactions",
+                "by_global_time",
+                std::slice::from_ref(&first_global_time),
+                std::slice::from_ref(&last_global_time),
+            )
+            .await?;
+        sequenced_transactions.extend(
+            self.database
+                .index_scan_raw(
+                    "jazz_transactions",
+                    "by_global_time",
+                    std::slice::from_ref(&last_global_time),
+                )
+                .await?,
+        );
         for raw in sequenced_transactions {
             #[cfg(feature = "testing")]
             {
@@ -301,7 +321,8 @@ where
         let mut pending_edges = Vec::new();
         for raw in self
             .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])?
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .await?
         {
             let record = raw.record();
             let child_alias =
@@ -330,10 +351,12 @@ where
         }
         for (child, parent) in pending_edges {
             if self
-                .query_transaction(child)?
+                .query_transaction(child)
+                .await?
                 .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
                 && self
-                    .query_transaction(parent)?
+                    .query_transaction(parent)
+                    .await?
                     .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
             {
                 self.record_child_edges(child, [parent]);
@@ -343,7 +366,8 @@ where
         let mut rejected_headers = Vec::new();
         for raw in self
             .database
-            .primary_key_scan_raw("jazz_rejected_transactions", &[])?
+            .primary_key_scan_raw("jazz_rejected_transactions", &[])
+            .await?
         {
             let record = raw.record();
             let node_alias =
@@ -367,7 +391,7 @@ where
             ));
         }
         for (node_alias, tx_id, record) in rejected_headers {
-            let versions = self.rejected_versions_for(node_alias, tx_id)?;
+            let versions = self.rejected_versions_for(node_alias, tx_id).await?;
             self.rejections
                 .rejected_transactions
                 .insert(tx_id, RejectedTransaction::new(tx_id, record, versions));
@@ -379,7 +403,8 @@ where
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| web_time::Instant::now());
         if !cleanly_closed {
-            self.cleanup_settled_ahead_current_leftovers(storage_consistent_through)?;
+            self.cleanup_settled_ahead_current_leftovers(storage_consistent_through)
+                .await?;
         }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {

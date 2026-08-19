@@ -116,7 +116,7 @@ where
         Ok(())
     }
 
-    fn ensure_provisional_physical_mapping(
+    async fn ensure_provisional_physical_mapping(
         &mut self,
         schema_version: SchemaVersionId,
     ) -> Result<(), Error> {
@@ -214,7 +214,7 @@ where
                 ))?;
         let mut batch = self.database.open_batch();
         Self::write_schema_version_mapping_to_batch(&mut batch, alias, schema_version, &mapping)?;
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         self.catalogue
             .schema_version_aliases
             .insert(schema_version, alias);
@@ -819,7 +819,7 @@ where
         Ok(())
     }
 
-    fn ensure_node_alias(&mut self, node_uuid: NodeUuid) -> Result<NodeAlias, Error> {
+    async fn ensure_node_alias(&mut self, node_uuid: NodeUuid) -> Result<NodeAlias, Error> {
         if node_uuid == self.node_uuid
             && let Some(alias) = self.self_node_alias
         {
@@ -837,7 +837,11 @@ where
             .map(|alias| alias.0)
             .max()
             .unwrap_or(0);
-        for raw in self.database.primary_key_scan_raw("jazz_nodes", &[])? {
+        for raw in self
+            .database
+            .primary_key_scan_raw("jazz_nodes", &[])
+            .await?
+        {
             let record = raw.record();
             let alias = NodeAlias(record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?);
             max_alias = max_alias.max(alias.0);
@@ -859,11 +863,11 @@ where
             "jazz_nodes",
             vec![Value::U64(alias.0), Value::Uuid(node_uuid.0)],
         );
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         Ok(alias)
     }
 
-    fn ensure_schema_version_alias(
+    async fn ensure_schema_version_alias(
         &mut self,
         schema_version_id: SchemaVersionId,
     ) -> Result<SchemaVersionAlias, Error> {
@@ -877,7 +881,8 @@ where
             }
             return Ok(*alias);
         }
-        self.ensure_provisional_physical_mapping(schema_version_id)?;
+        self.ensure_provisional_physical_mapping(schema_version_id)
+            .await?;
         self.catalogue
             .schema_version_aliases
             .get(&schema_version_id)

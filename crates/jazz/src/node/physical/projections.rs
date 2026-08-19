@@ -240,7 +240,9 @@ where
         ))
     }
 
-    pub(super) fn register_physical_history_variant_projections(&mut self) -> Result<(), Error> {
+    pub(super) async fn register_physical_history_variant_projections(
+        &mut self,
+    ) -> Result<(), Error> {
         let targets = self
             .catalogue
             .physical_mappings
@@ -286,11 +288,9 @@ where
                     &physical_names,
                     self.database.table_schema(&storage_table)?,
                 )?;
-                self.database.define_variant_projection(
-                    &storage_table,
-                    &projection_target,
-                    output,
-                )?;
+                self.database
+                    .define_variant_projection(&storage_table, &projection_target, output)
+                    ?;
                 for (source_schema, source_table_name, source_mapping) in &sources {
                     let source_alias = self
                         .catalogue
@@ -319,19 +319,21 @@ where
                             present,
                         )?
                         else {
-                            self.database.register_variant_ignore_case(
+                            self.database
+                                .register_variant_ignore_case(
+                                    &storage_table,
+                                    &projection_target,
+                                    tag,
+                                )?;
+                            continue;
+                        };
+                        self.database
+                            .register_variant_case(
                                 &storage_table,
                                 &projection_target,
                                 tag,
+                                fields,
                             )?;
-                            continue;
-                        };
-                        self.database.register_variant_case(
-                            &storage_table,
-                            &projection_target,
-                            tag,
-                            fields,
-                        )?;
                     }
                 }
             }
@@ -339,7 +341,9 @@ where
         Ok(())
     }
 
-    pub(super) fn register_physical_current_variant_projections(&mut self) -> Result<(), Error> {
+    pub(super) async fn register_physical_current_variant_projections(
+        &mut self,
+    ) -> Result<(), Error> {
         let targets = self
             .catalogue
             .physical_mappings
@@ -375,11 +379,9 @@ where
                     &physical_names,
                     self.database.table_schema(storage_table)?,
                 )?;
-                self.database.define_variant_projection(
-                    storage_table,
-                    &projection_target,
-                    output,
-                )?;
+                self.database
+                    .define_variant_projection(storage_table, &projection_target, output)
+                    ?;
             }
 
             let sources = self
@@ -425,18 +427,20 @@ where
                     )?;
                     for storage_table in &storage_tables {
                         if let Some(fields) = fields.clone() {
-                            self.database.register_variant_case(
-                                storage_table,
-                                &projection_target,
-                                tag,
-                                fields,
-                            )?;
+                            self.database
+                                .register_variant_case(
+                                    storage_table,
+                                    &projection_target,
+                                    tag,
+                                    fields,
+                                )?;
                         } else {
-                            self.database.register_variant_ignore_case(
-                                storage_table,
-                                &projection_target,
-                                tag,
-                            )?;
+                            self.database
+                                .register_variant_ignore_case(
+                                    storage_table,
+                                    &projection_target,
+                                    tag,
+                                )?;
                         }
                     }
                 }
@@ -592,7 +596,7 @@ where
     /// Register the common physical descriptor used to choose the latest
     /// Global/Ahead version before a query-local old-schema projection can
     /// omit an unrepresentable enum case.
-    pub(super) fn ensure_physical_current_winner_projection(
+    pub(super) async fn ensure_physical_current_winner_projection(
         &mut self,
         target_schema: SchemaVersionId,
         target_table_name: &str,
@@ -653,7 +657,8 @@ where
                 output_fields = Some(fields);
             }
             self.database
-                .define_variant_projection(storage_table, &projection_target, output)?;
+                .define_variant_projection(storage_table, &projection_target, output)
+                ?;
         }
 
         let sources = self
@@ -749,12 +754,13 @@ where
                             }
                         })
                         .collect::<Result<Vec<_>, _>>()?;
-                    self.database.refresh_variant_case_for_registry_evolution(
-                        storage_table,
-                        &projection_target,
-                        tag,
-                        fields,
-                    )?;
+                    self.database
+                        .refresh_variant_case_for_registry_evolution(
+                            storage_table,
+                            &projection_target,
+                            tag,
+                            fields,
+                        )?;
                 }
             }
         }
@@ -941,7 +947,7 @@ where
         ))
     }
 
-    pub(super) fn synchronize_physical_version_tables(&mut self) -> Result<(), Error> {
+    pub(super) async fn synchronize_physical_version_tables(&mut self) -> Result<(), Error> {
         for desired in physical_version_storage_tables(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
@@ -973,11 +979,12 @@ where
                 if existing.variant(schema_version.tag).is_some() {
                     continue;
                 }
-                self.database.register_table_variant_with_columns(
-                    &desired.name,
-                    added_columns.clone(),
-                    schema_version,
-                )?;
+                self.database
+                    .register_table_variant_with_columns(
+                        &desired.name,
+                        added_columns.clone(),
+                        schema_version,
+                    )?;
             }
             for index in desired.indices {
                 if existing
@@ -987,18 +994,20 @@ where
                 {
                     continue;
                 }
-                self.database.register_table_index(&desired.name, index)?;
+                self.database
+                    .register_table_index(&desired.name, index)
+                    .await?;
             }
         }
-        self.register_physical_history_variant_projections()?;
-        self.register_physical_current_variant_projections()?;
-        self.register_physical_current_winner_projections()
+        self.register_physical_history_variant_projections().await?;
+        self.register_physical_current_variant_projections().await?;
+        self.register_physical_current_winner_projections().await
     }
 
     /// Keep the raw Global/Ahead winner targets live as the physical enum
     /// registries evolve, so a subsequent query-local lowering pass can read
     /// every newly introduced source variant.
-    fn register_physical_current_winner_projections(&mut self) -> Result<(), Error> {
+    async fn register_physical_current_winner_projections(&mut self) -> Result<(), Error> {
         let targets = self
             .catalogue
             .physical_mappings
@@ -1011,7 +1020,8 @@ where
             })
             .collect::<BTreeSet<_>>();
         for (schema_version, table_name) in targets {
-            self.ensure_physical_current_winner_projection(schema_version, &table_name)?;
+            self.ensure_physical_current_winner_projection(schema_version, &table_name)
+                .await?;
         }
         Ok(())
     }

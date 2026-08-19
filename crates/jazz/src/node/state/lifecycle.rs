@@ -3,11 +3,11 @@ where
     S: OrderedKvStorage,
 {
     /// Open or create a node over the supplied storage.
-    pub fn new(node_uuid: NodeUuid, schema: JazzSchema, storage: S) -> Result<Self, Error>
+    pub async fn new(node_uuid: NodeUuid, schema: JazzSchema, storage: S) -> Result<Self, Error>
     where
         S: ReopenableStorage,
     {
-        Self::new_with_history_complete(node_uuid, schema, storage, false)
+        Self::new_with_history_complete(node_uuid, schema, storage, false).await
     }
 
     /// Open an edge-local runtime before it has received an authenticated
@@ -17,14 +17,14 @@ where
     /// durable genesis from `JazzSchema::empty()`.  Its only valid transition
     /// is installation of a trusted catalogue snapshot; application reads,
     /// writes, and current-schema access fail closed beforehand.
-    pub(crate) fn new_catalogue_uninitialized(
+    pub(crate) async fn new_catalogue_uninitialized(
         node_uuid: NodeUuid,
         storage: S,
     ) -> Result<Self, Error>
     where
         S: ReopenableStorage,
     {
-        let (storage, durable_genesis) = Self::discover_durable_catalogue_genesis(storage)?;
+        let (storage, durable_genesis) = Self::discover_durable_catalogue_genesis(storage).await?;
         if let Some(schema) = durable_genesis {
             // A fresh process cannot assume the temporary empty schema it
             // would use for an uninitialized edge.  Recover the authority
@@ -39,7 +39,8 @@ where
                 CatalogueBootstrapState::Ready,
                 #[cfg(feature = "testing")]
                 None,
-            );
+            )
+            .await;
         }
         Self::new_with_options_inner(
             node_uuid,
@@ -50,13 +51,16 @@ where
             #[cfg(feature = "testing")]
             None,
         )
+        .await
     }
 
     /// Read only the fixed catalogue metadata layout to discover an already
     /// durable authority genesis before choosing an application schema for a
     /// fresh process.  This is the inverse of the uninitialized constructor:
     /// it never uses `JazzSchema::empty()` as a genesis candidate.
-    fn discover_durable_catalogue_genesis(storage: S) -> Result<(S, Option<JazzSchema>), Error> {
+    async fn discover_durable_catalogue_genesis(
+        storage: S,
+    ) -> Result<(S, Option<JazzSchema>), Error> {
         let bootstrap_schema = JazzSchema::empty();
         // Dynamic discovery must inspect the fixed history/branch/fate stores
         // too: an empty catalogue does not make an existing Jazz store safe to
@@ -66,14 +70,18 @@ where
             meta_schema,
             storage,
             StorageLayout::jazz_class_v1(),
-        )?;
+        )
+        .await?;
         let mut genesis = None;
         let mut schemas = BTreeMap::new();
         let mut bootstrap_ready = None;
         let mut staged_lineages = BTreeMap::new();
         let mut active_lineages = BTreeMap::new();
         let mut has_catalogue_residue = false;
-        for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {
+        for raw in meta_database
+            .primary_key_scan_raw("jazz_catalogue", &[])
+            .await?
+        {
             has_catalogue_residue = true;
             let record = raw.record();
             match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
@@ -144,7 +152,8 @@ where
             }
         }
         let mapping_ids = meta_database
-            .primary_key_scan_raw("jazz_schema_versions", &[])?
+            .primary_key_scan_raw("jazz_schema_versions", &[])
+            .await?
             .into_iter()
             .map(|raw| {
                 Ok(SchemaVersionId(
@@ -154,7 +163,8 @@ where
             })
             .collect::<Result<BTreeSet<_>, Error>>()?;
         let durable_pointer = meta_database
-            .primary_key_last_raw("jazz_catalogue_pointer", &[])?
+            .primary_key_last_raw("jazz_catalogue_pointer", &[])
+            .await?
             .map(|raw| {
                 let record = raw.record();
                 Ok::<CurrentWriteSchema, Error>(CurrentWriteSchema {
@@ -174,7 +184,11 @@ where
             "jazz_global_changes",
             "jazz_deletion_history",
         ] {
-            if !meta_database.primary_key_scan_raw(table, &[])?.is_empty() {
+            if !meta_database
+                .primary_key_scan_raw(table, &[])
+                .await?
+                .is_empty()
+            {
                 has_non_catalogue_residue = true;
                 break;
             }
@@ -274,7 +288,7 @@ where
     /// Ordinary downstream clients should use [`NodeState::new`], which fails
     /// historical handle reads closed until a complete-history subscription
     /// path marks the queried shape complete in a later slice.
-    pub fn new_history_complete(
+    pub async fn new_history_complete(
         node_uuid: NodeUuid,
         schema: JazzSchema,
         storage: S,
@@ -282,11 +296,11 @@ where
     where
         S: ReopenableStorage,
     {
-        Self::new_with_history_complete(node_uuid, schema, storage, true)
+        Self::new_with_history_complete(node_uuid, schema, storage, true).await
     }
 
     /// Rebuild the groove layer over the same storage using the standard open path.
-    pub fn reopen_in_place(self) -> Result<Self, Error>
+    pub async fn reopen_in_place(self) -> Result<Self, Error>
     where
         S: ReopenableStorage,
     {
@@ -301,19 +315,20 @@ where
         let storage = database.into_inner().into_storage();
         let reopened = match catalogue_bootstrap_state {
             CatalogueBootstrapState::Uninitialized => {
-                Self::new_catalogue_uninitialized(node_uuid, storage)?
+                Self::new_catalogue_uninitialized(node_uuid, storage).await?
             }
             CatalogueBootstrapState::Ready => Self::new_with_history_complete(
                 node_uuid,
                 catalogue.schema,
                 storage,
                 history_complete,
-            )?,
+            )
+            .await?,
         };
         Ok(reopened)
     }
 
-    fn new_with_history_complete(
+    async fn new_with_history_complete(
         node_uuid: NodeUuid,
         schema: JazzSchema,
         storage: S,
@@ -322,10 +337,10 @@ where
     where
         S: ReopenableStorage,
     {
-        Self::new_with_options(node_uuid, schema, storage, history_complete)
+        Self::new_with_options(node_uuid, schema, storage, history_complete).await
     }
 
-    fn new_with_options(
+    async fn new_with_options(
         node_uuid: NodeUuid,
         schema: JazzSchema,
         storage: S,
@@ -343,11 +358,12 @@ where
             #[cfg(feature = "testing")]
             None,
         )
+        .await
     }
 
     #[cfg(feature = "testing")]
     /// Open a node and attribute durable recovery without changing open semantics.
-    pub fn new_with_open_receipt_for_test(
+    pub async fn new_with_open_receipt_for_test(
         node_uuid: NodeUuid,
         schema: JazzSchema,
         storage: S,
@@ -364,11 +380,12 @@ where
             history_complete,
             CatalogueBootstrapState::Ready,
             Some(&mut receipt),
-        )?;
+        )
+        .await?;
         Ok((node, receipt))
     }
 
-    fn new_with_options_inner(
+    async fn new_with_options_inner(
         node_uuid: NodeUuid,
         schema: JazzSchema,
         storage: S,
@@ -397,7 +414,7 @@ where
             next_physical_column_id,
             current_write_schema,
             catalogue_bootstrap_marker,
-        } = Self::open_catalogue_stage(schema.clone(), storage, catalogue_bootstrap_state)?;
+        } = Self::open_catalogue_stage(schema.clone(), storage, catalogue_bootstrap_state).await?;
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.catalogue_open = started.elapsed();
@@ -421,7 +438,8 @@ where
             &registration_aliases,
             &registration_mappings,
             storage,
-        )?;
+        )
+        .await?;
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.database_open = started.elapsed();
@@ -451,7 +469,7 @@ where
                     ],
                 );
             }
-            database.commit_batch(batch)?;
+            database.commit_batch(batch).await?;
             schemas.insert(
                 staged.publication.schema.id,
                 staged.publication.schema.clone(),
@@ -571,24 +589,25 @@ where
             .copied()
             .collect::<Vec<_>>();
         for schema_version in known_schema_versions {
-            node.ensure_provisional_physical_mapping(schema_version)?;
+            node.ensure_provisional_physical_mapping(schema_version)
+                .await?;
         }
-        node.synchronize_physical_version_tables()?;
+        node.synchronize_physical_version_tables().await?;
         node.drain_pending_schema_lineages()?;
         node.drain_pending_catalogue_pointers()?;
         #[cfg(feature = "testing")]
         if let Some(receipt) = receipt.as_deref_mut() {
             let started = Instant::now();
-            node.recover_from_storage_with_receipt(receipt)?;
+            node.recover_from_storage_with_receipt(receipt).await?;
             receipt.recover_storage = started.elapsed();
         } else {
-            node.recover_from_storage()?;
+            node.recover_from_storage().await?;
         }
         #[cfg(not(feature = "testing"))]
-        node.recover_from_storage()?;
+        node.recover_from_storage().await?;
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
-        node.recover_known_state_facts()?;
+        node.recover_known_state_facts().await?;
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.recover_known_state = started.elapsed();
@@ -597,21 +616,23 @@ where
         let started = receipt.as_ref().map(|_| Instant::now());
         #[cfg(feature = "testing")]
         if let Some(receipt) = receipt.as_deref_mut() {
-            node.rebuild_ahead_current_keys_with_receipt(receipt)?;
+            node.rebuild_ahead_current_keys_with_receipt(receipt).await?;
         } else {
-            node.rebuild_ahead_current_keys()?;
+            node.rebuild_ahead_current_keys().await?;
         }
         #[cfg(not(feature = "testing"))]
-        node.rebuild_ahead_current_keys()?;
+        node.rebuild_ahead_current_keys().await?;
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.rebuild_ahead_current = started.elapsed();
         }
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
-        let self_node_alias = node.ensure_node_alias(node_uuid)?;
+        let self_node_alias = node.ensure_node_alias(node_uuid).await?;
         node.self_node_alias = Some(self_node_alias);
-        let schema_alias = node.ensure_schema_version_alias(current_schema_version_id)?;
+        let schema_alias = node
+            .ensure_schema_version_alias(current_schema_version_id)
+            .await?;
         node.catalogue.current_schema_version_alias = Some(schema_alias);
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
@@ -620,7 +641,7 @@ where
         Ok(node)
     }
 
-    fn open_full_database(
+    async fn open_full_database(
         schema: &JazzSchema,
         catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
         schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
@@ -635,7 +656,9 @@ where
             physical_mappings,
         )?);
         let layout = StorageLayout::jazz_class_v1();
-        Database::new_with_storage_layout(lowered, storage, layout).map_err(Error::from)
+        Database::new_with_storage_layout(lowered, storage, layout)
+            .await
+            .map_err(Error::from)
     }
 
     pub(crate) fn committed_global_time(&self) -> GlobalTime {
@@ -710,7 +733,7 @@ where
         self.permissions_ready
     }
 
-    fn rebuild_database_slot(&mut self) -> Result<(), Error> {
+    async fn rebuild_database_slot(&mut self) -> Result<(), Error> {
         // Reopening the database refreshes Groove's physical table catalogue.
         // Parking is in-memory delivery state, not derivable from storage, so a
         // live refresh must retain it for the caller to drain afterwards.
@@ -723,10 +746,11 @@ where
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
             storage,
-        )?;
+        )
+        .await?;
         self.database.replace(database);
-        self.register_physical_history_variant_projections()?;
-        self.register_physical_current_variant_projections()?;
+        self.register_physical_history_variant_projections().await?;
+        self.register_physical_current_variant_projections().await?;
         self.groove_runtime_token = next_groove_runtime_token();
         self.invalidate_runtime_handles_after_database_rebuild();
         self.parking = parking;
@@ -831,7 +855,7 @@ where
             .remove(&binding_view_key);
     }
 
-    fn open_catalogue_stage(
+    async fn open_catalogue_stage(
         schema: JazzSchema,
         storage: S,
         catalogue_bootstrap_state: CatalogueBootstrapState,
@@ -842,7 +866,8 @@ where
             meta_schema,
             storage,
             StorageLayout::jazz_class_v1(),
-        )?;
+        )
+        .await?;
         let mut catalogue_schemas = BTreeMap::new();
         let mut catalogue_lenses = BTreeMap::new();
         let mut staged_lineages_by_id = BTreeMap::new();
@@ -851,7 +876,10 @@ where
         let mut pending_write_pointers = BTreeMap::new();
         let mut genesis_schema = None;
         let mut catalogue_bootstrap_ready = None;
-        for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {
+        for raw in meta_database
+            .primary_key_scan_raw("jazz_catalogue", &[])
+            .await?
+        {
             let record = raw.record();
             match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
                 b"schema" => {
@@ -1014,7 +1042,10 @@ where
             .unwrap_or(0);
         let mut schema_version_aliases = BTreeMap::new();
         let mut physical_mappings = BTreeMap::new();
-        for raw in meta_database.primary_key_scan_raw("jazz_schema_versions", &[])? {
+        for raw in meta_database
+            .primary_key_scan_raw("jazz_schema_versions", &[])
+            .await?
+        {
             let record = raw.record();
             let mapping: SchemaPhysicalMapping = serde_json::from_slice(
                 record.get_bytes(SchemaVersionAliasRowRecord::FIELD_PHYSICAL_MAPPING_IDX)?,
@@ -1152,7 +1183,7 @@ where
                     current_schema_version_id,
                     &mapping,
                 )?;
-                meta_database.commit_batch(batch)?;
+                meta_database.commit_batch(batch).await?;
             }
             schema_version_aliases.insert(current_schema_version_id, alias);
             physical_mappings.insert(current_schema_version_id, mapping);
@@ -1161,7 +1192,10 @@ where
             revision: 0,
             schema: current_schema_version_id,
         };
-        if let Some(raw) = meta_database.primary_key_last_raw("jazz_catalogue_pointer", &[])? {
+        if let Some(raw) = meta_database
+            .primary_key_last_raw("jazz_catalogue_pointer", &[])
+            .await?
+        {
             let record = raw.record();
             current_write_schema = CurrentWriteSchema {
                 revision: record.get_u64(CataloguePointerRowRecord::FIELD_REVISION_IDX)?,

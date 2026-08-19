@@ -616,14 +616,14 @@ where
         Ok(())
     }
 
-    fn recover_known_state_facts(&mut self) -> Result<(), Error> {
+    async fn recover_known_state_facts(&mut self) -> Result<(), Error> {
         self.query.settled_through_by_binding_view.clear();
         self.query.authorization_progress_by_binding_view.clear();
         self.query.settled_result_sets.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        for entry in store.prefix_entries(&[])? {
+        for entry in store.prefix_entries(&[]).await? {
             if entry.key.len() != 3 {
                 return Err(Error::InvalidStoredValue(
                     "known-state fact key must have three columns",
@@ -683,7 +683,7 @@ where
             .database
             .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
         let mut recovered_members = Vec::new();
-        for entry in store.prefix_entries(&[])? {
+        for entry in store.prefix_entries(&[]).await? {
             if entry.key.len() != 4 {
                 return Err(Error::InvalidStoredValue(
                     "settled result member key must have four columns",
@@ -714,7 +714,7 @@ where
         let store = self
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
-        for entry in store.prefix_entries(&[])? {
+        for entry in store.prefix_entries(&[]).await? {
             if entry.key.len() != 4 {
                 return Err(Error::InvalidStoredValue(
                     "settled program fact key must have four columns",
