@@ -14,6 +14,7 @@ use crate::storage::OwnedStorage;
 /// bridge; moving that traversal into an explicit node work queue is the next,
 /// deliberately separate step.
 struct EvaluationSession {
+    relevant_nodes: HashSet<NodeId>,
     runnable_roots: VecDeque<NodeId>,
     outputs: HashMap<NodeId, RecordDeltas>,
     operator_states: HashMap<OperatorStateKey, OperatorState>,
@@ -25,26 +26,80 @@ struct EvaluationSession {
 }
 
 impl EvaluationSession {
-    fn hydration(runtime: &IvmRuntime, root: NodeId) -> Self {
-        Self {
-            runnable_roots: VecDeque::from([root]),
-            outputs: HashMap::default(),
-            operator_states: runtime.operator_states.clone(),
-            arrangement_states: runtime.arrangement_states.clone(),
-            eval_memo: runtime.eval_memo.clone(),
-            eval_memo_bytes: runtime.eval_memo_bytes,
-            memo_use_clock: runtime.memo_use_clock,
-            node_meta: runtime.node_meta.clone(),
+    fn hydration(runtime: &IvmRuntime, roots: VecDeque<NodeId>) -> Result<Self, IvmRuntimeError> {
+        let mut relevant_nodes = HashSet::default();
+        let mut pending = roots.iter().copied().collect::<Vec<_>>();
+        while let Some(node) = pending.pop() {
+            if !relevant_nodes.insert(node) {
+                continue;
+            }
+            let graph_node = runtime
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            pending.extend(graph_node.descriptor.inputs.iter().copied());
         }
+        let operator_states = runtime
+            .operator_states
+            .iter()
+            .filter(|(key, _)| relevant_nodes.contains(&key.node))
+            .map(|(key, state)| (key.clone(), state.clone()))
+            .collect();
+        let arrangement_states = runtime
+            .arrangement_states
+            .iter()
+            .filter(|(key, _)| relevant_nodes.contains(&key.input))
+            .map(|(key, state)| (key.clone(), state.clone()))
+            .collect();
+        let eval_memo = runtime
+            .eval_memo
+            .iter()
+            .filter(|(key, _)| relevant_nodes.contains(&key.node))
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect::<HashMap<_, _>>();
+        let eval_memo_bytes = eval_memo.values().map(|entry| entry.payload_bytes).sum();
+        let node_meta = runtime
+            .node_meta
+            .iter()
+            .filter(|(node, _)| relevant_nodes.contains(node))
+            .map(|(node, meta)| (*node, meta.clone()))
+            .collect();
+        Ok(Self {
+            relevant_nodes,
+            runnable_roots: roots,
+            outputs: HashMap::default(),
+            operator_states,
+            arrangement_states,
+            eval_memo,
+            eval_memo_bytes,
+            memo_use_clock: runtime.memo_use_clock,
+            node_meta,
+        })
     }
 
     fn install(self, runtime: &mut IvmRuntime) {
-        runtime.operator_states = self.operator_states;
-        runtime.arrangement_states = self.arrangement_states;
-        runtime.eval_memo = self.eval_memo;
-        runtime.eval_memo_bytes = self.eval_memo_bytes;
+        runtime
+            .operator_states
+            .retain(|key, _| !self.relevant_nodes.contains(&key.node));
+        runtime.operator_states.extend(self.operator_states);
+        runtime
+            .arrangement_states
+            .retain(|key, _| !self.relevant_nodes.contains(&key.input));
+        runtime.arrangement_states.extend(self.arrangement_states);
+        runtime
+            .eval_memo
+            .retain(|key, _| !self.relevant_nodes.contains(&key.node));
+        runtime.eval_memo.extend(self.eval_memo);
+        runtime.eval_memo_bytes = runtime
+            .eval_memo
+            .values()
+            .map(|entry| entry.payload_bytes)
+            .sum();
         runtime.memo_use_clock = self.memo_use_clock;
-        runtime.node_meta = self.node_meta;
+        runtime
+            .node_meta
+            .retain(|node, _| !self.relevant_nodes.contains(node));
+        runtime.node_meta.extend(self.node_meta);
     }
 }
 
@@ -457,12 +512,10 @@ impl IvmRuntime {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut metrics = TickMetrics::default();
-        let first_root = roots
-            .front()
-            .copied()
-            .ok_or(IvmRuntimeError::UnsupportedOperator)?;
-        let mut session = EvaluationSession::hydration(self, first_root);
-        session.runnable_roots = roots;
+        if roots.is_empty() {
+            return Err(IvmRuntimeError::UnsupportedOperator);
+        }
+        let mut session = EvaluationSession::hydration(self, roots)?;
         let mut evaluation_inputs = EvaluationInputs::default();
         let mut storage_requests = StorageRequests::new(OwnedStorage::new(Rc::new(storage)));
         while !session.runnable_roots.is_empty() {
