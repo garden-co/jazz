@@ -9,35 +9,35 @@ use std::ops::{Deref, DerefMut};
 
 use groove::db::Database;
 
-pub(super) struct DatabaseSlot<S> {
-    database: Option<Database<S>>,
+pub(super) struct DatabaseSlot {
+    database: Option<Database>,
 }
 
-impl<S> DatabaseSlot<S> {
-    pub(super) fn new(database: Database<S>) -> Self {
+impl DatabaseSlot {
+    pub(super) fn new(database: Database) -> Self {
         Self {
             database: Some(database),
         }
     }
 
-    pub(super) fn take(&mut self) -> Database<S> {
+    pub(super) fn take(&mut self) -> Database {
         self.database
             .take()
             .expect("node database slot must be populated outside rebuild")
     }
 
-    pub(super) fn replace(&mut self, database: Database<S>) {
+    pub(super) fn replace(&mut self, database: Database) {
         debug_assert!(self.database.is_none());
         self.database = Some(database);
     }
 
-    pub(super) fn into_inner(mut self) -> Database<S> {
+    pub(super) fn into_inner(mut self) -> Database {
         self.take()
     }
 }
 
-impl<S> Deref for DatabaseSlot<S> {
-    type Target = Database<S>;
+impl Deref for DatabaseSlot {
+    type Target = Database;
 
     fn deref(&self) -> &Self::Target {
         self.database
@@ -46,7 +46,7 @@ impl<S> Deref for DatabaseSlot<S> {
     }
 }
 
-impl<S> DerefMut for DatabaseSlot<S> {
+impl DerefMut for DatabaseSlot {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.database
             .as_mut()

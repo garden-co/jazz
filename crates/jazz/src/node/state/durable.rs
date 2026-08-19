@@ -820,7 +820,7 @@ where
     }
 
     /// Consume the node and return the underlying groove database.
-    pub fn into_database(self) -> Database<S> {
+    pub fn into_database(self) -> Database {
         self.database.into_inner()
     }
 
