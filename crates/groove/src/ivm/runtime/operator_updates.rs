@@ -270,18 +270,15 @@ impl NodeState {
         })
     }
 
-    pub(super) async fn update_index_source<S>(
+    pub(super) async fn update_index_source(
         input: &IndexSourceOp,
         schema: &DatabaseSchema,
         variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
         output_desc: &RecordDescriptor,
         table_deltas: &[TableDelta],
-        storage: Option<&S>,
+        storage: Option<&dyn OrderedKvStorage>,
         eval_mode: EvalMode,
-    ) -> Result<RecordDeltas, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
         if eval_mode == EvalMode::Hydrate {
             let storage = storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
             let store = RecordStore::new(storage, "indices", output_desc);

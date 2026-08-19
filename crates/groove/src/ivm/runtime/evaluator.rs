@@ -150,7 +150,7 @@ pub(super) struct RootOrderingWindows {
     pub(super) after: BTreeMap<Vec<u8>, usize>,
 }
 
-pub(super) struct TickEvaluator<'a, S> {
+pub(super) struct TickEvaluator<'a> {
     pub(super) schema: &'a DatabaseSchema,
     pub(super) graph: &'a IvmGraph,
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
@@ -167,7 +167,7 @@ pub(super) struct TickEvaluator<'a, S> {
     pub(super) binding_frontiers: &'a HashMap<String, u64>,
     pub(super) memo_use_clock: &'a mut u64,
     pub(super) node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
-    pub(super) storage: Option<&'a S>,
+    pub(super) storage: Option<&'a dyn OrderedKvStorage>,
     pub(super) evaluation_inputs: Option<&'a mut super::evaluation_session::EvaluationInputs>,
     pub(super) context: EvalContext,
     pub(super) metrics: &'a mut TickMetrics,
@@ -180,7 +180,7 @@ pub(super) struct TickEvaluator<'a, S> {
 
 /// Borrowed runtime pieces used by recursive evaluation to run child graphs.
 /// This avoids giving recursion ownership of the whole [`IvmRuntime`].
-pub(super) struct GraphRuntimeView<'a, S> {
+pub(super) struct GraphRuntimeView<'a> {
     pub(super) schema: &'a DatabaseSchema,
     pub(super) graph: &'a IvmGraph,
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
@@ -197,14 +197,14 @@ pub(super) struct GraphRuntimeView<'a, S> {
     pub(super) binding_frontiers: &'a HashMap<String, u64>,
     pub(super) memo_use_clock: &'a mut u64,
     pub(super) node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
-    pub(super) storage: &'a S,
+    pub(super) storage: &'a dyn OrderedKvStorage,
     pub(super) evaluation_inputs: Option<&'a mut super::evaluation_session::EvaluationInputs>,
     pub(super) scope: ScopeId,
     pub(super) metrics: &'a mut TickMetrics,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn graph_runtime_view<'a, S>(
+fn graph_runtime_view<'a>(
     schema: &'a DatabaseSchema,
     graph: &'a IvmGraph,
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
@@ -221,11 +221,11 @@ fn graph_runtime_view<'a, S>(
     binding_frontiers: &'a HashMap<String, u64>,
     memo_use_clock: &'a mut u64,
     node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
-    storage: &'a S,
+    storage: &'a dyn OrderedKvStorage,
     evaluation_inputs: Option<&'a mut super::evaluation_session::EvaluationInputs>,
     scope: ScopeId,
     metrics: &'a mut TickMetrics,
-) -> GraphRuntimeView<'a, S> {
+) -> GraphRuntimeView<'a> {
     GraphRuntimeView {
         schema,
         graph,
@@ -250,10 +250,7 @@ fn graph_runtime_view<'a, S>(
     }
 }
 
-impl<'a, S> GraphRuntimeView<'a, S>
-where
-    S: OrderedKvStorage,
-{
+impl GraphRuntimeView<'_> {
     pub(super) async fn eval_with_binding(
         &mut self,
         sub_tick: u64,
@@ -389,10 +386,7 @@ where
     }
 }
 
-impl<S> TickEvaluator<'_, S>
-where
-    S: OrderedKvStorage,
-{
+impl TickEvaluator<'_> {
     pub(super) fn apply_root_ordering(
         &self,
         ordering_node: NodeId,

@@ -1232,7 +1232,7 @@ pub trait StorageFactory: std::fmt::Debug {
 }
 
 /// Typed view over one storage column family.
-pub struct RecordStore<'a, S> {
+pub struct RecordStore<'a, S: ?Sized> {
     storage: &'a S,
     /// One table or durable index column family.
     column_family: &'a str,
@@ -1240,7 +1240,7 @@ pub struct RecordStore<'a, S> {
     descriptor: &'a RecordDescriptor,
 }
 
-impl<'a, S> RecordStore<'a, S>
+impl<'a, S: ?Sized> RecordStore<'a, S>
 where
     S: OrderedKvStorage,
 {
