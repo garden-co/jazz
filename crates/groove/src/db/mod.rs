@@ -18,8 +18,8 @@ use web_time::{Duration, Instant};
 
 use crate::ivm::runtime::{durable_index_key_prefix, encode_key_part};
 use crate::ivm::{
-    IvmRuntime, PlannerError, QueryParameter, RecordDelta, RecordDeltas, RuntimeStats, TableDelta,
-    TickMetrics, plan_prepared_shape, plan_query,
+    IvmRuntime, PlannerError, PublicationId, QueryParameter, RecordDelta, RecordDeltas,
+    RuntimeStats, TableDelta, TickMetrics, plan_prepared_shape, plan_query,
 };
 use crate::queries::Query;
 use crate::records::{
@@ -54,6 +54,8 @@ pub struct Database<S> {
     /// remaining one externally atomic publication. Notifications stay queued
     /// until the outermost host scope completes.
     durable_publication_state: Arc<Mutex<DurablePublicationState>>,
+    next_publication_id: u64,
+    durable_publication_frontier: Option<PublicationId>,
     poisoned: bool,
 }
 

@@ -7,6 +7,17 @@ use std::sync::Mutex;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SubscriptionId(pub(super) u64);
 
+/// Monotone identity of one resident database publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PublicationId(pub u64);
+
+/// Incremental terminal output together with the publication that produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicationUpdate<T> {
+    pub publication: Option<PublicationId>,
+    pub deltas: T,
+}
+
 impl SubscriptionId {
     pub(super) fn retainer_key(self) -> String {
         self.0.to_string()
@@ -101,6 +112,15 @@ impl Subscription {
             .map(|deltas| self.extract_sink_deltas(deltas))
     }
 
+    pub fn recv_with_publication(&self) -> Result<PublicationUpdate<RecordDeltas>, RecvError> {
+        self.inner
+            .recv_with_publication()
+            .map(|update| PublicationUpdate {
+                publication: update.publication,
+                deltas: self.extract_sink_deltas(update.deltas),
+            })
+    }
+
     pub fn try_recv(&self) -> Result<RecordDeltas, TryRecvError> {
         if let Some(initial) = self.take_initial() {
             return Ok(initial);
@@ -108,6 +128,17 @@ impl Subscription {
         self.inner
             .try_recv()
             .map(|deltas| self.extract_sink_deltas(deltas))
+    }
+
+    pub fn try_recv_with_publication(
+        &self,
+    ) -> Result<PublicationUpdate<RecordDeltas>, TryRecvError> {
+        self.inner
+            .try_recv_with_publication()
+            .map(|update| PublicationUpdate {
+                publication: update.publication,
+                deltas: self.extract_sink_deltas(update.deltas),
+            })
     }
 
     /// Take the complete value captured when this terminal session opened.
@@ -145,11 +176,15 @@ pub(super) struct QueuedMultisinkDeltas {
     // it. The initial snapshot is owned separately by MultisinkSubscription.
     // Eval memo is only a recompute cache and may be evicted independently.
     pub(super) deltas: MultisinkDeltas,
+    pub(super) publication: Option<PublicationId>,
 }
 
 impl QueuedMultisinkDeltas {
     pub(super) fn new(deltas: MultisinkDeltas) -> Self {
-        Self { deltas }
+        Self {
+            deltas,
+            publication: None,
+        }
     }
 }
 
@@ -185,11 +220,39 @@ impl MultisinkSubscription {
         self.receiver.recv().map(|queued| queued.deltas)
     }
 
+    pub fn recv_with_publication(&self) -> Result<PublicationUpdate<MultisinkDeltas>, RecvError> {
+        if let Some(initial) = self.take_initial() {
+            return Ok(PublicationUpdate {
+                publication: None,
+                deltas: initial,
+            });
+        }
+        self.receiver.recv().map(|queued| PublicationUpdate {
+            publication: queued.publication,
+            deltas: queued.deltas,
+        })
+    }
+
     pub fn try_recv(&self) -> Result<MultisinkDeltas, TryRecvError> {
         if let Some(initial) = self.take_initial() {
             return Ok(initial);
         }
         self.receiver.try_recv().map(|queued| queued.deltas)
+    }
+
+    pub fn try_recv_with_publication(
+        &self,
+    ) -> Result<PublicationUpdate<MultisinkDeltas>, TryRecvError> {
+        if let Some(initial) = self.take_initial() {
+            return Ok(PublicationUpdate {
+                publication: None,
+                deltas: initial,
+            });
+        }
+        self.receiver.try_recv().map(|queued| PublicationUpdate {
+            publication: queued.publication,
+            deltas: queued.deltas,
+        })
     }
 
     /// Take the complete multisink value captured when this terminal session

@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use futures::executor::block_on;
 use futures::task::noop_waker;
 use groove::db::{Database, GraphBuilder};
-use groove::ivm::ProjectField;
+use groove::ivm::{ProjectField, PublicationId};
 use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -181,6 +181,41 @@ fn cancelled_storage_commit_does_not_publish_the_staged_tick() {
     );
     block_on(database.commit_batch(retry)).unwrap();
     assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+}
+
+#[test]
+fn committed_terminal_output_carries_its_durable_publication_identity() {
+    let (storage, _) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let subscription =
+        block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut first = database.open_batch();
+    first.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    block_on(database.commit_batch(first)).unwrap();
+    let first_update = subscription.recv_with_publication().unwrap();
+    assert_eq!(first_update.publication, Some(PublicationId(1)));
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(PublicationId(1))
+    );
+
+    let mut second = database.open_batch();
+    second.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Bitches Brew".into())],
+    );
+    block_on(database.commit_batch(second)).unwrap();
+    let second_update = subscription.recv_with_publication().unwrap();
+    assert_eq!(second_update.publication, Some(PublicationId(2)));
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(PublicationId(2))
+    );
 }
 
 #[test]
