@@ -313,7 +313,9 @@ where
         if binding.binding_id() != predicate.binding_id {
             return Ok(true);
         }
-        let at_base = self.shape_output_tx_set_at_snapshot(&shape, &binding, snapshot)?;
+        let at_base = self
+            .shape_output_tx_set_at_snapshot(&shape, &binding, snapshot)
+            .await?;
         let at_now = self.shape_output_tx_set_now(&shape, &binding).await?;
         Ok(at_base != at_now)
     }
@@ -325,7 +327,10 @@ where
     ) -> Result<BTreeSet<(RowUuid, TxId)>, Error> {
         let table = shape.query().table.clone();
         let mut set = BTreeSet::new();
-        for row in self.query_rows(shape, binding, DurabilityTier::Global)? {
+        for row in self
+            .query_rows(shape, binding, DurabilityTier::Global)
+            .await?
+        {
             if let Some(tx_id) = self.visible_global_content_tx_id_now(&table, row.row_uuid()).await {
                 set.insert((row.row_uuid(), tx_id));
             }
@@ -333,30 +338,33 @@ where
         Ok(set)
     }
 
-    fn shape_output_tx_set_at_snapshot(
+    async fn shape_output_tx_set_at_snapshot(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         snapshot: &Snapshot,
     ) -> Result<BTreeSet<(RowUuid, TxId)>, Error> {
         let table = shape.query().table.clone();
-        let rows = self.query_rows_at_snapshot(shape, binding, snapshot)?;
-        rows.into_iter()
-            .map(|row| {
-                let row_uuid = row.row_uuid();
-                let Some(tx_id) =
-                    self.snapshot_content_witness(&table, row_uuid, snapshot)
-                else {
+        let rows = self
+            .query_rows_at_snapshot(shape, binding, snapshot)
+            .await?;
+        let mut set = BTreeSet::new();
+        for row in rows {
+            let row_uuid = row.row_uuid();
+            let Some(tx_id) = self
+                .snapshot_content_witness(&table, row_uuid, snapshot)
+                .await
+            else {
                     return Err(Error::InvalidStoredValue(
                         "historical query output row must have visible content",
                     ));
-                };
-                Ok((row_uuid, tx_id))
-            })
-            .collect()
+            };
+            set.insert((row_uuid, tx_id));
+        }
+        Ok(set)
     }
 
-    pub(super) fn commit_unit_satisfies_write_policies(
+    pub(super) async fn commit_unit_satisfies_write_policies(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
@@ -375,19 +383,22 @@ where
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
         for version in versions {
-            if !self.version_satisfies_write_policy(version, permission_subject)? {
+            if !self
+                .version_satisfies_write_policy(version, permission_subject)
+                .await?
+            {
                 return Ok(false);
             }
         }
         Ok(true)
     }
 
-    pub(super) fn version_satisfies_write_policy(
+    pub(super) async fn version_satisfies_write_policy(
         &mut self,
         version: &VersionRecord,
         author: AuthorId,
     ) -> Result<bool, Error> {
-        self.write_policy_allows_version_record(version, author)
+        self.write_policy_allows_version_record(version, author).await
     }
 
     pub(super) async fn cascade_root_for_versions(
