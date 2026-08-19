@@ -8,16 +8,12 @@ function TodoApp() {
 
 // #region auth-localfirst-react
 export function LocalFirstAuthApp() {
-  const { secret, isLoading } = useLocalFirstAuth();
-
-  if (isLoading || !secret) return null;
-
   return (
     <JazzProvider
       config={{
         appId: "my-app",
-        secret,
       }}
+      auth="local-first"
     >
       <TodoApp />
     </JazzProvider>

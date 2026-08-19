@@ -843,7 +843,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
     }
     if (this.pendingTxs.has(id) || this.completedTxs.has(id)) {
-      throw new Error(`Begin transaction failed: batch ${id} has already been opened`);
+      throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
     const session = sessionFromWriteContext(sessionJson);
     this.applySessionClaims(session);
@@ -861,7 +861,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (pending.writes.length === 0 && pending.kind === "mergeable") {
       throw new Error(
-        "Commit transaction failed: empty mergeable batch has no committed unit; roll it back instead",
+        "Commit transaction failed: empty mergeable transaction has no committed unit; roll it back instead",
       );
     }
     let write: Write;
@@ -885,7 +885,7 @@ export class NativeRuntimeAdapter implements Runtime {
     batchId = await batchId;
     const write = this.writes.get(batchId);
     if (!write) {
-      throw new Error(`Wait for batch failed: unknown batch ${batchId}`);
+      throw new Error(`Wait for transaction failed: unknown transaction ${batchId}`);
     }
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
@@ -1586,7 +1586,7 @@ export class NativeRuntimeAdapter implements Runtime {
       pending.kind === "mergeable"
         ? this.db.attachMergeableTx(pending.id)
         : this.db.attachExclusiveTx?.(pending.id);
-    if (!tx) throw new Error("Native runtime does not support attached exclusive batches");
+    if (!tx) throw new Error("Native runtime does not support attached exclusive transactions");
     pending.txByView.set(this, tx);
     return tx;
   }
@@ -2255,9 +2255,9 @@ function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
 function txStateMessage(openBatchId: string, completedBatches: Map<string, CompletedTx>): string {
   const completed = completedBatches.get(openBatchId);
   if (completed?.state === "committed") {
-    return `open batch ${openBatchId} is already committed`;
+    return `open transaction ${openBatchId} is already committed`;
   }
-  return `open batch ${openBatchId} has already been completed or was never opened`;
+  return `open transaction ${openBatchId} has already been completed or was never opened`;
 }
 
 function commitTransactionMessage(
@@ -2318,9 +2318,6 @@ function readOptions(
   const options = optionsJson == null ? ({} as Record<string, unknown>) : JSON.parse(optionsJson);
   const readOptions: Record<string, unknown> = { tier: tier ?? "local" };
   if (includeDeleted) readOptions.include_deleted = true;
-  if (options.propagate === false && options.propagation == null) {
-    readOptions.propagation = "local_only";
-  }
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
   return readOptions;
@@ -2329,9 +2326,8 @@ function readOptions(
 function readPropagationIsFull(optionsJson?: string | null): boolean {
   if (optionsJson == null) return true;
   try {
-    const options = JSON.parse(optionsJson) as { propagation?: unknown; propagate?: unknown };
-    if (options.propagation != null) return options.propagation === "full";
-    return options.propagate !== false;
+    const options = JSON.parse(optionsJson) as { propagation?: unknown };
+    return options.propagation == null || options.propagation === "full";
   } catch {
     return true;
   }
@@ -2389,10 +2385,6 @@ function readSupportedReadOptions(optionsJson: string): void {
     throw new Error(
       `Native runtime does not support read propagation '${String(propagation)}' yet`,
     );
-  }
-  const propagate = parsed.propagate;
-  if (propagate != null && typeof propagate !== "boolean") {
-    throw new Error(`Native runtime does not support read propagate '${String(propagate)}' yet`);
   }
 }
 
@@ -2672,11 +2664,11 @@ function isPendingCoverageError(error: unknown): boolean {
 }
 
 function rejectedWaitError(
-  batchId: BatchId,
+  transactionId: BatchId,
   error: unknown,
 ): {
   kind: "rejected";
-  batchId: BatchId;
+  transactionId: BatchId;
   code: string;
   reason: string;
   /** An Error-compatible diagnostic for direct native callers. */
@@ -2686,13 +2678,13 @@ function rejectedWaitError(
   if (!message.includes("WriteRejected")) return null;
   const rejection: {
     kind: "rejected";
-    batchId: BatchId;
+    transactionId: BatchId;
     code: string;
     reason: string;
     message: string;
   } = {
     kind: "rejected",
-    batchId,
+    transactionId,
     code: rejectionCode(message),
     reason: rejectionReason(message),
     message,

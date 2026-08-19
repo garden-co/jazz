@@ -25,7 +25,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         ],
     )]);
     let view = owner.register_schema_view(schema.clone()).unwrap();
-    let open = OpenBatchId::new();
+    let open = OpenTransactionId::new();
     owner.begin_mergeable(open).unwrap();
     let inserted = row(0x91);
     view.mergeable_tx_ref(open)
@@ -78,7 +78,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         })
         .unwrap();
 
-    let overlay_open = OpenBatchId::new();
+    let overlay_open = OpenTransactionId::new();
     owner.begin_mergeable(overlay_open).unwrap();
     let overlay_inserted = row(0x93);
     let overlay_tx = view.mergeable_tx_ref(overlay_open);
@@ -270,6 +270,163 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
     let committed = db.read(&query).unwrap();
     assert_eq!(provenance(&committed, inserted), inserted_overlay);
     assert_eq!(provenance(&committed, existing), updated_overlay);
+}
+
+/// This stays internal because transaction overlays are not sync-visible. The
+/// point, table, and prepared-query paths are separate overlay consumers, so
+/// exercise all three with the same row UUID present in two logical tables.
+#[test]
+fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
+    fn table_schema(name: &str) -> TableSchema {
+        TableSchema::new(
+            name,
+            [
+                ColumnSchema::new("status", ColumnType::String),
+                ColumnSchema::new("value", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public())
+    }
+
+    fn cells(status: &str, value: &str) -> RowCells {
+        BTreeMap::from([
+            ("status".to_owned(), Value::String(status.to_owned())),
+            ("value".to_owned(), Value::String(value.to_owned())),
+        ])
+    }
+
+    fn visible_cells(
+        rows: Vec<CurrentRow>,
+        table_name: &str,
+        table: &TableSchema,
+    ) -> BTreeMap<RowUuid, RowCells> {
+        rows.into_iter()
+            .map(|row| {
+                assert_eq!(row.table(), table_name);
+                (
+                    row.row_uuid(),
+                    BTreeMap::from([
+                        (
+                            "status".to_owned(),
+                            row.cell(table, "status").expect("status cell"),
+                        ),
+                        (
+                            "value".to_owned(),
+                            row.cell(table, "value").expect("value cell"),
+                        ),
+                    ]),
+                )
+            })
+            .collect()
+    }
+
+    fn assert_reads<T>(
+        tx: &T,
+        table_name: &str,
+        table: &TableSchema,
+        filtered: &PreparedQuery,
+        shared_row: RowUuid,
+        expected_shared: &RowCells,
+        expected_all: BTreeMap<RowUuid, RowCells>,
+    ) where
+        T: ExclusiveTxOps<RocksDbStorage>,
+    {
+        assert_eq!(
+            tx.read(table_name, shared_row).unwrap().as_ref(),
+            Some(expected_shared)
+        );
+        assert_eq!(
+            visible_cells(tx.all(table_name).unwrap(), table_name, table),
+            expected_all
+        );
+        assert_eq!(
+            visible_cells(tx.all_prepared(filtered).unwrap(), table_name, table),
+            BTreeMap::from([(shared_row, expected_shared.clone())])
+        );
+    }
+
+    let schema = JazzSchema::new([table_schema("table_a"), table_schema("table_b")]);
+    let db = open_db(0x5e, AuthorId::SYSTEM, &schema);
+    let table_a = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "table_a")
+        .unwrap();
+    let table_b = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "table_b")
+        .unwrap();
+    let shared_row = row(0x44);
+    let other_a = row(0xa1);
+    let other_b = row(0xb1);
+    let current_a = cells("selected", "table A current");
+    let current_b = cells("selected", "table B current");
+    let nonmatching_a = cells("ignored", "table A nonmatching");
+    let nonmatching_b = cells("ignored", "table B nonmatching");
+
+    for (table, row_uuid, row_cells) in [
+        ("table_a", shared_row, current_a.clone()),
+        ("table_a", other_a, nonmatching_a.clone()),
+        ("table_b", shared_row, current_b.clone()),
+        ("table_b", other_b, nonmatching_b.clone()),
+    ] {
+        let write = db.insert_with_id(table, row_uuid, row_cells).unwrap();
+        block_on(write.wait(DurabilityTier::Local)).unwrap();
+    }
+
+    let filtered_a = db
+        .prepare_query(
+            &db.table("table_a")
+                .filter(eq(col("status"), lit("selected"))),
+        )
+        .unwrap();
+    let filtered_b = db
+        .prepare_query(
+            &db.table("table_b")
+                .filter(eq(col("status"), lit("selected"))),
+        )
+        .unwrap();
+    let tx = db.exclusive_tx().unwrap();
+    let pending_a = cells("selected", "table A pending");
+    tx.insert_with_id("table_a", shared_row, pending_a.clone())
+        .unwrap();
+
+    assert_reads(
+        &tx,
+        "table_b",
+        table_b,
+        &filtered_b,
+        shared_row,
+        &current_b,
+        BTreeMap::from([
+            (shared_row, current_b.clone()),
+            (other_b, nonmatching_b.clone()),
+        ]),
+    );
+
+    let pending_b = cells("selected", "table B pending");
+    tx.insert_with_id("table_b", shared_row, pending_b.clone())
+        .unwrap();
+    assert_reads(
+        &tx,
+        "table_a",
+        table_a,
+        &filtered_a,
+        shared_row,
+        &pending_a,
+        BTreeMap::from([(shared_row, pending_a.clone()), (other_a, nonmatching_a)]),
+    );
+    assert_reads(
+        &tx,
+        "table_b",
+        table_b,
+        &filtered_b,
+        shared_row,
+        &pending_b,
+        BTreeMap::from([(shared_row, pending_b.clone()), (other_b, nonmatching_b)]),
+    );
 }
 
 #[test]
@@ -555,7 +712,7 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
         .unwrap();
     builder_tx.commit().unwrap();
 
-    let open_tx = OpenBatchId::new();
+    let open_tx = OpenTransactionId::new();
     handle.begin_mergeable(open_tx).unwrap();
     {
         let tx = handle.mergeable_tx_ref(open_tx);
@@ -660,7 +817,7 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
     db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
         .unwrap();
 
-    let open_tx = OpenBatchId::new();
+    let open_tx = OpenTransactionId::new();
     db.begin_exclusive(open_tx).unwrap();
     {
         let tx = db.exclusive_tx_ref(open_tx);

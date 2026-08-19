@@ -660,7 +660,7 @@ These are designed but not landed:
   no-identity-platform modes (ch. 9) and `accept_subscriber` admission policy are
   not yet represented.
 - 🔶 **Exclusive transaction handles in the binding ABI.** The binding ABI opens
-  real core `OpenBatchId`/open-exclusive state through a small internal handle API
+  real core `OpenTransactionId`/open-exclusive state through a small internal handle API
   for write-side exclusive transactions. They are not faked by replaying staged
   point writes at commit time. Tx reads, restore behavior, multi-row
   `WriteStarted` row ids, and rejected-write wait semantics for unmet higher

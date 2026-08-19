@@ -45,12 +45,12 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                 ("huge", BIG_SAFE_PLUS_ONE),
             ];
             for (label, amount) in rows {
-                let (_, _, batch_id) = client
+                let (_, _, transaction_id) = client
                     .insert("metrics", row_input!("label" => label, "amount" => amount))
                     .expect("insert bigint row");
                 client
-                    .wait_for_batch(
-                        batch_id.expect("ordinary mutation commits immediately"),
+                    .wait_for_transaction(
+                        transaction_id.expect("ordinary mutation commits immediately"),
                         DurabilityTier::EdgeServer,
                     )
                     .await
@@ -128,15 +128,15 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                 .expect("subscribe to BIGINT predicate");
             let mut log = Vec::new();
 
-            let (late_id, _, batch_id) = client
+            let (late_id, _, transaction_id) = client
                 .insert(
                     "metrics",
                     row_input!("label" => "later", "amount" => BIG_SAFE_PLUS_ONE + 1),
                 )
                 .expect("insert subscribed bigint row");
             client
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
                 .await

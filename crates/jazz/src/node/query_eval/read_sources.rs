@@ -723,7 +723,7 @@ where
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalSeq>,
-        open_tx_overlay: Option<OpenBatchId>,
+        open_tx_overlay: Option<OpenTransactionId>,
         branch_data: Option<BranchId>,
     ) -> Result<Option<DeletionRegisterSource>, SourceResolutionError> {
         if !request
@@ -775,7 +775,7 @@ where
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalSeq>,
-        open_tx_overlay: Option<OpenBatchId>,
+        open_tx_overlay: Option<OpenTransactionId>,
         branch_data: Option<BranchId>,
     ) -> Result<Option<ContentVersionSource>, SourceResolutionError> {
         if !request
@@ -2200,7 +2200,9 @@ where
         let query = shape.query();
         let mut access_paths = BTreeMap::new();
         let equalities = root_literal_equalities(query, binding)?;
-        if let Some(value) = equalities.get("id").cloned() {
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let has_declared_id = table.columns.iter().any(|column| column.name == "id");
+        if !has_declared_id && let Some(value) = equalities.get("id").cloned() {
             access_paths.insert(
                 root_source_id(&query.table),
                 CurrentAccessPath::PrimaryKey(vec![value]),
@@ -2263,9 +2265,7 @@ where
     ) -> Result<(), Error> {
         let table = self.table_in_schema(table_name, schema_version)?;
         let equalities = literal_equalities_for_filters(filters, binding)?;
-        if let Some(value) = equalities.get("id").cloned() {
-            access_paths.insert(source.clone(), CurrentAccessPath::PrimaryKey(vec![value]));
-        } else if let Some(access_path) = select_current_access_path(&table, &equalities)
+        if let Some(access_path) = select_current_access_path(&table, &equalities)
             && matches!(access_path, CurrentAccessPath::PrimaryKey(_))
         {
             access_paths.insert(source.clone(), access_path);
@@ -3060,4 +3060,35 @@ pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -
     );
     fields.push("authored_columns".to_owned());
     fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// This is an internal planner assertion because the selected physical
+    /// access path is not observable through the public query result. A
+    /// declared `id` must never be mistaken for the storage row UUID.
+    #[test]
+    fn declared_id_filter_does_not_select_the_physical_primary_key() {
+        let table = TableSchema::new("things", [ColumnSchema::new("id", ColumnType::Uuid)]);
+        let declared_id = uuid::Uuid::from_u128(0x99);
+        let equalities = BTreeMap::from([("id".to_owned(), Value::Uuid(declared_id))]);
+
+        assert!(select_current_access_path(&table, &equalities).is_none());
+    }
+
+    /// A table without a declared `id` retains the legacy physical row-id
+    /// primary-key access path.
+    #[test]
+    fn missing_declared_id_filter_selects_the_physical_primary_key() {
+        let table = TableSchema::new("things", [ColumnSchema::new("label", ColumnType::String)]);
+        let row_id = uuid::Uuid::from_u128(0x9a);
+        let equalities = BTreeMap::from([("id".to_owned(), Value::Uuid(row_id))]);
+
+        assert!(matches!(
+            select_current_access_path(&table, &equalities),
+            Some(CurrentAccessPath::PrimaryKey(values)) if values == vec![Value::Uuid(row_id)]
+        ));
+    }
 }

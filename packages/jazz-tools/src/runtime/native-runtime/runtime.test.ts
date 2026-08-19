@@ -2090,6 +2090,45 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(detached).toEqual([]);
   });
 
+  it("ignores the removed propagate read option", async () => {
+    const readOptions: unknown[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: (_query: unknown, opts: unknown) => {
+              readOptions.push(opts);
+              return new Uint8Array([0]);
+            },
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => true,
+            detachQuery: () => undefined,
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        null,
+        "edge",
+        JSON.stringify({ propagate: false }),
+      ),
+    ).resolves.toEqual([]);
+
+    expect(readOptions).toEqual([{ tier: "edge" }]);
+  });
+
   it("keeps concurrent client coverage attachments on the raw client path", async () => {
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     const attachedSubjects: string[] = [];

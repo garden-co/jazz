@@ -312,6 +312,17 @@ fn flat_join_qualified_field(field: &str) -> Result<(&str, &str), QueryError> {
         })
 }
 
+fn flat_join_column_type<'a>(
+    table: &'a TableSchema,
+    column: &str,
+) -> Result<&'a ColumnType, QueryError> {
+    if column == "_id" {
+        Ok(&ColumnType::Uuid)
+    } else {
+        planner_column_type(table, column)
+    }
+}
+
 fn validate_flat_join(
     schema: &JazzSchema,
     root_table: &str,
@@ -346,8 +357,8 @@ fn validate_flat_join(
         }
         let left_schema = table(schema, left_table)?;
         let right_schema = table(schema, &source.table)?;
-        if planner_column_type(&left_schema, left_column)?
-            != planner_column_type(&right_schema, right_column)?
+        if flat_join_column_type(&left_schema, left_column)?
+            != flat_join_column_type(&right_schema, right_column)?
         {
             return Err(QueryError::OperandTypeMismatch);
         }
@@ -390,8 +401,13 @@ fn validate_join(
                 });
             }
         }
-        if lookup.value_column != "id" {
-            planner_column_type(&lookup_table, &lookup.value_column)?;
+        planner_column_type(&lookup_table, &lookup.value_column)?;
+        if lookup.value_column == "id"
+            && has_declared_id(&lookup_table)
+            && planner_column_type(&lookup_table, &lookup.value_column)?
+                != planner_column_type(&join_table, &join.on_column)?
+        {
+            return Err(QueryError::OperandTypeMismatch);
         }
         if join.source_column.as_deref() != Some(lookup.value_column.as_str()) {
             return Err(QueryError::JoinNotRefCompatible {
@@ -415,6 +431,12 @@ fn validate_join(
         }
     } else if let Some(source_column) = &join.source_column {
         if source_column == "id" {
+            if has_declared_id(root)
+                && planner_column_type(root, source_column)?
+                    != planner_column_type(&join_table, &join.on_column)?
+            {
+                return Err(QueryError::OperandTypeMismatch);
+            }
             root_table.to_owned()
         } else {
             planner_column_type(root, source_column)?;
@@ -569,6 +591,9 @@ fn planner_column_type<'a>(
     table: &'a TableSchema,
     column: &str,
 ) -> Result<&'a ColumnType, QueryError> {
+    if let Ok(column_schema) = column_schema(table, column) {
+        return Ok(&column_schema.column_type);
+    }
     if column == "id" {
         return Ok(&ColumnType::Uuid);
     }
@@ -576,6 +601,10 @@ fn planner_column_type<'a>(
         return Ok(column_type);
     }
     Ok(&column_schema(table, column)?.column_type)
+}
+
+fn has_declared_id(table: &TableSchema) -> bool {
+    table.columns.iter().any(|column| column.name == "id")
 }
 
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
@@ -675,7 +704,12 @@ fn validate_reachable(
     let access = table(schema, &reachable.access_table)?;
     planner_column_type(&access, &reachable.access_row_column)?;
     planner_column_type(&access, &reachable.access_team_column)?;
-    if reachable.access_row_column == "id" {
+    let root_key_type = if has_declared_id(root) {
+        planner_column_type(root, "id")?
+    } else {
+        &ColumnType::Uuid
+    };
+    if reachable.access_row_column == "id" && !has_declared_id(&access) {
         if access.name != root.name {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: reachable.access_table.clone(),
@@ -685,8 +719,7 @@ fn validate_reachable(
         }
     } else if access.name == root.name {
         let access_column_type = planner_column_type(&access, &reachable.access_row_column)?;
-        let root_column_type = planner_column_type(root, &reachable.access_row_column)?;
-        if !column_types_comparable(access_column_type, root_column_type) {
+        if !column_types_comparable(access_column_type, root_key_type) {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: reachable.access_table.clone(),
                 column: reachable.access_row_column.clone(),
@@ -703,6 +736,12 @@ fn validate_reachable(
                     target_table: root.name.clone(),
                 });
             }
+        }
+        if !column_types_comparable(
+            planner_column_type(&access, &reachable.access_row_column)?,
+            root_key_type,
+        ) {
+            return Err(QueryError::OperandTypeMismatch);
         }
     }
     let team_table = match reachable.access_team_target {
@@ -728,7 +767,7 @@ fn validate_reachable(
     let edge = table(schema, &reachable.edge_table)?;
     for column in [&reachable.edge_member_column, &reachable.edge_parent_column] {
         planner_column_type(&edge, column)?;
-        if *column == "id" && edge.name == *team_table {
+        if *column == "id" && !has_declared_id(&edge) && edge.name == *team_table {
             continue;
         }
         match edge.references.get(column) {
@@ -744,7 +783,9 @@ fn validate_reachable(
     }
     if let Some(seed) = &reachable.seed {
         let seed_table = table(schema, &seed.table)?;
-        planner_column_type(&seed_table, &seed.team_column)?;
+        if planner_column_type(&seed_table, &seed.team_column)? != &ColumnType::Uuid {
+            return Err(QueryError::OperandTypeMismatch);
+        }
         if let Some(user_column) = &seed.user_column {
             planner_column_type(&seed_table, user_column)?;
         }

@@ -51,15 +51,11 @@ describe("native write path", () => {
         const result = await db.transaction((tx) => {
           for (let rowIndex = 0; rowIndex < 200; rowIndex += 1) {
             const ordinal = txIndex * 200 + rowIndex;
-            tx.upsert(
-              importApp.children,
-              {
-                parent: parent.id,
-                label: `child-${ordinal}`,
-                ordinal,
-              },
-              { id: rowId(ordinal) },
-            );
+            tx.upsert(importApp.children, rowId(ordinal), {
+              parent: parent.id,
+              label: `child-${ordinal}`,
+              ordinal,
+            });
           }
         });
         await result.wait({ tier: "local" });
@@ -117,15 +113,11 @@ describe("native write path", () => {
         const result = await db.transaction((tx) => {
           for (let rowIndex = 0; rowIndex < 200; rowIndex += 1) {
             const ordinal = txIndex * 200 + rowIndex;
-            tx.upsert(
-              importApp.children,
-              {
-                parent: parent.id,
-                label: `child-${ordinal}`,
-                ordinal,
-              },
-              { id: rowId(ordinal) },
-            );
+            tx.upsert(importApp.children, rowId(ordinal), {
+              parent: parent.id,
+              label: `child-${ordinal}`,
+              ordinal,
+            });
           }
         });
         await result.wait({ tier: "local" });

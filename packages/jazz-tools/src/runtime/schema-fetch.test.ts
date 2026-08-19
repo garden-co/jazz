@@ -4,6 +4,7 @@ import {
   fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
+  publishStoredSchema,
   publishStoredPermissions,
 } from "./schema-fetch.js";
 import { fetchServerSubscriptions } from "./introspection-fetch.js";
@@ -172,6 +173,38 @@ describe("schema-fetch", () => {
     expect(fetchMock.mock.calls[0]![0]).toBe(
       "http://localhost:1625/apps/test-app/schema/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );
+  });
+
+  it("publishes only the schema in the schema POST body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      statusText: "Created",
+      json: async () => ({
+        objectId: "11111111-1111-1111-1111-111111111111",
+        hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await publishStoredSchema("http://localhost:1625/", {
+      appId: "test-app",
+      adminSecret: "admin-secret",
+      schema: { users: { columns: [] } },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:1625/apps/test-app/admin/schemas");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Jazz-Admin-Secret": "admin-secret",
+      },
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({
+      schema: { users: { columns: [] } },
+    });
   });
 
   it("publishes nested relation literals as tagged wire values", async () => {

@@ -69,7 +69,7 @@ async fn sync_layers_emit_otel_spans() {
                 .insert("todos", todo_values("trace sync telemetry", false))
                 .expect("alice creates persisted todo");
             alice
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )

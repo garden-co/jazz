@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::tx::TxId;
 
-macro_rules! batch_id {
+macro_rules! transaction_id {
     ($name:ident, $kind:literal, $doc:literal) => {
         #[doc = $doc]
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -77,33 +77,33 @@ macro_rules! batch_id {
     };
 }
 
-batch_id!(
-    OpenBatchId,
-    "open batch id",
+transaction_id!(
+    OpenTransactionId,
+    "open transaction id",
     "Coordination-free identity for mutable, runtime-local work before commit."
 );
 
-impl OpenBatchId {
-    /// Mint an open-batch identity without coordinating with a runtime.
+impl OpenTransactionId {
+    /// Mint an open-transaction identity without coordinating with a runtime.
     pub fn new() -> Self {
         Self(*Uuid::now_v7().as_bytes())
     }
 }
 
-impl Default for OpenBatchId {
+impl Default for OpenTransactionId {
     fn default() -> Self {
         Self::new()
     }
 }
 
-batch_id!(
-    BatchId,
-    "batch id",
-    "Identity of an immutable committed batch."
+transaction_id!(
+    TransactionId,
+    "transaction id",
+    "Identity of an immutable committed transaction."
 );
 
-impl BatchId {
-    /// Derive the public committed-batch identity from core causal identity.
+impl TransactionId {
+    /// Derive the public committed-transaction identity from core causal identity.
     ///
     /// The domain-separated digest keeps the core's wider `TxId` private while
     /// preserving a stable 128-bit identifier across bindings and runtimes.
@@ -123,23 +123,23 @@ mod tests {
     use crate::time::TxTime;
 
     #[test]
-    fn open_batch_ids_are_canonical_uuid_v7_values() {
-        let id = OpenBatchId::new();
+    fn open_transaction_ids_are_canonical_uuid_v7_values() {
+        let id = OpenTransactionId::new();
         assert_eq!(id.to_string().len(), 32);
         assert_eq!(id.as_bytes()[6] >> 4, 7);
         assert_eq!(id.as_bytes()[8] >> 6, 2);
-        assert_eq!(id.to_string().parse::<OpenBatchId>().unwrap(), id);
+        assert_eq!(id.to_string().parse::<OpenTransactionId>().unwrap(), id);
     }
 
     #[test]
-    fn committed_batch_id_is_stable_and_domain_derived() {
+    fn committed_transaction_id_is_stable_and_domain_derived() {
         let tx = TxId::new(TxTime::from(42), NodeUuid(Uuid::from_bytes([7; 16])));
-        let first = BatchId::from_committed_tx(tx);
-        assert_eq!(first, BatchId::from_committed_tx(tx));
-        assert_eq!(first.to_string().parse::<BatchId>().unwrap(), first);
+        let first = TransactionId::from_committed_tx(tx);
+        assert_eq!(first, TransactionId::from_committed_tx(tx));
+        assert_eq!(first.to_string().parse::<TransactionId>().unwrap(), first);
         assert_ne!(
             first,
-            BatchId::from_committed_tx(TxId::new(
+            TransactionId::from_committed_tx(TxId::new(
                 TxTime::from(43),
                 NodeUuid(Uuid::from_bytes([7; 16]))
             ))
@@ -147,19 +147,19 @@ mod tests {
     }
 
     #[test]
-    fn batch_id_debug_is_compact_and_stable() {
-        let id = BatchId::from_committed_tx(TxId::new(
+    fn transaction_id_debug_is_compact_and_stable() {
+        let id = TransactionId::from_committed_tx(TxId::new(
             TxTime::from(42),
             NodeUuid(Uuid::from_bytes([7; 16])),
         ));
         let debug = format!("{id:?}");
-        assert_eq!(debug, format!("BatchId({id})"));
-        assert_eq!(debug.len(), "BatchId()".len() + 32);
+        assert_eq!(debug, format!("TransactionId({id})"));
+        assert_eq!(debug.len(), "TransactionId()".len() + 32);
 
-        let open = OpenBatchId([0xab; 16]);
+        let open = OpenTransactionId([0xab; 16]);
         assert_eq!(
             format!("{open:?}"),
-            "OpenBatchId(abababababababababababababababab)"
+            "OpenTransactionId(abababababababababababababababab)"
         );
     }
 }

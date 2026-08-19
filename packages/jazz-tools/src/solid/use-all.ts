@@ -54,6 +54,12 @@ export function useAll<T extends { id: string }>(
             isLoading: false,
             error: normalizeError(error),
           }),
+        onReset: () =>
+          batch(() => {
+            setState("data", undefined);
+            setState("isLoading", true);
+            setState("error", null);
+          }),
         onfulfilled: (nextData) =>
           setState({
             data: nextData,

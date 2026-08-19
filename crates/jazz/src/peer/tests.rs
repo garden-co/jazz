@@ -11,7 +11,7 @@ use crate::query::{
 };
 use crate::schema::{JazzSchema, Policy, TableSchema, WritePolicies};
 use crate::time::{GlobalSeq, TxTime};
-use crate::tools::OpenBatchId;
+use crate::tools::OpenTransactionId;
 use crate::tx::DeletionEvent;
 use crate::tx::{DurabilityTier, Fate, TxKind};
 use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
@@ -3074,7 +3074,7 @@ fn maintained_subscription_view_exclusive_delta_stays_maintained() {
     let mut peer = PeerState::new();
 
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let tx = OpenBatchId::new();
+    let tx = OpenTransactionId::new();
     core.open_exclusive(tx).unwrap();
     core.tx_write(tx, "todos", row(0x61), title_cells("match"), None)
         .unwrap();
@@ -3109,7 +3109,7 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
     let mut peer = PeerState::new();
 
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let tx = OpenBatchId::new();
+    let tx = OpenTransactionId::new();
     core.open_exclusive(tx).unwrap();
     core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
         .unwrap();
@@ -3157,7 +3157,7 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
     peer.set_ship_complete_exclusive_payloads(true);
 
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let tx = OpenBatchId::new();
+    let tx = OpenTransactionId::new();
     core.open_exclusive(tx).unwrap();
     core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
         .unwrap();
@@ -3211,7 +3211,7 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
             (row(0x72), title_cells("other")),
         ]
     );
-    let open = OpenBatchId::new();
+    let open = OpenTransactionId::new();
     reader.open_exclusive(open).unwrap();
     assert_eq!(
         reader.tx_read(open, "todos", row(0x72)).unwrap(),
@@ -3289,7 +3289,7 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     let doc_b = row(0x82);
     let project = row(0x83);
 
-    let tx = OpenBatchId::new();
+    let tx = OpenTransactionId::new();
     core.open_exclusive(tx).unwrap();
     core.tx_write(tx, "docs", doc_a, doc_cells("a", project), None)
         .unwrap();
@@ -3565,7 +3565,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     let doc_two = row(2);
     let project = row(9);
 
-    let tx = OpenBatchId::new();
+    let tx = OpenTransactionId::new();
     writer.open_exclusive(tx).unwrap();
     writer
         .tx_write(tx, "docs", doc_one, doc_cells("one", project), None)
@@ -3694,7 +3694,7 @@ fn all_exclusive_never_gated_stays_incremental() {
     assert!(result_member_adds.is_empty());
     assert!(version_bundles.is_empty());
 
-    let tx = OpenBatchId::new();
+    let tx = OpenTransactionId::new();
     core.open_exclusive(tx).unwrap();
     core.tx_write(tx, "todos", row_one, title_cells("one"), None)
         .unwrap();

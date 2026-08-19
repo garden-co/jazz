@@ -346,15 +346,15 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_
     )
     .await;
 
-    let batch_id = client_a
+    let transaction_id = client_a
         .update(
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
         .expect("update todo from client a");
     client_a
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::EdgeServer,
         )
         .await
@@ -427,10 +427,10 @@ async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
     )
     .await;
 
-    let batch_id = client_a.delete(todo_id).expect("delete todo from client a");
+    let transaction_id = client_a.delete(todo_id).expect("delete todo from client a");
     client_a
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::EdgeServer,
         )
         .await
@@ -517,7 +517,7 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn wait_for_batch_reaches_edge_and_global_tiers() {
+async fn wait_for_transaction_reaches_edge_and_global_tiers() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = test_schema();
@@ -530,7 +530,7 @@ async fn wait_for_batch_reaches_edge_and_global_tiers() {
 
             wait_for_edge_query_ready(&alice, Duration::from_secs(30)).await;
 
-            let (_, _, batch_id) = alice
+            let (_, _, transaction_id) = alice
                 .insert(
                     "todos",
                     row_input!("title" => "scheduler confirmation", "completed" => false),
@@ -538,19 +538,19 @@ async fn wait_for_batch_reaches_edge_and_global_tiers() {
                 .expect("insert todo");
 
             alice
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
                 .await
-                .expect("edge wait_for_batch should resolve from scheduled core progress");
+                .expect("edge wait_for_transaction should resolve from scheduled core progress");
             alice
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::GlobalServer,
                 )
                 .await
-                .expect("global wait_for_batch should resolve from scheduled core progress");
+                .expect("global wait_for_transaction should resolve from scheduled core progress");
 
             alice.shutdown().await.expect("shutdown alice");
             server.shutdown().await;

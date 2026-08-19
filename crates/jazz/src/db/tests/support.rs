@@ -1869,7 +1869,7 @@ impl CoreDb {
     }
 
     pub(super) fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
-        let tx_id = OpenBatchId::new();
+        let tx_id = OpenTransactionId::new();
         self.server.node().borrow_mut().open_exclusive(tx_id)?;
         Ok(CoreExclusiveTx {
             core: self,
@@ -1922,7 +1922,7 @@ impl CoreDb {
 
 pub(super) struct CoreExclusiveTx<'a> {
     core: &'a CoreDb,
-    tx_id: OpenBatchId,
+    tx_id: OpenTransactionId,
     has_reads: Cell<bool>,
 }
 
@@ -1961,7 +1961,10 @@ impl CoreExclusiveTx<'_> {
         let node = self.core.server.node();
         if self.has_reads.get() && node.borrow().open_exclusive_snapshot_moved(self.tx_id)? {
             node.borrow_mut().abandon_tx(self.tx_id)?;
-            return Err(write_rejected(RejectionReason::ExclusiveConflict));
+            return Err(write_rejected(
+                self.tx_id,
+                RejectionReason::ExclusiveConflict,
+            ));
         }
         let (tx_id, unit) = node.borrow_mut().commit_exclusive(
             self.tx_id,
@@ -1978,7 +1981,7 @@ impl CoreExclusiveTx<'_> {
             .borrow_mut()
             .finalize_local_exclusive_commit(tx, versions)?;
         if let Fate::Rejected(reason) = fate {
-            return Err(write_rejected(reason));
+            return Err(write_rejected(tx_id, reason));
         }
         self.core.server.mark_subscriber_connections_dirty();
         Ok(tx_id)

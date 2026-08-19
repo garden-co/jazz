@@ -43,7 +43,7 @@ use crate::schema::{
     SETTLED_RESULT_MEMBERS_STORE, TableSchema, registered_column_transform,
 };
 use crate::time::{GlobalSeq, TxTime};
-use crate::tools::OpenBatchId;
+use crate::tools::OpenTransactionId;
 use crate::tx::{
     AbsentRead, BranchLineage, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate,
     HistoryEntry, PredicateRead, RejectedTransaction, RejectedVersion, RejectionReason, RowRead,
@@ -793,9 +793,9 @@ struct RegisteredBinding {
 /// Locally open transactions and local-only permission attribution.
 struct OpenTxState {
     /// Open transaction handles keyed by caller-generated identity.
-    open_transactions: BTreeMap<OpenBatchId, OpenTransaction>,
+    open_transactions: BTreeMap<OpenTransactionId, OpenTransaction>,
     /// Identities consumed by commit or rollback; never reusable in this runtime.
-    closed_batches: BTreeSet<OpenBatchId>,
+    closed_batches: BTreeSet<OpenTransactionId>,
     /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
     local_permission_subjects: BTreeMap<TxId, AuthorId>,
 }
@@ -1707,10 +1707,10 @@ pub enum Error {
     MaintainedViewMissingBundleWitness(&'static str),
     /// Open transaction handle was not known.
     #[error("missing open transaction: {0:?}")]
-    MissingOpenBatch(OpenBatchId),
+    MissingOpenBatch(OpenTransactionId),
     /// A caller attempted to reuse an identity that still names live mutable work.
     #[error("duplicate open batch id: {0}")]
-    DuplicateOpenBatch(OpenBatchId),
+    DuplicateOpenBatch(OpenTransactionId),
     /// Fate or global-current update was non-monotone.
     #[error("non-monotone state update: {0}")]
     NonMonotoneState(&'static str),

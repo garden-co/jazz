@@ -375,7 +375,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     .expect("connect client");
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
-    let (_, _, batch_id) = client
+    let (_, _, transaction_id) = client
         .insert(
             "todos",
             HashMap::from([
@@ -388,8 +388,8 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         )
         .expect("create before restart");
     client
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::EdgeServer,
         )
         .await
@@ -422,7 +422,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         "existing client should continue serving Edge-settled queries after server restart"
     );
 
-    let (_, _, batch_id) = client
+    let (_, _, transaction_id) = client
         .insert(
             "todos",
             HashMap::from([
@@ -435,8 +435,8 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         )
         .expect("create after restart");
     client
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::EdgeServer,
         )
         .await
