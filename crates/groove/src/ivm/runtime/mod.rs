@@ -43,6 +43,7 @@ use crate::storage::{
 use thiserror::Error;
 
 mod aggregate;
+mod evaluation_session;
 mod join;
 mod persist;
 mod recursion;
@@ -54,7 +55,7 @@ use join::{AntiJoinState, ArrangementState, JoinState, touched_join_keys};
 use persist::apply_persist_delta;
 use recursion::{
     RecursiveState, hydrate_recursive_arrangements, recompute_recursive, recursive_delta,
-    recursive_read_tables, snapshot_table_deltas,
+    recursive_read_tables, snapshot_table_deltas_for_roots,
 };
 use state::{
     ArrangementKey, ArrangementUpdateMode, AsOf, EvalContext, EvalMemoEntry, EvalMemoKey, EvalMode,
@@ -352,6 +353,8 @@ pub enum IvmRuntimeError {
     Storage(#[from] crate::storage::Error),
     #[error("storage unavailable for durable node")]
     StorageUnavailable,
+    #[error("evaluation blocked on a non-resident storage input")]
+    EvaluationBlocked,
     #[error("subscription shape not found: {0:?}")]
     PreparedShapeNotFound(PreparedShapeId),
     #[error("runtime state is stale: expected={expected}, actual={actual:?}")]

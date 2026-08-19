@@ -1,8 +1,11 @@
 //! Tick orchestration, hydration, memo eviction, and durable-node evaluation.
 
 use std::collections::VecDeque;
+use std::rc::Rc;
 
+use super::evaluation_session::{EvaluationInputs, StorageRequests};
 use super::*;
+use crate::storage::OwnedStorage;
 
 /// First owned slice of the interruptible evaluator design.
 ///
@@ -196,6 +199,7 @@ impl IvmRuntime {
             memo_use_clock: &mut self.memo_use_clock,
             node_meta: &mut self.node_meta,
             storage: Some(storage),
+            evaluation_inputs: None,
             context: EvalContext::root(),
             metrics: &mut metrics,
             terminal_deltas: HashMap::default(),
@@ -451,12 +455,13 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
-        let mut table_deltas_by_root = HashMap::default();
-        for root in roots.iter().copied() {
-            let table_deltas =
-                snapshot_table_deltas(&self.schema, &self.graph, storage, root).await?;
-            table_deltas_by_root.insert(root, table_deltas);
-        }
+        let table_deltas_by_root = snapshot_table_deltas_for_roots(
+            &self.schema,
+            &self.graph,
+            storage,
+            roots.iter().copied(),
+        )
+        .await?;
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut metrics = TickMetrics::default();
         let first_root = roots
@@ -465,44 +470,78 @@ impl IvmRuntime {
             .ok_or(IvmRuntimeError::UnsupportedOperator)?;
         let mut session = EvaluationSession::hydration(self, first_root);
         session.runnable_roots = roots;
-        while let Some(root) = session.runnable_roots.pop_front() {
-            let context = match mode {
-                HydrationMode::Ordinary => EvalContext::root_snapshot(),
-                HydrationMode::Subscription if self.output_depends_on_aggregate(root)? => {
-                    EvalContext::root_subscription_snapshot()
+        let mut evaluation_inputs = EvaluationInputs::default();
+        let mut storage_requests = StorageRequests::new(OwnedStorage::new(Rc::new(storage)));
+        while !session.runnable_roots.is_empty() {
+            let mut blocked = VecDeque::new();
+            while let Some(root) = session.runnable_roots.pop_front() {
+                let context = match mode {
+                    HydrationMode::Ordinary => EvalContext::root_snapshot(),
+                    HydrationMode::Subscription if self.output_depends_on_aggregate(root)? => {
+                        EvalContext::root_subscription_snapshot()
+                    }
+                    HydrationMode::Subscription => EvalContext::root_snapshot(),
+                };
+                let table_deltas = table_deltas_by_root
+                    .get(&root)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(root))?;
+                let result = {
+                    let mut evaluator = TickEvaluator {
+                        schema: &self.schema,
+                        graph: &self.graph,
+                        variant_projections: &self.variant_projections,
+                        table_deltas,
+                        binding_deltas: &[],
+                        binding_snapshots: &binding_snapshots,
+                        current_tick: self.current_tick,
+                        operator_states: &mut session.operator_states,
+                        arrangement_states: &mut session.arrangement_states,
+                        eval_memo: &mut session.eval_memo,
+                        eval_memo_bytes: &mut session.eval_memo_bytes,
+                        table_frontiers: &self.table_frontiers,
+                        binding_frontiers: &self.binding_frontiers,
+                        memo_use_clock: &mut session.memo_use_clock,
+                        node_meta: &mut session.node_meta,
+                        storage: Some(storage),
+                        evaluation_inputs: Some(&mut evaluation_inputs),
+                        context,
+                        metrics: &mut metrics,
+                        terminal_deltas: HashMap::default(),
+                        root_ordering_windows: HashMap::default(),
+                    };
+                    evaluator
+                        .update_node(root)
+                        .await
+                        .map(|records| records.as_ref().clone())
+                };
+                match result {
+                    Ok(records) => {
+                        session.outputs.insert(root, records);
+                    }
+                    Err(IvmRuntimeError::EvaluationBlocked) => blocked.push_back(root),
+                    Err(error) => return Err(error),
                 }
-                HydrationMode::Subscription => EvalContext::root_snapshot(),
-            };
-            let table_deltas = table_deltas_by_root
-                .get(&root)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(root))?;
-            let mut evaluator = TickEvaluator {
-                schema: &self.schema,
-                graph: &self.graph,
-                variant_projections: &self.variant_projections,
-                table_deltas,
-                binding_deltas: &[],
-                binding_snapshots: &binding_snapshots,
-                current_tick: self.current_tick,
-                operator_states: &mut session.operator_states,
-                arrangement_states: &mut session.arrangement_states,
-                eval_memo: &mut session.eval_memo,
-                eval_memo_bytes: &mut session.eval_memo_bytes,
-                table_frontiers: &self.table_frontiers,
-                binding_frontiers: &self.binding_frontiers,
-                memo_use_clock: &mut session.memo_use_clock,
-                node_meta: &mut session.node_meta,
-                storage: Some(storage),
-                context,
-                metrics: &mut metrics,
-                terminal_deltas: HashMap::default(),
-                root_ordering_windows: HashMap::default(),
-            };
-            let records = evaluator
-                .update_node(root)
-                .await
-                .map(|records| records.as_ref().clone())?;
-            session.outputs.insert(root, records);
+            }
+            if blocked.is_empty() {
+                break;
+            }
+            let requested = evaluation_inputs.take_requested();
+            if requested.is_empty() {
+                return Err(IvmRuntimeError::EvaluationBlocked);
+            }
+            for request in requested {
+                storage_requests.request(request);
+            }
+            std::future::poll_fn(|cx| {
+                if storage_requests.poll(cx) > 0 {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            evaluation_inputs.install(storage_requests.drain_ready()?);
+            session.runnable_roots = blocked;
         }
         let outputs = std::mem::take(&mut session.outputs);
         session.install(self);
@@ -629,6 +668,7 @@ impl IvmRuntime {
                     memo_use_clock: &mut self.memo_use_clock,
                     node_meta: &mut self.node_meta,
                     storage: Some(storage),
+                    evaluation_inputs: None,
                     context: EvalContext::root(),
                     metrics: &mut metrics,
                     terminal_deltas: HashMap::default(),

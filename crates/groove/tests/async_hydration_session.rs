@@ -59,6 +59,35 @@ fn cancelled_hydration_publishes_no_subscription_or_partial_session() {
 }
 
 #[test]
+fn hash_equal_hydration_roots_share_one_in_flight_storage_request() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+
+    control.take_observed();
+    let subscription = block_on(database.subscribe([
+        ("left", GraphBuilder::table("albums")),
+        ("right", GraphBuilder::table("albums")),
+    ]))
+    .unwrap();
+    assert!(
+        subscription
+            .recv()
+            .unwrap()
+            .sinks
+            .values()
+            .all(|sink| sink.is_empty())
+    );
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn cancelled_prepared_bind_discards_binding_tick_and_subscription_state() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = block_on(Database::new(schema(), storage)).unwrap();

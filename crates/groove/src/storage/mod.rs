@@ -50,6 +50,68 @@ pub type KeyValue = (Vec<u8>, Vec<u8>);
 pub type StorageFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 pub type StorageScan<'a> = Box<dyn StorageCursor + 'a>;
 
+/// Executor-local ownership boundary used by interruptible engine work.
+///
+/// `OrderedKvStorage` deliberately permits futures and cursors that borrow an
+/// adapter. An evaluation session cannot retain such a borrow into its own
+/// fields, so it owns the adapter through `Rc` and completes cursor iteration
+/// inside the outer owned future. The result crossing back into the evaluator
+/// is always owned.
+#[derive(Clone)]
+pub(crate) struct OwnedStorage<S>(Rc<S>);
+
+impl<S> OwnedStorage<S>
+where
+    S: OrderedKvStorage,
+{
+    pub(crate) fn new(storage: Rc<S>) -> Self {
+        Self(storage)
+    }
+
+    pub(crate) fn get<'a>(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+    ) -> StorageFuture<'a, Result<Option<Value>, Error>>
+    where
+        S: 'a,
+    {
+        let storage = Rc::clone(&self.0);
+        Box::pin(async move { storage.get(cf, key).await })
+    }
+
+    pub(crate) fn scan_range<'a>(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'a, Result<Vec<KeyValue>, Error>>
+    where
+        S: 'a,
+    {
+        let storage = Rc::clone(&self.0);
+        Box::pin(async move {
+            let scan = storage.scan_range(cf, start, end).await?;
+            collect_scan(scan).await
+        })
+    }
+
+    pub(crate) fn scan_prefix<'a>(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'a, Result<Vec<KeyValue>, Error>>
+    where
+        S: 'a,
+    {
+        let storage = Rc::clone(&self.0);
+        Box::pin(async move {
+            let scan = storage.scan_prefix(cf, prefix).await?;
+            collect_scan(scan).await
+        })
+    }
+}
+
 /// Owned, executor-local cursor over an ordered scan.
 ///
 /// Backends choose their own batch size. An empty batch is not an end marker;
@@ -452,6 +514,56 @@ where
 
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.as_ref().column_family_names()
+    }
+}
+
+impl<S> OrderedKvStorage for &S
+where
+    S: OrderedKvStorage,
+{
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        S::get(*self, cf, key)
+    }
+
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        S::set(*self, cf, key, value)
+    }
+
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        S::delete(*self, cf, key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        S::scan_range(*self, cf, start, end)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        S::scan_prefix(*self, cf, prefix)
+    }
+
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        S::write_many(*self, operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        S::column_family_names(*self)
     }
 }
 

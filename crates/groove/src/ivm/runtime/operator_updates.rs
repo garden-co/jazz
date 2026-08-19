@@ -20,6 +20,44 @@ pub(super) struct NodeRuntimeMeta {
 pub(super) struct NodeState;
 
 impl NodeState {
+    pub(super) fn update_index_source_from_inputs(
+        input: &IndexSourceOp,
+        output_desc: &RecordDescriptor,
+        inputs: &mut super::evaluation_session::EvaluationInputs,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let request =
+            match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())? {
+                StaticScanBounds::Prefix(prefix) => {
+                    super::evaluation_session::StorageRequestKey::ScanPrefix {
+                        family: "indices".to_owned(),
+                        prefix,
+                    }
+                }
+                StaticScanBounds::Range { start, end } => {
+                    if start >= end {
+                        return Ok(RecordDeltas::empty(*output_desc));
+                    }
+                    super::evaluation_session::StorageRequestKey::ScanRange {
+                        family: "indices".to_owned(),
+                        start,
+                        end,
+                    }
+                }
+            };
+        let deltas = inputs
+            .rows(request)?
+            .iter()
+            .map(|(_, record)| RecordDelta {
+                record: Bytes::copy_from_slice(record),
+                weight: 1,
+            })
+            .collect();
+        Ok(RecordDeltas {
+            descriptor: *output_desc,
+            deltas,
+        })
+    }
+
     pub(super) fn update_table_source(
         input: &TableSourceOp,
         schema: &DatabaseSchema,

@@ -11,7 +11,11 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp};
 use crate::records::RecordDescriptor;
+use crate::storage::OwnedStorage;
 use crate::storage::{OrderedKvStorage, StorageFuture};
+use std::rc::Rc;
+
+use super::evaluation_session::{StorageRequestKey, StorageRequestOutput, StorageRequests};
 
 use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
@@ -432,6 +436,137 @@ pub(super) async fn snapshot_table_deltas(
         );
     }
     Ok(output)
+}
+
+/// Load all table sources needed by several roots through one owned request
+/// registry. Equal scans across hash-shared graph fragments retain one storage
+/// future even when several terminal roots need the same source.
+pub(super) async fn snapshot_table_deltas_for_roots<S>(
+    schema: &crate::schema::DatabaseSchema,
+    graph: &IvmGraph,
+    storage: &S,
+    roots: impl IntoIterator<Item = NodeId>,
+) -> Result<HashMap<NodeId, Vec<TableDelta>>, IvmRuntimeError>
+where
+    S: OrderedKvStorage,
+{
+    let mut sources_by_root = HashMap::default();
+    let mut all_sources = std::collections::HashSet::new();
+    for root in roots {
+        let mut sources = std::collections::HashSet::new();
+        collect_table_sources(graph, root, &mut sources)?;
+        all_sources.extend(sources.iter().cloned());
+        sources_by_root.insert(root, sources);
+    }
+
+    let owned = OwnedStorage::new(Rc::new(storage));
+    let mut requests = StorageRequests::new(owned);
+    let mut request_by_source = HashMap::default();
+    for source in &all_sources {
+        let request = match &source.scan {
+            None => Some(StorageRequestKey::ScanPrefix {
+                family: source.table.clone(),
+                prefix: Vec::new(),
+            }),
+            Some(scan) => match scan_bounds(scan)? {
+                StaticScanBounds::Prefix(prefix) => Some(StorageRequestKey::ScanPrefix {
+                    family: source.table.clone(),
+                    prefix,
+                }),
+                StaticScanBounds::Range { start, end } if start < end => {
+                    Some(StorageRequestKey::ScanRange {
+                        family: source.table.clone(),
+                        start,
+                        end,
+                    })
+                }
+                StaticScanBounds::Range { .. } => None,
+            },
+        };
+        if let Some(request) = &request {
+            requests.request(request.clone());
+        }
+        request_by_source.insert(source.clone(), request);
+    }
+
+    std::future::poll_fn(|cx| {
+        requests.poll(cx);
+        if requests.has_pending() {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
+    })
+    .await;
+
+    let mut rows_by_source = HashMap::default();
+    for source in all_sources {
+        let rows = match request_by_source
+            .remove(&source)
+            .expect("every source has a request decision")
+        {
+            None => Vec::new(),
+            Some(request) => match requests
+                .take(&request)
+                .expect("completed request retains its result")?
+            {
+                StorageRequestOutput::Rows(rows) => rows,
+                StorageRequestOutput::Value(_) => {
+                    return Err(IvmRuntimeError::UnsupportedOperator);
+                }
+            },
+        };
+        rows_by_source.insert(source, rows);
+    }
+
+    let mut output = HashMap::default();
+    for (root, sources) in sources_by_root {
+        let mut deltas = Vec::new();
+        for source in sources {
+            let rows = rows_by_source
+                .get(&source)
+                .expect("root source belongs to the shared source set");
+            deltas.extend(snapshot_deltas_from_rows(schema, &source, rows)?);
+        }
+        output.insert(root, deltas);
+    }
+    Ok(output)
+}
+
+fn snapshot_deltas_from_rows(
+    schema: &crate::schema::DatabaseSchema,
+    source: &TableSnapshotSource,
+    rows: &[crate::storage::KeyValue],
+) -> Result<Vec<TableDelta>, IvmRuntimeError> {
+    let table_schema = schema
+        .table(&source.table)
+        .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
+    let mut by_variant = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
+    for (_, stored) in rows {
+        let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
+        let descriptor = table_schema
+            .record_schema_for_variant(variant_tag)
+            .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                table: source.table.clone(),
+                version: u64::from(variant_tag),
+            })?;
+        by_variant
+            .entry((variant_tag, descriptor))
+            .or_default()
+            .push(RecordDelta {
+                record: Bytes::copy_from_slice(payload),
+                weight: 1,
+            });
+    }
+    Ok(by_variant
+        .into_iter()
+        .map(|((variant_tag, descriptor), deltas)| TableDelta {
+            table: source.table.clone(),
+            variant_tag,
+            descriptor,
+            deltas,
+        })
+        .collect())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
