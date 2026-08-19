@@ -23,7 +23,7 @@ Every client needs an `appId`. Local-first auth also needs a device secret, whic
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
     </include>
 
-    `auth="local-first"` tells `JazzProvider` to load the device secret, or generate one on first run. Descendants can use `useLocalFirstAuth()` for backup, restore, and sign-out flows using that same identity.
+    `auth="local-first"` tells `JazzProvider` to load the app-scoped device secret, or generate one on first run. Descendants can use `useLocalFirstAuth()` for backup, restore, and sign-out flows using that same identity.
 
   </Tab>
   <Tab value="Vue">

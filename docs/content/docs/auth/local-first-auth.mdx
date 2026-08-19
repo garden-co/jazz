@@ -39,8 +39,8 @@ Load or create a secret before starting your Jazz client. The framework integrat
     <include cwd lang="tsx" meta='title="App.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
     </include>
-    `auth="local-first"` makes `JazzProvider` load or create the secret. Descendants can use
-    `useLocalFirstAuth()` for backup, restore, and sign-out flows using the same identity.
+    `auth="local-first"` makes `JazzProvider` load or create an `appId`-scoped secret. Descendants
+    can use `useLocalFirstAuth()` for backup, restore, and sign-out flows using the same identity.
   </Tab>
   <Tab value="Vue">
     <include cwd lang="vue" meta='title="App.vue"'>
