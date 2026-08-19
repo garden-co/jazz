@@ -311,7 +311,7 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
         ColumnType::Text => buf.push(TYPE_TEXT),
         ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
         ColumnType::Uuid => buf.push(TYPE_UUID),
-        ColumnType::BatchId => buf.push(TYPE_BATCH_ID),
+        ColumnType::TransactionId => buf.push(TYPE_BATCH_ID),
         ColumnType::Bytea => buf.push(TYPE_BYTEA),
         ColumnType::Json { schema } => {
             buf.push(TYPE_JSON);
@@ -368,7 +368,7 @@ fn decode_column_type(
         TYPE_TEXT => Ok(ColumnType::Text),
         TYPE_TIMESTAMP => Ok(ColumnType::Timestamp),
         TYPE_UUID => Ok(ColumnType::Uuid),
-        TYPE_BATCH_ID => Ok(ColumnType::BatchId),
+        TYPE_BATCH_ID => Ok(ColumnType::TransactionId),
         TYPE_BYTEA => Ok(ColumnType::Bytea),
         TYPE_JSON => {
             let has_schema = read_u8(data, offset)? != 0;
@@ -1412,7 +1412,7 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
             buf.push(VALUE_UUID);
             buf.extend_from_slice(id.uuid().as_bytes());
         }
-        Value::BatchId(bytes) => {
+        Value::TransactionId(bytes) => {
             buf.push(VALUE_BATCH_ID);
             buf.extend_from_slice(bytes);
         }
@@ -1488,7 +1488,9 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
         }
         VALUE_BATCH_ID => {
             let bytes = read_bytes(data, offset, 16)?;
-            Ok(Value::BatchId(bytes.try_into().expect("16-byte batch id")))
+            Ok(Value::TransactionId(
+                bytes.try_into().expect("16-byte batch id"),
+            ))
         }
         VALUE_BYTEA => {
             let len = read_u32(data, offset)? as usize;

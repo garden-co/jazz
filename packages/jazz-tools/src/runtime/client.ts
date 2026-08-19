@@ -248,25 +248,25 @@ export type TransactionKind = "mergeable" | "exclusive";
 export type TransactionFate =
   | {
       kind: "missing";
-      batchId: BatchId;
+      transactionId: BatchId;
     }
   | {
       kind: "rejected";
-      batchId: BatchId;
+      transactionId: BatchId;
       code: string;
       reason: string;
     }
   | {
       kind: "accepted";
-      batchId: BatchId;
+      transactionId: BatchId;
       confirmedTier: DurabilityTier;
     };
 
 export interface LocalTransactionRecord {
-  batchId: BatchId;
+  transactionId: BatchId;
   kind: TransactionKind;
   sealed: boolean;
-  latestSettlement: TransactionFate | null;
+  latestSettlement: TransactionFate;
   encodedRecord?: Uint8Array;
 }
 
@@ -452,7 +452,7 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   }
   const candidate = error as {
     kind?: unknown;
-    batchId?: unknown;
+    transactionId?: unknown;
     code?: unknown;
     reason?: unknown;
   };
@@ -462,12 +462,12 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   if (
     typeof candidate.code !== "string" ||
     typeof candidate.reason !== "string" ||
-    typeof candidate.batchId !== "string"
+    typeof candidate.transactionId !== "string"
   ) {
     return null;
   }
   return new PersistedWriteRejectedError(
-    candidate.batchId as BatchId,
+    candidate.transactionId as BatchId,
     candidate.code,
     candidate.reason,
   );
@@ -480,11 +480,11 @@ export class PersistedWriteRejectedError extends Error {
   readonly name = "PersistedWriteRejectedError";
 
   constructor(
-    readonly batchId: BatchId,
+    readonly transactionId: BatchId,
     readonly code: string,
     readonly reason: string,
   ) {
-    super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
+    super(`Persisted transaction ${transactionId} was rejected (${code}): ${reason}`);
   }
 }
 

@@ -457,7 +457,7 @@ fn sharing_key_excludes_binding_and_output_requirements() {
                 manifest_fingerprint: vec![0xa2],
             },
             ResolvedOverlay {
-                overlay: OverlayRef::OpenTransaction(OpenBatchId([7; 16])),
+                overlay: OverlayRef::OpenTransaction(OpenTransactionId([7; 16])),
                 manifest_fingerprint: vec![0xa3],
             },
         ],

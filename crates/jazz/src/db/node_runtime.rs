@@ -285,7 +285,7 @@ where
         let Some((fate, _, durability)) = self.node.borrow_mut().transaction_state(tx_id) else {
             return Some(Err(Error::new(
                 ErrorCode::NotObserved,
-                "transaction is not known locally",
+                format!("transaction {tx_id:?} is not known locally"),
             )));
         };
         match fate {
@@ -293,7 +293,7 @@ where
                 if let Err(error) = self.consume_mutation_error(tx_id) {
                     tracing::warn!(?tx_id, %error, "failed to consume waited mutation error");
                 }
-                Some(Err(write_rejected(reason)))
+                Some(Err(write_rejected(tx_id, reason)))
             }
             Fate::Pending | Fate::Accepted if durability >= tier => Some(Ok(tx_id)),
             Fate::Pending | Fate::Accepted => None,

@@ -8,7 +8,7 @@ fn column_type_fixed_sizes() {
     assert_eq!(ColumnType::Boolean.fixed_size(), Some(1));
     assert_eq!(ColumnType::Timestamp.fixed_size(), Some(8));
     assert_eq!(ColumnType::Uuid.fixed_size(), Some(16));
-    assert_eq!(ColumnType::BatchId.fixed_size(), Some(16));
+    assert_eq!(ColumnType::TransactionId.fixed_size(), Some(16));
     assert_eq!(ColumnType::Text.fixed_size(), None);
     assert_eq!(ColumnType::Bytea.fixed_size(), None);
     assert_eq!(
@@ -155,8 +155,8 @@ fn value_column_type() {
         Some(ColumnType::Uuid)
     );
     assert_eq!(
-        Value::BatchId([7; 16]).column_type(),
-        Some(ColumnType::BatchId)
+        Value::TransactionId([7; 16]).column_type(),
+        Some(ColumnType::TransactionId)
     );
     assert_eq!(
         Value::Bytea(vec![0, 1, 2, 3]).column_type(),

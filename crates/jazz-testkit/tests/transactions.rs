@@ -95,15 +95,15 @@ fn has_todo(
 }
 
 async fn insert_visible_todo(client: &JazzClient, title: &str, completed: bool) -> ObjectId {
-    let (todo_id, _, batch_id) = client
+    let (todo_id, _, transaction_id) = client
         .insert(
             "todos",
             row_input!("title" => title, "completed" => completed),
         )
         .expect("insert visible todo");
     client
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::EdgeServer,
         )
         .await
@@ -129,7 +129,7 @@ async fn transaction_stages_writes_and_can_commit() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.open_batch_id();
+    let transaction_id = tx.transaction_id();
 
     let (todo_id, inserted_values, write_batch_id) = tx
         .insert(
@@ -151,7 +151,7 @@ async fn transaction_stages_writes_and_can_commit() {
 
     tx.commit().expect("commit transaction");
     assert!(
-        client.commit_transaction(batch_id).is_err(),
+        client.commit_transaction(transaction_id).is_err(),
         "committed transaction should reject a second commit"
     );
 }
@@ -163,7 +163,7 @@ async fn transaction_can_be_rolled_back() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.open_batch_id();
+    let transaction_id = tx.transaction_id();
 
     let (todo_id, inserted_values, _) = tx
         .insert(
@@ -177,14 +177,14 @@ async fn transaction_can_be_rolled_back() {
     );
 
     client
-        .rollback_transaction(batch_id)
+        .rollback_transaction(transaction_id)
         .expect("roll back transaction by id");
     assert!(
         all_todos(&client).await.is_empty(),
         "rolled back transaction should not make staged rows visible"
     );
     assert!(
-        client.commit_transaction(batch_id).is_err(),
+        client.commit_transaction(transaction_id).is_err(),
         "rolled back transaction should reject commit"
     );
 }
@@ -196,7 +196,7 @@ async fn committed_transaction_rejects_later_handle_operations() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.open_batch_id();
+    let transaction_id = tx.transaction_id();
 
     let (todo_id, _, _) = tx
         .insert(
@@ -206,20 +206,20 @@ async fn committed_transaction_rejects_later_handle_operations() {
         .expect("insert in transaction");
     tx.commit().expect("commit transaction");
 
-    let closed_handle = client.with_write_context(WriteContext::default().with_batch_id(batch_id));
+    let closed_handle = client.with_write_context(WriteContext::default().with_transaction_id(transaction_id));
 
     let operation_errors = [
         (
             "commit",
             client
-                .commit_transaction(batch_id)
+                .commit_transaction(transaction_id)
                 .expect_err("committed transaction should reject a second commit")
                 .to_string(),
         ),
         (
             "rollback",
             client
-                .rollback_transaction(batch_id)
+                .rollback_transaction(transaction_id)
                 .expect_err("committed transaction should reject rollback")
                 .to_string(),
         ),
@@ -263,7 +263,7 @@ async fn committed_transaction_rejects_later_handle_operations() {
     for (operation, error) in operation_errors {
         assert!(
             error.contains("transaction")
-                && error.contains(&batch_id.to_string())
+                && error.contains(&transaction_id.to_string())
                 && error.contains("already committed"),
             "unexpected {operation} error: {error}"
         );
@@ -277,7 +277,7 @@ async fn rolled_back_transaction_rejects_later_handle_operations() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.open_batch_id();
+    let transaction_id = tx.transaction_id();
 
     let (todo_id, _, _) = tx
         .insert(
@@ -287,20 +287,20 @@ async fn rolled_back_transaction_rejects_later_handle_operations() {
         .expect("insert in transaction");
     tx.rollback().expect("roll back transaction through handle");
 
-    let closed_handle = client.with_write_context(WriteContext::default().with_batch_id(batch_id));
+    let closed_handle = client.with_write_context(WriteContext::default().with_transaction_id(transaction_id));
 
     let operation_errors = [
         (
             "commit",
             client
-                .commit_transaction(batch_id)
+                .commit_transaction(transaction_id)
                 .expect_err("rolled-back transaction should reject commit")
                 .to_string(),
         ),
         (
             "rollback",
             client
-                .rollback_transaction(batch_id)
+                .rollback_transaction(transaction_id)
                 .expect_err("rolled-back transaction should reject rollback")
                 .to_string(),
         ),
@@ -343,7 +343,7 @@ async fn rolled_back_transaction_rejects_later_handle_operations() {
 
     for (operation, error) in operation_errors {
         assert!(
-            error.contains(&batch_id.to_string())
+            error.contains(&transaction_id.to_string())
                 && error.contains("completed or was never opened"),
             "unexpected {operation} error: {error}"
         );
@@ -383,7 +383,7 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
 
     let committed_batch_id = tx.commit().expect("commit transaction");
     alice
-        .wait_for_batch(committed_batch_id, DurabilityTier::EdgeServer)
+        .wait_for_transaction(committed_batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("committed transaction settles");
 
@@ -604,7 +604,7 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     assert!(bob_staged.is_none(), "transaction update remains staged");
     let alice_batch_id = alice_tx.commit().expect("commit alice transaction");
     alice
-        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
+        .wait_for_transaction(alice_batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("alice transaction accepted");
     wait_for_todos(
@@ -664,7 +664,7 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     assert!(alice_staged.is_none(), "transaction update remains staged");
     let alice_batch_id = alice_tx.commit().expect("commit alice transaction");
     alice
-        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
+        .wait_for_transaction(alice_batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("alice transaction accepted");
     wait_for_todos(
@@ -684,7 +684,7 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
         .expect("bob stages update from latest visible row");
     assert!(bob_staged.is_none(), "transaction update remains staged");
     let bob_batch_id = bob_tx.commit().expect("commit bob transaction");
-    bob.wait_for_batch(bob_batch_id, DurabilityTier::EdgeServer)
+    bob.wait_for_transaction(bob_batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("bob transaction based on latest row should be accepted");
 
@@ -704,9 +704,9 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
 }
 
 local_tokio_test! {
-async fn wait_for_batch_errors_for_unattainable_durability_tier() {
+async fn wait_for_transaction_errors_for_unattainable_durability_tier() {
     let client = JazzClient::test_client(todo_schema()).await;
-    let (_, _, batch_id) = client
+    let (_, _, transaction_id) = client
         .insert(
             "todos",
             row_input!("title" => "local only", "completed" => false),
@@ -715,8 +715,8 @@ async fn wait_for_batch_errors_for_unattainable_durability_tier() {
 
     assert!(
         client
-            .wait_for_batch_with_timeout_for_test(
-                batch_id.expect("ordinary mutation commits immediately"),
+            .wait_for_transaction_with_timeout_for_test(
+                transaction_id.expect("ordinary mutation commits immediately"),
                 DurabilityTier::GlobalServer,
                 Duration::from_millis(100),
             )
@@ -725,7 +725,7 @@ async fn wait_for_batch_errors_for_unattainable_durability_tier() {
         "serverless test client cannot reach GlobalServer durability"
     );
     client
-        .wait_for_batch(batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::Local)
+        .wait_for_transaction(transaction_id.expect("ordinary mutation commits immediately"), DurabilityTier::Local)
         .await
         .expect("local durability should be reachable");
 }
@@ -777,13 +777,13 @@ async fn global_wait_after_over_one_mib_websocket_import_settles() {
         .expect("update target row after import");
 
     client
-        .wait_for_batch(target_batch.expect("ordinary mutation commits immediately"), DurabilityTier::Local)
+        .wait_for_transaction(target_batch.expect("ordinary mutation commits immediately"), DurabilityTier::Local)
         .await
         .expect("target update should settle locally without draining the import backlog");
 
     tokio::time::timeout(
         Duration::from_secs(30),
-        client.wait_for_batch(target_batch.expect("ordinary mutation commits immediately"), DurabilityTier::GlobalServer),
+        client.wait_for_transaction(target_batch.expect("ordinary mutation commits immediately"), DurabilityTier::GlobalServer),
     )
     .await
     .expect("global wait should settle after import backlog")

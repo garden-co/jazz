@@ -10,7 +10,7 @@ use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::TxTime;
-use jazz::tools::OpenBatchId;
+use jazz::tools::OpenTransactionId;
 use jazz::tx::{BranchLineage, DeletionEvent, DurabilityTier, Fate, Transaction};
 use jazz_sim::{emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
@@ -286,7 +286,7 @@ fn run_read_set_capture(config: &Config) {
     seed_local_rows(&mut node_, 64);
 
     let mut row_hist = NsHist::new();
-    let tx = OpenBatchId::new();
+    let tx = OpenTransactionId::new();
     node_.open_exclusive(tx).expect("open tx");
     for idx in 0..config.iterations {
         let start = Instant::now();
@@ -300,7 +300,7 @@ fn run_read_set_capture(config: &Config) {
 
     let mut predicate_hist = NsHist::new();
     for _ in 0..config.iterations {
-        let tx = OpenBatchId::new();
+        let tx = OpenTransactionId::new();
         node_.open_exclusive(tx).expect("open tx");
         let start = Instant::now();
         let rows = node_
@@ -332,7 +332,7 @@ fn run_validation_entries(config: &Config) {
 
     let mut row_hist = NsHist::new();
     for idx in 0..config.iterations {
-        let tx = OpenBatchId::new();
+        let tx = OpenTransactionId::new();
         client.open_exclusive(tx).expect("open tx");
         let _ = client.tx_read(tx, TABLE, row(idx % 64)).expect("tx read");
         client
@@ -367,7 +367,7 @@ fn run_validation_entries(config: &Config) {
 
     let mut predicate_hist = NsHist::new();
     for idx in 0..config.iterations {
-        let tx = OpenBatchId::new();
+        let tx = OpenTransactionId::new();
         client.open_exclusive(tx).expect("open tx");
         let _ = client.tx_current_rows(tx, TABLE).expect("tx current rows");
         client

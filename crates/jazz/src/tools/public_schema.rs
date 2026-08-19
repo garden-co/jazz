@@ -15,7 +15,7 @@ pub use crate::tools::public_api::types::{
     Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, Value, permissions,
     policy_expr,
 };
-pub use crate::tools::transaction::{BatchId, OpenBatchId};
+pub use crate::tools::transaction::{OpenTransactionId, TransactionId};
 
 /// Validate JSON-bearing public values without changing their source text.
 ///

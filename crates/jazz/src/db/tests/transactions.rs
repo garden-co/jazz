@@ -25,7 +25,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         ],
     )]);
     let view = owner.register_schema_view(schema.clone()).unwrap();
-    let open = OpenBatchId::new();
+    let open = OpenTransactionId::new();
     owner.begin_mergeable(open).unwrap();
     let inserted = row(0x91);
     view.mergeable_tx_ref(open)
@@ -78,7 +78,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         })
         .unwrap();
 
-    let overlay_open = OpenBatchId::new();
+    let overlay_open = OpenTransactionId::new();
     owner.begin_mergeable(overlay_open).unwrap();
     let overlay_inserted = row(0x93);
     let overlay_tx = view.mergeable_tx_ref(overlay_open);
@@ -555,7 +555,7 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
         .unwrap();
     builder_tx.commit().unwrap();
 
-    let open_tx = OpenBatchId::new();
+    let open_tx = OpenTransactionId::new();
     handle.begin_mergeable(open_tx).unwrap();
     {
         let tx = handle.mergeable_tx_ref(open_tx);
@@ -660,7 +660,7 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
     db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
         .unwrap();
 
-    let open_tx = OpenBatchId::new();
+    let open_tx = OpenTransactionId::new();
     db.begin_exclusive(open_tx).unwrap();
     {
         let tx = db.exclusive_tx_ref(open_tx);

@@ -118,7 +118,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                 )
                 .expect("trusted writer creates bob-visible doc");
             writer
-                .wait_for_batch(create_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
+                .wait_for_transaction(create_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("create reaches edge");
 
@@ -141,7 +141,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                 .update(doc_id, vec![("owner_id".to_owned(), Value::Uuid(alice_owner_id))])
                 .expect("narrowly authorized writer transfers ownership away from bob");
             writer
-                .wait_for_batch(revoke_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
+                .wait_for_transaction(revoke_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("ownership transfer reaches edge");
 

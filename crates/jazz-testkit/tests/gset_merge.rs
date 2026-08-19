@@ -78,7 +78,7 @@ async fn merge_concurrently(
         .update(doc_id, vec![(column.to_string(), first_value)])
         .expect("first replica writes");
     first
-        .wait_for_batch(
+        .wait_for_transaction(
             first_batch.expect("ordinary mutation commits immediately"),
             DurabilityTier::EdgeServer,
         )
@@ -89,7 +89,7 @@ async fn merge_concurrently(
         .update(doc_id, vec![(column.to_string(), second_value)])
         .expect("second replica writes");
     second
-        .wait_for_batch(
+        .wait_for_transaction(
             second_batch.expect("ordinary mutation commits immediately"),
             DurabilityTier::EdgeServer,
         )
@@ -493,7 +493,7 @@ async fn later_writes_cannot_remove_existing_elements_impl() {
         .update(doc_id, vec![("tags".to_string(), tags_value(&[]))])
         .expect("attempted removal writes a version");
     alice
-        .wait_for_batch(
+        .wait_for_transaction(
             remove_batch.expect("ordinary mutation commits immediately"),
             DurabilityTier::EdgeServer,
         )

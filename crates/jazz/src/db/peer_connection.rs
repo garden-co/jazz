@@ -3851,17 +3851,17 @@ pub(super) fn take_pending_mutation_error_delivery(
 
 pub(super) fn mutation_error_event(rejected: crate::tx::RejectedTransaction) -> MutationErrorEvent {
     let tx_id = rejected.tx_id();
-    let batch_id = BatchId::from_committed_tx(tx_id);
+    let transaction_id = TransactionId::from_committed_tx(tx_id);
     let (code, reason) = mutation_error_details(&rejected.reason());
     MutationErrorEvent {
         code: code.clone(),
         reason: reason.clone(),
         transaction: LocalTransactionRecord {
-            batch_id,
+            transaction_id,
             kind: rejected.kind().into(),
             sealed: true,
             latest_settlement: TransactionFate::Rejected {
-                batch_id,
+                transaction_id,
                 code,
                 reason,
             },

@@ -1313,7 +1313,7 @@ describe("Worker Bridge with OPFS", () => {
     const batchId = await insertResult.batchId;
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      batchId,
+      transactionId: batchId,
       code: "permission_denied",
     });
 
@@ -1344,12 +1344,12 @@ describe("Worker Bridge with OPFS", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        batchId,
+        transactionId: batchId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          batchId,
+          transactionId: batchId,
           code: "permission_denied",
           reason: "Write rejected by server authorization",
         },
@@ -1375,7 +1375,7 @@ describe("Worker Bridge with OPFS", () => {
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      batchId: insertResult.batchId,
+      transactionId: insertResult.batchId,
       code: "permission_denied",
     });
     expect(mutationErrorSpy).not.toHaveBeenCalled();
@@ -1416,12 +1416,12 @@ describe("Worker Bridge with OPFS", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        batchId,
+        transactionId: batchId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          batchId,
+          transactionId: batchId,
           code: "permission_denied",
           reason: "Write rejected by server authorization",
         },
@@ -1490,12 +1490,12 @@ describe("Worker Bridge with OPFS", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        batchId,
+        transactionId: batchId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          batchId,
+          transactionId: batchId,
           code: "permission_denied",
           reason: "Write rejected by server authorization",
         },
@@ -1516,7 +1516,7 @@ describe("Worker Bridge with OPFS", () => {
       const insertResult = db.insert(todos, { title: "Rejected", done: false });
       await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        batchId: insertResult.batchId,
+        transactionId: insertResult.batchId,
         code: "permission_denied",
       });
 
@@ -1542,7 +1542,7 @@ describe("Worker Bridge with OPFS", () => {
       const updateResult = db.update(todos, todo.id, { title: "Updated task" });
       await expect(updateResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        batchId: updateResult.batchId,
+        transactionId: updateResult.batchId,
         code: "permission_denied",
       });
 
@@ -1568,7 +1568,7 @@ describe("Worker Bridge with OPFS", () => {
       const deleteResult = db.delete(todos, todo.id);
       await expect(deleteResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        batchId: deleteResult.batchId,
+        transactionId: deleteResult.batchId,
         code: "permission_denied",
       });
 
@@ -1634,7 +1634,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            transaction: expect.objectContaining({ batchId }),
+            transaction: expect.objectContaining({ transactionId: batchId }),
           }),
         );
       });
@@ -1706,7 +1706,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            transaction: expect.objectContaining({ batchId }),
+            transaction: expect.objectContaining({ transactionId: batchId }),
           }),
         );
       });
@@ -1777,7 +1777,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            transaction: expect.objectContaining({ batchId }),
+            transaction: expect.objectContaining({ transactionId: batchId }),
           }),
         );
       });

@@ -723,7 +723,7 @@ where
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalSeq>,
-        open_tx_overlay: Option<OpenBatchId>,
+        open_tx_overlay: Option<OpenTransactionId>,
         branch_data: Option<BranchId>,
     ) -> Result<Option<DeletionRegisterSource>, SourceResolutionError> {
         if !request
@@ -775,7 +775,7 @@ where
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalSeq>,
-        open_tx_overlay: Option<OpenBatchId>,
+        open_tx_overlay: Option<OpenTransactionId>,
         branch_data: Option<BranchId>,
     ) -> Result<Option<ContentVersionSource>, SourceResolutionError> {
         if !request

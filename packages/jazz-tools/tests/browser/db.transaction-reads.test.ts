@@ -153,7 +153,7 @@ describe("db exclusive transaction reads browser integration", () => {
 
     await tx.commit();
 
-    const coreError = `open batch ${openBatchId} is already committed`;
+    const coreError = `open transaction ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -180,7 +180,7 @@ describe("db exclusive transaction reads browser integration", () => {
 
     await tx.rollback();
 
-    const coreError = `open batch ${openBatchId} has already been completed or was never opened`;
+    const coreError = `open transaction ${openBatchId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -371,7 +371,7 @@ describe("db mergeable transaction reads browser integration", () => {
 
     await tx.commit();
 
-    const coreError = `open batch ${openBatchId} is already committed`;
+    const coreError = `open transaction ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -389,7 +389,7 @@ describe("db mergeable transaction reads browser integration", () => {
 
     await tx.rollback();
 
-    const coreError = `open batch ${openBatchId} has already been completed or was never opened`;
+    const coreError = `open transaction ${openBatchId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -468,7 +468,7 @@ describe("db mergeable transaction reads browser integration", () => {
           expect(rows).toEqual([existingTodo]);
           return "no writes needed";
         }),
-      ).rejects.toThrow("empty mergeable batch has no committed unit; roll it back instead");
+      ).rejects.toThrow("empty mergeable transaction has no committed unit; roll it back instead");
     });
 
     it("rolls back cleanly when an async mergeable transaction reads then throws before writing", async () => {

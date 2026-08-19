@@ -98,7 +98,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("insert todo");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -168,7 +168,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("insert first matching joined row");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
@@ -197,7 +197,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("insert second matching join row");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -281,7 +281,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("replace root source content");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -311,7 +311,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("replace joined source content");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -346,7 +346,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
 
             let batch = client.delete(first).expect("remove first joined row");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -432,7 +432,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 )
                 .expect("insert root");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -463,7 +463,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 .expect("stage removal of that same joined occurrence");
             let batch = tx.commit().expect("commit add-then-remove batch");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_transaction(batch, DurabilityTier::EdgeServer)
                 .await
                 .expect("add-then-remove batch settles");
 
@@ -474,7 +474,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 )
                 .expect("insert durable matching joined row");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )

@@ -634,7 +634,10 @@ where
     }
 
     /// Branch-scoped exclusives are intentionally not implemented in v1.
-    pub fn open_exclusive_on_branch(&mut self, _branch_id: BranchId) -> Result<OpenBatchId, Error> {
+    pub fn open_exclusive_on_branch(
+        &mut self,
+        _branch_id: BranchId,
+    ) -> Result<OpenTransactionId, Error> {
         self.require_catalogue_ready()?;
         Err(Error::UnsupportedBranchExclusive)
     }
