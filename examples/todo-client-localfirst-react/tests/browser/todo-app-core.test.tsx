@@ -134,7 +134,9 @@ describe("React Todo App core browser canary", () => {
     if (idx === -1) return;
 
     const { root } = mounts[idx];
-    await (window as TestWindow).__jazz?.shutdown(dbName);
+    await act(async () => {
+      await (window as TestWindow).__jazz?.shutdown(dbName);
+    });
     await act(async () => root.unmount());
     el.remove();
     mounts.splice(idx, 1);
