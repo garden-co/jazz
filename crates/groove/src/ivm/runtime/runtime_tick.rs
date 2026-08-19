@@ -3,7 +3,7 @@
 use super::*;
 
 impl IvmRuntime {
-    pub fn tick<S>(
+    pub async fn tick<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
         storage: &S,
@@ -12,9 +12,10 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         self.tick_with_params(table_deltas, Vec::new(), storage)
+            .await
     }
 
-    pub(super) fn flush_pending_binding_retractions<S>(
+    pub(super) async fn flush_pending_binding_retractions<S>(
         &mut self,
         storage: &S,
     ) -> Result<(), IvmRuntimeError>
@@ -27,12 +28,13 @@ impl IvmRuntime {
             // so it must first bring queued retractions into arranged state;
             // otherwise the snapshot could observe a binding as live while
             // its retraction is already committed to the lifecycle queue.
-            self.tick_with_params(Vec::new(), Vec::new(), storage)?;
+            self.tick_with_params(Vec::new(), Vec::new(), storage)
+                .await?;
         }
         Ok(())
     }
 
-    pub(crate) fn tick_staged<S>(
+    pub(crate) async fn tick_staged<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
         storage: &S,
@@ -48,7 +50,9 @@ impl IvmRuntime {
         let staged_overlay = RefCell::new(StagedWriteState::from(std::mem::take(staged_writes)));
         let overlay = StagedWriteOverlay::new(storage, &staged_overlay);
         self.defer_subscription_notifications = true;
-        let tick = self.tick_with_params(table_deltas, Vec::new(), &overlay);
+        let tick = self
+            .tick_with_params(table_deltas, Vec::new(), &overlay)
+            .await;
         self.defer_subscription_notifications = false;
         overlay.drain_into(staged_writes);
         if tick.is_err() {
@@ -83,7 +87,7 @@ impl IvmRuntime {
         self.staged_subscription_notifications.clear();
     }
 
-    pub(super) fn tick_with_params<S>(
+    pub(super) async fn tick_with_params<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
         mut binding_deltas: Vec<BindingDelta>,
@@ -103,7 +107,8 @@ impl IvmRuntime {
             .iter()
             .map(|delta| delta.deltas.len())
             .sum::<usize>();
-        self.tick_durable_nodes(&table_deltas, current_tick, storage)?;
+        self.tick_durable_nodes(&table_deltas, current_tick, storage)
+            .await?;
         let mut dropped_subscriptions = Vec::new();
         let mut deferred_notifications = Vec::new();
         let mut metrics = TickMetrics {
@@ -152,7 +157,7 @@ impl IvmRuntime {
             let mut sinks = BTreeMap::new();
             let mut terminal_sinks = BTreeMap::new();
             for (sink, output) in &subscription.outputs {
-                let records = evaluator.update_node(output.node)?;
+                let records = evaluator.update_node(output.node).await?;
                 if !records.deltas.is_empty()
                     && !records.descriptor.registry_compatible_with(&output.output)
                 {
@@ -243,7 +248,7 @@ impl IvmRuntime {
         // see the tick's deltas before retained-only roots can advance shared
         // recursive/operator state.
         for node in retained_roots {
-            evaluator.update_node(node)?;
+            evaluator.update_node(node).await?;
         }
         drop(evaluator);
         self.operator_states
@@ -372,7 +377,7 @@ impl IvmRuntime {
         }
     }
 
-    pub(super) fn hydration_snapshot<S>(
+    pub(super) async fn hydration_snapshot<S>(
         &mut self,
         output_node: NodeId,
         storage: &S,
@@ -381,7 +386,8 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
+        let table_deltas =
+            snapshot_table_deltas(&self.schema, &self.graph, storage, output_node).await?;
         let binding_snapshots = self.binding_snapshot_deltas();
         let context = match mode {
             HydrationMode::Ordinary => EvalContext::root_snapshot(),
@@ -425,13 +431,14 @@ impl IvmRuntime {
         };
         let records = evaluator
             .update_node(output_node)
+            .await
             .map(|records| records.as_ref().clone());
         self.record_hydration_memo_metrics(&metrics);
         self.evict_eval_memo();
         records
     }
 
-    pub(super) fn hydration_snapshots<S>(
+    pub(super) async fn hydration_snapshots<S>(
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
         storage: &S,
@@ -442,11 +449,11 @@ impl IvmRuntime {
     {
         let mut sinks = BTreeMap::new();
         for (sink, output) in outputs {
-            let ordering = output
-                .root_ordering_node
-                .map(|node| self.hydration_snapshot(node, storage, mode))
-                .transpose()?;
-            let mut records = self.hydration_snapshot(output.node, storage, mode)?;
+            let ordering = match output.root_ordering_node {
+                Some(node) => Some(self.hydration_snapshot(node, storage, mode).await?),
+                None => None,
+            };
+            let mut records = self.hydration_snapshot(output.node, storage, mode).await?;
             if !records.descriptor.registry_compatible_with(&output.output) {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
@@ -461,7 +468,7 @@ impl IvmRuntime {
         })
     }
 
-    pub(super) fn hydration_snapshots_for_subscription<S>(
+    pub(super) async fn hydration_snapshots_for_subscription<S>(
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
         storage: &S,
@@ -470,6 +477,7 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         self.hydration_snapshots(outputs, storage, HydrationMode::Subscription)
+            .await
     }
 
     fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
@@ -487,7 +495,7 @@ impl IvmRuntime {
         Ok(false)
     }
 
-    fn tick_durable_nodes<S>(
+    async fn tick_durable_nodes<S>(
         &mut self,
         table_deltas: &[TableDelta],
         current_tick: u64,
@@ -503,31 +511,50 @@ impl IvmRuntime {
             .collect::<Vec<_>>();
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut metrics = TickMetrics::default();
-        let mut evaluator = TickEvaluator {
-            schema: &self.schema,
-            graph: &self.graph,
-            variant_projections: &self.variant_projections,
-            table_deltas,
-            binding_deltas: &[],
-            binding_snapshots: &binding_snapshots,
-            current_tick,
-            operator_states: &mut self.operator_states,
-            arrangement_states: &mut self.arrangement_states,
-            eval_memo: &mut self.eval_memo,
-            eval_memo_bytes: &mut self.eval_memo_bytes,
-            table_frontiers: &self.table_frontiers,
-            binding_frontiers: &self.binding_frontiers,
-            memo_use_clock: &mut self.memo_use_clock,
-            node_meta: &mut self.node_meta,
-            storage: Some(storage),
-            context: EvalContext::root(),
-            metrics: &mut metrics,
-            terminal_deltas: HashMap::default(),
-            root_ordering_windows: HashMap::default(),
-        };
-
         for node in durable_nodes {
-            evaluator.update_node(node)?;
+            let graph_node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            let OpType::Persist(persist) = graph_node.descriptor.operator.clone() else {
+                return Err(IvmRuntimeError::UnsupportedOperator);
+            };
+            let [input_node] = graph_node.descriptor.inputs.as_slice() else {
+                return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+            };
+            let input = {
+                let mut evaluator = TickEvaluator {
+                    schema: &self.schema,
+                    graph: &self.graph,
+                    variant_projections: &self.variant_projections,
+                    table_deltas,
+                    binding_deltas: &[],
+                    binding_snapshots: &binding_snapshots,
+                    current_tick,
+                    operator_states: &mut self.operator_states,
+                    arrangement_states: &mut self.arrangement_states,
+                    eval_memo: &mut self.eval_memo,
+                    eval_memo_bytes: &mut self.eval_memo_bytes,
+                    table_frontiers: &self.table_frontiers,
+                    binding_frontiers: &self.binding_frontiers,
+                    memo_use_clock: &mut self.memo_use_clock,
+                    node_meta: &mut self.node_meta,
+                    storage: Some(storage),
+                    context: EvalContext::root(),
+                    metrics: &mut metrics,
+                    terminal_deltas: HashMap::default(),
+                    root_ordering_windows: HashMap::default(),
+                };
+                evaluator.update_node(*input_node).await?.as_ref().clone()
+            };
+            apply_persist_delta(
+                storage,
+                &persist.storage,
+                &persist.key_fields,
+                persist.unique,
+                &input,
+            )
+            .await?;
         }
 
         Ok(())

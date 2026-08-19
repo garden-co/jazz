@@ -1585,7 +1585,7 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
 }
 
 impl IvmRuntime {
-    pub fn subscribe_one_sink(
+    pub async fn subscribe_one_sink(
         &mut self,
         graph: GraphBuilder,
         storage: &impl OrderedKvStorage,
@@ -1600,13 +1600,15 @@ impl IvmRuntime {
             {
                 shape_id
             } else {
-                let shape = self.prepare_one_sink(
-                    plan.graph.clone(),
-                    plan.shape.clone(),
-                    plan.binding_descriptor,
-                    [plan.binding_field.clone()],
-                    storage,
-                )?;
+                let shape = self
+                    .prepare_one_sink(
+                        plan.graph.clone(),
+                        plan.shape.clone(),
+                        plan.binding_descriptor,
+                        [plan.binding_field.clone()],
+                        storage,
+                    )
+                    .await?;
                 if let Some(state) = self.prepared_shapes.get_mut(&shape.id()) {
                     state.auto_family_key = Some(plan.key.clone());
                     if let Some(terminal) = state.terminals.get_mut(DEFAULT_SINK) {
@@ -1617,13 +1619,15 @@ impl IvmRuntime {
                     .insert(plan.key.clone(), shape.id());
                 shape.id()
             };
-            return self.bind_shape_one_sink(shape_id, &[plan.binding_value], storage);
+            return self
+                .bind_shape_one_sink(shape_id, &[plan.binding_value], storage)
+                .await;
         }
-        let multisink = self.subscribe([(DEFAULT_SINK, graph)], storage)?;
+        let multisink = self.subscribe([(DEFAULT_SINK, graph)], storage).await?;
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
-    pub fn subscribe<I, K, S>(
+    pub async fn subscribe<I, K, S>(
         &mut self,
         sinks: I,
         storage: &S,
@@ -1633,7 +1637,7 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage)?;
+        self.flush_pending_binding_retractions(storage).await?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
@@ -1677,7 +1681,10 @@ impl IvmRuntime {
                 target: MultisinkSubscriptionTarget::Direct,
             },
         );
-        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
+        let initial = match self
+            .hydration_snapshots_for_subscription(&outputs, storage)
+            .await
+        {
             Ok(initial) => initial,
             Err(error) => {
                 self.unsubscribe(subscription_id);
@@ -1692,7 +1699,7 @@ impl IvmRuntime {
         })
     }
 
-    pub fn prepare<I, S>(
+    pub async fn prepare<I, S>(
         &mut self,
         terminals: I,
         binding_source_shape: impl Into<String>,
@@ -1703,7 +1710,7 @@ impl IvmRuntime {
         I: IntoIterator<Item = RoutedMultisinkTerminal>,
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage)?;
+        self.flush_pending_binding_retractions(storage).await?;
         let terminals = terminals.into_iter().collect::<Vec<_>>();
         if terminals.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
@@ -1787,7 +1794,7 @@ impl IvmRuntime {
         Ok(PreparedShape { id: shape_id })
     }
 
-    pub fn bind_shape<S>(
+    pub async fn bind_shape<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -1797,9 +1804,10 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
+            .await
     }
 
-    fn bind_shape_with_public_fields<S>(
+    async fn bind_shape_with_public_fields<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -1809,7 +1817,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage)?;
+        self.flush_pending_binding_retractions(storage).await?;
         let shape = self
             .prepared_shapes
             .get(&shape_id)
@@ -1844,7 +1852,9 @@ impl IvmRuntime {
             }
         };
         if !binding_delta.deltas.is_empty()
-            && let Err(error) = self.tick_with_params(Vec::new(), vec![binding_delta], storage)
+            && let Err(error) = self
+                .tick_with_params(Vec::new(), vec![binding_delta], storage)
+                .await
         {
             self.remove_multisink_retainers(subscription_id, &outputs);
             let _ = self.remove_binding_ref(shape_id, &binding_key);
@@ -1864,7 +1874,10 @@ impl IvmRuntime {
                 },
             },
         );
-        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
+        let initial = match self
+            .hydration_snapshots_for_subscription(&outputs, storage)
+            .await
+        {
             Ok(initial) => initial,
             Err(error) => {
                 self.unsubscribe(subscription_id);
@@ -1879,7 +1892,7 @@ impl IvmRuntime {
         })
     }
 
-    pub fn prepare_one_sink(
+    pub async fn prepare_one_sink(
         &mut self,
         graph: GraphBuilder,
         binding_source_shape: impl Into<String>,
@@ -1912,9 +1925,10 @@ impl IvmRuntime {
             binding_descriptor,
             storage,
         )
+        .await
     }
 
-    pub fn prepare_one_sink_with_routing(
+    pub async fn prepare_one_sink_with_routing(
         &mut self,
         output_graph: GraphBuilder,
         routing_graph: GraphBuilder,
@@ -1950,9 +1964,10 @@ impl IvmRuntime {
             binding_descriptor,
             storage,
         )
+        .await
     }
 
-    pub fn bind_shape_one_sink<S>(
+    pub async fn bind_shape_one_sink<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -1961,11 +1976,11 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        let multisink = self.bind_shape(shape_id, binding_values, storage)?;
+        let multisink = self.bind_shape(shape_id, binding_values, storage).await?;
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
-    pub(crate) fn bind_shape_one_sink_with_output<S>(
+    pub(crate) async fn bind_shape_one_sink_with_output<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -1983,12 +1998,14 @@ impl IvmRuntime {
             &public_output,
         )?;
         let public_fields = descriptor_field_names(&public_output)?;
-        let multisink = self.bind_shape_with_public_fields(
-            shape_id,
-            binding_values,
-            [(DEFAULT_SINK.to_owned(), public_fields)].into(),
-            storage,
-        )?;
+        let multisink = self
+            .bind_shape_with_public_fields(
+                shape_id,
+                binding_values,
+                [(DEFAULT_SINK.to_owned(), public_fields)].into(),
+                storage,
+            )
+            .await?;
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
@@ -2011,7 +2028,7 @@ impl IvmRuntime {
         false
     }
 
-    pub fn unsubscribe_with_storage<S>(
+    pub async fn unsubscribe_with_storage<S>(
         &mut self,
         subscription_id: SubscriptionId,
         storage: &S,
@@ -2028,7 +2045,8 @@ impl IvmRuntime {
                 && let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
                 && !param_delta.deltas.is_empty()
             {
-                self.tick_with_params(Vec::new(), vec![param_delta], storage)?;
+                self.tick_with_params(Vec::new(), vec![param_delta], storage)
+                    .await?;
                 self.remove_unreferenced_auto_family(shape_id);
             }
             return Ok(removed);
@@ -2073,7 +2091,7 @@ impl IvmRuntime {
         Ok(())
     }
 
-    pub(crate) fn prune_dropped_subscriptions_with_storage<S>(
+    pub(crate) async fn prune_dropped_subscriptions_with_storage<S>(
         &mut self,
         storage: &S,
     ) -> Result<usize, IvmRuntimeError>
@@ -2086,7 +2104,7 @@ impl IvmRuntime {
             .filter_map(|(id, state)| state.receiver_liveness.upgrade().is_none().then_some(*id))
             .collect::<Vec<_>>();
         for id in &dropped {
-            self.unsubscribe_with_storage(*id, storage)?;
+            self.unsubscribe_with_storage(*id, storage).await?;
         }
         Ok(dropped.len())
     }

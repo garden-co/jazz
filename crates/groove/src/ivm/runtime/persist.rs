@@ -23,7 +23,7 @@ struct PendingPersistKey {
     positive_record: Option<Vec<u8>>,
 }
 
-pub(super) fn apply_persist_delta(
+pub(super) async fn apply_persist_delta(
     storage: &impl OrderedKvStorage,
     durable_storage: &DurableStorage,
     key_fields: &[usize],
@@ -31,7 +31,7 @@ pub(super) fn apply_persist_delta(
     delta: &RecordDeltas,
 ) -> Result<(), IvmRuntimeError> {
     if key_fields == [0] && delta.descriptor == index_record_descriptor() {
-        return apply_index_persist_delta(storage, durable_storage, unique, delta);
+        return apply_index_persist_delta(storage, durable_storage, unique, delta).await;
     }
 
     let store = RecordStore::new(storage, &durable_storage.column_family, &delta.descriptor);
@@ -59,7 +59,7 @@ pub(super) fn apply_persist_delta(
                     {
                         Some(record)
                     } else {
-                        store.get_raw(&key)?
+                        store.get_raw(&key).await?
                     };
                     if current
                         .as_deref()
@@ -75,7 +75,7 @@ pub(super) fn apply_persist_delta(
                 entry.positive_record = Some(record_delta.raw().to_vec());
             } else if record_delta.weight < 0 {
                 if unique {
-                    let current = store.get_raw(&key)?;
+                    let current = store.get_raw(&key).await?;
                     if current
                         .as_deref()
                         .is_some_and(|record| record != record_delta.raw())
@@ -98,7 +98,7 @@ pub(super) fn apply_persist_delta(
         } else if entry.weight < 0 {
             final_writes.insert(key, None);
         } else if let Some(record) = entry.positive_record
-            && store.get_raw(&key)?.is_some()
+            && store.get_raw(&key).await?.is_some()
         {
             final_writes.insert(key, Some(record));
         }
@@ -110,10 +110,10 @@ pub(super) fn apply_persist_delta(
             None => store.delete(key),
         })
         .collect::<Vec<_>>();
-    Ok(store.write_many(&operations)?)
+    Ok(store.write_many(operations).await?)
 }
 
-fn apply_index_persist_delta(
+async fn apply_index_persist_delta(
     storage: &impl OrderedKvStorage,
     durable_storage: &DurableStorage,
     unique: bool,
@@ -137,7 +137,7 @@ fn apply_index_persist_delta(
                 {
                     Some(record)
                 } else {
-                    store.get_raw(&key)?
+                    store.get_raw(&key).await?
                 };
                 if current
                     .as_deref()
@@ -153,7 +153,7 @@ fn apply_index_persist_delta(
             entry.positive_record = Some(record_delta.raw().to_vec());
         } else if record_delta.weight < 0 {
             if unique {
-                let current = store.get_raw(&key)?;
+                let current = store.get_raw(&key).await?;
                 if current
                     .as_deref()
                     .is_some_and(|record| record != record_delta.raw())
@@ -175,7 +175,7 @@ fn apply_index_persist_delta(
         } else if entry.weight < 0 {
             final_writes.insert(key, None);
         } else if let Some(record) = entry.positive_record
-            && store.get_raw(&key)?.is_some()
+            && store.get_raw(&key).await?.is_some()
         {
             final_writes.insert(key, Some(record));
         }
@@ -187,7 +187,7 @@ fn apply_index_persist_delta(
             None => store.delete(key),
         })
         .collect::<Vec<_>>();
-    Ok(store.write_many(&operations)?)
+    Ok(store.write_many(operations).await?)
 }
 
 fn persisted_index_record_key(durable_storage: &DurableStorage, logical_key: &[u8]) -> Vec<u8> {

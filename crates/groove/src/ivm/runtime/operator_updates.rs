@@ -152,7 +152,7 @@ impl NodeState {
         })
     }
 
-    pub(super) fn update_index_source<S>(
+    pub(super) async fn update_index_source<S>(
         input: &IndexSourceOp,
         schema: &DatabaseSchema,
         variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
@@ -167,21 +167,25 @@ impl NodeState {
         if eval_mode == EvalMode::Hydrate {
             let storage = storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
             let store = RecordStore::new(storage, "indices", output_desc);
-            let mut deltas = Vec::new();
-            let mut visit = |_: &[u8], record: &[u8]| {
-                deltas.push(RecordDelta {
-                    record: Bytes::copy_from_slice(record),
-                    weight: 1,
-                });
-                Ok(())
-            };
-            match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())? {
-                StaticScanBounds::Prefix(prefix) => store.scan_prefix(&prefix, &mut visit)?,
-                StaticScanBounds::Range { start, end } => {
-                    if start < end {
-                        store.scan_range(&start, &end, &mut visit)?;
+            let scan =
+                match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
+                {
+                    StaticScanBounds::Prefix(prefix) => store.scan_prefix(&prefix).await?,
+                    StaticScanBounds::Range { start, end } => {
+                        if start < end {
+                            store.scan_range(&start, &end).await?
+                        } else {
+                            return Ok(RecordDeltas::empty(*output_desc));
+                        }
                     }
-                }
+                };
+            let mut scan = scan;
+            let mut deltas = Vec::new();
+            while let Some(batch) = scan.next_batch().await? {
+                deltas.extend(batch.into_iter().map(|(_, record)| RecordDelta {
+                    record: Bytes::from(record),
+                    weight: 1,
+                }));
             }
             return Ok(RecordDeltas {
                 descriptor: *output_desc,
@@ -509,6 +513,7 @@ impl NodeState {
         })
     }
 
+    #[cfg(any())]
     pub(super) fn update_persist(
         persist: &PersistOp,
         output_desc: RecordDescriptor,

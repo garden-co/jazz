@@ -38,11 +38,12 @@ where
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn subscribe_one_sink(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
+    pub async fn subscribe_one_sink(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .subscribe_one_sink(graph, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -50,7 +51,7 @@ where
     ///
     /// The initial message includes every sink, even if that sink is empty.
     /// Later messages are sent only when at least one sink has deltas.
-    pub fn subscribe<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
+    pub async fn subscribe<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
     where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
@@ -59,6 +60,7 @@ where
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .subscribe(sinks, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -102,9 +104,9 @@ where
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn subscribe_query(&mut self, query: Query) -> Result<Subscription, Error> {
+    pub async fn subscribe_query(&mut self, query: Query) -> Result<Subscription, Error> {
         let planned = plan_query(&query, self.ivm_runtime.schema())?;
-        self.subscribe_one_sink(planned.graph)
+        self.subscribe_one_sink(planned.graph).await
     }
 
     /// Prepare a parameterized SQL-ish query shape once so callers can bind many
@@ -137,7 +139,7 @@ where
     /// assert_eq!(prepared.parameters()[0].name, "year");
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn prepare_query(&mut self, query: Query) -> Result<PreparedShape, Error> {
+    pub async fn prepare_query(&mut self, query: Query) -> Result<PreparedShape, Error> {
         self.ensure_not_poisoned()?;
         let planned = plan_prepared_shape(&query, self.ivm_runtime.schema())?;
         let output = RecordDescriptor::new(
@@ -146,12 +148,14 @@ where
                 .iter()
                 .map(|field| (field.name.clone(), field.value_type.clone())),
         );
-        let shape = self.prepare_one_sink(
-            planned.planned.graph,
-            planned.shape,
-            planned.binding_descriptor,
-            planned.output_key_fields,
-        )?;
+        let shape = self
+            .prepare_one_sink(
+                planned.planned.graph,
+                planned.shape,
+                planned.binding_descriptor,
+                planned.output_key_fields,
+            )
+            .await?;
         Ok(PreparedShape {
             id: shape.id(),
             parameters: planned.parameters,
@@ -194,7 +198,7 @@ where
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn bind(
+    pub async fn bind(
         &mut self,
         prepared: &PreparedShape,
         bindings: &[(&str, Value)],
@@ -224,6 +228,7 @@ where
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink_with_output(prepared.id, &values, prepared.output, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -235,7 +240,7 @@ where
     /// registered as the single route-carrying terminal, `output_key_fields`
     /// name the hidden route fields, and [`Database::bind_shape_one_sink`] adapts the
     /// one sink back to a [`Subscription`].
-    pub fn prepare_one_sink(
+    pub async fn prepare_one_sink(
         &mut self,
         graph: GraphBuilder,
         binding_source_shape: impl Into<String>,
@@ -252,6 +257,7 @@ where
                 output_key_fields,
                 &storage,
             )
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -263,7 +269,7 @@ where
     /// the graph Groove maintains and routes by; `output_graph` only supplies
     /// the subscriber-visible field names and types that are projected from the
     /// routed terminal.
-    pub fn prepare_one_sink_with_routing(
+    pub async fn prepare_one_sink_with_routing(
         &mut self,
         output_graph: GraphBuilder,
         routing_graph: GraphBuilder,
@@ -282,6 +288,7 @@ where
                 routing_key_fields,
                 &storage,
             )
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -291,7 +298,7 @@ where
     /// columns. Binding appends ordinary filter/project graph nodes for each
     /// sink, so callers with one-sink needs should treat [`Database::prepare_one_sink`]
     /// and [`Database::prepare_one_sink_with_routing`] as thin convenience wrappers.
-    pub fn prepare(
+    pub async fn prepare(
         &mut self,
         terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
         binding_source_shape: impl Into<String>,
@@ -306,6 +313,7 @@ where
                 binding_descriptor,
                 &storage,
             )
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -346,7 +354,7 @@ where
     /// assert!(subscription.recv()?.is_empty());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn bind_shape_one_sink(
+    pub async fn bind_shape_one_sink(
         &mut self,
         shape: PreparedShapeId,
         binding_values: &[Value],
@@ -355,6 +363,7 @@ where
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink(shape, binding_values, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -365,7 +374,7 @@ where
     /// The prepared terminal may contain hidden routing fields from
     /// `output_key_fields` or `routing_key_fields`; `public_output` selects the
     /// descriptor that bound subscribers receive.
-    pub fn bind_shape_one_sink_with_output(
+    pub async fn bind_shape_one_sink_with_output(
         &mut self,
         shape: PreparedShapeId,
         binding_values: &[Value],
@@ -375,11 +384,12 @@ where
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink_with_output(shape, binding_values, public_output, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
     /// Bind a routed multisink shape by positional values.
-    pub fn bind_shape(
+    pub async fn bind_shape(
         &mut self,
         shape: PreparedShapeId,
         binding_values: &[Value],
@@ -388,6 +398,7 @@ where
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape(shape, binding_values, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -424,9 +435,9 @@ where
     /// assert_eq!(rows.to_values()?, vec![(vec![Value::String("Kind of Blue".into())], 1)]);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn query(&mut self, query: Query) -> Result<RecordDeltas, Error> {
+    pub async fn query(&mut self, query: Query) -> Result<RecordDeltas, Error> {
         let planned = plan_query(&query, self.ivm_runtime.schema())?;
-        self.query_graph(planned.graph)
+        self.query_graph(planned.graph).await
     }
 
     /// Run a one-shot graph query against the current storage snapshot.
@@ -459,17 +470,18 @@ where
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn query_graph(&mut self, graph: GraphBuilder) -> Result<RecordDeltas, Error> {
+    pub async fn query_graph(&mut self, graph: GraphBuilder) -> Result<RecordDeltas, Error> {
         self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .query_snapshot(graph, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
     /// Run several named graph outputs against the same current storage
     /// snapshot without registering a live subscription.
-    pub fn query_graphs<I, K>(&mut self, sinks: I) -> Result<MultisinkDeltas, Error>
+    pub async fn query_graphs<I, K>(&mut self, sinks: I) -> Result<MultisinkDeltas, Error>
     where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
@@ -478,12 +490,14 @@ where
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .query_snapshots(sinks, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
-    pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
+    pub async fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
         self.ivm_runtime
             .unsubscribe_with_storage(subscription_id, &self.storage)
+            .await
             .unwrap_or(false)
     }
 
@@ -500,10 +514,11 @@ where
     /// Retire subscriptions whose receiving handles have already been
     /// dropped, even when no later data delta exists to discover the closed
     /// notification channel.
-    pub fn prune_dropped_subscriptions(&mut self) -> Result<usize, Error> {
+    pub async fn prune_dropped_subscriptions(&mut self) -> Result<usize, Error> {
         self.ensure_not_poisoned()?;
         self.ivm_runtime
             .prune_dropped_subscriptions_with_storage(&self.storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 }

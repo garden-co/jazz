@@ -121,9 +121,7 @@ impl OrderedKvStorage for MemoryStorage {
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
-            let values = inner
-                .get_mut(&cf)
-                .ok_or_else(|| Error::ColumnFamilyNotFound(cf))?;
+            let values = inner.get_mut(&cf).ok_or(Error::ColumnFamilyNotFound(cf))?;
             values.insert(key, value);
             Ok(())
         })
@@ -132,9 +130,7 @@ impl OrderedKvStorage for MemoryStorage {
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
-            let values = inner
-                .get_mut(&cf)
-                .ok_or_else(|| Error::ColumnFamilyNotFound(cf))?;
+            let values = inner.get_mut(&cf).ok_or(Error::ColumnFamilyNotFound(cf))?;
             values.remove(&key);
             Ok(())
         })

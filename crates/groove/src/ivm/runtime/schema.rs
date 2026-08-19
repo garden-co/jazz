@@ -132,7 +132,7 @@ impl IvmRuntime {
         Ok(())
     }
 
-    pub(crate) fn register_table_index<S>(
+    pub(crate) async fn register_table_index<S>(
         &mut self,
         table: &str,
         index: IndexSchema,
@@ -164,7 +164,8 @@ impl IvmRuntime {
         }
         let persist = self.add_dedup_schema_index(&table_schema, &index)?;
         self.invalidate_table_inputs(table);
-        self.hydration_snapshot(persist, storage, HydrationMode::Ordinary)?;
+        self.hydration_snapshot(persist, storage, HydrationMode::Ordinary)
+            .await?;
         Ok(())
     }
 
@@ -689,7 +690,7 @@ impl IvmRuntime {
         self.schema.direct_record_store(store)
     }
 
-    pub fn query_snapshot<S>(
+    pub async fn query_snapshot<S>(
         &mut self,
         graph: GraphBuilder,
         storage: &S,
@@ -697,7 +698,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage)?;
+        self.flush_pending_binding_retractions(storage).await?;
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
         }
@@ -707,18 +708,20 @@ impl IvmRuntime {
             node: output_node,
             ..
         } = self.add_dedup_graph(&graph)?;
-        let records = self.hydration_snapshot(output_node, storage, HydrationMode::Ordinary);
+        let records = self
+            .hydration_snapshot(output_node, storage, HydrationMode::Ordinary)
+            .await?;
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
-        let records = records?;
+        self.prune_unreferenced_arrangements();
         if !records.descriptor.registry_compatible_with(&output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
         Ok(records)
     }
 
-    pub fn query_snapshots<I, K, S>(
+    pub async fn query_snapshots<I, K, S>(
         &mut self,
         sinks: I,
         storage: &S,
@@ -728,7 +731,7 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage)?;
+        self.flush_pending_binding_retractions(storage).await?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
@@ -753,10 +756,13 @@ impl IvmRuntime {
         for (sink, graph) in sinks {
             outputs.insert(sink, self.add_dedup_graph(&graph)?);
         }
-        let snapshots = self.hydration_snapshots(&outputs, storage, HydrationMode::Ordinary);
+        let snapshots = self
+            .hydration_snapshots(&outputs, storage, HydrationMode::Ordinary)
+            .await;
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
+        self.prune_unreferenced_arrangements();
         snapshots
     }
 }
