@@ -57,9 +57,10 @@ fn register_projection(database: &mut Database<MemoryStorage>) -> Result<(), gro
     Ok(())
 }
 
-#[test]
+#[futures_test::test]
 #[ignore = "manual release A/B receipt"]
-fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dyn std::error::Error>> {
+async fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dyn std::error::Error>>
+{
     let descriptors = {
         let schema = schema();
         (1..=4)
@@ -77,10 +78,11 @@ fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dyn std:
     for _ in 0..REPS {
         let database_schema = schema();
         let storage = MemoryStorage::new(&database_schema.column_families());
-        let mut database = Database::new(database_schema, storage)?;
+        let mut database = Database::new(database_schema, storage).await?;
         register_projection(&mut database)?;
-        let subscription =
-            database.subscribe_one_sink(GraphBuilder::variant_source("entries", "receipt"))?;
+        let subscription = database
+            .subscribe_one_sink(GraphBuilder::variant_source("entries", "receipt"))
+            .await?;
         assert!(subscription.recv()?.is_empty());
         let started = std::time::Instant::now();
         let mut batch = database.open_batch();
@@ -99,18 +101,19 @@ fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dyn std:
                 VariantRecord::create(tag, descriptors[tag as usize - 1], &values)?,
             );
         }
-        database.commit_batch(batch)?;
+        database.commit_batch(batch).await?;
         let delivered = subscription.recv()?;
         assert_eq!(delivered.deltas.len(), ROWS as usize);
         commits.push(started.elapsed().as_micros());
         drop(subscription);
 
         let storage = database.into_storage();
-        let mut reopened = Database::new(schema(), storage)?;
+        let mut reopened = Database::new(schema(), storage).await?;
         register_projection(&mut reopened)?;
         let scan_started = std::time::Instant::now();
         let hydration = reopened
-            .subscribe_one_sink(GraphBuilder::variant_source("entries", "receipt"))?
+            .subscribe_one_sink(GraphBuilder::variant_source("entries", "receipt"))
+            .await?
             .recv()?;
         assert_eq!(hydration.deltas.len(), ROWS as usize);
         scans.push(scan_started.elapsed().as_micros());

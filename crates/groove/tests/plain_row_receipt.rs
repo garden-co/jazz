@@ -72,7 +72,7 @@ fn recursive_disk_bytes(path: &Path) -> std::io::Result<u64> {
     })
 }
 
-fn fresh_open_after_exclusive_drop(
+async fn fresh_open_after_exclusive_drop(
     storage: RocksDbStorage,
     path: &Path,
     column_families: &[&str],
@@ -81,11 +81,12 @@ fn fresh_open_after_exclusive_drop(
     let reopened = fresh_open_after_exclusive_drop_with(storage, path, column_families, || {
         fresh_open_attempts.set(fresh_open_attempts.get() + 1);
         RocksDbStorage::open(path, column_families)
-    })?;
+    })
+    .await?;
     Ok((reopened, fresh_open_attempts.get()))
 }
 
-fn fresh_open_after_exclusive_drop_with(
+async fn fresh_open_after_exclusive_drop_with(
     storage: RocksDbStorage,
     path: &Path,
     column_families: &[&str],
@@ -95,21 +96,21 @@ fn fresh_open_after_exclusive_drop_with(
         RocksDbStorage::open(path, column_families).is_err(),
         "RocksDB must reject a competing open while the original handle is alive"
     );
-    storage.close()?;
+    storage.close().await?;
     drop(storage);
 
     Ok(fresh_open()?)
 }
 
-#[test]
+#[futures_test::test]
 #[ignore = "manual storage receipt; noisy and host-specific"]
-fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn std::error::Error>> {
+async fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn std::error::Error>> {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     let dir = tempfile::tempdir()?;
     let schema = schema();
     let column_families = schema.column_families();
     let storage = RocksDbStorage::open(dir.path(), &column_families)?;
-    let mut db = Database::new(schema.clone(), storage)?;
+    let mut db = Database::new(schema.clone(), storage).await?;
 
     let write_started = Instant::now();
     for revision in 0..2 {
@@ -121,7 +122,7 @@ fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn std::er
             } else {
                 batch.update("rows", row(id, revision));
             }
-            db.commit_batch(batch)?;
+            db.commit_batch(batch).await?;
         }
     }
     let write = write_started.elapsed();
@@ -131,7 +132,8 @@ fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn std::er
     let mut checksum_before = 0u64;
     for id in 0..ROWS {
         let record = db
-            .primary_key_get("rows", &[Value::U64(id)])?
+            .primary_key_get("rows", &[Value::U64(id)])
+            .await?
             .expect("updated row exists");
         assert_eq!(
             record.to_values()?[1],
@@ -144,7 +146,7 @@ fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn std::er
 
     db.reset_storage_read_metrics();
     let scan_started = Instant::now();
-    let scanned = db.primary_key_scan("rows", &[])?;
+    let scanned = db.primary_key_scan("rows", &[]).await?;
     let scan = scan_started.elapsed();
     let scan_reads = db.take_storage_read_metrics();
     assert_eq!(scanned.len() as u64, ROWS);
@@ -158,15 +160,16 @@ fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn std::er
 
     let reopen_started = Instant::now();
     let (storage, fresh_open_attempts) =
-        fresh_open_after_exclusive_drop(storage, dir.path(), &column_families)?;
+        fresh_open_after_exclusive_drop(storage, dir.path(), &column_families).await?;
     assert_eq!(fresh_open_attempts, 1);
-    let reopened = Database::new(schema, storage)?;
+    let reopened = Database::new(schema, storage).await?;
     let reopen = reopen_started.elapsed();
     let disk_bytes = recursive_disk_bytes(dir.path())?;
     let mut checksum_after = 0u64;
     for id in 0..ROWS {
         let record = reopened
-            .primary_key_get("rows", &[Value::U64(id)])?
+            .primary_key_get("rows", &[Value::U64(id)])
+            .await?
             .expect("row survives fresh open");
         assert_eq!(
             record.to_values()?[1],
@@ -218,12 +221,15 @@ fn checksum_is_sensitive_to_returned_row_content() {
     );
 }
 
-#[test]
-fn fresh_open_requires_dropping_the_original_exclusive_handle() {
+#[futures_test::test]
+async fn fresh_open_requires_dropping_the_original_exclusive_handle() {
     let dir = tempfile::tempdir().unwrap();
     let column_families = vec!["records"];
     let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
-    storage.set("records", b"key", b"persisted").unwrap();
+    storage
+        .set("records".to_owned(), b"key".to_vec(), b"persisted".to_vec())
+        .await
+        .unwrap();
 
     let attempts = Cell::new(0usize);
     let reopened =
@@ -231,6 +237,7 @@ fn fresh_open_requires_dropping_the_original_exclusive_handle() {
             attempts.set(attempts.get() + 1);
             RocksDbStorage::open(dir.path(), &column_families)
         })
+        .await
         .unwrap();
     assert_eq!(
         attempts.get(),
@@ -238,7 +245,11 @@ fn fresh_open_requires_dropping_the_original_exclusive_handle() {
         "fresh open callback must run exactly once"
     );
     assert_eq!(
-        reopened.get("records", b"key").unwrap().as_deref(),
+        reopened
+            .get("records".to_owned(), b"key".to_vec())
+            .await
+            .unwrap()
+            .as_deref(),
         Some(b"persisted".as_slice())
     );
 }
