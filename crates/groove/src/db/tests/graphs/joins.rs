@@ -2,18 +2,20 @@
 
 use super::*;
 
-#[test]
-fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
+#[futures_test::test]
+async fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let first = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
         .unwrap();
     let second = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
         .unwrap();
     let first_output = database
         .ivm_runtime
@@ -27,28 +29,31 @@ fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
     assert_eq!(first_output, second_output);
     assert_eq!(database.ivm_runtime.retained_node_ids().len(), 1);
 
-    assert!(database.unsubscribe(first.id()));
+    assert!(database.unsubscribe(first.id()).await);
     assert!(database.ivm_runtime.graph().node(first_output).is_some());
 
-    assert!(database.unsubscribe(second.id()));
+    assert!(database.unsubscribe(second.id()).await);
     assert!(database.ivm_runtime.graph().node(first_output).is_none());
     assert!(database.ivm_runtime.retained_node_ids().is_empty());
 }
 
-#[test]
-fn union_subscriptions_receive_deltas_from_multiple_tables() {
+#[futures_test::test]
+async fn union_subscriptions_receive_deltas_from_multiple_tables() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "archived_albums"],
     )
     .unwrap();
-    let mut database = Database::new(two_album_tables_schema(), storage).unwrap();
+    let mut database = Database::new(two_album_tables_schema(), storage)
+        .await
+        .unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::union([
             GraphBuilder::table("albums"),
             GraphBuilder::table("archived_albums"),
         ]))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -60,7 +65,7 @@ fn union_subscriptions_receive_deltas_from_multiple_tables() {
         "archived_albums",
         vec![Value::U64(2), Value::String("Out to Lunch".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id)
@@ -74,15 +79,16 @@ fn union_subscriptions_receive_deltas_from_multiple_tables() {
     );
 }
 
-#[test]
-fn union_all_subscriptions_preserve_duplicate_derivations() {
+#[futures_test::test]
+async fn union_all_subscriptions_preserve_duplicate_derivations() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let album_titles = GraphBuilder::table("albums").project(["title"]);
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::union([album_titles.clone(), album_titles]))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -90,7 +96,7 @@ fn union_all_subscriptions_preserve_duplicate_derivations() {
         "albums",
         vec![Value::U64(1), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -101,16 +107,17 @@ fn union_all_subscriptions_preserve_duplicate_derivations() {
     );
 }
 
-#[test]
-fn filter_subscriptions_emit_only_matching_rows() {
+#[futures_test::test]
+async fn filter_subscriptions_emit_only_matching_rows() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(
             GraphBuilder::table("albums").filter(PredicateExpr::gt("id", Value::U64(10))),
         )
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -122,7 +129,7 @@ fn filter_subscriptions_emit_only_matching_rows() {
         "albums",
         vec![Value::U64(11), Value::String("Giant Steps".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -130,14 +137,15 @@ fn filter_subscriptions_emit_only_matching_rows() {
     );
 }
 
-#[test]
-fn project_subscriptions_emit_projected_records() {
+#[futures_test::test]
+async fn project_subscriptions_emit_projected_records() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums").project(["title"]))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -145,19 +153,19 @@ fn project_subscriptions_emit_projected_records() {
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_recv_vals(&subscription_id),
         [(vec!["Blue Train".into()], 1)]
     );
 }
 
-#[test]
-fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
+#[futures_test::test]
+async fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let graph = GraphBuilder::table("albums")
         .filter(PredicateExpr::eq(
             "title",
@@ -165,8 +173,8 @@ fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
         ))
         .project(["title"]);
 
-    let first = database.subscribe_one_sink(graph.clone()).unwrap();
-    let second = database.subscribe_one_sink(graph).unwrap();
+    let first = database.subscribe_one_sink(graph.clone()).await.unwrap();
+    let second = database.subscribe_one_sink(graph).await.unwrap();
     let first_output = database
         .ivm_runtime
         .subscription_output_node(first.id())
@@ -184,23 +192,25 @@ fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
             .contains(&first_output)
     );
 
-    assert!(database.unsubscribe(first.id()));
+    assert!(database.unsubscribe(first.id()).await);
     assert!(database.ivm_runtime.graph().node(first_output).is_some());
 
-    assert!(database.unsubscribe(second.id()));
+    assert!(database.unsubscribe(second.id()).await);
     assert!(database.ivm_runtime.graph().node(first_output).is_none());
     assert!(database.ivm_runtime.retained_node_ids().is_empty());
 }
 
-#[test]
-fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
+#[futures_test::test]
+async fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("albums"),
@@ -208,6 +218,7 @@ fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -215,7 +226,7 @@ fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
         "artists",
         vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(subscription_id.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -227,7 +238,7 @@ fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -244,10 +255,10 @@ fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
     );
 }
 
-#[test]
-fn join_subscriptions_match_array_key_elements() {
+#[futures_test::test]
+async fn join_subscriptions_match_array_key_elements() {
     let storage = MemoryStorage::new(&["files", "file_parts"]);
-    let mut database = Database::new(files_parts_schema(), storage).unwrap();
+    let mut database = Database::new(files_parts_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("files"),
@@ -255,6 +266,7 @@ fn join_subscriptions_match_array_key_elements() {
             ["part_ids"],
             ["part_uuid"],
         ))
+        .await
         .unwrap();
 
     let part_a = uuid(0xa);
@@ -285,7 +297,7 @@ fn join_subscriptions_match_array_key_elements() {
             Value::Bytes(b"c".to_vec()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -302,16 +314,17 @@ fn join_subscriptions_match_array_key_elements() {
     );
 }
 
-#[test]
-fn unnest_subscription_emits_one_row_per_array_element() {
+#[futures_test::test]
+async fn unnest_subscription_emits_one_row_per_array_element() {
     let storage = MemoryStorage::new(&["files", "file_parts"]);
-    let mut database = Database::new(files_parts_schema(), storage).unwrap();
+    let mut database = Database::new(files_parts_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(
             GraphBuilder::table("files")
                 .unnest("part_ids", "part_id")
                 .project(["id", "part_id"]),
         )
+        .await
         .unwrap();
 
     let part_a = uuid(0xa);
@@ -326,7 +339,7 @@ fn unnest_subscription_emits_one_row_per_array_element() {
             Value::Array(vec![Value::Uuid(part_a), Value::Uuid(part_b)]),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -345,7 +358,7 @@ fn unnest_subscription_emits_one_row_per_array_element() {
             Value::Array(vec![Value::Uuid(part_b), Value::Uuid(part_c)]),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -358,10 +371,10 @@ fn unnest_subscription_emits_one_row_per_array_element() {
     );
 }
 
-#[test]
-fn join_subscriptions_match_persisted_array_key_elements() {
+#[futures_test::test]
+async fn join_subscriptions_match_persisted_array_key_elements() {
     let storage = MemoryStorage::new(&["files", "file_parts"]);
-    let mut database = Database::new(files_parts_schema(), storage).unwrap();
+    let mut database = Database::new(files_parts_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("files"),
@@ -369,6 +382,7 @@ fn join_subscriptions_match_persisted_array_key_elements() {
             ["part_ids"],
             ["part_uuid"],
         ))
+        .await
         .unwrap();
 
     let part_a = uuid(0xa);
@@ -388,7 +402,7 @@ fn join_subscriptions_match_persisted_array_key_elements() {
         ],
     );
     batch.insert("files", vec![Value::U64(2), Value::Array(vec![])]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(subscription_id.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -416,7 +430,7 @@ fn join_subscriptions_match_persisted_array_key_elements() {
             Value::Bytes(b"c".to_vec()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -453,10 +467,12 @@ fn join_subscriptions_match_persisted_array_key_elements() {
     );
 }
 
-#[test]
-fn join_subscriptions_match_nullable_array_key_elements() {
+#[futures_test::test]
+async fn join_subscriptions_match_nullable_array_key_elements() {
     let storage = MemoryStorage::new(&["files", "file_parts"]);
-    let mut database = Database::new(nullable_files_parts_schema(), storage).unwrap();
+    let mut database = Database::new(nullable_files_parts_schema(), storage)
+        .await
+        .unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("files"),
@@ -464,6 +480,7 @@ fn join_subscriptions_match_nullable_array_key_elements() {
             ["part_ids"],
             ["part_uuid"],
         ))
+        .await
         .unwrap();
 
     let part_a = uuid(0xa);
@@ -488,7 +505,7 @@ fn join_subscriptions_match_nullable_array_key_elements() {
             Value::Bytes(b"b".to_vec()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -508,12 +525,15 @@ fn join_subscriptions_match_nullable_array_key_elements() {
     );
 }
 
-#[test]
-fn index_subscriptions_expand_array_key_elements() {
+#[futures_test::test]
+async fn index_subscriptions_expand_array_key_elements() {
     let storage = MemoryStorage::new(&["files", "indices"]);
-    let mut database = Database::new(indexed_files_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_files_schema(), storage)
+        .await
+        .unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::index("files", "files_by_part_ids"))
+        .await
         .unwrap();
 
     let part_a = uuid(0xa);
@@ -526,7 +546,7 @@ fn index_subscriptions_expand_array_key_elements() {
             Value::Array(vec![Value::Uuid(part_b), Value::Uuid(part_a)]),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -549,10 +569,12 @@ fn index_subscriptions_expand_array_key_elements() {
     );
 }
 
-#[test]
-fn query_graph_joins_related_tables_through_database_facade() {
+#[futures_test::test]
+async fn query_graph_joins_related_tables_through_database_facade() {
     let storage = MemoryStorage::new(&["albums", "artists"]);
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -587,7 +609,7 @@ fn query_graph_joins_related_tables_through_database_facade() {
             Value::String("Giant Steps".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let rows = database
         .query_graph(
@@ -602,6 +624,7 @@ fn query_graph_joins_related_tables_through_database_facade() {
                 ProjectField::renamed("left.title", "album"),
             ]),
         )
+        .await
         .unwrap();
 
     let mut values = rows.to_values().unwrap();
@@ -634,15 +657,17 @@ fn query_graph_joins_related_tables_through_database_facade() {
     );
 }
 
-#[test]
-fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
+#[futures_test::test]
+async fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("albums"),
@@ -650,6 +675,7 @@ fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -661,7 +687,7 @@ fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(subscription_id.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -669,7 +695,7 @@ fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
         "artists",
         vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -686,15 +712,17 @@ fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
     );
 }
 
-#[test]
-fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
+#[futures_test::test]
+async fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("albums"),
@@ -702,6 +730,7 @@ fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -717,7 +746,7 @@ fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial_join = expect_recv_vals(&subscription_id);
 
     let mut batch = database.open_batch();
@@ -729,7 +758,7 @@ fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
             Value::String("Giant Steps".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let deltas = expect_recv_vals(&subscription_id);
     assert_eq!(deltas.len(), 2);
@@ -756,7 +785,7 @@ fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
 
     let mut batch = database.open_batch();
     batch.delete("artists", PrimaryKeyValue::U64(11));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_recv_vals(&subscription_id),
         [(
@@ -772,15 +801,17 @@ fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
     );
 }
 
-#[test]
-fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
+#[futures_test::test]
+async fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::anti_join(
             GraphBuilder::table("albums"),
@@ -788,6 +819,7 @@ fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -799,7 +831,7 @@ fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -807,15 +839,17 @@ fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
     );
 }
 
-#[test]
-fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
+#[futures_test::test]
+async fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::semi_join(
             GraphBuilder::table("albums"),
@@ -823,6 +857,7 @@ fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
@@ -835,7 +870,7 @@ fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(subscription.try_recv().is_err());
 
     let mut batch = database.open_batch();
@@ -843,7 +878,7 @@ fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
         "artists",
         vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -851,15 +886,17 @@ fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
     );
 }
 
-#[test]
-fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
+#[futures_test::test]
+async fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::semi_join(
             GraphBuilder::table("albums"),
@@ -867,6 +904,7 @@ fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
@@ -875,7 +913,7 @@ fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
         "artists",
         vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(subscription.try_recv().is_err());
 
     let mut batch = database.open_batch();
@@ -887,7 +925,7 @@ fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
@@ -895,22 +933,24 @@ fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
 
     let mut batch = database.open_batch();
     batch.delete("artists", PrimaryKeyValue::U64(11));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], -1)]
     );
 }
 
-#[test]
-fn semi_join_hydration_snapshot_filters_missing_right_matches() {
+#[futures_test::test]
+async fn semi_join_hydration_snapshot_filters_missing_right_matches() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
@@ -932,7 +972,7 @@ fn semi_join_hydration_snapshot_filters_missing_right_matches() {
         "artists",
         vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let subscription = database
         .subscribe_one_sink(GraphBuilder::semi_join(
@@ -941,6 +981,7 @@ fn semi_join_hydration_snapshot_filters_missing_right_matches() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
 
     assert_eq!(
@@ -949,15 +990,17 @@ fn semi_join_hydration_snapshot_filters_missing_right_matches() {
     );
 }
 
-#[test]
-fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
+#[futures_test::test]
+async fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::anti_join(
             GraphBuilder::table("albums"),
@@ -965,6 +1008,7 @@ fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -976,7 +1020,7 @@ fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(expect_recv_vals(&subscription)[0].1, 1);
 
     let mut batch = database.open_batch();
@@ -984,7 +1028,7 @@ fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
         "artists",
         vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], -1)]
@@ -992,22 +1036,24 @@ fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
 
     let mut batch = database.open_batch();
     batch.delete("artists", PrimaryKeyValue::U64(11));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
     );
 }
 
-#[test]
-fn anti_join_only_changes_when_right_count_crosses_zero() {
+#[futures_test::test]
+async fn anti_join_only_changes_when_right_count_crosses_zero() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "blocks"],
     )
     .unwrap();
-    let mut database = Database::new(albums_blockers_schema(), storage).unwrap();
+    let mut database = Database::new(albums_blockers_schema(), storage)
+        .await
+        .unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::anti_join(
             GraphBuilder::table("albums"),
@@ -1015,6 +1061,7 @@ fn anti_join_only_changes_when_right_count_crosses_zero() {
             ["artist_id"],
             ["artist_id"],
         ))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -1026,13 +1073,13 @@ fn anti_join_only_changes_when_right_count_crosses_zero() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(expect_recv_vals(&subscription)[0].1, 1);
 
     let mut batch = database.open_batch();
     batch.insert("blocks", vec![Value::U64(1), Value::U64(11)]);
     batch.insert("blocks", vec![Value::U64(2), Value::U64(11)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], -1)]
@@ -1040,27 +1087,29 @@ fn anti_join_only_changes_when_right_count_crosses_zero() {
 
     let mut batch = database.open_batch();
     batch.delete("blocks", PrimaryKeyValue::U64(1));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(subscription.try_recv().is_err());
 
     let mut batch = database.open_batch();
     batch.delete("blocks", PrimaryKeyValue::U64(2));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
     );
 }
 
-#[test]
-fn anti_join_hydration_snapshot_filters_existing_right_matches() {
+#[futures_test::test]
+async fn anti_join_hydration_snapshot_filters_existing_right_matches() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
@@ -1082,7 +1131,7 @@ fn anti_join_hydration_snapshot_filters_existing_right_matches() {
         "artists",
         vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let subscription = database
         .subscribe_one_sink(GraphBuilder::anti_join(
@@ -1091,6 +1140,7 @@ fn anti_join_hydration_snapshot_filters_existing_right_matches() {
             ["artist_id"],
             ["id"],
         ))
+        .await
         .unwrap();
 
     assert_eq!(
@@ -1102,15 +1152,17 @@ fn anti_join_hydration_snapshot_filters_existing_right_matches() {
     );
 }
 
-#[test]
-fn anti_join_filters_identical_descriptors_before_projection() {
+#[futures_test::test]
+async fn anti_join_filters_identical_descriptors_before_projection() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(4), Value::U64(3)]);
@@ -1119,10 +1171,11 @@ fn anti_join_filters_identical_descriptors_before_projection() {
         vec![Value::U64(5), Value::U64(4), Value::U64(3)],
     );
     batch.insert("edges", vec![Value::U64(2), Value::U64(8), Value::U64(4)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let subscription = database
         .subscribe_one_sink(unblocked_edges_graph())
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -1130,15 +1183,17 @@ fn anti_join_filters_identical_descriptors_before_projection() {
     );
 }
 
-#[test]
-fn anti_join_hydration_snapshot_filters_many_existing_identical_descriptor_blockers() {
+#[futures_test::test]
+async fn anti_join_hydration_snapshot_filters_many_existing_identical_descriptor_blockers() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage)
+        .await
+        .unwrap();
 
     let edges = [
         (1, 8, 4),
@@ -1174,10 +1229,11 @@ fn anti_join_hydration_snapshot_filters_many_existing_identical_descriptor_block
             vec![Value::U64(id), Value::U64(src), Value::U64(dst)],
         );
     }
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let subscription = database
         .subscribe_one_sink(unblocked_edges_graph())
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -1192,22 +1248,25 @@ fn anti_join_hydration_snapshot_filters_many_existing_identical_descriptor_block
     );
 }
 
-#[test]
-fn anti_join_retracts_identical_descriptor_projection_when_blocker_arrives() {
+#[futures_test::test]
+async fn anti_join_retracts_identical_descriptor_projection_when_blocker_arrives() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(4), Value::U64(3)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let subscription = database
         .subscribe_one_sink(unblocked_edges_graph())
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -1219,7 +1278,7 @@ fn anti_join_retracts_identical_descriptor_projection_when_blocker_arrives() {
         "blockers",
         vec![Value::U64(5), Value::U64(4), Value::U64(3)],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -1227,22 +1286,25 @@ fn anti_join_retracts_identical_descriptor_projection_when_blocker_arrives() {
     );
 }
 
-#[test]
-fn anti_join_remembers_blocker_inserted_before_matching_left_key_exists() {
+#[futures_test::test]
+async fn anti_join_remembers_blocker_inserted_before_matching_left_key_exists() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(8), Value::U64(4)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let subscription = database
         .subscribe_one_sink(unblocked_edges_graph())
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -1254,12 +1316,12 @@ fn anti_join_remembers_blocker_inserted_before_matching_left_key_exists() {
         "blockers",
         vec![Value::U64(5), Value::U64(4), Value::U64(3)],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(subscription.try_recv().is_err());
 
     let mut batch = database.open_batch();
     batch.update("edges", vec![Value::U64(1), Value::U64(4), Value::U64(3)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -1267,15 +1329,17 @@ fn anti_join_remembers_blocker_inserted_before_matching_left_key_exists() {
     );
 }
 
-#[test]
-fn anti_join_retracts_when_right_update_moves_onto_left_key() {
+#[futures_test::test]
+async fn anti_join_retracts_when_right_update_moves_onto_left_key() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("edges", vec![Value::U64(4), Value::U64(4), Value::U64(3)]);
@@ -1283,10 +1347,11 @@ fn anti_join_retracts_when_right_update_moves_onto_left_key() {
         "blockers",
         vec![Value::U64(5), Value::U64(6), Value::U64(8)],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let subscription = database
         .subscribe_one_sink(unblocked_edges_graph())
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -1298,7 +1363,7 @@ fn anti_join_retracts_when_right_update_moves_onto_left_key() {
         "blockers",
         vec![Value::U64(5), Value::U64(4), Value::U64(3)],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -1306,38 +1371,42 @@ fn anti_join_retracts_when_right_update_moves_onto_left_key() {
     );
 }
 
-#[test]
-fn anti_join_resubscribe_hydrates_from_storage_after_unretained_changes() {
+#[futures_test::test]
+async fn anti_join_resubscribe_hydrates_from_storage_after_unretained_changes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(4), Value::U64(3)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let subscription = database
         .subscribe_one_sink(unblocked_edges_graph())
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![Value::U64(4), Value::U64(3)], 1)]
     );
-    assert!(database.unsubscribe(subscription.id()));
+    assert!(database.unsubscribe(subscription.id()).await);
 
     let mut batch = database.open_batch();
     batch.insert(
         "blockers",
         vec![Value::U64(5), Value::U64(4), Value::U64(3)],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let subscription = database
         .subscribe_one_sink(unblocked_edges_graph())
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 }
