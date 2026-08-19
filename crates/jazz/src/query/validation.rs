@@ -312,6 +312,17 @@ fn flat_join_qualified_field(field: &str) -> Result<(&str, &str), QueryError> {
         })
 }
 
+fn flat_join_column_type<'a>(
+    table: &'a TableSchema,
+    column: &str,
+) -> Result<&'a ColumnType, QueryError> {
+    if column == "_id" {
+        Ok(&ColumnType::Uuid)
+    } else {
+        planner_column_type(table, column)
+    }
+}
+
 fn validate_flat_join(
     schema: &JazzSchema,
     root_table: &str,
@@ -346,8 +357,8 @@ fn validate_flat_join(
         }
         let left_schema = table(schema, left_table)?;
         let right_schema = table(schema, &source.table)?;
-        if planner_column_type(&left_schema, left_column)?
-            != planner_column_type(&right_schema, right_column)?
+        if flat_join_column_type(&left_schema, left_column)?
+            != flat_join_column_type(&right_schema, right_column)?
         {
             return Err(QueryError::OperandTypeMismatch);
         }
@@ -413,6 +424,12 @@ fn validate_join(
         }
     } else if let Some(source_column) = &join.source_column {
         if source_column == "id" {
+            if has_declared_id(root)
+                && planner_column_type(root, source_column)?
+                    != planner_column_type(&join_table, &join.on_column)?
+            {
+                return Err(QueryError::OperandTypeMismatch);
+            }
             root_table.to_owned()
         } else {
             planner_column_type(root, source_column)?;

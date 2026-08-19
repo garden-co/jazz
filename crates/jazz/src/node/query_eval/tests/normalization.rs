@@ -130,6 +130,37 @@ fn source_key_resolution_distinguishes_declared_and_physical_ids() {
     ));
 }
 
+/// A declared string `id` cannot be used as a UUID foreign-key join source,
+/// while FlatJoin's explicit `_id` alias remains the physical UUID row key.
+#[test]
+fn declared_id_join_types_and_flat_join_physical_alias_validate() {
+    let schema = JazzSchema::new([
+        TableSchema::new("parents", [ColumnSchema::new("id", ColumnType::String)]),
+        TableSchema::new("children", [ColumnSchema::new("parent", ColumnType::Uuid)])
+            .with_reference("parent", "parents"),
+    ]);
+    assert!(
+        Query::from("parents")
+            .join_via_column("children", "parent", "id", [])
+            .validate(&schema)
+            .is_err()
+    );
+
+    let mut flat = Query::from("parents");
+    flat.flat_join = Some(FlatJoin {
+        root_alias: None,
+        sources: vec![FlatJoinSource {
+            table: "children".to_owned(),
+            alias: None,
+            on: FlatJoinOn {
+                left: "parents._id".to_owned(),
+                right: "children.parent".to_owned(),
+            },
+        }],
+    });
+    assert!(flat.validate(&schema).is_ok());
+}
+
 #[test]
 fn join_read_tables_include_source_lookups_and_nested_joins() {
     let nested = crate::query::JoinVia {

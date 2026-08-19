@@ -2862,7 +2862,7 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
 }
 
 fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Option<Value> {
-    if column == "id" {
+    if column == "id" && !table.columns.iter().any(|candidate| candidate.name == "id") {
         return Some(Value::Uuid(row.row_uuid().0));
     }
     if is_magic_current_column(column) {

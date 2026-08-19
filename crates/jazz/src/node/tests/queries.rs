@@ -221,6 +221,48 @@ fn inverse_join_via_column_uses_root_declared_id() {
     assert_eq!(rows, vec![parent]);
 }
 
+/// Alice's declared IDs control final one-shot ordering and pagination, even
+/// when their physical row UUID order is the opposite.
+#[test]
+fn declared_id_order_and_pagination_use_declared_values() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "things",
+        [
+            ColumnSchema::new("id", ColumnType::Uuid),
+            ColumnSchema::new("label", ColumnType::String),
+        ],
+    )]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let physically_first = row(0x31);
+    let physically_second = row(0x32);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("things", physically_first, 10).cells(BTreeMap::from([
+            ("id".to_owned(), Value::Uuid(row(0xf1).0)),
+            ("label".to_owned(), Value::String("later".to_owned())),
+        ])),
+    );
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("things", physically_second, 11).cells(BTreeMap::from([
+            ("id".to_owned(), Value::Uuid(row(0x01).0)),
+            ("label".to_owned(), Value::String("earlier".to_owned())),
+        ])),
+    );
+
+    let (rows, _) = query_rows_by_uuid(
+        &mut core,
+        Query::from("things")
+            .order_by("id", OrderDirection::Asc)
+            .limit(1),
+        DurabilityTier::Global,
+    );
+    assert_eq!(rows, vec![physically_second]);
+}
+
 #[test]
 fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
     let schema = access_path_schema();
