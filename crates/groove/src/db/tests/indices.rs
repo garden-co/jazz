@@ -2,15 +2,17 @@
 
 use super::*;
 
-#[test]
-fn database_creation_dedups_schema_indices_as_durable_nodes() {
+#[futures_test::test]
+async fn database_creation_dedups_schema_indices_as_durable_nodes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let database = Database::new(indexed_albums_schema(), storage).unwrap();
+    let database = Database::new(indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let durable_nodes = database
         .ivm_runtime
@@ -28,25 +30,31 @@ fn database_creation_dedups_schema_indices_as_durable_nodes() {
     assert_eq!(durable_nodes.len(), 1);
 }
 
-#[test]
-fn persist_maintains_schema_index_entries() {
+#[futures_test::test]
+async fn persist_maintains_schema_index_entries() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let prefix = b"albums\0albums_by_title\0";
-    let entries = database.storage.prefix("indices", prefix).unwrap();
+    let entries = database
+        .storage
+        .prefix("indices".to_owned(), prefix.to_vec())
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(persisted_index_value(&entries[0].1), Vec::<u8>::new());
 
@@ -55,9 +63,13 @@ fn persist_maintains_schema_index_entries() {
         "albums",
         vec![Value::U64(7), Value::String("Giant Steps".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
-    let entries = database.storage.prefix("indices", prefix).unwrap();
+    let entries = database
+        .storage
+        .prefix("indices".to_owned(), prefix.to_vec())
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert!(
         entries[0]
@@ -69,40 +81,43 @@ fn persist_maintains_schema_index_entries() {
 
     let mut batch = database.open_batch();
     batch.delete("albums", PrimaryKeyValue::U64(7));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert!(
         database
             .storage
-            .prefix("indices", prefix)
+            .prefix("indices".to_owned(), prefix.to_vec())
+            .await
             .unwrap()
             .is_empty()
     );
 }
 
-#[test]
-fn persist_consolidates_same_tick_deltas_and_rejects_unique_conflicts() {
+#[futures_test::test]
+async fn persist_consolidates_same_tick_deltas_and_rejects_unique_conflicts() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(unique_indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(unique_indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.update(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         record_values(
             database
@@ -111,6 +126,7 @@ fn persist_consolidates_same_tick_deltas_and_rejects_unique_conflicts() {
                     "unique_albums_by_title",
                     &[Value::String("Blue Train".to_owned())],
                 )
+                .await
                 .unwrap()
         ),
         [vec![Value::U64(7), Value::String("Blue Train".to_owned())]]
@@ -122,13 +138,13 @@ fn persist_consolidates_same_tick_deltas_and_rejects_unique_conflicts() {
         vec![Value::U64(8), Value::String("Blue Train".to_owned())],
     );
     assert!(matches!(
-        database.commit_batch(batch).unwrap_err(),
+        database.commit_batch(batch).await.unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { .. })
     ));
 }
 
-#[test]
-fn public_database_facade_reads_secondary_indexes_with_memory_storage() {
+#[futures_test::test]
+async fn public_database_facade_reads_secondary_indexes_with_memory_storage() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "albums",
         [
@@ -140,7 +156,7 @@ fn public_database_facade_reads_secondary_indexes_with_memory_storage() {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
     let storage = MemoryStorage::new(&["albums", "indices"]);
-    let mut database = Database::new(schema, storage).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -175,11 +191,12 @@ fn public_database_facade_reads_secondary_indexes_with_memory_storage() {
             Value::U64(1965),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let albums_from_1959 = record_values(
         database
             .index_scan("albums", "albums_by_year", &[Value::U64(1959)])
+            .await
             .unwrap(),
     );
     assert_eq!(
@@ -206,20 +223,23 @@ fn public_database_facade_reads_secondary_indexes_with_memory_storage() {
                 &[Value::U64(1959)],
                 &[Value::U64(1965)],
             )
+            .await
             .unwrap(),
     );
     assert_eq!(late_1950s_and_early_1960s, albums_from_1959);
 }
 
-#[test]
-fn index_reads_track_insert_update_delete_and_prefixes() {
+#[futures_test::test]
+async fn index_reads_track_insert_update_delete_and_prefixes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_tracks_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -240,7 +260,7 @@ fn index_reads_track_insert_update_delete_and_prefixes() {
             Value::String("Part Two".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         record_values(
@@ -250,6 +270,7 @@ fn index_reads_track_insert_update_delete_and_prefixes() {
                     "tracks_by_album_disc",
                     &[Value::U64(7), Value::Nullable(None),]
                 )
+                .await
                 .unwrap()
         ),
         vec![vec![
@@ -263,6 +284,7 @@ fn index_reads_track_insert_update_delete_and_prefixes() {
         record_values(
             database
                 .index_scan("tracks", "tracks_by_album_disc", &[Value::U64(7)])
+                .await
                 .unwrap()
         )
         .len(),
@@ -279,10 +301,11 @@ fn index_reads_track_insert_update_delete_and_prefixes() {
             Value::String("Intro".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(
         database
             .index_scan("tracks", "tracks_by_album_disc", &[Value::U64(7)])
+            .await
             .unwrap()
             .len()
             == 1
@@ -290,24 +313,27 @@ fn index_reads_track_insert_update_delete_and_prefixes() {
 
     let mut batch = database.open_batch();
     batch.delete("tracks", PrimaryKeyValue::U64(2));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(
         database
             .index_scan("tracks", "tracks_by_album_disc", &[Value::U64(7)])
+            .await
             .unwrap()
             .is_empty()
     );
 }
 
-#[test]
-fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_finite() {
+#[futures_test::test]
+async fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_finite() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(interval_history_schema(), storage).unwrap();
+    let mut database = Database::new(interval_history_schema(), storage)
+        .await
+        .unwrap();
     let row = vec![7; 16];
 
     let mut batch = database.open_batch();
@@ -321,10 +347,11 @@ fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_finite(
             Value::String("open".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         database
             .index_scan("history", "history_by_until_row", &[Value::U64(u64::MAX)])
+            .await
             .unwrap()
             .len(),
         1
@@ -341,11 +368,12 @@ fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_finite(
             Value::String("closed".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert!(
         database
             .index_scan("history", "history_by_until_row", &[Value::U64(u64::MAX)])
+            .await
             .unwrap()
             .is_empty()
     );
@@ -353,6 +381,7 @@ fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_finite(
         record_values(
             database
                 .index_scan("history", "history_by_until_row", &[Value::U64(2)])
+                .await
                 .unwrap()
         ),
         vec![vec![
@@ -365,15 +394,17 @@ fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_finite(
     );
 }
 
-#[test]
-fn persisted_index_update_preserves_entry_when_index_key_is_unchanged() {
+#[futures_test::test]
+async fn persisted_index_update_preserves_entry_when_index_key_is_unchanged() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(interval_history_schema(), storage).unwrap();
+    let mut database = Database::new(interval_history_schema(), storage)
+        .await
+        .unwrap();
     let row = vec![7; 16];
 
     let mut batch = database.open_batch();
@@ -387,7 +418,7 @@ fn persisted_index_update_preserves_entry_when_index_key_is_unchanged() {
             Value::String("before".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.update(
@@ -400,12 +431,13 @@ fn persisted_index_update_preserves_entry_when_index_key_is_unchanged() {
             Value::String("after".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         record_values(
             database
                 .index_scan("history", "history_by_until_row", &[Value::U64(u64::MAX)])
+                .await
                 .unwrap()
         ),
         vec![vec![
@@ -418,15 +450,15 @@ fn persisted_index_update_preserves_entry_when_index_key_is_unchanged() {
     );
 }
 
-#[test]
-fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
+#[futures_test::test]
+async fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["docs", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(uuid_docs_schema(), storage).unwrap();
+    let mut database = Database::new(uuid_docs_schema(), storage).await.unwrap();
     let low = uuid::Uuid::from_bytes([1; 16]);
     let mid = uuid::Uuid::from_bytes([2; 16]);
     let high = uuid::Uuid::from_bytes([3; 16]);
@@ -457,7 +489,7 @@ fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
             Value::String("mid".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         record_values(
@@ -467,6 +499,7 @@ fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
                     "docs_by_owner",
                     &[Value::Nullable(Some(Box::new(Value::Uuid(owner))))],
                 )
+                .await
                 .unwrap(),
         ),
         vec![
@@ -485,6 +518,7 @@ fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
     assert_eq!(
         database
             .index_scan("docs", "docs_by_owner", &[Value::Nullable(None)])
+            .await
             .unwrap()
             .len(),
         1
@@ -499,7 +533,7 @@ fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
             Value::String("mid-owned".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         database
@@ -508,21 +542,24 @@ fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
                 "docs_by_owner",
                 &[Value::Nullable(Some(Box::new(Value::Uuid(owner))))],
             )
+            .await
             .unwrap()
             .len(),
         3
     );
 }
 
-#[test]
-fn index_get_on_unique_index_returns_zero_or_one_record() {
+#[futures_test::test]
+async fn index_get_on_unique_index_returns_zero_or_one_record() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_tracks_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -534,7 +571,7 @@ fn index_get_on_unique_index_returns_zero_or_one_record() {
             Value::String("Intro".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         database
@@ -543,6 +580,7 @@ fn index_get_on_unique_index_returns_zero_or_one_record() {
                 "tracks_by_title_unique",
                 &[Value::String("Intro".to_owned())],
             )
+            .await
             .unwrap()
             .len(),
         1
@@ -554,20 +592,21 @@ fn index_get_on_unique_index_returns_zero_or_one_record() {
                 "tracks_by_title_unique",
                 &[Value::String("Missing".to_owned())],
             )
+            .await
             .unwrap()
             .is_empty()
     );
 }
 
-#[test]
-fn tuple_columns_work_in_index_keys_and_nullable_columns() {
+#[futures_test::test]
+async fn tuple_columns_work_in_index_keys_and_nullable_columns() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(tuple_edges_schema(), storage).unwrap();
+    let mut database = Database::new(tuple_edges_schema(), storage).await.unwrap();
     let node_a = uuid::Uuid::from_bytes([0x0a; 16]);
     let node_b = uuid::Uuid::from_bytes([0x0b; 16]);
     let parent_a = Value::Tuple(vec![Value::Uuid(node_a), Value::U64(1)]);
@@ -592,16 +631,18 @@ fn tuple_columns_work_in_index_keys_and_nullable_columns() {
             Value::String("a".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let rows = database
         .index_get("edges", "edges_by_parent", std::slice::from_ref(&parent_a))
+        .await
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get("title").unwrap(), Value::String("a".to_owned()));
 
     let scanned = database
         .index_scan("edges", "edges_by_parent", &[])
+        .await
         .unwrap()
         .into_iter()
         .map(|record| record.get("title").unwrap().clone())
@@ -613,6 +654,7 @@ fn tuple_columns_work_in_index_keys_and_nullable_columns() {
 
     let rows = database
         .index_get("edges", "edges_by_parent", &[parent_b])
+        .await
         .unwrap();
     assert_eq!(
         rows[0].get("maybe_parent").unwrap(),
@@ -620,20 +662,22 @@ fn tuple_columns_work_in_index_keys_and_nullable_columns() {
     );
 }
 
-#[test]
-fn raw_reads_return_encoded_base_records() {
+#[futures_test::test]
+async fn raw_reads_return_encoded_base_records() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_tracks_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("tracks", track_values(1, 7, Some(1), "Intro"));
     batch.insert("tracks", track_values(2, 7, None, ""));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let descriptor = database
         .ivm_runtime
@@ -646,12 +690,14 @@ fn raw_reads_return_encoded_base_records() {
 
     let by_pk = database
         .primary_key_scan_raw("tracks", &[Value::U64(1)])
+        .await
         .unwrap();
     assert_eq!(by_pk.len(), 1);
     assert_eq!(by_pk[0].record().get_str(title_idx).unwrap(), "Intro");
 
     let by_index = database
         .index_scan_raw("tracks", "tracks_by_album_disc", &[Value::U64(7)])
+        .await
         .unwrap();
     assert_eq!(by_index.len(), 2);
     assert_eq!(by_index[0].record().get_u64(album_idx).unwrap(), 7);
@@ -662,6 +708,7 @@ fn raw_reads_return_encoded_base_records() {
             "tracks_by_album_disc",
             &[Value::U64(7), Value::Nullable(None)],
         )
+        .await
         .unwrap();
     assert_eq!(exact.len(), 1);
     assert_eq!(exact[0].record().get_str(title_idx).unwrap(), "");
@@ -673,55 +720,59 @@ fn raw_reads_return_encoded_base_records() {
             &[Value::U64(7)],
             &[Value::U64(8)],
         )
+        .await
         .unwrap();
     assert_eq!(ranged.len(), 2);
 }
 
-#[test]
-fn persisted_index_scan_treats_missing_primary_key_record_as_invalid() {
+#[futures_test::test]
+async fn persisted_index_scan_treats_missing_primary_key_record_as_invalid() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     database
         .storage
-        .delete("albums", &PrimaryKeyValue::U64(7).into_bytes())
+        .delete("albums".to_owned(), PrimaryKeyValue::U64(7).into_bytes())
+        .await
         .unwrap();
 
     assert!(matches!(
         database
-            .index_scan("albums", "albums_by_title", &[Value::String("Blue Train".to_owned())])
+            .index_scan("albums", "albums_by_title", &[Value::String("Blue Train".to_owned())]).await
             .unwrap_err(),
         Error::InvalidPersistedIndex(index) if index == "albums_by_title"
     ));
 }
 
-#[test]
-fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
+#[futures_test::test]
+async fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 10, 1, "older"));
     batch.insert("history", history_values(1, 20, 1, "winner"));
     batch.insert("history", history_values(1, 30, 1, "too-new"));
     batch.insert("history", history_values(2, 15, 1, "other-row"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let descriptor = database
         .ivm_runtime
@@ -736,6 +787,7 @@ fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
             &[Value::U64(1)],
             &[Value::U64(1), Value::U64(20), Value::U64(u64::MAX)],
         )
+        .await
         .unwrap()
         .expect("bounded row");
     assert_eq!(bounded.record().get_str(title_idx).unwrap(), "winner");
@@ -746,6 +798,7 @@ fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
             &[Value::U64(1)],
             &[Value::U64(1), Value::U64(5), Value::U64(u64::MAX)],
         )
+        .await
         .unwrap();
     assert!(before_first.is_none());
 
@@ -755,6 +808,7 @@ fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
             &[Value::U64(1), Value::U64(10), Value::U64(0)],
             &[Value::U64(1), Value::U64(30), Value::U64(0)],
         )
+        .await
         .unwrap();
     let titles = ranged
         .iter()
@@ -763,15 +817,17 @@ fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
     assert_eq!(titles, vec!["older", "winner"]);
 }
 
-#[test]
-fn randomized_index_reads_match_full_scan_oracle() {
+#[futures_test::test]
+async fn randomized_index_reads_match_full_scan_oracle() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_tracks_schema(), storage)
+        .await
+        .unwrap();
     let mut rows = std::collections::BTreeMap::<u64, (u64, Option<u64>, String)>::new();
     let mut rng = 0x51eed_u64;
 
@@ -789,7 +845,7 @@ fn randomized_index_reads_match_full_scan_oracle() {
             rows.remove(&id);
             batch.delete("tracks", PrimaryKeyValue::U64(id));
         }
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
 
         let album_key = Value::U64(album);
         let mut expected = rows
@@ -803,6 +859,7 @@ fn randomized_index_reads_match_full_scan_oracle() {
         let mut actual = record_values(
             database
                 .index_scan("tracks", "tracks_by_album_disc", &[album_key])
+                .await
                 .unwrap(),
         );
         actual.sort_by_key(|values| format!("{values:?}"));
@@ -810,15 +867,17 @@ fn randomized_index_reads_match_full_scan_oracle() {
     }
 }
 
-#[test]
-fn persisted_index_keys_sort_by_index_value_then_primary_key() {
+#[futures_test::test]
+async fn persisted_index_keys_sort_by_index_value_then_primary_key() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -829,11 +888,12 @@ fn persisted_index_keys_sort_by_index_value_then_primary_key() {
         "albums",
         vec![Value::U64(1), Value::String("aa".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let keys = database
         .storage
-        .prefix("indices", b"albums\0albums_by_title\0")
+        .prefix("indices".to_owned(), b"albums\0albums_by_title\0".to_vec())
+        .await
         .unwrap()
         .into_iter()
         .map(|(key, _)| key)
@@ -848,26 +908,29 @@ fn persisted_index_keys_sort_by_index_value_then_primary_key() {
     );
 }
 
-#[test]
-fn durable_non_unique_index_keys_append_separator_and_primary_key_suffix() {
+#[futures_test::test]
+async fn durable_non_unique_index_keys_append_separator_and_primary_key_suffix() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let entries = database
         .storage
-        .prefix("indices", b"albums\0albums_by_title\0")
+        .prefix("indices".to_owned(), b"albums\0albums_by_title\0".to_vec())
+        .await
         .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(
@@ -881,25 +944,31 @@ fn durable_non_unique_index_keys_append_separator_and_primary_key_suffix() {
     );
 }
 
-#[test]
-fn unique_indices_use_only_index_columns_as_storage_keys() {
+#[futures_test::test]
+async fn unique_indices_use_only_index_columns_as_storage_keys() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(unique_indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(unique_indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let prefix = b"albums\0unique_albums_by_title\0";
-    let entries = database.storage.prefix("indices", prefix).unwrap();
+    let entries = database
+        .storage
+        .prefix("indices".to_owned(), prefix.to_vec())
+        .await
+        .unwrap();
     let expected_key = persisted_index_storage_key(
         "unique_albums_by_title",
         &encoded_title_key_part("Blue Train"),
@@ -913,26 +982,32 @@ fn unique_indices_use_only_index_columns_as_storage_keys() {
     );
 }
 
-#[test]
-fn durable_unique_index_keys_omit_primary_key_suffix() {
+#[futures_test::test]
+async fn durable_unique_index_keys_omit_primary_key_suffix() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(unique_indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(unique_indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let entries = database
         .storage
-        .prefix("indices", b"albums\0unique_albums_by_title\0")
+        .prefix(
+            "indices".to_owned(),
+            b"albums\0unique_albums_by_title\0".to_vec(),
+        )
+        .await
         .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(
@@ -945,8 +1020,8 @@ fn durable_unique_index_keys_omit_primary_key_suffix() {
     assert!(!entries[0].0.ends_with(&encoded_u64_index_part(7)));
 }
 
-#[test]
-fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_key() {
+#[futures_test::test]
+async fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_key() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "history",
         [
@@ -968,16 +1043,17 @@ fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_key() 
         &["history", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(schema, storage).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(2, 10, 1, "older"));
     batch.insert("history", history_values(1, 20, 7, "newer"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let entries = database
         .storage
-        .prefix("indices", b"history\0by_tx\0")
+        .prefix("indices".to_owned(), b"history\0by_tx\0".to_vec())
+        .await
         .unwrap();
     assert_eq!(
         entries
@@ -1005,6 +1081,7 @@ fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_key() 
 
     let latest = database
         .index_last_raw("history", "by_tx", &[])
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(latest.key(), &history_key(1, 20, 7).into_bytes());
@@ -1015,6 +1092,7 @@ fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_key() 
 
     let stamp_scan = database
         .index_scan("history", "by_tx", &[Value::U64(10)])
+        .await
         .unwrap();
     assert_eq!(
         record_values(stamp_scan),
@@ -1022,22 +1100,24 @@ fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_key() 
     );
 }
 
-#[test]
-fn unique_indices_reject_existing_conflicting_values() {
+#[futures_test::test]
+async fn unique_indices_reject_existing_conflicting_values() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(unique_indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(unique_indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -1045,12 +1125,16 @@ fn unique_indices_reject_existing_conflicting_values() {
         vec![Value::U64(8), Value::String("Blue Train".to_owned())],
     );
     assert!(matches!(
-        database.commit_batch(batch).unwrap_err(),
+        database.commit_batch(batch).await.unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { .. })
     ));
 
     let prefix = b"albums\0unique_albums_by_title\0";
-    let entries = database.storage.prefix("indices", prefix).unwrap();
+    let entries = database
+        .storage
+        .prefix("indices".to_owned(), prefix.to_vec())
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(
         persisted_index_value(&entries[0].1),
@@ -1058,22 +1142,24 @@ fn unique_indices_reject_existing_conflicting_values() {
     );
 }
 
-#[test]
-fn durable_unique_indices_reject_positive_delta_for_existing_different_record() {
+#[futures_test::test]
+async fn durable_unique_indices_reject_positive_delta_for_existing_different_record() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(unique_indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(unique_indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -1082,20 +1168,22 @@ fn durable_unique_indices_reject_positive_delta_for_existing_different_record() 
     );
 
     assert!(matches!(
-        database.commit_batch(batch).unwrap_err(),
+        database.commit_batch(batch).await.unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { .. })
     ));
 }
 
-#[test]
-fn unique_indices_reject_conflicts_within_one_batch() {
+#[futures_test::test]
+async fn unique_indices_reject_conflicts_within_one_batch() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(unique_indexed_albums_schema(), storage).unwrap();
+    let mut database = Database::new(unique_indexed_albums_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -1108,20 +1196,24 @@ fn unique_indices_reject_conflicts_within_one_batch() {
     );
 
     assert!(matches!(
-        database.commit_batch(batch).unwrap_err(),
+        database.commit_batch(batch).await.unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { .. })
     ));
     assert!(
         database
             .storage
-            .prefix("indices", b"albums\0unique_albums_by_title\0")
+            .prefix(
+                "indices".to_owned(),
+                b"albums\0unique_albums_by_title\0".to_vec()
+            )
+            .await
             .unwrap()
             .is_empty()
     );
 }
 
-#[test]
-fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
+#[futures_test::test]
+async fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
     let temp_dir = tempfile::tempdir().unwrap();
     let table_graph = GraphBuilder::table("albums");
     let index_graph = GraphBuilder::index("albums", "albums_by_title");
@@ -1132,16 +1224,24 @@ fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
             &["albums", "indices"],
         )
         .unwrap();
-        let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
-        database.subscribe_one_sink(table_graph.clone()).unwrap();
-        database.subscribe_one_sink(index_graph.clone()).unwrap();
+        let mut database = Database::new(indexed_albums_schema(), storage)
+            .await
+            .unwrap();
+        database
+            .subscribe_one_sink(table_graph.clone())
+            .await
+            .unwrap();
+        database
+            .subscribe_one_sink(index_graph.clone())
+            .await
+            .unwrap();
 
         let mut batch = database.open_batch();
         batch.insert(
             "albums",
             vec![Value::U64(7), Value::String("Blue Train".to_owned())],
         );
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
     }
 
     {
@@ -1150,11 +1250,13 @@ fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
             &["albums", "indices"],
         )
         .unwrap();
-        let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
-        let table_subscription_id = database.subscribe_one_sink(table_graph).unwrap();
-        let index_subscription_id = database.subscribe_one_sink(index_graph).unwrap();
+        let mut database = Database::new(indexed_albums_schema(), storage)
+            .await
+            .unwrap();
+        let table_subscription_id = database.subscribe_one_sink(table_graph).await.unwrap();
+        let index_subscription_id = database.subscribe_one_sink(index_graph).await.unwrap();
 
-        database.flush().unwrap();
+        database.flush().await.unwrap();
         assert_eq!(
             expect_recv_vals(&table_subscription_id),
             [(vec![7_u64.into(), "Blue Train".into()], 1)]
@@ -1175,7 +1277,7 @@ fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
             "albums",
             vec![Value::U64(7), Value::String("Giant Steps".to_owned())],
         );
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
 
         assert_eq!(
             expect_recv_vals(&table_subscription_id),
@@ -1207,8 +1309,8 @@ fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
     }
 }
 
-#[test]
-fn persisted_indices_can_be_deleted_after_restart() {
+#[futures_test::test]
+async fn persisted_indices_can_be_deleted_after_restart() {
     let temp_dir = tempfile::tempdir().unwrap();
     let table_graph = GraphBuilder::table("albums");
     let index_graph = GraphBuilder::index("albums", "albums_by_title");
@@ -1219,16 +1321,24 @@ fn persisted_indices_can_be_deleted_after_restart() {
             &["albums", "indices"],
         )
         .unwrap();
-        let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
-        database.subscribe_one_sink(table_graph.clone()).unwrap();
-        database.subscribe_one_sink(index_graph.clone()).unwrap();
+        let mut database = Database::new(indexed_albums_schema(), storage)
+            .await
+            .unwrap();
+        database
+            .subscribe_one_sink(table_graph.clone())
+            .await
+            .unwrap();
+        database
+            .subscribe_one_sink(index_graph.clone())
+            .await
+            .unwrap();
 
         let mut batch = database.open_batch();
         batch.insert(
             "albums",
             vec![Value::U64(7), Value::String("Blue Train".to_owned())],
         );
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
     }
 
     {
@@ -1237,11 +1347,13 @@ fn persisted_indices_can_be_deleted_after_restart() {
             &["albums", "indices"],
         )
         .unwrap();
-        let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
-        let table_subscription_id = database.subscribe_one_sink(table_graph).unwrap();
-        let index_subscription_id = database.subscribe_one_sink(index_graph).unwrap();
+        let mut database = Database::new(indexed_albums_schema(), storage)
+            .await
+            .unwrap();
+        let table_subscription_id = database.subscribe_one_sink(table_graph).await.unwrap();
+        let index_subscription_id = database.subscribe_one_sink(index_graph).await.unwrap();
 
-        database.flush().unwrap();
+        database.flush().await.unwrap();
         assert_eq!(
             expect_recv_vals(&table_subscription_id),
             [(vec![7_u64.into(), "Blue Train".into()], 1)]
@@ -1259,7 +1371,7 @@ fn persisted_indices_can_be_deleted_after_restart() {
 
         let mut batch = database.open_batch();
         batch.delete("albums", PrimaryKeyValue::U64(7));
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
 
         assert_eq!(
             expect_recv_vals(&table_subscription_id),
