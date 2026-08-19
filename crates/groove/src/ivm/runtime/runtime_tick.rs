@@ -45,7 +45,13 @@ impl SourceWorkQueue {
     fn discover(
         mut self,
         graph: &IvmGraph,
-    ) -> Result<std::collections::BTreeSet<StorageRequestKey>, IvmRuntimeError> {
+    ) -> Result<
+        (
+            HashSet<NodeId>,
+            std::collections::BTreeSet<StorageRequestKey>,
+        ),
+        IvmRuntimeError,
+    > {
         let mut requests = std::collections::BTreeSet::new();
         while let Some(node_id) = self.pending.pop_front() {
             if !self.visited.insert(node_id) {
@@ -64,24 +70,17 @@ impl SourceWorkQueue {
                 requests.insert(request);
             }
         }
-        Ok(requests)
+        Ok((self.visited, requests))
     }
 }
 
 impl EvaluationSession {
-    fn hydration(runtime: &IvmRuntime, roots: VecDeque<NodeId>) -> Result<Self, IvmRuntimeError> {
-        let mut relevant_nodes = HashSet::default();
-        let mut pending = roots.iter().copied().collect::<Vec<_>>();
-        while let Some(node) = pending.pop() {
-            if !relevant_nodes.insert(node) {
-                continue;
-            }
-            let graph_node = runtime
-                .graph
-                .node(node)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-            pending.extend(graph_node.descriptor.inputs.iter().copied());
-        }
+    fn hydration(
+        runtime: &IvmRuntime,
+        roots: VecDeque<NodeId>,
+    ) -> Result<(Self, std::collections::BTreeSet<StorageRequestKey>), IvmRuntimeError> {
+        let (relevant_nodes, source_requests) =
+            SourceWorkQueue::new(roots.iter().copied()).discover(&runtime.graph)?;
         // Installed operator state is root-scoped. Recursive child scopes are
         // scratch state and are cleared before an evaluation is installed.
         // Probe by reachable node instead of scanning state owned by unrelated
@@ -133,18 +132,21 @@ impl EvaluationSession {
                     .map(|meta| (*node, meta))
             })
             .collect();
-        Ok(Self {
-            relevant_nodes,
-            runnable_roots: roots,
-            outputs: HashMap::default(),
-            operator_states,
-            arrangement_states,
-            arrangement_keys_by_input,
-            eval_memo,
-            eval_memo_bytes,
-            memo_use_clock: runtime.memo_use_clock,
-            node_meta,
-        })
+        Ok((
+            Self {
+                relevant_nodes,
+                runnable_roots: roots,
+                outputs: HashMap::default(),
+                operator_states,
+                arrangement_states,
+                arrangement_keys_by_input,
+                eval_memo,
+                eval_memo_bytes,
+                memo_use_clock: runtime.memo_use_clock,
+                node_meta,
+            },
+            source_requests,
+        ))
     }
 
     fn install(self, runtime: &mut IvmRuntime) {
@@ -720,11 +722,9 @@ impl IvmRuntime {
         if roots.is_empty() {
             return Err(IvmRuntimeError::UnsupportedOperator);
         }
-        let mut session = EvaluationSession::hydration(self, roots)?;
+        let (mut session, source_requests) = EvaluationSession::hydration(self, roots)?;
         let mut evaluation_inputs = EvaluationInputs::default();
         let mut storage_requests = StorageRequests::new(OwnedStorage::new(Rc::new(storage)));
-        let source_requests =
-            SourceWorkQueue::new(session.runnable_roots.iter().copied()).discover(&self.graph)?;
         for request in source_requests {
             storage_requests.request(request);
         }
