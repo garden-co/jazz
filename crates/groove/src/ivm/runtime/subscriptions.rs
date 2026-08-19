@@ -1637,11 +1637,25 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage).await?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
+        let mut staged = self.clone();
+        let subscription = staged.subscribe_staged(sinks, storage).await?;
+        *self = staged;
+        Ok(subscription)
+    }
+
+    async fn subscribe_staged<S>(
+        &mut self,
+        sinks: Vec<(String, GraphBuilder)>,
+        storage: &S,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        self.flush_pending_binding_retractions(storage).await?;
         if sinks.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
         }
