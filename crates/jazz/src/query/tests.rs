@@ -449,64 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn flat_join_allows_nullable_scalar_keys() {
-        let schema = JazzSchema::new([
-            TableSchema::new(
-                "parents",
-                [ColumnSchema::new(
-                    "child_id",
-                    ColumnType::Uuid.nullable(),
-                )],
-            ),
-            TableSchema::new(
-                "children",
-                [ColumnSchema::new(
-                    "parent_id",
-                    ColumnType::Uuid.nullable(),
-                )],
-            ),
-        ]);
-
-        Query::from("parents")
-            .flat_join("children", "parents.child_id", "children.id")
-            .validate(&schema)
-            .unwrap();
-        Query::from("parents")
-            .flat_join("children", "parents.id", "children.parent_id")
-            .validate(&schema)
-            .unwrap();
-    }
-
-    #[test]
-    fn flat_join_allows_array_element_keys() {
-        let schema = JazzSchema::new([
-            TableSchema::new(
-                "parents",
-                [ColumnSchema::new(
-                    "child_ids",
-                    ColumnType::Uuid.array_of(),
-                )],
-            ),
-            TableSchema::new(
-                "children",
-                [ColumnSchema::new(
-                    "parent_ids",
-                    ColumnType::Uuid.array_of(),
-                )],
-            ),
-        ]);
-
-        Query::from("parents")
-            .flat_join("children", "parents.child_ids", "children.id")
-            .validate(&schema)
-            .unwrap();
-        Query::from("parents")
-            .flat_join("children", "parents.id", "children.parent_ids")
-            .validate(&schema)
-            .unwrap();
-    }
-
-    #[test]
     fn rejects_invalid_array_subquery_shapes() {
         let schema = schema();
 

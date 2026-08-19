@@ -743,7 +743,6 @@ local_tokio_test! {
 ///
 /// Actors: alice writes posts out of order, bob reads Alice with posts ordered
 /// by id descending.
-#[ignore = "subquery order_by id collides with the magic row id and materializes an empty child array"]
 async fn array_subquery_orders_inner_rows() {
     let clients = Clients::start().await;
 

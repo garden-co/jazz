@@ -405,7 +405,6 @@ local_tokio_test! {
 ///   stream: change for part_a AND part_b
 ///   query result: [part_b]
 /// ```
-#[ignore = "flat joins reject UUID-array-to-UUID operands (Query: operand type mismatch)"]
 async fn subscribe_all_reacts_to_uuid_array_fk_updates_in_projected_join_queries() {
     let pair = ClientPair::start().await;
 
