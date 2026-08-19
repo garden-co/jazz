@@ -18,6 +18,27 @@ replaced the underlying mechanism with a simpler abstraction.
 
 ## Active terms
 
+### Publication
+
+**Meaning today:** Making a fully prepared state transition observable to
+in-memory readers or subscription receivers. It is distinct from writing the
+same transition durably and from sending it to another peer.
+
+**Why it is opaque:** “Publish” can also mean persist, broadcast, release a
+package, or emit a message. Commit paths sometimes use it without identifying
+the audience or durability guarantee.
+
+**Prefer:** Name the observable boundary: “make visible to local reads,” “emit
+subscription updates,” “persist the batch,” or “send to peers.”
+
+**Design debt:** Preparation, local visibility, persistence, and external
+release are not consistently represented as separate transitions, obscuring
+where suspension, cancellation, and failure are safe.
+
+**Exit criteria:** Commit APIs and state types identify the audience and
+durability of each transition, and architecture prose no longer relies on the
+unqualified words “publish” or “publication.”
+
 ### Cursor
 
 **Meaning today:** A compact progress position that lets a participant resume
