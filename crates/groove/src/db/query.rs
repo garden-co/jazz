@@ -9,15 +9,21 @@ where
         subscription: &Subscription,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<RecordDeltas, Error>> {
-        if let std::task::Poll::Ready(result) = subscription.poll_next(cx) {
-            return std::task::Poll::Ready(result.map_err(|_| Error::SubscriptionEnded));
+        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
+            return std::task::Poll::Ready(match event {
+                SubscriptionEvent::Update(update) => Ok(update.deltas),
+                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+            });
         }
         if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
             return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
         }
-        subscription
-            .poll_next(cx)
-            .map(|result| result.map_err(|_| Error::SubscriptionEnded))
+        subscription.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => Ok(update.deltas),
+            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+        })
     }
 
     pub async fn next_subscription(
@@ -32,15 +38,21 @@ where
         subscription: &Subscription,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<PublicationUpdate<RecordDeltas>, Error>> {
-        if let std::task::Poll::Ready(result) = subscription.poll_next_with_publication(cx) {
-            return std::task::Poll::Ready(result.map_err(|_| Error::SubscriptionEnded));
+        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
+            return std::task::Poll::Ready(match event {
+                SubscriptionEvent::Update(update) => Ok(update),
+                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+            });
         }
         if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
             return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
         }
-        subscription
-            .poll_next_with_publication(cx)
-            .map(|result| result.map_err(|_| Error::SubscriptionEnded))
+        subscription.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => Ok(update),
+            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+        })
     }
 
     pub async fn next_subscription_with_publication(
@@ -55,15 +67,21 @@ where
         subscription: &MultisinkSubscription,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<MultisinkDeltas, Error>> {
-        if let std::task::Poll::Ready(result) = subscription.poll_next(cx) {
-            return std::task::Poll::Ready(result.map_err(|_| Error::SubscriptionEnded));
+        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
+            return std::task::Poll::Ready(match event {
+                SubscriptionEvent::Update(update) => Ok(update.deltas),
+                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+            });
         }
         if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
             return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
         }
-        subscription
-            .poll_next(cx)
-            .map(|result| result.map_err(|_| Error::SubscriptionEnded))
+        subscription.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => Ok(update.deltas),
+            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+        })
     }
 
     pub async fn next_multisink_subscription(
@@ -78,15 +96,21 @@ where
         subscription: &MultisinkSubscription,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<PublicationUpdate<MultisinkDeltas>, Error>> {
-        if let std::task::Poll::Ready(result) = subscription.poll_next_with_publication(cx) {
-            return std::task::Poll::Ready(result.map_err(|_| Error::SubscriptionEnded));
+        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
+            return std::task::Poll::Ready(match event {
+                SubscriptionEvent::Update(update) => Ok(update),
+                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+            });
         }
         if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
             return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
         }
-        subscription
-            .poll_next_with_publication(cx)
-            .map(|result| result.map_err(|_| Error::SubscriptionEnded))
+        subscription.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => Ok(update),
+            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+        })
     }
 
     pub async fn next_multisink_subscription_with_publication(

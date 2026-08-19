@@ -20,6 +20,44 @@ pub struct PublicationUpdate<T> {
     pub deltas: T,
 }
 
+/// One low-level subscription outcome. An error is terminal for this session.
+#[derive(Clone, Debug)]
+pub enum SubscriptionEvent<T> {
+    Update(PublicationUpdate<T>),
+    Error(SubscriptionError),
+}
+
+/// Shared evaluation failure which permanently ended a low-level subscription.
+#[derive(Clone, Debug)]
+pub enum SubscriptionError {
+    Evaluation(Arc<IvmRuntimeError>),
+    Ended,
+}
+
+impl SubscriptionError {
+    pub(super) fn new(error: Arc<IvmRuntimeError>) -> Self {
+        Self::Evaluation(error)
+    }
+
+    pub fn source_error(&self) -> Option<&IvmRuntimeError> {
+        match self {
+            Self::Evaluation(error) => Some(error.as_ref()),
+            Self::Ended => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SubscriptionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Evaluation(error) => write!(formatter, "subscription evaluation failed: {error}"),
+            Self::Ended => formatter.write_str("subscription ended"),
+        }
+    }
+}
+
+impl std::error::Error for SubscriptionError {}
+
 impl SubscriptionId {
     pub(super) fn retainer_key(self) -> String {
         self.0.to_string()
@@ -152,6 +190,19 @@ impl Subscription {
         })
     }
 
+    pub fn poll_next_event(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<SubscriptionEvent<RecordDeltas>> {
+        self.inner.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => SubscriptionEvent::Update(PublicationUpdate {
+                publication: update.publication,
+                deltas: self.extract_sink_deltas(update.deltas),
+            }),
+            SubscriptionEvent::Error(error) => SubscriptionEvent::Error(error),
+        })
+    }
+
     pub fn try_recv_with_publication(
         &self,
     ) -> Result<PublicationUpdate<RecordDeltas>, TryRecvError> {
@@ -226,7 +277,7 @@ impl MultisinkDeltas {
 pub struct MultisinkSubscription {
     pub(super) id: SubscriptionId,
     pub(super) initial: Mutex<Option<MultisinkDeltas>>,
-    pub(super) receiver: Receiver<QueuedMultisinkDeltas>,
+    pub(super) receiver: Receiver<Result<QueuedMultisinkDeltas, SubscriptionError>>,
     pub(super) waiter: Arc<Mutex<Option<std::task::Waker>>>,
     pub(super) _receiver_liveness: Arc<()>,
 }
@@ -240,7 +291,10 @@ impl MultisinkSubscription {
         if let Some(initial) = self.take_initial() {
             return Ok(initial);
         }
-        self.receiver.recv().map(|queued| queued.deltas)
+        match self.receiver.recv()? {
+            Ok(queued) => Ok(queued.deltas),
+            Err(_) => Err(RecvError),
+        }
     }
 
     pub fn recv_with_publication(&self) -> Result<PublicationUpdate<MultisinkDeltas>, RecvError> {
@@ -250,17 +304,23 @@ impl MultisinkSubscription {
                 deltas: initial,
             });
         }
-        self.receiver.recv().map(|queued| PublicationUpdate {
-            publication: queued.publication,
-            deltas: queued.deltas,
-        })
+        match self.receiver.recv()? {
+            Ok(queued) => Ok(PublicationUpdate {
+                publication: queued.publication,
+                deltas: queued.deltas,
+            }),
+            Err(_) => Err(RecvError),
+        }
     }
 
     pub fn try_recv(&self) -> Result<MultisinkDeltas, TryRecvError> {
         if let Some(initial) = self.take_initial() {
             return Ok(initial);
         }
-        self.receiver.try_recv().map(|queued| queued.deltas)
+        match self.receiver.try_recv()? {
+            Ok(queued) => Ok(queued.deltas),
+            Err(_) => Err(TryRecvError::Disconnected),
+        }
     }
 
     pub fn poll_next(
@@ -275,21 +335,32 @@ impl MultisinkSubscription {
         &self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<PublicationUpdate<MultisinkDeltas>, RecvError>> {
+        self.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => Ok(update),
+            SubscriptionEvent::Error(_) => Err(RecvError),
+        })
+    }
+
+    pub fn poll_next_event(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<SubscriptionEvent<MultisinkDeltas>> {
         if let Some(initial) = self.take_initial() {
-            return std::task::Poll::Ready(Ok(PublicationUpdate {
+            return std::task::Poll::Ready(SubscriptionEvent::Update(PublicationUpdate {
                 publication: None,
                 deltas: initial,
             }));
         }
         match self.receiver.try_recv() {
-            Ok(queued) => {
-                return std::task::Poll::Ready(Ok(PublicationUpdate {
+            Ok(Ok(queued)) => {
+                return std::task::Poll::Ready(SubscriptionEvent::Update(PublicationUpdate {
                     publication: queued.publication,
                     deltas: queued.deltas,
                 }));
             }
+            Ok(Err(error)) => return std::task::Poll::Ready(SubscriptionEvent::Error(error)),
             Err(TryRecvError::Disconnected) => {
-                return std::task::Poll::Ready(Err(RecvError));
+                return std::task::Poll::Ready(SubscriptionEvent::Error(SubscriptionError::Ended));
             }
             Err(TryRecvError::Empty) => {}
         }
@@ -298,11 +369,16 @@ impl MultisinkSubscription {
             .lock()
             .expect("subscription waiter mutex poisoned") = Some(cx.waker().clone());
         match self.receiver.try_recv() {
-            Ok(queued) => std::task::Poll::Ready(Ok(PublicationUpdate {
-                publication: queued.publication,
-                deltas: queued.deltas,
-            })),
-            Err(TryRecvError::Disconnected) => std::task::Poll::Ready(Err(RecvError)),
+            Ok(Ok(queued)) => {
+                std::task::Poll::Ready(SubscriptionEvent::Update(PublicationUpdate {
+                    publication: queued.publication,
+                    deltas: queued.deltas,
+                }))
+            }
+            Ok(Err(error)) => std::task::Poll::Ready(SubscriptionEvent::Error(error)),
+            Err(TryRecvError::Disconnected) => {
+                std::task::Poll::Ready(SubscriptionEvent::Error(SubscriptionError::Ended))
+            }
             Err(TryRecvError::Empty) => std::task::Poll::Pending,
         }
     }
@@ -316,10 +392,13 @@ impl MultisinkSubscription {
                 deltas: initial,
             });
         }
-        self.receiver.try_recv().map(|queued| PublicationUpdate {
-            publication: queued.publication,
-            deltas: queued.deltas,
-        })
+        match self.receiver.try_recv()? {
+            Ok(queued) => Ok(PublicationUpdate {
+                publication: queued.publication,
+                deltas: queued.deltas,
+            }),
+            Err(_) => Err(TryRecvError::Disconnected),
+        }
     }
 
     /// Take the complete multisink value captured when this terminal session
@@ -436,16 +515,27 @@ impl RecordDelta {
 
 #[derive(Clone, Debug)]
 pub(super) struct SubscriptionSender {
-    sender: Sender<QueuedMultisinkDeltas>,
+    sender: Arc<Mutex<Option<SubscriptionChannelSender>>>,
     waiter: Arc<Mutex<Option<std::task::Waker>>>,
 }
+
+type SubscriptionChannelSender = Sender<Result<QueuedMultisinkDeltas, SubscriptionError>>;
 
 impl SubscriptionSender {
     pub(super) fn send(
         &self,
         queued: QueuedMultisinkDeltas,
     ) -> Result<(), std::sync::mpsc::SendError<QueuedMultisinkDeltas>> {
-        self.sender.send(queued)?;
+        let sender = self
+            .sender
+            .lock()
+            .expect("subscription sender mutex poisoned");
+        let Some(sender) = sender.as_ref() else {
+            return Err(std::sync::mpsc::SendError(queued));
+        };
+        sender.send(Ok(queued)).map_err(|error| {
+            std::sync::mpsc::SendError(error.0.expect("update send retains update"))
+        })?;
         if let Some(waiter) = self
             .waiter
             .lock()
@@ -456,6 +546,25 @@ impl SubscriptionSender {
         }
         Ok(())
     }
+
+    pub(super) fn fail(&self, error: SubscriptionError) {
+        if let Some(sender) = self
+            .sender
+            .lock()
+            .expect("subscription sender mutex poisoned")
+            .take()
+        {
+            let _ = sender.send(Err(error));
+        }
+        if let Some(waiter) = self
+            .waiter
+            .lock()
+            .expect("subscription waiter mutex poisoned")
+            .take()
+        {
+            waiter.wake();
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -464,6 +573,7 @@ pub(super) struct MultisinkSubscriptionState {
     pub(super) receiver_liveness: Weak<()>,
     pub(super) outputs: BTreeMap<String, CompiledNode>,
     pub(super) target: MultisinkSubscriptionTarget,
+    pub(super) failed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1838,7 +1948,7 @@ impl IvmRuntime {
         let (sender, receiver) = mpsc::channel();
         let waiter = Arc::new(Mutex::new(None));
         let sender = SubscriptionSender {
-            sender,
+            sender: Arc::new(Mutex::new(Some(sender))),
             waiter: Arc::clone(&waiter),
         };
         let receiver_liveness = Arc::new(());
@@ -1859,6 +1969,7 @@ impl IvmRuntime {
                 receiver_liveness: Arc::downgrade(&receiver_liveness),
                 outputs: outputs.clone(),
                 target: MultisinkSubscriptionTarget::Direct,
+                failed: false,
             },
         );
         Ok(MultisinkSubscription {
@@ -2061,7 +2172,7 @@ impl IvmRuntime {
         let (sender, receiver) = mpsc::channel();
         let waiter = Arc::new(Mutex::new(None));
         let sender = SubscriptionSender {
-            sender,
+            sender: Arc::new(Mutex::new(Some(sender))),
             waiter: Arc::clone(&waiter),
         };
         let receiver_liveness = Arc::new(());
@@ -2075,6 +2186,7 @@ impl IvmRuntime {
                     shape_id,
                     binding_key: binding_key.clone(),
                 },
+                failed: false,
             },
         );
         let initial = match self

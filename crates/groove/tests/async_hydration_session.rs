@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use groove::db::{Database, GraphBuilder, PrimaryKeyValue};
+use groove::db::{Database, Error as DatabaseError, GraphBuilder, PrimaryKeyValue};
 use groove::ivm::{AggregateExpr, AggregateFunction, PlanExpr, ProjectField, PublicationId};
 use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
@@ -390,6 +390,79 @@ fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked()
     assert_eq!(resumed.publication, Some(publication_id));
     assert_eq!(resumed.deltas.deltas.len(), 2);
     let persistence = block_on(published.persist());
+    database.settle_publication(persistence).unwrap();
+}
+
+#[test]
+fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
+    let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage)).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    let seeded = block_on(database.publish_batch(seed)).unwrap();
+    let persistence = block_on(seeded.persist());
+    database.settle_publication(persistence).unwrap();
+
+    let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(albums.recv().unwrap().is_empty());
+    let failed_reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(failed_reach.recv().unwrap().deltas.len(), 3);
+    let shared_failed_reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(shared_failed_reach.recv().unwrap().deltas.len(), 3);
+
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.fail_next(TestStorageOperation::ScanOpen);
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Speak No Evil".into())],
+    );
+    batch.delete("edges", PrimaryKeyValue::U64(2));
+    let published = block_on(database.publish_batch(batch)).unwrap();
+    assert_eq!(albums.recv().unwrap().deltas.len(), 1);
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert!(matches!(
+        block_on(database.next_subscription(&failed_reach)),
+        Err(DatabaseError::SubscriptionFailed(_))
+    ));
+    assert!(matches!(
+        block_on(database.next_subscription(&shared_failed_reach)),
+        Err(DatabaseError::SubscriptionFailed(_))
+    ));
+    assert!(matches!(
+        block_on(database.next_subscription(&failed_reach)),
+        Err(DatabaseError::SubscriptionEnded)
+    ));
+    let persistence = block_on(published.persist());
+    database.settle_publication(persistence).unwrap();
+
+    let mut later = database.open_batch();
+    later.insert("albums", vec![Value::U64(2), Value::String("JuJu".into())]);
+    let later = block_on(database.publish_batch(later)).unwrap();
+    assert_eq!(albums.recv().unwrap().deltas.len(), 1);
+
+    let reinstalled = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(reinstalled.recv().unwrap().deltas.len(), 1);
+
+    let persistence = block_on(later.persist());
+    database.settle_publication(persistence).unwrap();
+
+    control.fail_next(TestStorageOperation::ScanOpen);
+    let mut immediate_failure = database.open_batch();
+    immediate_failure.insert(
+        "albums",
+        vec![Value::U64(3), Value::String("Adam's Apple".into())],
+    );
+    immediate_failure.delete("edges", PrimaryKeyValue::U64(1));
+    let immediate_failure = block_on(database.publish_batch(immediate_failure)).unwrap();
+    assert_eq!(albums.recv().unwrap().deltas.len(), 1);
+    assert!(matches!(
+        block_on(database.next_subscription(&reinstalled)),
+        Err(DatabaseError::SubscriptionFailed(_))
+    ));
+    let persistence = block_on(immediate_failure.persist());
     database.settle_publication(persistence).unwrap();
 }
 

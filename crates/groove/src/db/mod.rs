@@ -41,7 +41,7 @@ use thiserror::Error;
 pub use crate::ivm::{
     CollectByField, GraphBuilder, IvmRuntimeError, MultisinkDeltas, MultisinkSubscription,
     PredicateExpr, PreparedShapeId, ProjectField, PublicationUpdate, RoutedMultisinkTerminal,
-    Subscription, SubscriptionId,
+    Subscription, SubscriptionError, SubscriptionEvent, SubscriptionId,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
@@ -213,6 +213,8 @@ pub enum Error {
     PublicationNotFound(PublicationId),
     #[error("subscription ended")]
     SubscriptionEnded,
+    #[error(transparent)]
+    SubscriptionFailed(#[from] SubscriptionError),
     #[error("duplicate primary key for table {table}: {key:?}")]
     DuplicatePrimaryKey { table: String, key: Vec<u8> },
     #[error("duplicate schema version {version} for table {table}")]
