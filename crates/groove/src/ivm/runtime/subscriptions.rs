@@ -132,6 +132,26 @@ impl Subscription {
             .map(|deltas| self.extract_sink_deltas(deltas))
     }
 
+    pub fn poll_next(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<RecordDeltas, RecvError>> {
+        self.poll_next_with_publication(cx)
+            .map(|result| result.map(|update| update.deltas))
+    }
+
+    pub fn poll_next_with_publication(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<PublicationUpdate<RecordDeltas>, RecvError>> {
+        self.inner.poll_next_with_publication(cx).map(|result| {
+            result.map(|update| PublicationUpdate {
+                publication: update.publication,
+                deltas: self.extract_sink_deltas(update.deltas),
+            })
+        })
+    }
+
     pub fn try_recv_with_publication(
         &self,
     ) -> Result<PublicationUpdate<RecordDeltas>, TryRecvError> {
@@ -207,6 +227,7 @@ pub struct MultisinkSubscription {
     pub(super) id: SubscriptionId,
     pub(super) initial: Mutex<Option<MultisinkDeltas>>,
     pub(super) receiver: Receiver<QueuedMultisinkDeltas>,
+    pub(super) waiter: Arc<Mutex<Option<std::task::Waker>>>,
     pub(super) _receiver_liveness: Arc<()>,
 }
 
@@ -240,6 +261,50 @@ impl MultisinkSubscription {
             return Ok(initial);
         }
         self.receiver.try_recv().map(|queued| queued.deltas)
+    }
+
+    pub fn poll_next(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<MultisinkDeltas, RecvError>> {
+        self.poll_next_with_publication(cx)
+            .map(|result| result.map(|update| update.deltas))
+    }
+
+    pub fn poll_next_with_publication(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<PublicationUpdate<MultisinkDeltas>, RecvError>> {
+        if let Some(initial) = self.take_initial() {
+            return std::task::Poll::Ready(Ok(PublicationUpdate {
+                publication: None,
+                deltas: initial,
+            }));
+        }
+        match self.receiver.try_recv() {
+            Ok(queued) => {
+                return std::task::Poll::Ready(Ok(PublicationUpdate {
+                    publication: queued.publication,
+                    deltas: queued.deltas,
+                }));
+            }
+            Err(TryRecvError::Disconnected) => {
+                return std::task::Poll::Ready(Err(RecvError));
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        *self
+            .waiter
+            .lock()
+            .expect("subscription waiter mutex poisoned") = Some(cx.waker().clone());
+        match self.receiver.try_recv() {
+            Ok(queued) => std::task::Poll::Ready(Ok(PublicationUpdate {
+                publication: queued.publication,
+                deltas: queued.deltas,
+            })),
+            Err(TryRecvError::Disconnected) => std::task::Poll::Ready(Err(RecvError)),
+            Err(TryRecvError::Empty) => std::task::Poll::Pending,
+        }
     }
 
     pub fn try_recv_with_publication(
@@ -370,8 +435,32 @@ impl RecordDelta {
 }
 
 #[derive(Clone, Debug)]
+pub(super) struct SubscriptionSender {
+    sender: Sender<QueuedMultisinkDeltas>,
+    waiter: Arc<Mutex<Option<std::task::Waker>>>,
+}
+
+impl SubscriptionSender {
+    pub(super) fn send(
+        &self,
+        queued: QueuedMultisinkDeltas,
+    ) -> Result<(), std::sync::mpsc::SendError<QueuedMultisinkDeltas>> {
+        self.sender.send(queued)?;
+        if let Some(waiter) = self
+            .waiter
+            .lock()
+            .expect("subscription waiter mutex poisoned")
+            .take()
+        {
+            waiter.wake();
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct MultisinkSubscriptionState {
-    pub(super) sender: Sender<QueuedMultisinkDeltas>,
+    pub(super) sender: SubscriptionSender,
     pub(super) receiver_liveness: Weak<()>,
     pub(super) outputs: BTreeMap<String, CompiledNode>,
     pub(super) target: MultisinkSubscriptionTarget,
@@ -1747,6 +1836,11 @@ impl IvmRuntime {
         }
         let subscription_id = self.next_subscription_id();
         let (sender, receiver) = mpsc::channel();
+        let waiter = Arc::new(Mutex::new(None));
+        let sender = SubscriptionSender {
+            sender,
+            waiter: Arc::clone(&waiter),
+        };
         let receiver_liveness = Arc::new(());
         // Installation is not published until hydration succeeds. A dropped
         // or failed future therefore leaves no live subscription or retainer;
@@ -1771,6 +1865,7 @@ impl IvmRuntime {
             id: subscription_id,
             initial: Mutex::new(Some(initial)),
             receiver,
+            waiter,
             _receiver_liveness: receiver_liveness,
         })
     }
@@ -1964,6 +2059,11 @@ impl IvmRuntime {
             return Err(error);
         }
         let (sender, receiver) = mpsc::channel();
+        let waiter = Arc::new(Mutex::new(None));
+        let sender = SubscriptionSender {
+            sender,
+            waiter: Arc::clone(&waiter),
+        };
         let receiver_liveness = Arc::new(());
         self.multisink_subscriptions.insert(
             subscription_id,
@@ -1991,6 +2091,7 @@ impl IvmRuntime {
             id: subscription_id,
             initial: Mutex::new(Some(initial)),
             receiver,
+            waiter,
             _receiver_liveness: receiver_liveness,
         })
     }

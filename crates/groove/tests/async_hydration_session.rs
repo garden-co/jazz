@@ -379,14 +379,16 @@ fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked()
         panic!("resident publication must not wait for independent hydration");
     };
     let published = published.unwrap();
+    let publication_id = published.publication();
 
     assert_eq!(albums.try_recv().unwrap().deltas.len(), 1);
     assert!(reach.try_recv().is_err());
 
     control.resume_operation(TestStorageOperation::ScanOpen);
     drop(publication);
-    block_on(database.flush()).unwrap();
-    assert_eq!(reach.recv().unwrap().deltas.len(), 2);
+    let resumed = block_on(database.next_subscription_with_publication(&reach)).unwrap();
+    assert_eq!(resumed.publication, Some(publication_id));
+    assert_eq!(resumed.deltas.deltas.len(), 2);
     let persistence = block_on(published.persist());
     database.settle_publication(persistence).unwrap();
 }
@@ -431,8 +433,13 @@ fn resident_publication_returns_before_independent_recursive_hydration() {
     assert_eq!(rows.deltas.len(), 1);
     drop(query);
 
-    block_on(database.flush()).unwrap();
-    assert_eq!(reach.recv().unwrap().deltas.len(), 2);
+    assert_eq!(
+        block_on(database.next_subscription(&reach))
+            .unwrap()
+            .deltas
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -493,8 +500,13 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
     );
 
     control.resume_operation(TestStorageOperation::ScanOpen);
-    block_on(database.flush()).unwrap();
-    assert_eq!(reach.recv().unwrap().deltas.len(), 2);
+    assert_eq!(
+        block_on(database.next_subscription(&reach))
+            .unwrap()
+            .deltas
+            .len(),
+        2
+    );
 }
 
 #[test]

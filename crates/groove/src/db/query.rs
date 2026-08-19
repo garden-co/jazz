@@ -4,6 +4,101 @@ impl<S> Database<S>
 where
     S: OrderedKvStorage + 'static,
 {
+    pub fn poll_subscription(
+        &mut self,
+        subscription: &Subscription,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<RecordDeltas, Error>> {
+        if let std::task::Poll::Ready(result) = subscription.poll_next(cx) {
+            return std::task::Poll::Ready(result.map_err(|_| Error::SubscriptionEnded));
+        }
+        if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
+            return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
+        }
+        subscription
+            .poll_next(cx)
+            .map(|result| result.map_err(|_| Error::SubscriptionEnded))
+    }
+
+    pub async fn next_subscription(
+        &mut self,
+        subscription: &Subscription,
+    ) -> Result<RecordDeltas, Error> {
+        std::future::poll_fn(|cx| self.poll_subscription(subscription, cx)).await
+    }
+
+    pub fn poll_subscription_with_publication(
+        &mut self,
+        subscription: &Subscription,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<PublicationUpdate<RecordDeltas>, Error>> {
+        if let std::task::Poll::Ready(result) = subscription.poll_next_with_publication(cx) {
+            return std::task::Poll::Ready(result.map_err(|_| Error::SubscriptionEnded));
+        }
+        if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
+            return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
+        }
+        subscription
+            .poll_next_with_publication(cx)
+            .map(|result| result.map_err(|_| Error::SubscriptionEnded))
+    }
+
+    pub async fn next_subscription_with_publication(
+        &mut self,
+        subscription: &Subscription,
+    ) -> Result<PublicationUpdate<RecordDeltas>, Error> {
+        std::future::poll_fn(|cx| self.poll_subscription_with_publication(subscription, cx)).await
+    }
+
+    pub fn poll_multisink_subscription(
+        &mut self,
+        subscription: &MultisinkSubscription,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<MultisinkDeltas, Error>> {
+        if let std::task::Poll::Ready(result) = subscription.poll_next(cx) {
+            return std::task::Poll::Ready(result.map_err(|_| Error::SubscriptionEnded));
+        }
+        if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
+            return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
+        }
+        subscription
+            .poll_next(cx)
+            .map(|result| result.map_err(|_| Error::SubscriptionEnded))
+    }
+
+    pub async fn next_multisink_subscription(
+        &mut self,
+        subscription: &MultisinkSubscription,
+    ) -> Result<MultisinkDeltas, Error> {
+        std::future::poll_fn(|cx| self.poll_multisink_subscription(subscription, cx)).await
+    }
+
+    pub fn poll_multisink_subscription_with_publication(
+        &mut self,
+        subscription: &MultisinkSubscription,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<PublicationUpdate<MultisinkDeltas>, Error>> {
+        if let std::task::Poll::Ready(result) = subscription.poll_next_with_publication(cx) {
+            return std::task::Poll::Ready(result.map_err(|_| Error::SubscriptionEnded));
+        }
+        if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
+            return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
+        }
+        subscription
+            .poll_next_with_publication(cx)
+            .map(|result| result.map_err(|_| Error::SubscriptionEnded))
+    }
+
+    pub async fn next_multisink_subscription_with_publication(
+        &mut self,
+        subscription: &MultisinkSubscription,
+    ) -> Result<PublicationUpdate<MultisinkDeltas>, Error> {
+        std::future::poll_fn(|cx| {
+            self.poll_multisink_subscription_with_publication(subscription, cx)
+        })
+        .await
+    }
+
     /// Subscribe to an IVM graph and receive an initial snapshot followed by
     /// deltas from committed batches.
     ///
