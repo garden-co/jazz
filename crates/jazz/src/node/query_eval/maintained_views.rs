@@ -207,7 +207,8 @@ where
                 authorization_mode,
                 settled_binding_view,
                 PreparedClaimBindingMode::Strict,
-            )?;
+            )
+            .await?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             _retained_prepared_plan: retained_prepared_plan,

@@ -164,7 +164,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    fn policy_authorization_row_id_graph(
+    async fn policy_authorization_row_id_graph(
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<PolicyAuthorizationGraph, Error> {
@@ -195,8 +195,8 @@ where
             self.query.policy_proof_stack.push(table.clone());
         }
 
-        let result = (|| {
-            let program = self.compile_query_program_request(request)?;
+        let result = async {
+            let program = self.compile_query_program_request(request).await?;
             let graph = lowered_terminal_graph(&program, "policy.authorized_rows")?;
             let route_fields = program
                 .lowered
@@ -219,7 +219,8 @@ where
                 .policy_authorization_graph_cache
                 .insert(cache_key, graph.clone());
             Ok(graph)
-        })();
+        }
+        .await;
 
         if proof_table.is_some() {
             self.query
@@ -230,7 +231,7 @@ where
         result
     }
 
-    pub(in crate::node) fn branch_read_policy_authorized_branch_ids(
+    pub(in crate::node) async fn branch_read_policy_authorized_branch_ids(
         &mut self,
         branch_id: BranchId,
         identity: AuthorId,
@@ -300,8 +301,12 @@ where
                 policy_shape.query(),
             ),
         };
-        let graph = self.policy_authorization_row_id_graph(request)?.graph;
-        let deltas = self.database.query_graph(graph).map_err(Error::Groove)?;
+        let graph = self.policy_authorization_row_id_graph(request).await?.graph;
+        let deltas = self
+            .database
+            .query_graph(graph)
+            .await
+            .map_err(Error::Groove)?;
         let row_idx =
             deltas
                 .descriptor
@@ -337,7 +342,7 @@ where
         }
     }
 
-    pub(in crate::node) fn write_policy_query_allows_current_row(
+    pub(in crate::node) async fn write_policy_query_allows_current_row(
         &mut self,
         policy: &crate::query::Query,
         row_uuid: RowUuid,
@@ -358,15 +363,18 @@ where
             root_source_id(&policy.table),
             CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
         )]);
-        let program = self.compile_current_query_program_with_access_paths(
-            &policy_shape,
-            &binding,
-            DurabilityTier::Local,
-            identity,
-            CurrentQueryProgramOutput::AppRows,
-            access_paths,
-        )?;
+        let program = self
+            .compile_current_query_program_with_access_paths(
+                &policy_shape,
+                &binding,
+                DurabilityTier::Local,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+                access_paths,
+            )
+            .await?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
+            .await
     }
 
     /// Authorize an inline old/candidate row through the query program.
@@ -374,7 +382,7 @@ where
     /// Insert candidates reinterpret plain `inherits(parent)` as parent
     /// update-using authorization. Existing/update-check rows retain ordinary
     /// read inheritance unless the policy names an explicit write operation.
-    pub(in crate::node) fn write_policy_query_allows_candidate(
+    pub(in crate::node) async fn write_policy_query_allows_candidate(
         &mut self,
         table: &TableSchema,
         policy: &crate::query::Query,
@@ -416,9 +424,10 @@ where
             insert_candidate,
             branch_id,
         )
+        .await
     }
 
-    pub(in crate::node) fn write_policy_query_allows_candidate_for_schema(
+    pub(in crate::node) async fn write_policy_query_allows_candidate_for_schema(
         &mut self,
         policy_schema_version: SchemaVersionId,
         table: &TableSchema,
@@ -527,15 +536,18 @@ where
         } else {
             self.current_query_primary_key_access_paths(&policy_shape, &binding)?
         };
-        let program = self.compile_query_program_request_with_inline_sources_and_access_paths(
-            request,
-            inline_sources,
-            access_paths,
-        )?;
+        let program = self
+            .compile_query_program_request_with_inline_sources_and_access_paths(
+                request,
+                inline_sources,
+                access_paths,
+            )
+            .await?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
+            .await
     }
 
-    pub(in crate::node) fn branch_write_policy_query_allows_candidate(
+    pub(in crate::node) async fn branch_write_policy_query_allows_candidate(
         &mut self,
         branch_id: BranchId,
         table: &TableSchema,
@@ -554,37 +566,42 @@ where
             insert_candidate,
             Some(branch_id),
         )
+        .await
     }
 
-    fn write_policy_query_program_allows(
+    async fn write_policy_query_program_allows(
         &mut self,
         program: &QueryProgram,
         policy_shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<bool, Error> {
-        let deltas =
-            match self.prepared_query_plan_from_program(&program, &policy_shape, &binding)? {
-                PreparedQueryPlan::Graph(graph) => {
-                    self.database.query_graph(graph).map_err(Error::Groove)?
-                }
-                PreparedQueryPlan::Prepared { shape, params } => {
-                    let values = binding_values_for_plan(
-                        &binding,
-                        &params,
-                        &program.request.policy,
-                        PreparedClaimBindingMode::Strict,
-                    )?;
-                    take_required_sink_deltas(
-                        self.bind_shape_snapshot(shape, &values)?,
-                        JAZZ_APP_ROWS_SINK,
-                    )?
-                }
-                PreparedQueryPlan::PeerMaintainedMarker => {
-                    return Err(Error::InvalidStoredValue(
-                        "peer maintained marker cannot execute write policy plan",
-                    ));
-                }
-            };
+        let deltas = match self
+            .prepared_query_plan_from_program(&program, &policy_shape, &binding)
+            .await?
+        {
+            PreparedQueryPlan::Graph(graph) => self
+                .database
+                .query_graph(graph)
+                .await
+                .map_err(Error::Groove)?,
+            PreparedQueryPlan::Prepared { shape, params } => {
+                let values = binding_values_for_plan(
+                    &binding,
+                    &params,
+                    &program.request.policy,
+                    PreparedClaimBindingMode::Strict,
+                )?;
+                take_required_sink_deltas(
+                    self.bind_shape_snapshot(shape, &values).await?,
+                    JAZZ_APP_ROWS_SINK,
+                )?
+            }
+            PreparedQueryPlan::PeerMaintainedMarker => {
+                return Err(Error::InvalidStoredValue(
+                    "peer maintained marker cannot execute write policy plan",
+                ));
+            }
+        };
         Ok(deltas.iter().any(|(_, weight)| weight > 0))
     }
 
@@ -592,7 +609,7 @@ where
     ///
     /// Phase B step 2 returns output-relation rows only. Provenance-closure
     /// shipping and settled result set reads are introduced by the wire step.
-    pub fn query_rows(
+    pub async fn query_rows(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -600,9 +617,10 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         self.require_catalogue_ready()?;
         self.query_rows_with_prepared_plan(shape, binding, tier, None)
+            .await
     }
 
-    pub(super) fn policy_filtered_current_source_graph_via_query_engine(
+    pub(super) async fn policy_filtered_current_source_graph_via_query_engine(
         &mut self,
         policy_request: Result<QueryProgramRequest, Error>,
         base: GraphBuilder,
@@ -662,7 +680,7 @@ where
                         .collect::<BTreeSet<_>>(),
                 )
             });
-        let authorized = match self.policy_authorization_row_id_graph(policy_request) {
+        let authorized = match self.policy_authorization_row_id_graph(policy_request).await {
             Ok(authorized) => authorized,
             Err(Error::QueryCapability(err)) if err.contains("PolicyProofCycle") => {
                 return Err(Error::QueryCapability(err));
