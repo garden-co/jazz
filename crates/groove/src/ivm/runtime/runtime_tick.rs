@@ -7,15 +7,14 @@ use super::evaluation_session::{EvaluationInputs, StorageRequestKey, StorageRequ
 use super::*;
 use crate::storage::OwnedStorage;
 
-/// First owned slice of the interruptible evaluator design.
+/// Owned preparation state for one interruptible evaluation.
 ///
-/// The session owns its roots and every mutable value that may change while a
-/// storage future is pending. Node traversal is still the boxed recursive
-/// bridge; moving that traversal into an explicit node work queue is the next,
-/// deliberately separate step.
+/// Storage suspension lives in `EvaluationWorkQueue`; the recursive evaluator
+/// is entered only for a root whose complete source frontier is ready, so its
+/// future is a short-lived execution frame rather than retained blocked work.
 struct EvaluationSession {
     relevant_nodes: HashSet<NodeId>,
-    runnable_roots: VecDeque<NodeId>,
+    roots: HashSet<NodeId>,
     outputs: HashMap<NodeId, RecordDeltas>,
     operator_states: HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
@@ -29,30 +28,38 @@ struct EvaluationSession {
 /// Discovers storage leaves for all reachable siblings without recursively
 /// evaluating through the first blocked branch. Hash-consed nodes enter the
 /// queue once, so discovery is linear in the reachable graph slice.
-struct SourceWorkQueue {
-    pending: VecDeque<NodeId>,
-    visited: HashSet<NodeId>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvaluationEntry {
+    Waiting(usize),
+    Runnable,
+    Complete,
 }
 
-impl SourceWorkQueue {
+struct EvaluationWorkQueue {
+    pending: VecDeque<NodeId>,
+    visited: HashSet<NodeId>,
+    entries: HashMap<NodeId, EvaluationEntry>,
+    dependents: HashMap<NodeId, Vec<NodeId>>,
+    storage_dependents: std::collections::BTreeMap<StorageRequestKey, Vec<NodeId>>,
+    runnable: VecDeque<NodeId>,
+    roots: HashSet<NodeId>,
+}
+
+impl EvaluationWorkQueue {
     fn new(roots: impl IntoIterator<Item = NodeId>) -> Self {
+        let roots = roots.into_iter().collect::<VecDeque<_>>();
         Self {
-            pending: roots.into_iter().collect(),
+            pending: roots.clone(),
             visited: HashSet::default(),
+            entries: HashMap::default(),
+            dependents: HashMap::default(),
+            storage_dependents: std::collections::BTreeMap::new(),
+            runnable: VecDeque::new(),
+            roots: roots.into_iter().collect(),
         }
     }
 
-    fn discover(
-        mut self,
-        graph: &IvmGraph,
-    ) -> Result<
-        (
-            HashSet<NodeId>,
-            std::collections::BTreeSet<StorageRequestKey>,
-        ),
-        IvmRuntimeError,
-    > {
-        let mut requests = std::collections::BTreeSet::new();
+    fn discover(mut self, graph: &IvmGraph) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
         while let Some(node_id) = self.pending.pop_front() {
             if !self.visited.insert(node_id) {
                 continue;
@@ -61,16 +68,80 @@ impl SourceWorkQueue {
                 .node(node_id)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node_id))?;
             self.pending.extend(node.descriptor.inputs.iter().copied());
+            for input in &node.descriptor.inputs {
+                self.dependents.entry(*input).or_default().push(node_id);
+            }
             let request = match &node.descriptor.operator {
                 OpType::TableSource(source) => NodeState::table_source_request(source)?,
                 OpType::IndexSource(source) => NodeState::index_source_request(source)?,
                 _ => None,
             };
             if let Some(request) = request {
-                requests.insert(request);
+                self.storage_dependents
+                    .entry(request)
+                    .or_default()
+                    .push(node_id);
+                self.entries.insert(node_id, EvaluationEntry::Waiting(1));
+            } else {
+                self.entries.insert(
+                    node_id,
+                    EvaluationEntry::Waiting(node.descriptor.inputs.len()),
+                );
             }
         }
-        Ok((self.visited, requests))
+        let initially_ready = self
+            .entries
+            .iter()
+            .filter_map(|(node, entry)| (*entry == EvaluationEntry::Waiting(0)).then_some(*node))
+            .collect::<Vec<_>>();
+        for node in initially_ready {
+            self.make_runnable(node);
+        }
+        let relevant_nodes = self.visited.clone();
+        Ok((relevant_nodes, self))
+    }
+
+    fn requests(&self) -> impl Iterator<Item = &StorageRequestKey> {
+        self.storage_dependents.keys()
+    }
+
+    fn storage_ready(&mut self, requests: impl IntoIterator<Item = StorageRequestKey>) {
+        let ready_sources = requests
+            .into_iter()
+            .flat_map(|request| self.storage_dependents.remove(&request).unwrap_or_default())
+            .collect::<Vec<_>>();
+        for node in ready_sources {
+            self.make_runnable(node);
+        }
+    }
+
+    fn make_runnable(&mut self, node: NodeId) {
+        if matches!(
+            self.entries.get(&node),
+            Some(EvaluationEntry::Runnable | EvaluationEntry::Complete)
+        ) {
+            return;
+        }
+        self.entries.insert(node, EvaluationEntry::Runnable);
+        self.runnable.push_back(node);
+    }
+
+    fn complete(&mut self, node: NodeId) {
+        self.entries.insert(node, EvaluationEntry::Complete);
+        let dependents = self.dependents.get(&node).cloned().unwrap_or_default();
+        for dependent in dependents {
+            let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&dependent) else {
+                continue;
+            };
+            *remaining = remaining.saturating_sub(1);
+            if *remaining == 0 {
+                self.make_runnable(dependent);
+            }
+        }
+    }
+
+    fn is_root(&self, node: NodeId) -> bool {
+        self.roots.contains(&node)
     }
 }
 
@@ -78,9 +149,9 @@ impl EvaluationSession {
     fn hydration(
         runtime: &IvmRuntime,
         roots: VecDeque<NodeId>,
-    ) -> Result<(Self, std::collections::BTreeSet<StorageRequestKey>), IvmRuntimeError> {
-        let (relevant_nodes, source_requests) =
-            SourceWorkQueue::new(roots.iter().copied()).discover(&runtime.graph)?;
+    ) -> Result<(Self, EvaluationWorkQueue), IvmRuntimeError> {
+        let (relevant_nodes, work_queue) =
+            EvaluationWorkQueue::new(roots.iter().copied()).discover(&runtime.graph)?;
         // Installed operator state is root-scoped. Recursive child scopes are
         // scratch state and are cleared before an evaluation is installed.
         // Probe by reachable node instead of scanning state owned by unrelated
@@ -135,7 +206,7 @@ impl EvaluationSession {
         Ok((
             Self {
                 relevant_nodes,
-                runnable_roots: roots,
+                roots: roots.into_iter().collect(),
                 outputs: HashMap::default(),
                 operator_states,
                 arrangement_states,
@@ -145,7 +216,7 @@ impl EvaluationSession {
                 memo_use_clock: runtime.memo_use_clock,
                 node_meta,
             },
-            source_requests,
+            work_queue,
         ))
     }
 
@@ -722,32 +793,22 @@ impl IvmRuntime {
         if roots.is_empty() {
             return Err(IvmRuntimeError::UnsupportedOperator);
         }
-        let (mut session, source_requests) = EvaluationSession::hydration(self, roots)?;
+        let hydrate_arrangements = mode == HydrationMode::Subscription
+            && roots.iter().copied().try_fold(false, |found, root| {
+                Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
+            })?;
+        let (mut session, mut work_queue) = EvaluationSession::hydration(self, roots)?;
         let mut evaluation_inputs = EvaluationInputs::default();
         let mut storage_requests = StorageRequests::new(OwnedStorage::new(Rc::new(storage)));
-        for request in source_requests {
+        for request in work_queue.requests().cloned().collect::<Vec<_>>() {
             storage_requests.request(request);
         }
-        if storage_requests.has_pending() {
-            std::future::poll_fn(|cx| {
-                if storage_requests.poll(cx) > 0 {
-                    std::task::Poll::Ready(())
+        while session.outputs.len() < session.roots.len() {
+            while let Some(node) = work_queue.runnable.pop_front() {
+                let context = if hydrate_arrangements {
+                    EvalContext::root_subscription_snapshot()
                 } else {
-                    std::task::Poll::Pending
-                }
-            })
-            .await;
-            evaluation_inputs.install(storage_requests.drain_ready()?);
-        }
-        while !session.runnable_roots.is_empty() {
-            let mut blocked = VecDeque::new();
-            while let Some(root) = session.runnable_roots.pop_front() {
-                let context = match mode {
-                    HydrationMode::Ordinary => EvalContext::root_snapshot(),
-                    HydrationMode::Subscription if self.output_depends_on_aggregate(root)? => {
-                        EvalContext::root_subscription_snapshot()
-                    }
-                    HydrationMode::Subscription => EvalContext::root_snapshot(),
+                    EvalContext::root_snapshot()
                 };
                 let result = {
                     let mut evaluator = TickEvaluator {
@@ -775,27 +836,28 @@ impl IvmRuntime {
                         root_ordering_windows: HashMap::default(),
                     };
                     evaluator
-                        .update_node(root)
+                        .update_node(node)
                         .await
                         .map(|records| records.as_ref().clone())
                 };
                 match result {
                     Ok(records) => {
-                        session.outputs.insert(root, records);
+                        if work_queue.is_root(node) {
+                            session.outputs.insert(node, records);
+                        }
+                        work_queue.complete(node);
                     }
-                    Err(IvmRuntimeError::EvaluationBlocked) => blocked.push_back(root),
+                    Err(IvmRuntimeError::EvaluationBlocked) => {
+                        return Err(IvmRuntimeError::EvaluationBlocked);
+                    }
                     Err(error) => return Err(error),
                 }
             }
-            if blocked.is_empty() {
+            if session.outputs.len() == session.roots.len() {
                 break;
             }
-            let requested = evaluation_inputs.take_requested();
-            if requested.is_empty() {
+            if !storage_requests.has_pending() {
                 return Err(IvmRuntimeError::EvaluationBlocked);
-            }
-            for request in requested {
-                storage_requests.request(request);
             }
             std::future::poll_fn(|cx| {
                 if storage_requests.poll(cx) > 0 {
@@ -805,8 +867,9 @@ impl IvmRuntime {
                 }
             })
             .await;
-            evaluation_inputs.install(storage_requests.drain_ready()?);
-            session.runnable_roots = blocked;
+            let ready = storage_requests.drain_ready()?;
+            work_queue.storage_ready(ready.keys().cloned());
+            evaluation_inputs.install(ready);
         }
         let outputs = std::mem::take(&mut session.outputs);
         session.install(self);

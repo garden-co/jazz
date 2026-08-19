@@ -1,6 +1,6 @@
 //! Owned work and storage-request state for interruptible evaluation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -34,7 +34,6 @@ pub(super) enum StorageRequestOutput {
 
 #[derive(Default)]
 pub(super) struct EvaluationInputs {
-    requested: BTreeSet<StorageRequestKey>,
     loaded: BTreeMap<StorageRequestKey, StorageRequestOutput>,
 }
 
@@ -44,17 +43,12 @@ impl EvaluationInputs {
         key: StorageRequestKey,
     ) -> Result<&[KeyValue], super::IvmRuntimeError> {
         if !self.loaded.contains_key(&key) {
-            self.requested.insert(key);
             return Err(super::IvmRuntimeError::EvaluationBlocked);
         }
         match self.loaded.get(&key).expect("loaded key checked") {
             StorageRequestOutput::Rows(rows) => Ok(rows),
             StorageRequestOutput::Value(_) => Err(super::IvmRuntimeError::UnsupportedOperator),
         }
-    }
-
-    pub(super) fn take_requested(&mut self) -> BTreeSet<StorageRequestKey> {
-        std::mem::take(&mut self.requested)
     }
 
     pub(super) fn install(&mut self, ready: BTreeMap<StorageRequestKey, StorageRequestOutput>) {
