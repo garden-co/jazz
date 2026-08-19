@@ -15,6 +15,8 @@ export function createSolidJazzClientInternal(
 ) {
   let disposed = false;
   let lifecycle: Promise<void> | undefined;
+  let hasLifecycleError = false;
+  let lifecycleError: unknown;
   onCleanup(() => {
     disposed = true;
   });
@@ -52,19 +54,33 @@ export function createSolidJazzClientInternal(
             lifecycle ? lifecycle.then(() => client.shutdown()) : client.shutdown()
           ).then(
             () => undefined,
-            () => undefined,
+            (error) => {
+              hasLifecycleError = true;
+              lifecycleError = error;
+            },
           );
         }
       });
 
       const run = async () => {
         if (disposed || runId !== activeRunId()) return undefined;
+        if (hasLifecycleError) {
+          const error = lifecycleError;
+          hasLifecycleError = false;
+          lifecycleError = undefined;
+          throw error;
+        }
 
         const client = await clientFactory(nextConfig);
         rawClient = client;
         if (disposed || runId !== activeRunId()) {
           disconnectRunId();
-          await client.shutdown();
+          try {
+            await client.shutdown();
+          } catch (error) {
+            hasLifecycleError = true;
+            lifecycleError = error;
+          }
           return undefined;
         }
         connectRunId();
