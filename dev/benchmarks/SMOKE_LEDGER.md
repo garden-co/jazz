@@ -56724,3 +56724,316 @@ JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution
 {"acceptance_p50_us":1275,"acceptance_p95_us":2173,"api_surface":"db","driver":"synchronous","durability_tier":"Edge","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s9-smoke","scenario":"s9_durable_execution","seed":1493172225}
 {"driver":"synchronous","git_dirty":false,"hydration_bytes":3072,"hydration_floor_bytes":3072,"hydration_rows":8,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s9-smoke","scenario":"s9_durable_execution","scope":"workflow_table_surface","seed":1493172225}
 ```
+
+---
+
+## Run 2026-08-19T05:32:19Z - smoke
+
+- result: `fail`
+- git: `76cec3f9d`
+- dirty: `false`
+- log_dir: `target/benchmark-smoke`
+- result_dir: `dev/benchmarks/results/20260819T052842Z`
+- prebuild_s: `122.398`
+- excerpt_lines: `18`
+
+### Summary
+
+| Scenario | Status | Wall Time | Previous | Delta | JSONL Rows | Invocation |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| jazz/cold_subscription | `fail` | 6.362s | 0.299s | +6.063s | 1 | `JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --bench cold_subscription` |
+| jazz/sync | `fail` | 6.434s | 0.255s | +6.179s | 1 | `GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --bench sync` |
+| jazz/validation | `fail` | 6.205s | 0.298s | +5.907s | 1 | `GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --bench validation` |
+| jazz/merge_back_cost | `fail` | 6.249s | 0.236s | +6.013s | 1 | `JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost` |
+| jazz/relation_include_delivery | `fail` | 6.201s | 47.021s | -40.820s | 1 | `JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --no-default-features --bench relation_include_delivery` |
+| jazz/route_subscription_curve | `fail` | 6.951s | 62.157s | -55.206s | 1 | `JAZZ_ROUTE_CURVE_ROUTES=10 cargo bench -p jazz --features testing --bench route_subscription_curve` |
+| jazz-sim/micro | `fail` | 7.033s | 53.925s | -46.892s | 1 | `JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro # no JAZZ_SMOKE; fixed size ladders remain` |
+| jazz-sim/s1_saas | `fail` | 6.880s | 10.393s | -3.513s | 1 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s1_saas` |
+| jazz-sim/s2_canvas | `fail` | 6.972s | 14.284s | -7.312s | 1 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s2_canvas` |
+| jazz-sim/s3_permissions | `fail` | 6.945s | 12.799s | -5.854s | 1 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s3_permissions` |
+| jazz-sim/s4_order_processing | `fail` | 6.954s | 13.601s | -6.647s | 1 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s4_order_processing` |
+| jazz-sim/s5_durable_stream | `fail` | 6.940s | 12.013s | -5.073s | 1 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s5_durable_stream` |
+| jazz-sim/s7_migrations | `fail` | 6.954s | 12.481s | -5.527s | 1 | `cargo bench -p jazz-sim --bench s7_migrations # source always runs smoke(); no env knob` |
+| jazz-sim/s9_durable_execution | `fail` | 6.911s | 11.839s | -4.928s | 1 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution` |
+
+### Details
+
+#### jazz/cold_subscription
+
+- status: `fail`
+- wall_time: `6.362s`
+- previous_wall_time: `0.299s`
+- delta: `+6.063s`
+- log: `target/benchmark-smoke/jazz_cold_subscription.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz_cold_subscription.jsonl`
+- invocation:
+
+```sh
+JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --bench cold_subscription
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz/cold_subscription","status":"fail","wall_s":6.36216,"wall_us":6362160}
+```
+
+#### jazz/sync
+
+- status: `fail`
+- wall_time: `6.434s`
+- previous_wall_time: `0.255s`
+- delta: `+6.179s`
+- log: `target/benchmark-smoke/jazz_sync.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz_sync.jsonl`
+- invocation:
+
+```sh
+GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --bench sync
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz/sync","status":"fail","wall_s":6.43397,"wall_us":6433970}
+```
+
+#### jazz/validation
+
+- status: `fail`
+- wall_time: `6.205s`
+- previous_wall_time: `0.298s`
+- delta: `+5.907s`
+- log: `target/benchmark-smoke/jazz_validation.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz_validation.jsonl`
+- invocation:
+
+```sh
+GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --bench validation
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz/validation","status":"fail","wall_s":6.20545,"wall_us":6205450}
+```
+
+#### jazz/merge_back_cost
+
+- status: `fail`
+- wall_time: `6.249s`
+- previous_wall_time: `0.236s`
+- delta: `+6.013s`
+- log: `target/benchmark-smoke/jazz_merge_back_cost.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz_merge_back_cost.jsonl`
+- invocation:
+
+```sh
+JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz/merge_back_cost","status":"fail","wall_s":6.24899,"wall_us":6248990}
+```
+
+#### jazz/relation_include_delivery
+
+- status: `fail`
+- wall_time: `6.201s`
+- previous_wall_time: `47.021s`
+- delta: `-40.820s`
+- log: `target/benchmark-smoke/jazz_relation_include_delivery.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz_relation_include_delivery.jsonl`
+- invocation:
+
+```sh
+JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --no-default-features --bench relation_include_delivery
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz/relation_include_delivery","status":"fail","wall_s":6.20121,"wall_us":6201210}
+```
+
+#### jazz/route_subscription_curve
+
+- status: `fail`
+- wall_time: `6.951s`
+- previous_wall_time: `62.157s`
+- delta: `-55.206s`
+- log: `target/benchmark-smoke/jazz_route_subscription_curve.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz_route_subscription_curve.jsonl`
+- invocation:
+
+```sh
+JAZZ_ROUTE_CURVE_ROUTES=10 cargo bench -p jazz --features testing --bench route_subscription_curve
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz/route_subscription_curve","status":"fail","wall_s":6.95098,"wall_us":6950980}
+```
+
+#### jazz-sim/micro
+
+- status: `fail`
+- wall_time: `7.033s`
+- previous_wall_time: `53.925s`
+- delta: `-46.892s`
+- log: `target/benchmark-smoke/jazz-sim_micro.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz-sim_micro.jsonl`
+- invocation:
+
+```sh
+JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro # no JAZZ_SMOKE; fixed size ladders remain
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz-sim/micro","status":"fail","wall_s":7.03301,"wall_us":7033010}
+```
+
+#### jazz-sim/s1_saas
+
+- status: `fail`
+- wall_time: `6.880s`
+- previous_wall_time: `10.393s`
+- delta: `-3.513s`
+- log: `target/benchmark-smoke/jazz-sim_s1_saas.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz-sim_s1_saas.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s1_saas
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz-sim/s1_saas","status":"fail","wall_s":6.88042,"wall_us":6880420}
+```
+
+#### jazz-sim/s2_canvas
+
+- status: `fail`
+- wall_time: `6.972s`
+- previous_wall_time: `14.284s`
+- delta: `-7.312s`
+- log: `target/benchmark-smoke/jazz-sim_s2_canvas.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz-sim_s2_canvas.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s2_canvas
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz-sim/s2_canvas","status":"fail","wall_s":6.97217,"wall_us":6972170}
+```
+
+#### jazz-sim/s3_permissions
+
+- status: `fail`
+- wall_time: `6.945s`
+- previous_wall_time: `12.799s`
+- delta: `-5.854s`
+- log: `target/benchmark-smoke/jazz-sim_s3_permissions.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz-sim_s3_permissions.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s3_permissions
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz-sim/s3_permissions","status":"fail","wall_s":6.94453,"wall_us":6944530}
+```
+
+#### jazz-sim/s4_order_processing
+
+- status: `fail`
+- wall_time: `6.954s`
+- previous_wall_time: `13.601s`
+- delta: `-6.647s`
+- log: `target/benchmark-smoke/jazz-sim_s4_order_processing.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz-sim_s4_order_processing.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s4_order_processing
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz-sim/s4_order_processing","status":"fail","wall_s":6.95381,"wall_us":6953810}
+```
+
+#### jazz-sim/s5_durable_stream
+
+- status: `fail`
+- wall_time: `6.940s`
+- previous_wall_time: `12.013s`
+- delta: `-5.073s`
+- log: `target/benchmark-smoke/jazz-sim_s5_durable_stream.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz-sim_s5_durable_stream.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s5_durable_stream
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz-sim/s5_durable_stream","status":"fail","wall_s":6.94026,"wall_us":6940260}
+```
+
+#### jazz-sim/s7_migrations
+
+- status: `fail`
+- wall_time: `6.954s`
+- previous_wall_time: `12.481s`
+- delta: `-5.527s`
+- log: `target/benchmark-smoke/jazz-sim_s7_migrations.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz-sim_s7_migrations.jsonl`
+- invocation:
+
+```sh
+cargo bench -p jazz-sim --bench s7_migrations # source always runs smoke(); no env knob
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz-sim/s7_migrations","status":"fail","wall_s":6.95368,"wall_us":6953680}
+```
+
+#### jazz-sim/s9_durable_execution
+
+- status: `fail`
+- wall_time: `6.911s`
+- previous_wall_time: `11.839s`
+- delta: `-4.928s`
+- log: `target/benchmark-smoke/jazz-sim_s9_durable_execution.log`
+- jsonl: `dev/benchmarks/results/20260819T052842Z/jazz-sim_s9_durable_execution.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution
+```
+
+- excerpt:
+
+```jsonl
+{"emitted_json_lines":0,"phase":"harness","scenario":"jazz-sim/s9_durable_execution","status":"fail","wall_s":6.91138,"wall_us":6911380}
+```
