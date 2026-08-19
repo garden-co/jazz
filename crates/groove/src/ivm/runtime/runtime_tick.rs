@@ -634,9 +634,10 @@ impl IvmRuntime {
                 _ => {}
             }
         }
-        let mut storage_requests = StorageRequests::new(OwnedStorage::new(Rc::new(storage)));
+        let owned_storage = OwnedStorage::new(Rc::new(storage));
+        let mut storage_requests = StorageRequests::new();
         for request in requests {
-            storage_requests.request(request);
+            storage_requests.request(request, &owned_storage);
         }
         while storage_requests.has_pending() {
             std::future::poll_fn(|cx| {
@@ -799,9 +800,10 @@ impl IvmRuntime {
             })?;
         let (mut session, mut work_queue) = EvaluationSession::hydration(self, roots)?;
         let mut evaluation_inputs = EvaluationInputs::default();
-        let mut storage_requests = StorageRequests::new(OwnedStorage::new(Rc::new(storage)));
+        let owned_storage = OwnedStorage::new(Rc::new(storage));
+        let mut storage_requests = StorageRequests::new();
         for request in work_queue.requests().cloned().collect::<Vec<_>>() {
-            storage_requests.request(request);
+            storage_requests.request(request, &owned_storage);
         }
         while session.outputs.len() < session.roots.len() {
             while let Some(node) = work_queue.runnable.pop_front() {
