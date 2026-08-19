@@ -5,6 +5,18 @@ import { fileURLToPath } from "node:url";
 
 import * as packageRoot from "./index.js";
 import * as runtime from "./runtime/index.js";
+import type { QueryExecutionOptions } from "./runtime/index.js";
+
+const canonicalQueryExecutionOptions: QueryExecutionOptions = {
+  propagation: "local-only",
+};
+const removedQueryExecutionOptions: QueryExecutionOptions = {
+  // @ts-expect-error propagate was removed; use propagation instead.
+  propagate: false,
+};
+
+void canonicalQueryExecutionOptions;
+void removedQueryExecutionOptions;
 
 // @ts-expect-error NativeRuntimeAdapter is intentionally not part of the public runtime surface.
 import type { NativeRuntimeAdapter as InternalNativeRuntimeAdapterExport } from "./runtime/index.js";

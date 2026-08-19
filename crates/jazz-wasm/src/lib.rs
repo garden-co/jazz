@@ -2609,9 +2609,6 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
             other => return Err(JsValue::from_str(&format!("unknown local_updates {other}"))),
         };
     }
-    if optional_bool_prop(&value, "propagate")? == Some(false) {
-        opts.propagation = Propagation::LocalOnly;
-    }
     if let Some(propagation) = optional_string_prop(&value, "propagation")? {
         opts.propagation = match propagation.as_str() {
             "Full" | "full" => Propagation::Full,
@@ -2923,6 +2920,18 @@ mod dynamic_schema_view_tests {
     use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps};
     use jazz::groove::schema::ColumnType;
     use jazz::schema::{ColumnSchema, Policy, TableSchema};
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn removed_propagate_option_does_not_select_local_only() {
+        let value = js_sys::Object::new();
+        js_sys::Reflect::set(&value, &JsValue::from_str("propagate"), &JsValue::FALSE)
+            .expect("set legacy option");
+
+        let opts = read_opts_from_js(value.into()).expect("parse read options");
+
+        assert_eq!(opts.propagation, Propagation::Full);
+    }
 
     #[test]
     fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {

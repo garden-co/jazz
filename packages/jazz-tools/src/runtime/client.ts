@@ -213,13 +213,6 @@ export type QueryVisibility = "public" | "hidden_from_live_query_list";
 export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
-  /**
-   * Whether this subscription should cause upstream forwarding.
-   *
-   * Defaults to true. Set to false for inspector/helper subscriptions that
-   * should observe local state without opening remote coverage.
-   */
-  propagate?: boolean;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
 }
@@ -363,7 +356,7 @@ export function resolveEffectiveQueryExecutionOptions(
   return {
     tier: options?.tier ?? resolveDefaultDurabilityTier(context),
     localUpdates: options?.localUpdates ?? "immediate",
-    propagation: options?.propagation ?? (options?.propagate === false ? "local-only" : "full"),
+    propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
   };
 }

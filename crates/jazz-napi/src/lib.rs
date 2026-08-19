@@ -2354,9 +2354,6 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
             }
         };
     }
-    if optional_json_bool_prop(&value, "propagate")? == Some(false) {
-        opts.propagation = CorePropagation::LocalOnly;
-    }
     if let Some(propagation) = optional_json_string_prop(&value, "propagation")? {
         opts.propagation = match propagation.as_str() {
             "Full" | "full" => CorePropagation::Full,
@@ -3240,6 +3237,14 @@ mod tests {
             .expect("parse read opts");
 
         assert_eq!(opts.propagation, CorePropagation::LocalOnly);
+    }
+
+    #[test]
+    fn core_read_opts_ignore_removed_propagate_field() {
+        let opts =
+            core_read_opts_from_json(Some(json!({ "propagate": false }))).expect("parse read opts");
+
+        assert_eq!(opts.propagation, CorePropagation::Full);
     }
 
     #[test]
