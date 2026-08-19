@@ -167,11 +167,13 @@ where
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<(), Error> {
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
-            .apply_trusted_catalogue_snapshot(snapshot)?)
+        let outcome = crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .apply_trusted_catalogue_snapshot(snapshot),
+        )?;
+        crate::db::block_on(self.finish_publication_outcome(outcome))
     }
 
     #[cfg(any(test, feature = "testing"))]
