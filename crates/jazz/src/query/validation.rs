@@ -569,6 +569,9 @@ fn planner_column_type<'a>(
     table: &'a TableSchema,
     column: &str,
 ) -> Result<&'a ColumnType, QueryError> {
+    if let Ok(column_schema) = column_schema(table, column) {
+        return Ok(&column_schema.column_type);
+    }
     if column == "id" {
         return Ok(&ColumnType::Uuid);
     }

@@ -1,3 +1,5 @@
+use crate::query::{in_list, is_null};
+
 fn access_path_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "docs",
@@ -104,6 +106,119 @@ fn declared_id_column_filter_uses_declared_value_not_physical_row_uuid() {
     let (selected, _) = query_rows_by_uuid(&mut core, query, DurabilityTier::Global);
 
     assert_eq!(selected, vec![physical_row]);
+}
+
+/// A declared `id` is an ordinary user column for IN and NULL predicates;
+/// Alice's physical row UUID must not leak into either predicate evaluation.
+#[test]
+fn declared_id_column_in_and_is_null_use_declared_values() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "things",
+        [
+            ColumnSchema::new("id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
+            ColumnSchema::new("label", ColumnType::String),
+        ],
+    )]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let matching_row = row(0x12);
+    let null_row = row(0x13);
+    let declared_id = row(0xab);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("things", matching_row, 10).cells(BTreeMap::from([
+            (
+                "id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(declared_id.0)))),
+            ),
+            ("label".to_owned(), Value::String("matching".to_owned())),
+        ])),
+    );
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("things", null_row, 11).cells(BTreeMap::from([
+            ("id".to_owned(), Value::Nullable(None)),
+            ("label".to_owned(), Value::String("null".to_owned())),
+        ])),
+    );
+
+    let (in_rows, _) = query_rows_by_uuid(
+        &mut core,
+        Query::from("things").filter(in_list(
+            col("id"),
+            [lit(Value::Nullable(Some(Box::new(Value::Uuid(declared_id.0)))) )],
+        )),
+        DurabilityTier::Global,
+    );
+    let (null_rows, _) = query_rows_by_uuid(
+        &mut core,
+        Query::from("things").filter(is_null(col("id"))),
+        DurabilityTier::Global,
+    );
+    assert_eq!(in_rows, vec![matching_row]);
+    assert_eq!(null_rows, vec![null_row]);
+
+    let missing_id_schema = JazzSchema::new([TableSchema::new(
+        "without_declared_id",
+        [ColumnSchema::new("label", ColumnType::String)],
+    )]);
+    assert!(Query::from("without_declared_id")
+        .filter(is_null(col("id")))
+        .validate(&missing_id_schema)
+        .is_err());
+}
+
+/// Alice joins a child back to a parent through the parent's declared `id`,
+/// rather than accidentally comparing the child FK with the physical row UUID.
+#[test]
+fn inverse_join_via_column_uses_root_declared_id() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "parents",
+            [
+                ColumnSchema::new("id", ColumnType::Uuid),
+                ColumnSchema::new("label", ColumnType::String),
+            ],
+        ),
+        TableSchema::new(
+            "children",
+            [
+                ColumnSchema::new("parent", ColumnType::Uuid),
+                ColumnSchema::new("label", ColumnType::String),
+            ],
+        )
+        .with_reference("parent", "parents"),
+    ]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let parent = row(0x21);
+    let child = row(0x22);
+    let declared_parent_id = row(0xac);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("parents", parent, 10).cells(BTreeMap::from([
+            ("id".to_owned(), Value::Uuid(declared_parent_id.0)),
+            ("label".to_owned(), Value::String("parent".to_owned())),
+        ])),
+    );
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("children", child, 11).cells(BTreeMap::from([
+            ("parent".to_owned(), Value::Uuid(declared_parent_id.0)),
+            ("label".to_owned(), Value::String("child".to_owned())),
+        ])),
+    );
+
+    let (rows, _) = query_rows_by_uuid(
+        &mut core,
+        Query::from("parents").join_via_column("children", "parent", "id", []),
+        DurabilityTier::Global,
+    );
+    assert_eq!(rows, vec![parent]);
 }
 
 #[test]

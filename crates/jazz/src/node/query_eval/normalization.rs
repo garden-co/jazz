@@ -327,11 +327,12 @@ fn normalize_predicate(
             normalize_compare(schema, source, left, NormalizedComparisonOp::Lte, right)?
         }
         Predicate::In(value, options) => NormalizedPredicateExpr::In {
-            value: normalize_operand(source, value)?,
+            value: normalize_operand_for_schema(schema, source, value)?,
             options: options
                 .iter()
                 .map(|operand| {
-                    normalize_operand_with_target_type(
+                    normalize_operand_with_target_type_for_schema(
+                        schema,
                         source,
                         operand,
                         operand_column_type(schema, source, value)?.as_ref(),
@@ -340,15 +341,16 @@ fn normalize_predicate(
                 .collect::<Result<Vec<_>, Error>>()?,
         },
         Predicate::Contains(value, needle) => NormalizedPredicateExpr::ArrayContains {
-            value: normalize_operand(source, value)?,
-            needle: normalize_operand_with_target_type(
+            value: normalize_operand_for_schema(schema, source, value)?,
+            needle: normalize_operand_with_target_type_for_schema(
+                schema,
                 source,
                 needle,
                 contains_needle_type(schema, source, value)?.as_ref(),
             )?,
         },
         Predicate::IsNull(value) => {
-            NormalizedPredicateExpr::IsNull(normalize_operand(source, value)?)
+            NormalizedPredicateExpr::IsNull(normalize_operand_for_schema(schema, source, value)?)
         }
         Predicate::EnumMatch {
             column,
@@ -593,11 +595,7 @@ fn normalize_compare(
 ) -> Result<NormalizedPredicateExpr, Error> {
     let left_type = operand_column_type(schema, source, left)?;
     let right_type = operand_column_type(schema, source, right)?;
-    let has_declared_id = schema
-        .tables
-        .iter()
-        .find(|table| table.name == source.table)
-        .is_some_and(|table| table.columns.iter().any(|column| column.name == "id"));
+    let has_declared_id = source_has_declared_id(schema, source);
     Ok(NormalizedPredicateExpr::Compare {
         left: normalize_operand_with_target_type_and_declared_id(
             source,
@@ -617,6 +615,41 @@ fn normalize_compare(
 
 fn normalize_operand(source: &SourceId, operand: &Operand) -> Result<NormalizedValueRef, Error> {
     normalize_operand_with_target_type(source, operand, None)
+}
+
+fn source_has_declared_id(schema: &JazzSchema, source: &SourceId) -> bool {
+    schema
+        .tables
+        .iter()
+        .find(|table| table.name == source.table)
+        .is_some_and(|table| table.columns.iter().any(|column| column.name == "id"))
+}
+
+fn normalize_operand_for_schema(
+    schema: &JazzSchema,
+    source: &SourceId,
+    operand: &Operand,
+) -> Result<NormalizedValueRef, Error> {
+    normalize_operand_with_target_type_and_declared_id(
+        source,
+        operand,
+        None,
+        source_has_declared_id(schema, source),
+    )
+}
+
+fn normalize_operand_with_target_type_for_schema(
+    schema: &JazzSchema,
+    source: &SourceId,
+    operand: &Operand,
+    target_type: Option<&ColumnType>,
+) -> Result<NormalizedValueRef, Error> {
+    normalize_operand_with_target_type_and_declared_id(
+        source,
+        operand,
+        target_type,
+        source_has_declared_id(schema, source),
+    )
 }
 
 fn normalize_operand_with_target_type(
@@ -1376,7 +1409,7 @@ fn normalize_join_via_right(
                 left: current,
                 right: nested_right,
                 mode: NormalizedJoinMode::Inner,
-                on: join_via_predicate(&join_source, &nested_source, nested),
+                on: join_via_predicate(schema, &join_source, &nested_source, nested),
             },
         );
         let project_node = RowSetNodeId(format!("{nested_path}:parent_project"));
@@ -1715,15 +1748,20 @@ pub(super) fn table_schema<'a>(
 }
 
 fn schema_column_type(schema: &JazzSchema, table: &str, column: &str) -> Result<ColumnType, Error> {
-    if column == "id" {
-        return Ok(ColumnType::Uuid);
-    }
-    table_schema(schema, table)?
+    let schema_table = table_schema(schema, table)?;
+    if let Some(column) = schema_table
         .columns
         .iter()
         .find(|candidate| candidate.name == column)
-        .map(|column| column.column_type.clone())
-        .ok_or_else(|| Error::QueryLowering(format!("unknown query column {table}.{column}")))
+    {
+        return Ok(column.column_type.clone());
+    }
+    if column == "id" {
+        return Ok(ColumnType::Uuid);
+    }
+    Err(Error::QueryLowering(format!(
+        "unknown query column {table}.{column}"
+    )))
 }
 
 fn row_id_output_field() -> TypedOutputField {
@@ -1745,11 +1783,15 @@ fn source_public_field_projections(table: &TableSchema, source: &SourceId) -> Ve
     .collect()
 }
 
-fn join_via_root_key(root_source: &SourceId, join: &JoinVia) -> NormalizedValueRef {
+fn join_via_root_key(
+    schema: &JazzSchema,
+    root_source: &SourceId,
+    join: &JoinVia,
+) -> NormalizedValueRef {
     join.source_column
         .as_ref()
         .map(|field| {
-            if field == "id" {
+            if field == "id" && !source_has_declared_id(schema, root_source) {
                 NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone()))
             } else {
                 NormalizedValueRef::SourceField {
@@ -1772,6 +1814,7 @@ fn join_via_target_key(join_source: &SourceId, join: &JoinVia) -> NormalizedValu
 }
 
 fn join_via_predicate(
+    schema: &JazzSchema,
     left_source: &SourceId,
     right_source: &SourceId,
     join: &JoinVia,
@@ -1789,7 +1832,7 @@ fn join_via_predicate(
         )
     } else {
         (
-            join_via_root_key(left_source, join),
+            join_via_root_key(schema, left_source, join),
             join_via_target_key(right_source, join),
         )
     }];
@@ -1982,7 +2025,7 @@ fn normalize_filter_join_chain(
         };
         let (right, join_source) =
             normalize_join_via_right(nodes, auxiliary_sources, schema, join, &path)?;
-        let join_predicate = join_via_predicate(root_source, &join_source, join);
+        let join_predicate = join_via_predicate(schema, root_source, &join_source, join);
         if record_join_contributions {
             join_contributions.push(JoinContribution {
                 id: path.clone(),
