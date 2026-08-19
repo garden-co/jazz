@@ -401,6 +401,17 @@ impl IvmRuntime {
             HydrationMode::Subscription => EvalContext::root_snapshot(),
         };
         let mut metrics = TickMetrics::default();
+        // The recursive async evaluator is a migration bridge, not the durable
+        // representation of interrupted IVM work. Keep every mutation private
+        // across its awaits so cancellation or a storage error cannot leave the
+        // shared runtime partially hydrated. The explicit EvaluationSession in
+        // the spec will eventually replace this clone-and-install boundary.
+        let mut operator_states = self.operator_states.clone();
+        let mut arrangement_states = self.arrangement_states.clone();
+        let mut eval_memo = self.eval_memo.clone();
+        let mut eval_memo_bytes = self.eval_memo_bytes;
+        let mut memo_use_clock = self.memo_use_clock;
+        let mut node_meta = self.node_meta.clone();
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
             graph: &self.graph,
@@ -409,20 +420,20 @@ impl IvmRuntime {
             binding_deltas: &[],
             binding_snapshots: &binding_snapshots,
             current_tick: self.current_tick,
-            operator_states: &mut self.operator_states,
-            arrangement_states: &mut self.arrangement_states,
+            operator_states: &mut operator_states,
+            arrangement_states: &mut arrangement_states,
             // Snapshot hydration is evaluated at the runtime's current
             // logical frontier. If a canonical fragment has already been
             // hydrated at this frontier, reusing its memoized output is an
             // attach/probe operation, not an accumulation over stale state:
             // any table or binding change that could invalidate it advances the
             // input frontier counters stored with each memo entry.
-            eval_memo: &mut self.eval_memo,
-            eval_memo_bytes: &mut self.eval_memo_bytes,
+            eval_memo: &mut eval_memo,
+            eval_memo_bytes: &mut eval_memo_bytes,
             table_frontiers: &self.table_frontiers,
             binding_frontiers: &self.binding_frontiers,
-            memo_use_clock: &mut self.memo_use_clock,
-            node_meta: &mut self.node_meta,
+            memo_use_clock: &mut memo_use_clock,
+            node_meta: &mut node_meta,
             storage: Some(storage),
             context,
             metrics: &mut metrics,
@@ -432,10 +443,16 @@ impl IvmRuntime {
         let records = evaluator
             .update_node(output_node)
             .await
-            .map(|records| records.as_ref().clone());
+            .map(|records| records.as_ref().clone())?;
+        self.operator_states = operator_states;
+        self.arrangement_states = arrangement_states;
+        self.eval_memo = eval_memo;
+        self.eval_memo_bytes = eval_memo_bytes;
+        self.memo_use_clock = memo_use_clock;
+        self.node_meta = node_meta;
         self.record_hydration_memo_metrics(&metrics);
         self.evict_eval_memo();
-        records
+        Ok(records)
     }
 
     pub(super) async fn hydration_snapshots<S>(
