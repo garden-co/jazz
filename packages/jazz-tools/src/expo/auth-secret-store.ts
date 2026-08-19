@@ -13,8 +13,6 @@ export interface ExpoSecureStoreLike {
 export interface ExpoAuthSecretStoreOptions {
   /** SecureStore key name (default: "jazz-auth-secret"). */
   key?: string;
-  /** @deprecated Use `key`. Kept for the mainline configurable-key surface. */
-  authSecretStorageKey?: string;
   /** Optional app identifier to namespace the default key. */
   appId?: string;
   /** Optional principal identifier to isolate secrets per user. */
@@ -35,9 +33,8 @@ function normalizeScopeSegment(value?: string | null): string | null {
 }
 
 function resolveExpoAuthSecretKey(options: ExpoAuthSecretStoreOptions = {}): string {
-  const explicitKey = options.key ?? options.authSecretStorageKey;
-  if (explicitKey) {
-    return explicitKey;
+  if (options.key) {
+    return options.key;
   }
 
   const scopeSegments = [

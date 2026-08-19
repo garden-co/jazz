@@ -9,7 +9,7 @@ import type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 
 export type UseLocalFirstAuthOptions = Pick<
   BrowserAuthSecretStoreOptions,
-  "key" | "authSecretStorageKey" | "appId" | "userId" | "sessionId"
+  "key" | "appId" | "userId" | "sessionId"
 >;
 
 type LocalFirstAuthStoreContextValue = {
@@ -38,7 +38,6 @@ export function useLocalFirstAuth(options: UseLocalFirstAuthOptions = {}) {
     inherited !== null &&
     options.appId === inherited.appId &&
     options.key === undefined &&
-    options.authSecretStorageKey === undefined &&
     options.userId === undefined &&
     options.sessionId === undefined;
   const store = hasCustomOptions

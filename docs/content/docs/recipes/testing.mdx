@@ -210,18 +210,32 @@ export async function teardown(): Promise<void> {
 ```
 
 If you need to isolate data across tests, you can use different `dbName`s when creating the client database.
-For local-first auth in browser tests, also use a separate auth storage key for each logical user.
+For local-first auth in React browser tests, also use a separate auth storage key for each logical
+user. The key belongs to `useLocalFirstAuth`, then its returned secret is forwarded into the
+client configuration:
 
-```typescript
-await mountApp({
-  appId: APP_ID,
-  serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-  driver: {
-    type: "persistent",
-    dbName: crypto.randomUUID(),
-  },
-  authSecretStorageKey: crypto.randomUUID(),
-});
+```tsx
+import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
+
+const authKey = crypto.randomUUID();
+const dbName = crypto.randomUUID();
+
+function TestApp() {
+  const { secret, isLoading } = useLocalFirstAuth({ key: authKey });
+
+  if (isLoading || !secret) return null;
+
+  return (
+    <JazzProvider
+      config={{
+        appId: APP_ID,
+        serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+        secret,
+        driver: { type: "persistent", dbName },
+      }}
+    />
+  );
+}
 ```
 
 ### Testing sync
