@@ -23,7 +23,7 @@ use groove::ivm::ProjectField;
 #[cfg(test)]
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
-use groove::storage::{self, OrderedKvStorage, ReopenableStorage, StorageLayout};
+use groove::storage::{self, BoxedStorage, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use thiserror::Error;
 
 use self::query_engine::{QueryAuthorizationMode, user_column_field};
@@ -538,7 +538,8 @@ pub struct NodeState<S> {
     /// Rejected transaction records and pending-cascade parent/child indexes.
     rejections: RejectionTracking,
     /// Groove database slot over this node's storage.
-    database: DatabaseSlot<S>,
+    database: DatabaseSlot,
+    storage_type: std::marker::PhantomData<fn() -> S>,
     /// Process-local identity for runtime-local Groove handles such as prepared shape ids.
     groove_runtime_token: u64,
     /// Whether this node has complete settled history for historical reads.
@@ -1527,8 +1528,8 @@ struct IngestMemo {
     tx_made_at: BTreeMap<TxId, Option<TxTime>>,
 }
 
-struct CatalogueOpenState<S> {
-    storage: S,
+struct CatalogueOpenState {
+    storage: BoxedStorage,
     schemas: BTreeMap<SchemaVersionId, SchemaVersion>,
     lenses: BTreeMap<MigrationLensId, MigrationLens>,
     schema_version_aliases: BTreeMap<SchemaVersionId, SchemaVersionAlias>,

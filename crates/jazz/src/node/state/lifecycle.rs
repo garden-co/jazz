@@ -5,7 +5,7 @@ where
     /// Open or create a node over the supplied storage.
     pub async fn new(node_uuid: NodeUuid, schema: JazzSchema, storage: S) -> Result<Self, Error>
     where
-        S: ReopenableStorage,
+        S: ReopenableStorage + 'static,
     {
         Self::new_with_history_complete(node_uuid, schema, storage, false).await
     }
@@ -22,7 +22,7 @@ where
         storage: S,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage,
+        S: ReopenableStorage + 'static,
     {
         let (storage, durable_genesis) = Self::discover_durable_catalogue_genesis(storage).await?;
         if let Some(schema) = durable_genesis {
@@ -60,7 +60,10 @@ where
     /// it never uses `JazzSchema::empty()` as a genesis candidate.
     async fn discover_durable_catalogue_genesis(
         storage: S,
-    ) -> Result<(S, Option<JazzSchema>), Error> {
+    ) -> Result<(BoxedStorage, Option<JazzSchema>), Error>
+    where
+        S: ReopenableStorage + 'static,
+    {
         let bootstrap_schema = JazzSchema::empty();
         // Dynamic discovery must inspect the fixed history/branch/fate stores
         // too: an empty catalogue does not make an existing Jazz store safe to
@@ -294,15 +297,15 @@ where
         storage: S,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage,
+        S: ReopenableStorage + 'static,
     {
         Self::new_with_history_complete(node_uuid, schema, storage, true).await
     }
 
     /// Rebuild the groove layer over the same storage using the standard open path.
-    pub async fn reopen_in_place(self) -> Result<Self, Error>
+    pub async fn reopen_in_place(self) -> Result<NodeState<BoxedStorage>, Error>
     where
-        S: ReopenableStorage,
+        S: ReopenableStorage + 'static,
     {
         let NodeState {
             node_uuid,
@@ -315,9 +318,9 @@ where
         let storage = database.into_inner().into_storage();
         let reopened = match catalogue_bootstrap_state {
             CatalogueBootstrapState::Uninitialized => {
-                Self::new_catalogue_uninitialized(node_uuid, storage).await?
+                NodeState::<BoxedStorage>::new_catalogue_uninitialized(node_uuid, storage).await?
             }
-            CatalogueBootstrapState::Ready => Self::new_with_history_complete(
+            CatalogueBootstrapState::Ready => NodeState::<BoxedStorage>::new_with_history_complete(
                 node_uuid,
                 catalogue.schema,
                 storage,
@@ -335,7 +338,7 @@ where
         history_complete: bool,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage,
+        S: ReopenableStorage + 'static,
     {
         Self::new_with_options(node_uuid, schema, storage, history_complete).await
     }
@@ -347,7 +350,7 @@ where
         history_complete: bool,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage,
+        S: ReopenableStorage + 'static,
     {
         Self::new_with_options_inner(
             node_uuid,
@@ -370,7 +373,7 @@ where
         history_complete: bool,
     ) -> Result<(Self, NodeOpenReceipt), Error>
     where
-        S: ReopenableStorage,
+        S: ReopenableStorage + 'static,
     {
         let mut receipt = NodeOpenReceipt::default();
         let node = Self::new_with_options_inner(
@@ -385,16 +388,16 @@ where
         Ok((node, receipt))
     }
 
-    async fn new_with_options_inner(
+    async fn new_with_options_inner<T>(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        storage: S,
+        storage: T,
         history_complete: bool,
         catalogue_bootstrap_state: CatalogueBootstrapState,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage,
+        T: ReopenableStorage + 'static,
     {
         let current_schema_version_id = schema.version_id();
         #[cfg(feature = "testing")]
@@ -559,6 +562,7 @@ where
             },
             rejections: RejectionTracking::default(),
             database: DatabaseSlot::new(database),
+            storage_type: std::marker::PhantomData,
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
@@ -646,8 +650,8 @@ where
         catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
         schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
         physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-        storage: S,
-    ) -> Result<Database<S>, Error> {
+        storage: BoxedStorage,
+    ) -> Result<Database, Error> {
         debug_assert_lowered_layouts(schema);
         let mut lowered = schema.lower_to_groove();
         lowered.tables.extend(physical_version_storage_tables(
@@ -855,11 +859,14 @@ where
             .remove(&binding_view_key);
     }
 
-    async fn open_catalogue_stage(
+    async fn open_catalogue_stage<T>(
         schema: JazzSchema,
-        storage: S,
+        storage: T,
         catalogue_bootstrap_state: CatalogueBootstrapState,
-    ) -> Result<CatalogueOpenState<S>, Error> {
+    ) -> Result<CatalogueOpenState, Error>
+    where
+        T: ReopenableStorage + 'static,
+    {
         let current_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
         let mut meta_database = Database::new_with_storage_layout(

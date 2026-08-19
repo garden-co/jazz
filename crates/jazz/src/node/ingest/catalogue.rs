@@ -326,10 +326,7 @@ where
         self.drain_pending_schema_lineages().await
     }
 
-    pub(super) async fn recover_pending_schema_lineages(&mut self) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
+    pub(super) async fn recover_pending_schema_lineages(&mut self) -> Result<(), Error> {
         self.activate_pending_schema_lineages(CatalogueActivationMode::ColdOpen)
             .await
             .map(|_| ())
@@ -348,10 +345,7 @@ where
     async fn activate_pending_schema_lineages(
         &mut self,
         mode: CatalogueActivationMode,
-    ) -> Result<Vec<SyncMessage>, Error>
-    where
-        S: ReopenableStorage,
-    {
+    ) -> Result<Vec<SyncMessage>, Error> {
         let mut out = Vec::new();
         loop {
             let next = self.catalogue.active_catalogue_seq.saturating_add(1);
