@@ -359,6 +359,37 @@ mod tests {
     }
 
     #[test]
+    fn non_canonical_uuid_subjects_are_mapped_from_their_exact_bytes() {
+        let cases = [
+            (
+                " 123e4567-e89b-12d3-a456-426614174000 ",
+                [
+                    0xca, 0xc0, 0x70, 0x3e, 0x90, 0xfb, 0x59, 0x3f, 0x8c, 0x2b, 0x00, 0xf1, 0x2c,
+                    0xe3, 0xa4, 0xca,
+                ],
+            ),
+            (
+                "urn:uuid:123e4567-e89b-12d3-a456-426614174000",
+                [
+                    0x75, 0x2a, 0x3c, 0xeb, 0x73, 0xcd, 0x5b, 0xc3, 0x8b, 0x75, 0xce, 0x3f, 0x56,
+                    0x4d, 0x0b, 0x4a,
+                ],
+            ),
+            (
+                "{123e4567-e89b-12d3-a456-426614174000}",
+                [
+                    0xac, 0x79, 0x26, 0x25, 0xaa, 0x76, 0x53, 0x66, 0xa3, 0xd7, 0x35, 0xf3, 0x54,
+                    0x6e, 0x55, 0x0d,
+                ],
+            ),
+        ];
+
+        for (subject, expected) in cases {
+            assert_eq!(author_id_from_principal(subject).as_bytes(), &expected);
+        }
+    }
+
+    #[test]
     fn derive_verifying_key_is_deterministic() {
         let key1 = derive_verifying_key(&alice_seed());
         let key2 = derive_verifying_key(&alice_seed());
