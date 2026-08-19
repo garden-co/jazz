@@ -37,6 +37,56 @@ fn indexed_schema() -> DatabaseSchema {
     .with_index(IndexSchema::new("albums_by_title", ["title"]))])
 }
 
+fn edges_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "edges",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("src", ColumnType::U64),
+            ColumnSchema::new("dst", ColumnType::U64),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
+}
+
+fn indexed_edges_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "edges",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("src", ColumnType::U64),
+            ColumnSchema::new("dst", ColumnType::U64),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_index(IndexSchema::new("edges_by_src", ["src", "dst"]))])
+}
+
+fn edge_pairs() -> GraphBuilder {
+    GraphBuilder::table("edges").project(["src", "dst"])
+}
+
+fn reachability_graph() -> GraphBuilder {
+    let descriptor = RecordDescriptor::new([("src", ColumnType::U64), ("dst", ColumnType::U64)]);
+    let frontier = GraphBuilder::frontier_source("frontier", descriptor);
+    let step = GraphBuilder::join(frontier, edge_pairs(), ["dst"], ["src"]).project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    GraphBuilder::recursive(edge_pairs(), step, "frontier", 16)
+}
+
+fn indexed_reachability_graph() -> GraphBuilder {
+    let descriptor =
+        RecordDescriptor::new([("key", ColumnType::Bytes), ("value", ColumnType::Bytes)]);
+    GraphBuilder::recursive(
+        GraphBuilder::index("edges", "edges_by_src"),
+        GraphBuilder::frontier_source("frontier", descriptor),
+        "frontier",
+        16,
+    )
+}
+
 #[test]
 fn cancelled_hydration_publishes_no_subscription_or_partial_session() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
@@ -137,6 +187,73 @@ fn blocked_index_source_retains_its_storage_request_across_polls() {
             .count(),
         1,
         "resuming evaluation must poll the retained request, not recreate it"
+    );
+}
+
+#[test]
+fn recursive_hydration_reuses_the_sessions_table_snapshot() {
+    let (storage, control) = TestStorage::controlled(&["edges"]);
+    let mut database = block_on(Database::new(edges_schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(batch)).unwrap();
+
+    control.take_observed();
+    let subscription = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 3);
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        2,
+        "recursive seed and fixpoint steps share one session snapshot; arrangement seeding currently uses one separately scoped snapshot: {:?}",
+        control.observed()
+    );
+}
+
+#[test]
+fn blocked_recursive_index_source_retains_the_sessions_request() {
+    let (storage, control) = TestStorage::controlled(&["edges", "indices"]);
+    let mut database = block_on(Database::new(indexed_edges_schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(batch)).unwrap();
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let mut install = Box::pin(database.subscribe_one_sink(indexed_reachability_graph()));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    if let Poll::Ready(result) = install.as_mut().poll(&mut context) {
+        match result {
+            Ok(_) => panic!("recursive install completed before the paused request"),
+            Err(error) => panic!("recursive install failed early: {error:?}"),
+        }
+    }
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1
+    );
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    let subscription = block_on(install).unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 2);
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1,
+        "recursive fixpoint retries must reuse the retained index request"
     );
 }
 

@@ -15,7 +15,9 @@ use crate::storage::OwnedStorage;
 use crate::storage::{OrderedKvStorage, StorageFuture};
 use std::rc::Rc;
 
-use super::evaluation_session::{StorageRequestKey, StorageRequestOutput, StorageRequests};
+use super::evaluation_session::{
+    EvaluationInputs, StorageRequestKey, StorageRequestOutput, StorageRequests,
+};
 
 use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
@@ -162,6 +164,8 @@ where
             runtime.schema,
             runtime.graph,
             runtime.variant_projections,
+            None,
+            None,
             node,
             recursive,
             output_desc,
@@ -677,6 +681,8 @@ pub(super) async fn recompute_recursive(
     schema: &crate::schema::DatabaseSchema,
     graph: &IvmGraph,
     variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
+    table_deltas: Option<&[TableDelta]>,
+    mut evaluation_inputs: Option<&mut EvaluationInputs>,
     node: NodeId,
     recursive: &RecursiveOp,
     output_desc: RecordDescriptor,
@@ -697,6 +703,8 @@ pub(super) async fn recompute_recursive(
         schema,
         graph,
         variant_projections,
+        table_deltas,
+        evaluation_inputs: evaluation_inputs.as_deref_mut(),
         storage,
         binding_snapshots,
         context: EvalContext::root(),
@@ -722,6 +730,8 @@ pub(super) async fn recompute_recursive(
             schema,
             graph,
             variant_projections,
+            table_deltas,
+            evaluation_inputs: evaluation_inputs.as_deref_mut(),
             storage,
             binding_snapshots,
             context,
@@ -773,6 +783,8 @@ struct HydrationEvaluator<'a, S> {
     schema: &'a crate::schema::DatabaseSchema,
     graph: &'a IvmGraph,
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
+    table_deltas: Option<&'a [TableDelta]>,
+    evaluation_inputs: Option<&'a mut EvaluationInputs>,
     storage: &'a S,
     binding_snapshots: &'a HashMap<String, RecordDeltas>,
     context: EvalContext,
@@ -793,19 +805,35 @@ where
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
             let output_desc = graph_node.descriptor.output;
             match &graph_node.descriptor.operator {
-                OpType::TableSource(table) => self.eval_table_source(table, output_desc).await,
-                OpType::IndexSource(index) => {
-                    super::NodeState::update_index_source(
-                        index,
+                OpType::TableSource(table) => match self.table_deltas {
+                    Some(table_deltas) => NodeState::update_table_source(
+                        table,
                         self.schema,
                         self.variant_projections,
                         &output_desc,
-                        &[],
-                        Some(self.storage),
-                        super::EvalMode::Hydrate,
-                    )
-                    .await
-                }
+                        table_deltas,
+                    ),
+                    None => self.eval_table_source(table, output_desc).await,
+                },
+                OpType::IndexSource(index) => match self.evaluation_inputs.as_deref_mut() {
+                    Some(inputs) => super::NodeState::update_index_source_from_inputs(
+                        index,
+                        &output_desc,
+                        inputs,
+                    ),
+                    None => {
+                        super::NodeState::update_index_source(
+                            index,
+                            self.schema,
+                            self.variant_projections,
+                            &output_desc,
+                            &[],
+                            Some(self.storage),
+                            super::EvalMode::Hydrate,
+                        )
+                        .await
+                    }
+                },
                 OpType::InlineRecords(inline) => Ok(RecordDeltas {
                     descriptor: output_desc,
                     deltas: inline
@@ -1058,6 +1086,8 @@ where
                         self.schema,
                         self.graph,
                         self.variant_projections,
+                        self.table_deltas,
+                        self.evaluation_inputs.as_deref_mut(),
                         node,
                         recursive,
                         output_desc,
