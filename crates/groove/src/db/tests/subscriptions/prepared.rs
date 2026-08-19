@@ -2,10 +2,10 @@
 
 use super::*;
 
-#[test]
-fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
+#[futures_test::test]
+async fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
     let storage = MemoryStorage::new(&["albums"]);
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let routing_field = "__routing";
     let binding = GraphBuilder::binding_source("title_eq_param", binding_descriptor)
@@ -30,9 +30,11 @@ fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
         });
     let shape = database
         .prepare_one_sink(graph, "title_eq_param", binding_descriptor, ["wanted"])
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .await
         .unwrap();
 
     assert!(subscription.recv().unwrap().is_empty());
@@ -46,7 +48,7 @@ fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
         "albums",
         vec![Value::U64(11), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -61,10 +63,10 @@ fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
     );
 }
 
-#[test]
-fn prepared_binding_source_reuse_validates_descriptor() {
+#[futures_test::test]
+async fn prepared_binding_source_reuse_validates_descriptor() {
     let storage = MemoryStorage::new(&["albums"]);
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let string_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let string_graph = GraphBuilder::binding_source("shared_params", string_descriptor)
         .project_fields([ProjectField::named("wanted")]);
@@ -76,9 +78,11 @@ fn prepared_binding_source_reuse_validates_descriptor() {
             string_descriptor,
             ["wanted"],
         )
+        .await
         .unwrap();
     database
         .prepare_one_sink(string_graph, "shared_params", string_descriptor, ["wanted"])
+        .await
         .unwrap();
 
     let u64_descriptor = RecordDescriptor::new([("wanted", ColumnType::U64.clone())]);
@@ -86,6 +90,7 @@ fn prepared_binding_source_reuse_validates_descriptor() {
         .project_fields([ProjectField::named("wanted")]);
     let err = database
         .prepare_one_sink(u64_graph, "shared_params", u64_descriptor, ["wanted"])
+        .await
         .unwrap_err();
     assert!(matches!(
         err,
@@ -94,10 +99,10 @@ fn prepared_binding_source_reuse_validates_descriptor() {
     ));
 }
 
-#[test]
-fn graph_prepared_subscription_can_hide_internal_routing_fields() {
+#[futures_test::test]
+async fn graph_prepared_subscription_can_hide_internal_routing_fields() {
     let storage = MemoryStorage::new(&["albums"]);
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let binding = GraphBuilder::binding_source("hidden_title_eq_param", binding_descriptor);
     let graph = GraphBuilder::join(
@@ -118,6 +123,7 @@ fn graph_prepared_subscription_can_hide_internal_routing_fields() {
             binding_descriptor,
             ["__routing_wanted"],
         )
+        .await
         .unwrap();
     let public_output = RecordDescriptor::new([
         ("id", ColumnType::U64.clone()),
@@ -129,6 +135,7 @@ fn graph_prepared_subscription_can_hide_internal_routing_fields() {
             &[Value::String("Blue Train".to_owned())],
             public_output,
         )
+        .await
         .unwrap();
 
     assert!(subscription.recv().unwrap().is_empty());
@@ -142,7 +149,7 @@ fn graph_prepared_subscription_can_hide_internal_routing_fields() {
         "albums",
         vec![Value::U64(11), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -158,7 +165,7 @@ fn graph_prepared_subscription_can_hide_internal_routing_fields() {
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -169,10 +176,10 @@ fn graph_prepared_subscription_can_hide_internal_routing_fields() {
     );
 }
 
-#[test]
-fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
+#[futures_test::test]
+async fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
     let storage = MemoryStorage::new(&["albums"]);
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let output_graph = GraphBuilder::table("albums")
         .project_fields([ProjectField::named("id"), ProjectField::named("title")]);
@@ -195,9 +202,11 @@ fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
             binding_descriptor,
             ["__routing_wanted"],
         )
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .await
         .unwrap();
 
     let initial = subscription.recv().unwrap();
@@ -219,7 +228,7 @@ fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
         "albums",
         vec![Value::U64(11), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -235,7 +244,7 @@ fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -246,10 +255,12 @@ fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
     );
 }
 
-#[test]
-fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
+#[futures_test::test]
+async fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
     let storage = MemoryStorage::new(&["docs"]);
-    let mut database = Database::new(nullable_routed_docs_schema(), storage).unwrap();
+    let mut database = Database::new(nullable_routed_docs_schema(), storage)
+        .await
+        .unwrap();
     let owner = uuid(0x100);
     let other_owner = uuid(0x200);
 
@@ -281,7 +292,7 @@ fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
             Value::String("other tag".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([
         (
@@ -325,6 +336,7 @@ fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
             binding_descriptor,
             ["__routing_owner", "__routing_tag"],
         )
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(
@@ -334,6 +346,7 @@ fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
                 Value::Nullable(Some(Box::new(Value::String("open".to_owned())))),
             ],
         )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -342,10 +355,12 @@ fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
     );
 }
 
-#[test]
-fn prepared_nullable_binding_arg_max_emits_initial_snapshot() {
+#[futures_test::test]
+async fn prepared_nullable_binding_arg_max_emits_initial_snapshot() {
     let storage = MemoryStorage::new(&["docs"]);
-    let mut database = Database::new(nullable_routed_docs_schema(), storage).unwrap();
+    let mut database = Database::new(nullable_routed_docs_schema(), storage)
+        .await
+        .unwrap();
     let join_code = "invite-code";
 
     let mut batch = database.open_batch();
@@ -358,7 +373,7 @@ fn prepared_nullable_binding_arg_max_emits_initial_snapshot() {
             Value::String("initial invite row".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([(
         "join_code",
@@ -389,6 +404,7 @@ fn prepared_nullable_binding_arg_max_emits_initial_snapshot() {
             binding_descriptor,
             ["join_code"],
         )
+        .await
         .unwrap();
 
     let subscription = database
@@ -398,6 +414,7 @@ fn prepared_nullable_binding_arg_max_emits_initial_snapshot() {
                 join_code.to_owned(),
             ))))],
         )
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -412,10 +429,12 @@ fn prepared_nullable_binding_arg_max_emits_initial_snapshot() {
     );
 }
 
-#[test]
-fn prepared_subscription_routes_null_nullable_binding_keys() {
+#[futures_test::test]
+async fn prepared_subscription_routes_null_nullable_binding_keys() {
     let storage = MemoryStorage::new(&["docs"]);
-    let mut database = Database::new(nullable_routed_docs_schema(), storage).unwrap();
+    let mut database = Database::new(nullable_routed_docs_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -436,7 +455,7 @@ fn prepared_subscription_routes_null_nullable_binding_keys() {
             Value::String("partial null".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([
         (
@@ -493,9 +512,11 @@ fn prepared_subscription_routes_null_nullable_binding_keys() {
             binding_descriptor,
             ["__routing_owner", "__routing_tag"],
         )
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::Nullable(None), Value::Nullable(None)])
+        .await
         .unwrap();
 
     assert_eq!(
@@ -507,10 +528,10 @@ fn prepared_subscription_routes_null_nullable_binding_keys() {
     );
 }
 
-#[test]
-fn prepared_subscription_rejects_routing_graph_missing_clean_output_fields() {
+#[futures_test::test]
+async fn prepared_subscription_rejects_routing_graph_missing_clean_output_fields() {
     let storage = MemoryStorage::new(&["albums"]);
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let output_graph = GraphBuilder::table("albums")
         .project_fields([ProjectField::named("id"), ProjectField::named("title")]);
@@ -532,15 +553,15 @@ fn prepared_subscription_rejects_routing_graph_missing_clean_output_fields() {
             "missing_route_title_param",
             binding_descriptor,
             ["__routing_wanted"],
-        ),
+        ).await,
         Err(Error::IvmRuntime(IvmRuntimeError::GraphFieldNotFound(field))) if field == "title"
     ));
 }
 
-#[test]
-fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_first_bind() {
+#[futures_test::test]
+async fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_first_bind() {
     let storage = MemoryStorage::new(&["albums"]);
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
@@ -550,7 +571,7 @@ fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_first_b
         "albums",
         vec![Value::U64(11), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let output_graph = GraphBuilder::join(
@@ -582,9 +603,11 @@ fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_first_b
             binding_descriptor,
             ["__routing_wanted"],
         )
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .await
         .unwrap();
 
     assert_eq!(
@@ -593,15 +616,16 @@ fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_first_b
     );
 }
 
-#[test]
-fn prepared_recursive_subscription_with_separate_routing_hydrates_existing_rows_on_first_bind() {
+#[futures_test::test]
+async fn prepared_recursive_subscription_with_separate_routing_hydrates_existing_rows_on_first_bind()
+ {
     let storage = MemoryStorage::new(&["edges"]);
-    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
     insert_edge(&mut batch, 3, 4, 5);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let output_graph = prepared_reachability_graph(GraphBuilder::table("edges"), 16);
@@ -639,9 +663,11 @@ fn prepared_recursive_subscription_with_separate_routing_hydrates_existing_rows_
             binding_descriptor,
             ["__routing_seed"],
         )
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
 
     let mut values = expect_recv_vals(&subscription);
@@ -656,13 +682,13 @@ fn prepared_recursive_subscription_with_separate_routing_hydrates_existing_rows_
     );
 }
 
-#[test]
-fn prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_rows() {
+#[futures_test::test]
+async fn prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_rows() {
     let storage = MemoryStorage::new(&["edges", "docs"]);
-    let mut database = Database::new(edges_docs_schema(), storage).unwrap();
+    let mut database = Database::new(edges_docs_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let reach = prepared_reachability_graph(GraphBuilder::table("edges"), 16);
@@ -674,16 +700,18 @@ fn prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_r
         ]);
     let shape = database
         .prepare_one_sink(graph, "prepared-reach", binding_descriptor, ["seed"])
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -691,13 +719,13 @@ fn prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_r
     );
 }
 
-#[test]
-fn routed_prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_rows() {
+#[futures_test::test]
+async fn routed_prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_rows() {
     let storage = MemoryStorage::new(&["edges", "docs"]);
-    let mut database = Database::new(edges_docs_schema(), storage).unwrap();
+    let mut database = Database::new(edges_docs_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let reach = RecordDescriptor::new([
@@ -742,14 +770,18 @@ fn routed_prepared_recursive_subscription_joins_new_closure_to_preexisting_downs
             "prepared-routed-reach-docs",
             binding_descriptor,
         )
+        .await
         .unwrap();
-    let subscription = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let subscription = database
+        .bind_shape(shape.id(), &[Value::U64(1)])
+        .await
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         subscription
@@ -763,8 +795,8 @@ fn routed_prepared_recursive_subscription_joins_new_closure_to_preexisting_downs
     );
 }
 
-#[test]
-fn routed_recursive_sibling_terminals_each_replay_positive_table_deltas() {
+#[futures_test::test]
+async fn routed_recursive_sibling_terminals_each_replay_positive_table_deltas() {
     fn routed_reach_graph(binding_shape: &str, route_field: &str) -> GraphBuilder {
         let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
         let reach = RecordDescriptor::new([
@@ -804,10 +836,10 @@ fn routed_recursive_sibling_terminals_each_replay_positive_table_deltas() {
     }
 
     let storage = MemoryStorage::new(&["edges", "docs"]);
-    let mut database = Database::new(edges_docs_schema(), storage).unwrap();
+    let mut database = Database::new(edges_docs_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let shape = database
@@ -829,14 +861,18 @@ fn routed_recursive_sibling_terminals_each_replay_positive_table_deltas() {
             "prepared-sibling-reach",
             binding_descriptor,
         )
+        .await
         .unwrap();
-    let subscription = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let subscription = database
+        .bind_shape(shape.id(), &[Value::U64(1)])
+        .await
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let deltas = subscription.recv().unwrap();
     let expected = [(vec![Value::U64(11), Value::U64(3), Value::U64(1)], 1)];
@@ -850,13 +886,13 @@ fn routed_recursive_sibling_terminals_each_replay_positive_table_deltas() {
     );
 }
 
-#[test]
-fn prepared_recursive_subscription_joins_two_simultaneous_closure_deltas() {
+#[futures_test::test]
+async fn prepared_recursive_subscription_joins_two_simultaneous_closure_deltas() {
     let storage = MemoryStorage::new(&["edges", "docs"]);
-    let mut database = Database::new(edges_docs_schema(), storage).unwrap();
+    let mut database = Database::new(edges_docs_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let reach_descriptor = RecordDescriptor::new([
@@ -900,16 +936,18 @@ fn prepared_recursive_subscription_joins_two_simultaneous_closure_deltas() {
     ]);
     let shape = database
         .prepare_one_sink(graph, "prepared-double-reach", binding_descriptor, ["seed"])
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -917,47 +955,49 @@ fn prepared_recursive_subscription_joins_two_simultaneous_closure_deltas() {
     );
 }
 
-#[test]
-fn prepared_recursive_grant_shape_joins_resource_and_access_added_in_one_tick() {
-    fn run(split_ticks: bool) -> Vec<(Vec<Value>, i64)> {
+#[futures_test::test]
+async fn prepared_recursive_grant_shape_joins_resource_and_access_added_in_one_tick() {
+    async fn run(split_ticks: bool) -> Vec<(Vec<Value>, i64)> {
         let storage = MemoryStorage::new(&["group_edges", "access_edges", "resources"]);
-        let mut database = Database::new(grant_shape_schema(), storage).unwrap();
-        let shape = prepare_grant_shape(&mut database);
+        let mut database = Database::new(grant_shape_schema(), storage).await.unwrap();
+        let shape = prepare_grant_shape(&mut database).await;
         let subscription = database
             .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+            .await
             .unwrap();
         assert!(subscription.recv().unwrap().is_empty());
 
         if split_ticks {
             let mut batch = database.open_batch();
             insert_resource(&mut batch, 10, 777);
-            database.commit_batch(batch).unwrap();
+            database.commit_batch(batch).await.unwrap();
             assert!(subscription.try_recv().is_err());
 
             let mut batch = database.open_batch();
             insert_access_edge(&mut batch, 20, 10, 1);
-            database.commit_batch(batch).unwrap();
+            database.commit_batch(batch).await.unwrap();
         } else {
             let mut batch = database.open_batch();
             insert_resource(&mut batch, 10, 777);
             insert_access_edge(&mut batch, 20, 10, 1);
-            database.commit_batch(batch).unwrap();
+            database.commit_batch(batch).await.unwrap();
         }
 
         expect_recv_vals(&subscription)
     }
 
-    assert_eq!(run(false), run(true));
+    assert_eq!(run(false).await, run(true).await);
 }
 
-#[test]
-fn prepared_recursive_grant_shape_joins_membership_step_and_resource_in_one_tick() {
-    fn run(split_ticks: bool) -> Vec<(Vec<Value>, i64)> {
+#[futures_test::test]
+async fn prepared_recursive_grant_shape_joins_membership_step_and_resource_in_one_tick() {
+    async fn run(split_ticks: bool) -> Vec<(Vec<Value>, i64)> {
         let storage = MemoryStorage::new(&["group_edges", "access_edges", "resources"]);
-        let mut database = Database::new(grant_shape_schema(), storage).unwrap();
-        let shape = prepare_grant_shape(&mut database);
+        let mut database = Database::new(grant_shape_schema(), storage).await.unwrap();
+        let shape = prepare_grant_shape(&mut database).await;
         let subscription = database
             .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+            .await
             .unwrap();
         assert!(subscription.recv().unwrap().is_empty());
 
@@ -965,36 +1005,36 @@ fn prepared_recursive_grant_shape_joins_membership_step_and_resource_in_one_tick
             let mut batch = database.open_batch();
             insert_resource(&mut batch, 10, 777);
             insert_access_edge(&mut batch, 20, 10, 2);
-            database.commit_batch(batch).unwrap();
+            database.commit_batch(batch).await.unwrap();
             assert!(subscription.try_recv().is_err());
 
             let mut batch = database.open_batch();
             insert_group_edge(&mut batch, 30, 1, 2);
-            database.commit_batch(batch).unwrap();
+            database.commit_batch(batch).await.unwrap();
         } else {
             let mut batch = database.open_batch();
             insert_resource(&mut batch, 10, 777);
             insert_access_edge(&mut batch, 20, 10, 2);
             insert_group_edge(&mut batch, 30, 1, 2);
-            database.commit_batch(batch).unwrap();
+            database.commit_batch(batch).await.unwrap();
         }
 
         expect_recv_vals(&subscription)
     }
 
-    assert_eq!(run(false), run(true));
+    assert_eq!(run(false).await, run(true).await);
 }
 
-#[test]
-fn prepared_subscription_with_routing_can_route_output_that_already_depends_on_binding() {
+#[futures_test::test]
+async fn prepared_subscription_with_routing_can_route_output_that_already_depends_on_binding() {
     let storage = MemoryStorage::new(&["albums"]);
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
         vec![Value::U64(11), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let output_graph = GraphBuilder::join(
@@ -1034,9 +1074,11 @@ fn prepared_subscription_with_routing_can_route_output_that_already_depends_on_b
             binding_descriptor,
             ["__routing_wanted"],
         )
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .await
         .unwrap();
 
     assert_eq!(
@@ -1045,10 +1087,10 @@ fn prepared_subscription_with_routing_can_route_output_that_already_depends_on_b
     );
 }
 
-#[test]
-fn prepared_subscription_reports_incremental_contains_field_filter_deltas() {
+#[futures_test::test]
+async fn prepared_subscription_reports_incremental_contains_field_filter_deltas() {
     let storage = MemoryStorage::new(&["albums"]);
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let binding_descriptor = RecordDescriptor::new([("needle", ColumnType::String.clone())]);
     let routing_field = "__routing";
     let binding =
@@ -1073,9 +1115,11 @@ fn prepared_subscription_reports_incremental_contains_field_filter_deltas() {
         });
     let shape = database
         .prepare_one_sink(graph, "needle_param", binding_descriptor, ["needle"])
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::String("Train".to_owned())])
+        .await
         .unwrap();
 
     assert!(subscription.recv().unwrap().is_empty());
@@ -1089,7 +1133,7 @@ fn prepared_subscription_reports_incremental_contains_field_filter_deltas() {
         "albums",
         vec![Value::U64(11), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -1112,7 +1156,7 @@ fn prepared_subscription_reports_incremental_contains_field_filter_deltas() {
         "albums",
         vec![Value::U64(7), Value::String("Night Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription),

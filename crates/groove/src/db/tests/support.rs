@@ -904,7 +904,7 @@ pub(super) fn prepared_reachability_graph(
     GraphBuilder::recursive(seed, step, "frontier", max_iters)
 }
 
-pub(super) fn prepared_reachability_shape(
+pub(super) async fn prepared_reachability_shape(
     database: &mut Database<TestBtreeStorage>,
 ) -> crate::ivm::PreparedShape {
     database
@@ -914,10 +914,11 @@ pub(super) fn prepared_reachability_shape(
             RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed".to_owned()],
         )
+        .await
         .unwrap()
 }
 
-pub(super) fn prepared_reachability_with_antijoin_shape(
+pub(super) async fn prepared_reachability_with_antijoin_shape(
     database: &mut Database<TestBtreeStorage>,
 ) -> crate::ivm::PreparedShape {
     let unblocked = GraphBuilder::anti_join(
@@ -933,6 +934,7 @@ pub(super) fn prepared_reachability_with_antijoin_shape(
             RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed".to_owned()],
         )
+        .await
         .unwrap()
 }
 
@@ -1055,7 +1057,7 @@ pub(super) fn grant_shape_graph() -> GraphBuilder {
     ])
 }
 
-pub(super) fn prepare_grant_shape(
+pub(super) async fn prepare_grant_shape(
     database: &mut Database<MemoryStorage>,
 ) -> crate::ivm::PreparedShape {
     database
@@ -1065,6 +1067,7 @@ pub(super) fn prepare_grant_shape(
             RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed"],
         )
+        .await
         .unwrap()
 }
 

@@ -91,7 +91,7 @@ async fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete(
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
-    let shape = prepared_reachability_shape(&mut database);
+    let shape = prepared_reachability_shape(&mut database).await;
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
         .await
@@ -181,7 +181,7 @@ async fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retractio
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
-    let shape = prepared_reachability_shape(&mut database);
+    let shape = prepared_reachability_shape(&mut database).await;
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
         .await
@@ -234,7 +234,7 @@ async fn prepared_recursive_positive_step_inserts_match_recompute_diff_without_r
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
-    let shape = prepared_reachability_shape(&mut database);
+    let shape = prepared_reachability_shape(&mut database).await;
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
         .await
@@ -292,7 +292,7 @@ async fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
-    let shape = prepared_reachability_shape(&mut database);
+    let shape = prepared_reachability_shape(&mut database).await;
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
         .await
@@ -328,7 +328,7 @@ async fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() 
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
-    let shape = prepared_reachability_shape(&mut database);
+    let shape = prepared_reachability_shape(&mut database).await;
     let first = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
         .await
@@ -403,7 +403,7 @@ async fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_inpu
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();
-    let shape = prepared_reachability_with_antijoin_shape(&mut database);
+    let shape = prepared_reachability_with_antijoin_shape(&mut database).await;
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
         .await
@@ -446,7 +446,7 @@ async fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();
-    let shape = prepared_reachability_with_antijoin_shape(&mut database);
+    let shape = prepared_reachability_with_antijoin_shape(&mut database).await;
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
         .await

@@ -2,15 +2,17 @@
 
 use super::*;
 
-#[test]
-fn parameterized_shape_hydrates_and_routes_by_param() {
+#[futures_test::test]
+async fn parameterized_shape_hydrates_and_routes_by_param() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -29,7 +31,7 @@ fn parameterized_shape_hydrates_and_routes_by_param() {
             Value::String("Kind of Blue".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let shape = database
         .prepare_one_sink(
@@ -38,12 +40,15 @@ fn parameterized_shape_hydrates_and_routes_by_param() {
             artist_binding_descriptor(),
             ["artist_id"],
         )
+        .await
         .unwrap();
     let coltrane = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .await
         .unwrap();
     let miles = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(8)])
+        .await
         .unwrap();
 
     assert_eq!(
@@ -78,7 +83,7 @@ fn parameterized_shape_hydrates_and_routes_by_param() {
             Value::String("Giant Steps".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_try_recv_vals(&coltrane),
@@ -94,15 +99,17 @@ fn parameterized_shape_hydrates_and_routes_by_param() {
     assert!(miles.try_recv().is_err());
 }
 
-#[test]
-fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
+#[futures_test::test]
+async fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -113,7 +120,7 @@ fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let shape = database
         .prepare_one_sink(
@@ -122,12 +129,15 @@ fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
             artist_binding_descriptor(),
             ["artist_id"],
         )
+        .await
         .unwrap();
     let first = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .await
         .unwrap();
     let second = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .await
         .unwrap();
 
     assert_eq!(expect_try_recv_vals(&first).len(), 1);
@@ -142,14 +152,14 @@ fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
             Value::String("Giant Steps".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let first_delta = expect_try_recv_vals(&first);
     let second_delta = expect_try_recv_vals(&second);
     assert_eq!(first_delta, second_delta);
     assert_eq!(first_delta[0].1, 1);
 
-    assert!(database.unsubscribe(first.id()));
+    assert!(database.unsubscribe(first.id()).await);
     assert!(second.try_recv().is_err());
 
     let mut batch = database.open_batch();
@@ -161,7 +171,7 @@ fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
             Value::String("A Love Supreme".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_try_recv_vals(&second),
@@ -176,15 +186,17 @@ fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
     );
 }
 
-#[test]
-fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
+#[futures_test::test]
+async fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -203,7 +215,7 @@ fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
             Value::String("Kind of Blue".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let query = select_query(
         Select::new([
@@ -217,9 +229,9 @@ fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
             Expr::parameter("artist"),
         )),
     );
-    assert!(database.subscribe_query(query.clone()).is_err());
+    assert!(database.subscribe_query(query.clone()).await.is_err());
 
-    let prepared = database.prepare_query(query).unwrap();
+    let prepared = database.prepare_query(query).await.unwrap();
     assert_eq!(prepared.parameters()[0].name, "artist");
     assert_eq!(
         prepared
@@ -232,9 +244,11 @@ fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
     );
     let sub = database
         .bind(&prepared, &[("artist", Value::U64(7))])
+        .await
         .unwrap();
     let other = database
         .bind(&prepared, &[("artist", Value::U64(8))])
+        .await
         .unwrap();
     assert_eq!(
         database
@@ -280,7 +294,7 @@ fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
             Value::String("Milestones".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_try_recv_vals(&sub),
         vec![(
@@ -297,12 +311,12 @@ fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
     );
 }
 
-#[test]
-fn prepared_subscription_filters_not_equal_parameter_predicates() {
+#[futures_test::test]
+async fn prepared_subscription_filters_not_equal_parameter_predicates() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -313,7 +327,7 @@ fn prepared_subscription_filters_not_equal_parameter_predicates() {
         "albums",
         vec![Value::U64(2), Value::String("Kind of Blue".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("title_param", ColumnType::String.clone())]);
     let graph = GraphBuilder::join(
@@ -345,9 +359,11 @@ fn prepared_subscription_filters_not_equal_parameter_predicates() {
             binding_descriptor,
             ["title_param"],
         )
+        .await
         .unwrap();
     let sub = database
         .bind_shape_one_sink(prepared.id(), &[Value::String("Blue Train".to_owned())])
+        .await
         .unwrap();
 
     assert_eq!(
@@ -371,7 +387,7 @@ fn prepared_subscription_filters_not_equal_parameter_predicates() {
         "albums",
         vec![Value::U64(4), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_try_recv_vals(&sub),
         vec![(
@@ -385,15 +401,17 @@ fn prepared_subscription_filters_not_equal_parameter_predicates() {
     );
 }
 
-#[test]
-fn prepare_query_requires_parameters_and_only_lowers_parameter_equalities() {
+#[futures_test::test]
+async fn prepare_query_requires_parameters_and_only_lowers_parameter_equalities() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
 
     let no_parameters = select_query(
         Select::new([SelectItem::expr(Expr::column("id"))])
@@ -405,7 +423,7 @@ fn prepare_query_requires_parameters_and_only_lowers_parameter_equalities() {
             )),
     );
     assert!(matches!(
-        database.prepare_query(no_parameters).unwrap_err(),
+        database.prepare_query(no_parameters).await.unwrap_err(),
         Error::QueryPlanning(PlannerError::UnsupportedQuery(
             "prepare_query requires at least one query parameter"
         ))
@@ -421,7 +439,10 @@ fn prepare_query_requires_parameters_and_only_lowers_parameter_equalities() {
             )),
     );
     assert!(matches!(
-        database.prepare_query(non_equality_parameter).unwrap_err(),
+        database
+            .prepare_query(non_equality_parameter)
+            .await
+            .unwrap_err(),
         Error::QueryPlanning(PlannerError::UnsupportedExpression(
             "only equality parameter predicates are supported"
         ))
@@ -437,26 +458,29 @@ fn prepare_query_requires_parameters_and_only_lowers_parameter_equalities() {
             )),
     );
     assert!(matches!(
-        database.prepare_query(parameter_to_parameter).unwrap_err(),
+        database
+            .prepare_query(parameter_to_parameter)
+            .await
+            .unwrap_err(),
         Error::QueryPlanning(PlannerError::UnsupportedExpression(
             "only column = parameter predicates are supported"
         ))
     ));
 }
 
-#[test]
-fn select_literal_and_null_projections_remain_unsupported_by_query_planner() {
+#[futures_test::test]
+async fn select_literal_and_null_projections_remain_unsupported_by_query_planner() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     for expr in [Expr::Null, Expr::Literal(Value::String("x".to_owned()))] {
         let query =
             select_query(Select::new([SelectItem::expr(expr)]).from([TableRef::named("albums")]));
 
         assert!(matches!(
-            database.subscribe_query(query).unwrap_err(),
+            database.subscribe_query(query).await.unwrap_err(),
             Error::QueryPlanning(PlannerError::UnsupportedExpression(
                 "only column projection is currently lowerable"
             ))
@@ -464,15 +488,17 @@ fn select_literal_and_null_projections_remain_unsupported_by_query_planner() {
     }
 }
 
-#[test]
-fn prepared_subscription_validates_named_bindings() {
+#[futures_test::test]
+async fn prepared_subscription_validates_named_bindings() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let prepared = database
         .prepare_query(select_query(
             Select::new([SelectItem::expr(Expr::column("id"))])
@@ -483,29 +509,34 @@ fn prepared_subscription_validates_named_bindings() {
                     Expr::parameter("artist"),
                 )),
         ))
+        .await
         .unwrap();
 
     assert!(
         database
             .bind(&prepared, &[("other", Value::U64(7))])
+            .await
             .is_err()
     );
     assert!(
         database
             .bind(&prepared, &[("artist", Value::String("nope".to_owned()))])
+            .await
             .is_err()
     );
 }
 
-#[test]
-fn graph_level_prepare_rejects_output_key_fields_not_in_output_descriptor() {
+#[futures_test::test]
+async fn graph_level_prepare_rejects_output_key_fields_not_in_output_descriptor() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]);
     let graph = GraphBuilder::join(
         GraphBuilder::binding_source("artist_params", binding_descriptor),
@@ -520,21 +551,23 @@ fn graph_level_prepare_rejects_output_key_fields_not_in_output_descriptor() {
 
     assert!(matches!(
         database
-            .prepare_one_sink(graph, "artist_params", binding_descriptor, ["missing"])
+            .prepare_one_sink(graph, "artist_params", binding_descriptor, ["missing"]).await
             .unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::ShapeKeyFieldNotFound(field)) if field == "missing"
     ));
 }
 
-#[test]
-fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
+#[futures_test::test]
+async fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]);
     let graph = GraphBuilder::join(
         GraphBuilder::binding_source("artist_params", binding_descriptor),
@@ -549,6 +582,7 @@ fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
 
     let _shape = database
         .prepare_one_sink(graph, "artist_params", binding_descriptor, ["artist_id"])
+        .await
         .unwrap();
     let retained = database.ivm_runtime.retained_node_ids();
     let retained_output_nodes = retained
@@ -573,15 +607,17 @@ fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
     assert_eq!(database.ivm_runtime.stats().active_prepared_shapes, 1);
 }
 
-#[test]
-fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
+#[futures_test::test]
+async fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
@@ -591,7 +627,7 @@ fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let baseline = database.runtime_stats();
 
     // These deliberately share an identical binding source and graph. Retiring
@@ -604,6 +640,7 @@ fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
             artist_binding_descriptor(),
             ["artist_id"],
         )
+        .await
         .unwrap();
     let second = database
         .prepare_one_sink(
@@ -612,11 +649,13 @@ fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
             artist_binding_descriptor(),
             ["artist_id"],
         )
+        .await
         .unwrap();
     let first_id = first.id();
     let second_id = second.id();
     let first_subscription = database
         .bind_shape_one_sink(first_id, &[Value::U64(7)])
+        .await
         .unwrap();
     assert!(matches!(
         database.retire_prepared_shape(first_id),
@@ -633,15 +672,16 @@ fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
             1,
         )]
     );
-    database.unsubscribe(first_subscription.id());
+    database.unsubscribe(first_subscription.id()).await;
     database.retire_prepared_shape(first_id).unwrap();
 
     assert!(matches!(
-        database.bind_shape_one_sink(first_id, &[Value::U64(7)]),
+        database.bind_shape_one_sink(first_id, &[Value::U64(7)]).await,
         Err(Error::IvmRuntime(IvmRuntimeError::PreparedShapeNotFound(id))) if id == first_id
     ));
     let second_subscription = database
         .bind_shape_one_sink(second_id, &[Value::U64(7)])
+        .await
         .expect("retiring a sibling must preserve its shared binding source");
     assert_eq!(
         expect_try_recv_vals(&second_subscription),
@@ -654,7 +694,7 @@ fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
             1,
         )]
     );
-    database.unsubscribe(second_subscription.id());
+    database.unsubscribe(second_subscription.id()).await;
     database.retire_prepared_shape(second_id).unwrap();
 
     assert!(matches!(
@@ -662,7 +702,7 @@ fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
         Err(Error::IvmRuntime(IvmRuntimeError::PreparedShapeNotFound(id))) if id == second_id
     ));
     assert!(matches!(
-        database.bind_shape_one_sink(second_id, &[Value::U64(7)]),
+        database.bind_shape_one_sink(second_id, &[Value::U64(7)]).await,
         Err(Error::IvmRuntime(IvmRuntimeError::PreparedShapeNotFound(id))) if id == second_id
     ));
     let final_stats = database.runtime_stats();
@@ -682,15 +722,17 @@ fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
     assert_eq!(final_stats.arrangement_count, baseline.arrangement_count);
 }
 
-#[test]
-fn prepared_subscription_matches_literal_subscription_without_param_columns() {
+#[futures_test::test]
+async fn prepared_subscription_matches_literal_subscription_without_param_columns() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
@@ -700,7 +742,7 @@ fn prepared_subscription_matches_literal_subscription_without_param_columns() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let param_query = select_query(
         Select::new([
@@ -726,11 +768,12 @@ fn prepared_subscription_matches_literal_subscription_without_param_columns() {
             Expr::Literal(Value::U64(7)),
         )),
     );
-    let prepared = database.prepare_query(param_query).unwrap();
+    let prepared = database.prepare_query(param_query).await.unwrap();
     let param_sub = database
         .bind(&prepared, &[("artist", Value::U64(7))])
+        .await
         .unwrap();
-    let literal_sub = database.subscribe_query(literal_query).unwrap();
+    let literal_sub = database.subscribe_query(literal_query).await.unwrap();
 
     assert_eq!(
         expect_try_recv_vals(&param_sub),
@@ -746,7 +789,7 @@ fn prepared_subscription_matches_literal_subscription_without_param_columns() {
             Value::String("Interstellar Space".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_try_recv_vals(&param_sub),
@@ -754,21 +797,23 @@ fn prepared_subscription_matches_literal_subscription_without_param_columns() {
     );
 }
 
-#[test]
-fn prepared_subscriptions_match_literal_subscriptions_under_seeded_interleavings() {
+#[futures_test::test]
+async fn prepared_subscriptions_match_literal_subscriptions_under_seeded_interleavings() {
     for seed in [0x7117_u64, 0x5151_u64, 0xdec0de_u64] {
-        run_prepared_literal_oracle(seed);
+        run_prepared_literal_oracle(seed).await;
     }
 }
 
-fn run_prepared_literal_oracle(mut seed: u64) {
+async fn run_prepared_literal_oracle(mut seed: u64) {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let param_query = select_query(
         Select::new([
             SelectItem::expr(Expr::column("id")),
@@ -781,13 +826,14 @@ fn run_prepared_literal_oracle(mut seed: u64) {
             Expr::parameter("artist"),
         )),
     );
-    let prepared = database.prepare_query(param_query).unwrap();
+    let prepared = database.prepare_query(param_query).await.unwrap();
     let artist = (seed % 4) + 1;
     let prepared_sub = database
         .bind(&prepared, &[("artist", Value::U64(artist))])
+        .await
         .unwrap();
     let literal_query = literal_artist_query(artist);
-    let literal_sub = database.subscribe_query(literal_query).unwrap();
+    let literal_sub = database.subscribe_query(literal_query).await.unwrap();
     let mut prepared_rows = std::collections::BTreeMap::<(u64, String), i64>::new();
     let mut literal_rows = std::collections::BTreeMap::<(u64, String), i64>::new();
     drain_prepared_album_rows(&prepared_sub, &mut prepared_rows);
@@ -828,7 +874,7 @@ fn run_prepared_literal_oracle(mut seed: u64) {
                 ],
             );
         }
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
         drain_prepared_album_rows(&prepared_sub, &mut prepared_rows);
         drain_literal_album_rows(&literal_sub, &mut literal_rows);
         assert_eq!(
@@ -883,40 +929,45 @@ fn drain_literal_album_rows(
     rows.retain(|_, weight| *weight != 0);
 }
 
-#[test]
-fn binding_sources_are_rejected_outside_prepared_shapes() {
+#[futures_test::test]
+async fn binding_sources_are_rejected_outside_prepared_shapes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
 
     assert!(
         database
             .subscribe_one_sink(artist_album_shape_graph())
+            .await
             .is_err()
     );
 }
 
-#[test]
-fn duplicate_join_subscriptions_share_state_without_double_applying_deltas() {
+#[futures_test::test]
+async fn duplicate_join_subscriptions_share_state_without_double_applying_deltas() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let graph = GraphBuilder::join(
         GraphBuilder::table("albums"),
         GraphBuilder::table("artists"),
         ["artist_id"],
         ["id"],
     );
-    let first = database.subscribe_one_sink(graph.clone()).unwrap();
-    let second = database.subscribe_one_sink(graph).unwrap();
+    let first = database.subscribe_one_sink(graph.clone()).await.unwrap();
+    let second = database.subscribe_one_sink(graph).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -931,7 +982,7 @@ fn duplicate_join_subscriptions_share_state_without_double_applying_deltas() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&first),
@@ -960,7 +1011,7 @@ fn duplicate_join_subscriptions_share_state_without_double_applying_deltas() {
         )]
     );
 
-    assert!(database.unsubscribe(first.id()));
-    assert!(database.unsubscribe(second.id()));
+    assert!(database.unsubscribe(first.id()).await);
+    assert!(database.unsubscribe(second.id()).await);
     assert!(database.ivm_runtime.retained_node_ids().is_empty());
 }
