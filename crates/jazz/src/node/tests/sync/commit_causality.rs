@@ -106,7 +106,7 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
     let [base_fate] = core.apply_sync_message(base_unit).unwrap().try_into().unwrap();
     client.apply_sync_message(base_fate).unwrap();
 
-    let (_rejected, rejected_unit) = client
+    let (rejected, rejected_unit) = client
         .commit_mergeable_unit(
             MergeableCommit::new("todos", target, SKEW_TOLERANCE_MS + 1)
                 .cells(title_cells("rejected")),
@@ -128,6 +128,21 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
         }
     ));
     client.apply_sync_message(rejected_fate).unwrap();
+    assert_eq!(
+        client.transaction_state(rejected).unwrap().0,
+        Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
+    );
+    // The rejected speculative version must be removed from the visible row,
+    // leaving the previously accepted base as the current value.
+    assert_eq!(
+        client
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(target, title_cells("base"))])
+    );
 
     let (fresh, fresh_unit) = client
         .commit_mergeable_unit(
@@ -142,15 +157,35 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
         .unwrap()
         .try_into()
         .unwrap();
-    assert!(matches!(
-        fresh_fate,
-        SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Accepted,
-            durability: Some(DurabilityTier::Global),
-            ..
-        } if tx_id == fresh
-    ));
+    let SyncMessage::FateUpdate {
+        tx_id,
+        fate,
+        global_seq,
+        durability,
+    } = fresh_fate
+    else {
+        panic!("expected fresh fate update");
+    };
+    assert_eq!(tx_id, fresh);
+    assert_eq!(fate, Fate::Accepted);
+    assert_eq!(durability, Some(DurabilityTier::Global));
+    client
+        .apply_fate_update(tx_id, fate, global_seq, durability)
+        .unwrap();
+    assert_eq!(
+        client.transaction_state(fresh).unwrap().0,
+        Fate::Accepted
+    );
+    assert_eq!(ahead_current_row_count(&mut client, "todos"), 0);
+    assert_eq!(
+        client
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(target, title_cells("fresh"))])
+    );
 }
 #[test]
 fn client_side_rejection_cascades_to_local_mergeable_descendant() {
