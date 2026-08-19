@@ -51,7 +51,7 @@ pub struct Database<S> {
     ivm_runtime: IvmRuntime,
     last_commit_metrics: Option<CommitMetrics>,
     last_tick_metrics: Option<TickMetrics>,
-    storage_read_metrics: RefCell<StorageReadMetrics>,
+    storage_read_metrics: Rc<RefCell<StorageReadMetrics>>,
     /// Host-owned transactions may span several Groove storage commits while
     /// remaining one externally atomic publication. Notifications stay queued
     /// until the outermost host scope completes.

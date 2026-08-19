@@ -53,7 +53,7 @@ where
             ivm_runtime,
             last_commit_metrics: None,
             last_tick_metrics: None,
-            storage_read_metrics: RefCell::new(StorageReadMetrics::default()),
+            storage_read_metrics: Rc::new(RefCell::new(StorageReadMetrics::default())),
             durable_publication_state: Arc::new(Mutex::new(DurablePublicationState::default())),
             next_publication_id: 1,
             durable_publication_frontier: None,

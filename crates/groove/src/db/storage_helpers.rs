@@ -402,14 +402,46 @@ impl StorageReadBucket {
     }
 }
 
+enum LocalHandle<'a, T> {
+    Borrowed(&'a T),
+    Owned(Rc<T>),
+}
+
+impl<T> std::ops::Deref for LocalHandle<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
+
 pub(crate) struct MeteredStorage<'a, S> {
-    storage: &'a S,
-    metrics: &'a RefCell<StorageReadMetrics>,
+    storage: LocalHandle<'a, S>,
+    metrics: LocalHandle<'a, RefCell<StorageReadMetrics>>,
 }
 
 impl<'a, S> MeteredStorage<'a, S> {
     pub(crate) fn new(storage: &'a S, metrics: &'a RefCell<StorageReadMetrics>) -> Self {
-        Self { storage, metrics }
+        Self {
+            storage: LocalHandle::Borrowed(storage),
+            metrics: LocalHandle::Borrowed(metrics),
+        }
+    }
+
+    pub(crate) fn new_owned(
+        storage: Rc<S>,
+        metrics: Rc<RefCell<StorageReadMetrics>>,
+    ) -> MeteredStorage<'static, S>
+    where
+        S: 'static,
+    {
+        MeteredStorage {
+            storage: LocalHandle::Owned(storage),
+            metrics: LocalHandle::Owned(metrics),
+        }
     }
 }
 
@@ -514,7 +546,7 @@ where
             Ok(Box::new(MeteredStorageCursor {
                 inner: self.storage.scan_range(cf.clone(), start, end).await?,
                 column_family: cf,
-                metrics: self.metrics,
+                metrics: &self.metrics,
             }) as crate::storage::StorageScan<'_>)
         })
     }
@@ -532,7 +564,7 @@ where
             Ok(Box::new(MeteredStorageCursor {
                 inner: self.storage.scan_prefix(cf.clone(), prefix).await?,
                 column_family: cf,
-                metrics: self.metrics,
+                metrics: &self.metrics,
             }) as crate::storage::StorageScan<'_>)
         })
     }
@@ -550,7 +582,7 @@ where
             Ok(Box::new(MeteredStorageCursor {
                 inner: self.storage.scan_prefix_reverse(cf.clone(), prefix).await?,
                 column_family: cf,
-                metrics: self.metrics,
+                metrics: &self.metrics,
             }) as crate::storage::StorageScan<'_>)
         })
     }
