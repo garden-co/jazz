@@ -27,9 +27,10 @@ where
         self.ingest_transaction_and_versions_with_current_indexes(
             tx, versions, fate, global_time, durability, false, true,
         )
+        .await
     }
 
-    pub(super) fn ingest_view_scoped_transaction_with_current_indexes(
+    pub(super) async fn ingest_view_scoped_transaction_with_current_indexes(
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
