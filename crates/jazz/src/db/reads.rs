@@ -84,18 +84,18 @@ where
         {
             let mut node = self.node.node.borrow_mut();
             (
-                Some(node.prepared_query_plan(
+                Some(super::block_on(node.prepared_query_plan(
                     &shape,
                     &binding,
                     DurabilityTier::Local,
                     AuthorId::SYSTEM,
-                )?),
-                Some(node.prepared_query_plan(
+                ))?),
+                Some(super::block_on(node.prepared_query_plan(
                     &shape,
                     &binding,
                     DurabilityTier::Global,
                     AuthorId::SYSTEM,
-                )?),
+                ))?),
             )
         } else {
             (None, None)
@@ -118,11 +118,11 @@ where
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         let mut node = self.node.node.borrow_mut();
         let groove_runtime_token = node.groove_runtime_token();
-        node.query_rows_local_preview(
+        super::block_on(node.query_rows_local_preview(
             &prepared.shape,
             &prepared.binding,
             prepared.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
-        )
+        ))
         .map_err(Into::into)
     }
 
@@ -147,11 +147,11 @@ where
     ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
         let mut node = self.node.node.borrow_mut();
         let groove_runtime_token = node.groove_runtime_token();
-        node.query_rows_local_preview_profiled(
+        super::block_on(node.query_rows_local_preview_profiled(
             &prepared.shape,
             &prepared.binding,
             prepared.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
-        )
+        ))
         .map_err(Into::into)
     }
 
@@ -198,12 +198,14 @@ where
         position: GlobalTime,
         prepared: &PreparedQuery,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .at(position)
-            .read(&prepared.shape, &prepared.binding)
-            .map_err(Into::into)
+        super::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .at(position)
+                .read(&prepared.shape, &prepared.binding),
+        )
+        .map_err(Into::into)
     }
 
     /// Tier-gated one-shot read.
@@ -269,7 +271,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let tier = effective_read_tier(&opts);
-        let mut node = self.node.node.borrow_mut();
+        let mut node = self.node.node.lock().await;
         if !matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
             ensure_supported_read_view(&opts)?;
             if opts.include_deleted {
@@ -294,7 +296,8 @@ where
                     author,
                     &opts.read_view,
                 ),
-            }?;
+            }
+            .await?;
             return Ok(snapshot
                 .rows
                 .into_iter()
@@ -302,26 +305,32 @@ where
                 .collect());
         }
         match (opts.include_deleted, authorization_mode) {
-            (true, mode) => node.query_rows_including_deleted_in_authorization_mode(
-                &prepared.shape,
-                &prepared.binding,
-                tier,
-                None,
-                author,
-                mode,
-            ),
-            (false, QueryAuthorizationMode::TrustedServing) => node
-                .query_rows_with_prepared_plan_for_identity(
+            (true, mode) => {
+                node.query_rows_including_deleted_in_authorization_mode(
                     &prepared.shape,
                     &prepared.binding,
                     tier,
                     None,
                     author,
-                ),
+                    mode,
+                )
+                .await
+            }
+            (false, QueryAuthorizationMode::TrustedServing) => {
+                node.query_rows_with_prepared_plan_for_identity(
+                    &prepared.shape,
+                    &prepared.binding,
+                    tier,
+                    None,
+                    author,
+                )
+                .await
+            }
             (false, QueryAuthorizationMode::ClientLocal) => {
                 // A client consumes identity-scoped rows emitted by its
                 // trusted upstream; local reads must not apply policy again.
                 node.query_rows_for_client(&prepared.shape, &prepared.binding, tier, author)
+                    .await
             }
         }
         .map_err(Into::into)
@@ -351,6 +360,7 @@ where
                 self.identity.author,
                 &opts.read_view,
             )
+            .await
             .map_err(Into::into)
     }
 
@@ -379,6 +389,7 @@ where
                 author,
                 &opts.read_view,
             )
+            .await
             .map_err(Into::into)
     }
 
