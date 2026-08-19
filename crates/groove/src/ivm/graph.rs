@@ -1115,6 +1115,8 @@ pub struct IvmGraph {
     /// Deduplicated node specs. The `NodeId` is derived from the full
     /// descriptor, and insertion asserts that collisions do not merge specs.
     nodes: HashMap<NodeId, GraphNode>,
+    table_sources: HashMap<String, HashSet<NodeId>>,
+    binding_sources: HashMap<String, HashSet<NodeId>>,
 }
 
 impl IvmGraph {
@@ -1139,6 +1141,34 @@ impl IvmGraph {
             if let Some(input_node) = self.nodes.get_mut(input) {
                 input_node.children.insert(id);
             }
+        }
+
+        match &descriptor.operator {
+            OpType::TableSource(source) => {
+                self.table_sources
+                    .entry(source.table.clone())
+                    .or_default()
+                    .insert(id);
+            }
+            OpType::IndexSource(source) => {
+                self.table_sources
+                    .entry(source.table.clone())
+                    .or_default()
+                    .insert(id);
+            }
+            OpType::BindingSource(source) => {
+                self.binding_sources
+                    .entry(source.shape.clone())
+                    .or_default()
+                    .insert(id);
+            }
+            OpType::FrontierSource(source) => {
+                self.binding_sources
+                    .entry(source.binding.0.clone())
+                    .or_default()
+                    .insert(id);
+            }
+            _ => {}
         }
 
         self.nodes
@@ -1185,6 +1215,33 @@ impl IvmGraph {
         &self.nodes
     }
 
+    pub(crate) fn affected_nodes<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a str>,
+    ) -> std::collections::HashSet<NodeId> {
+        let mut affected = std::collections::HashSet::new();
+        let mut pending = tables
+            .into_iter()
+            .filter_map(|table| self.table_sources.get(table))
+            .chain(
+                bindings
+                    .into_iter()
+                    .filter_map(|binding| self.binding_sources.get(binding)),
+            )
+            .flat_map(|nodes| nodes.iter().copied())
+            .collect::<Vec<_>>();
+        while let Some(node) = pending.pop() {
+            if !affected.insert(node) {
+                continue;
+            }
+            if let Some(graph_node) = self.nodes.get(&node) {
+                pending.extend(graph_node.children.iter().copied());
+            }
+        }
+        affected
+    }
+
     pub fn mark_ancestors<S>(&self, id: NodeId, retained: &mut std::collections::HashSet<NodeId, S>)
     where
         S: BuildHasher,
@@ -1210,6 +1267,31 @@ impl IvmGraph {
                 input_node.children.remove(&id);
             }
         }
+        match &node.descriptor.operator {
+            OpType::TableSource(source) => {
+                remove_source_node(&mut self.table_sources, &source.table, id);
+            }
+            OpType::IndexSource(source) => {
+                remove_source_node(&mut self.table_sources, &source.table, id);
+            }
+            OpType::BindingSource(source) => {
+                remove_source_node(&mut self.binding_sources, &source.shape, id);
+            }
+            OpType::FrontierSource(source) => {
+                remove_source_node(&mut self.binding_sources, &source.binding.0, id);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn remove_source_node(sources: &mut HashMap<String, HashSet<NodeId>>, source: &str, node: NodeId) {
+    let remove_source = sources.get_mut(source).is_some_and(|nodes| {
+        nodes.remove(&node);
+        nodes.is_empty()
+    });
+    if remove_source {
+        sources.remove(source);
     }
 }
 

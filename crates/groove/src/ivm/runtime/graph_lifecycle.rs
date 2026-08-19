@@ -258,15 +258,25 @@ impl IvmRuntime {
         });
     }
 
-    pub(super) fn retained_recursive_nodes_are_current(&self, current_tick: u64) -> bool {
-        let retained = self.retained_node_ids();
-        self.operator_states.iter().all(|(key, state)| {
-            !retained.contains(&key.node)
-                || !matches!(state, OperatorState::Recursive(_))
-                || matches!(
-                    state,
-                    OperatorState::Recursive(recursive) if recursive.as_of() == Some(Tick(current_tick))
-                )
+    pub(super) fn affected_recursive_nodes_are_current(
+        &self,
+        affected: &std::collections::HashSet<NodeId>,
+        current_tick: u64,
+    ) -> bool {
+        affected.iter().all(|node| {
+            self.operator_states
+                .get(&OperatorStateKey {
+                    scope: ScopeId::root(),
+                    node: *node,
+                })
+                .is_none_or(|state| {
+                    !matches!(state, OperatorState::Recursive(_))
+                        || matches!(
+                            state,
+                            OperatorState::Recursive(recursive)
+                                if recursive.as_of() == Some(Tick(current_tick))
+                        )
+                })
         })
     }
 

@@ -46,6 +46,8 @@ pub(super) struct IncrementalEvaluation<'a> {
     evaluation_inputs: Option<EvaluationInputs>,
     work_queue: EvaluationWorkQueue,
     published_subscriptions: HashSet<SubscriptionId>,
+    affected_nodes: HashSet<NodeId>,
+    affected_subscriptions: HashSet<SubscriptionId>,
     terminal_deltas: HashMap<NodeId, TerminalDeltas>,
     root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
     notification_publication: Option<PublicationId>,
@@ -456,21 +458,31 @@ impl IncrementalEvaluation<'_> {
             }
         }
 
-        for (subscription_id, subscription) in &runtime.multisink_subscriptions {
+        for subscription_id in &self.affected_subscriptions {
+            let Some(subscription) = runtime.multisink_subscriptions.get(subscription_id) else {
+                continue;
+            };
             if subscription.failed
                 || self.published_subscriptions.contains(subscription_id)
-                || subscription.outputs.values().any(|output| {
-                    !self.work_queue.is_complete(output.node)
-                        || output
-                            .root_ordering_node
-                            .is_some_and(|node| !self.work_queue.is_complete(node))
-                })
+                || subscription
+                    .outputs
+                    .values()
+                    .filter(|output| self.affected_nodes.contains(&output.node))
+                    .any(|output| {
+                        !self.work_queue.is_complete(output.node)
+                            || output
+                                .root_ordering_node
+                                .is_some_and(|node| !self.work_queue.is_complete(node))
+                    })
             {
                 continue;
             }
             let mut sinks = BTreeMap::new();
             let mut terminal_sinks = BTreeMap::new();
             for (sink, output) in &subscription.outputs {
+                if !self.affected_nodes.contains(&output.node) {
+                    continue;
+                }
                 let records = {
                     let mut future = evaluator.update_node(output.node);
                     match Pin::new(&mut future).poll(cx) {
@@ -578,7 +590,9 @@ impl IncrementalEvaluation<'_> {
         for subscription_id in dropped_subscriptions {
             runtime.unsubscribe(subscription_id);
         }
-        debug_assert!(runtime.retained_recursive_nodes_are_current(self.current_tick));
+        debug_assert!(
+            runtime.affected_recursive_nodes_are_current(&self.affected_nodes, self.current_tick)
+        );
         runtime.evict_eval_memo();
         self.metrics.runtime_stats = if runtime.collect_tick_runtime_stats {
             runtime.stats()
@@ -1099,6 +1113,18 @@ impl IvmRuntime {
             pending.extend(binding_deltas);
             binding_deltas = pending;
         }
+        let changed_tables = table_deltas
+            .iter()
+            .map(|delta| delta.table.as_str())
+            .collect::<HashSet<_>>();
+        let changed_bindings = binding_deltas
+            .iter()
+            .map(|delta| delta.shape.as_str())
+            .collect::<HashSet<_>>();
+        let affected_nodes = self.graph.affected_nodes(
+            changed_tables.iter().copied(),
+            changed_bindings.iter().copied(),
+        );
         let negative_tables = table_deltas
             .iter()
             .filter(|delta| delta.deltas.iter().any(|record| record.weight < 0))
@@ -1122,34 +1148,47 @@ impl IvmRuntime {
             .iter()
             .map(|delta| delta.deltas.len())
             .sum::<usize>();
-        self.tick_durable_nodes(&table_deltas, current_tick, storage.as_ref())
-            .await?;
+        self.tick_durable_nodes(
+            &table_deltas,
+            &affected_nodes,
+            current_tick,
+            storage.as_ref(),
+        )
+        .await?;
         let metrics = TickMetrics {
             tick: current_tick,
             table_delta_records,
             ..TickMetrics::default()
         };
         let binding_snapshots = self.binding_snapshot_deltas();
-        let mut retained_roots = self
-            .node_meta
+        let affected_subscriptions = affected_nodes
             .iter()
-            .filter(|(node, meta)| {
-                !meta.retainers.is_empty()
+            .filter_map(|node| self.subscriptions_by_output_node.get(node))
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut retained_roots = affected_nodes
+            .iter()
+            .filter(|node| {
+                self.node_meta
+                    .get(node)
+                    .is_some_and(|meta| !meta.retainers.is_empty())
                     && self
                         .graph
                         .node(**node)
                         .is_some_and(|node| !node.is_durable())
             })
-            .map(|(node, _)| *node)
+            .copied()
             .collect::<Vec<_>>();
         retained_roots.sort_unstable();
-        let mut active_roots = self
-            .multisink_subscriptions
-            .values()
+        let mut active_roots = affected_subscriptions
+            .iter()
+            .filter_map(|subscription| self.multisink_subscriptions.get(subscription))
             .flat_map(|subscription| {
                 subscription
                     .outputs
                     .values()
+                    .filter(|output| affected_nodes.contains(&output.node))
                     .flat_map(|output| [Some(output.node), output.root_ordering_node])
                     .flatten()
             })
@@ -1172,6 +1211,8 @@ impl IvmRuntime {
             evaluation_inputs,
             work_queue,
             published_subscriptions: HashSet::default(),
+            affected_nodes,
+            affected_subscriptions,
             terminal_deltas: HashMap::default(),
             root_ordering_windows: HashMap::default(),
             notification_publication,
@@ -1183,6 +1224,9 @@ impl IvmRuntime {
         negative_tables: &HashSet<&str>,
         has_negative_bindings: bool,
     ) -> Result<std::collections::BTreeMap<StorageRequestKey, Vec<NodeId>>, IvmRuntimeError> {
+        if negative_tables.is_empty() && !has_negative_bindings {
+            return Ok(std::collections::BTreeMap::new());
+        }
         let recursive_nodes = self
             .graph
             .nodes()
@@ -1519,13 +1563,18 @@ impl IvmRuntime {
     async fn tick_durable_nodes(
         &mut self,
         table_deltas: &[TableDelta],
+        affected_nodes: &std::collections::HashSet<NodeId>,
         current_tick: u64,
         storage: &dyn OrderedKvStorage,
     ) -> Result<(), IvmRuntimeError> {
-        let durable_nodes = self
-            .retained_node_ids()
-            .into_iter()
-            .filter(|node| self.graph.node(*node).is_some_and(|node| node.is_durable()))
+        let durable_nodes = affected_nodes
+            .iter()
+            .copied()
+            .filter(|node| {
+                self.graph
+                    .node(*node)
+                    .is_some_and(|graph_node| graph_node.is_durable())
+            })
             .collect::<Vec<_>>();
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut metrics = TickMetrics::default();
