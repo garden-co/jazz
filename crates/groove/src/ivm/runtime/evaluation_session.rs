@@ -60,19 +60,14 @@ type PendingRequest<'a> = StorageFuture<'a, Result<StorageRequestOutput, Storage
 
 /// One request registry is shared by every work entry in an evaluation
 /// session. Equal semantic requests therefore have one future and one result.
-pub(super) struct StorageRequests<'a, S> {
-    storage: OwnedStorage<S>,
+pub(super) struct StorageRequests<'a> {
     pending: BTreeMap<StorageRequestKey, PendingRequest<'a>>,
     ready: BTreeMap<StorageRequestKey, Result<StorageRequestOutput, StorageError>>,
 }
 
-impl<'a, S> StorageRequests<'a, S>
-where
-    S: OrderedKvStorage + 'a,
-{
-    pub(super) fn new(storage: OwnedStorage<S>) -> Self {
+impl<'a> StorageRequests<'a> {
+    pub(super) fn new() -> Self {
         Self {
-            storage,
             pending: BTreeMap::new(),
             ready: BTreeMap::new(),
         }
@@ -80,25 +75,26 @@ where
 
     /// Register a request if neither its future nor result already exists.
     /// Returns `true` only for the caller that created the in-flight work.
-    pub(super) fn request(&mut self, key: StorageRequestKey) -> bool {
+    pub(super) fn request<S>(&mut self, key: StorageRequestKey, storage: &OwnedStorage<S>) -> bool
+    where
+        S: OrderedKvStorage + 'a,
+    {
         if self.pending.contains_key(&key) || self.ready.contains_key(&key) {
             return false;
         }
         let future = match &key {
             StorageRequestKey::Get { family, key } => {
-                let future = self.storage.get(family.clone(), key.clone());
+                let future = storage.get(family.clone(), key.clone());
                 Box::pin(async move { future.await.map(StorageRequestOutput::Value) })
                     as PendingRequest<'a>
             }
             StorageRequestKey::ScanRange { family, start, end } => {
-                let future = self
-                    .storage
-                    .scan_range(family.clone(), start.clone(), end.clone());
+                let future = storage.scan_range(family.clone(), start.clone(), end.clone());
                 Box::pin(async move { future.await.map(StorageRequestOutput::Rows) })
                     as PendingRequest<'a>
             }
             StorageRequestKey::ScanPrefix { family, prefix } => {
-                let future = self.storage.scan_prefix(family.clone(), prefix.clone());
+                let future = storage.scan_prefix(family.clone(), prefix.clone());
                 Box::pin(async move { future.await.map(StorageRequestOutput::Rows) })
                     as PendingRequest<'a>
             }
@@ -166,14 +162,15 @@ mod tests {
     fn equal_requests_share_one_retained_future() {
         let (storage, control) = TestStorage::controlled(&["rows"]);
         control.pause_on(TestStorageOperation::Get);
-        let mut requests = StorageRequests::new(OwnedStorage::new(Rc::new(storage)));
+        let storage = OwnedStorage::new(Rc::new(storage));
+        let mut requests = StorageRequests::new();
         let key = StorageRequestKey::Get {
             family: "rows".to_owned(),
             key: b"one".to_vec(),
         };
 
-        assert!(requests.request(key.clone()));
-        assert!(!requests.request(key.clone()));
+        assert!(requests.request(key.clone(), &storage));
+        assert!(!requests.request(key.clone(), &storage));
         assert_eq!(requests.pending_len(), 1);
 
         let waker = noop_waker();
