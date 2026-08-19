@@ -16,6 +16,8 @@ async function assertMutationResultContract() {
   const upserted: MutationResult<void> = db.upsert(todos, "todo-1", { title: "todo", done: false });
   const deleted: MutationResult<void> = db.delete(todos, "todo-1");
 
+  const transactionId: Promise<string> = inserted.transactionId;
+
   inserted.wait({ tier: "local" });
   // @ts-expect-error Mergeable mutations require a durability tier when waiting.
   inserted.wait();
@@ -43,6 +45,7 @@ async function assertMutationResultContract() {
   void updated;
   void upserted;
   void deleted;
+  void transactionId;
   void mergeableCommit;
   void exclusiveCommit;
 }
