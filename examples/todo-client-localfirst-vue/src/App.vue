@@ -35,13 +35,13 @@ function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   const serverUrl = overrides.serverUrl ?? readEnv("VITE_JAZZ_SERVER_URL");
   if (!appId)
     throw new Error("Missing appId: add jazzPlugin() to vite.config.ts or set VITE_JAZZ_APP_ID");
-  const secret = overrides.auth?.localFirstSecret ?? getOrCreateSecretSync(appId);
+  const secret = overrides.secret ?? getOrCreateSecretSync(appId);
 
   return {
     appId,
     env: "dev",
     userBranch: "main",
-    auth: { localFirstSecret: secret },
+    secret,
     ...(serverUrl ? { serverUrl } : {}),
     ...overrides,
   };

@@ -1,14 +1,14 @@
 ---
 title: Authentication
 description: "How and when to use Jazz's auth modes, and how to manage JWT auth over the lifetime of a live client."
-reviewedAt: "3384730e1"
+reviewedAt: "b29b48d1a"
 ---
 
 Jazz has three auth modes: `anonymous`, `local-first`, and `external`. You pick the mode implicitly by what you pass in `DbConfig`: nothing for anonymous, `secret` for local-first, or `jwtToken` for external.
 
 | Mode          | What it does                                                                | When to use it                                   |
 | ------------- | --------------------------------------------------------------------------- | ------------------------------------------------ |
-| `anonymous`   | Ephemeral read-only identity, no secret, no server                          | Public/marketing surfaces, try-before-anything   |
+| `anonymous`   | Ephemeral read-only identity with no stored credential                      | Public/marketing surfaces, try-before-anything   |
 | `local-first` | Stable identity from a device secret, no server needed                      | Production offline-first apps, try-before-signup |
 | `external`    | Validates a JWT from your auth provider via JWKS or a configured static key | Production apps with real user accounts          |
 
@@ -92,7 +92,7 @@ For sign-in and sign-out, recreate `JazzProvider` or `Db` with a new auth config
 
 ```tsx
 const [jwtToken, setJwtToken] = useState<string | null>(readStoredJwt());
-const { secret, isLoading } = useLocalFirstAuth();
+const { secret, isLoading } = useLocalFirstAuth({ appId: "my-app" });
 
 if (!jwtToken && (isLoading || !secret)) return <p>Loading…</p>;
 
@@ -226,11 +226,18 @@ When the server receives a request, it tries each auth method in priority order 
 1. **Backend impersonation**&hairsp;—&hairsp;the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and the session as a base64-encoded JSON string in `X-Jazz-Session`.
 2. **External JWT**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the configured `--jwks-url` or `--jwt-public-key`.
 3. **Local-first auth**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header with a self-signed local-first token.
-4. **No session**&hairsp;—&hairsp;none of the above matched.
+4. **Anonymous auth**&hairsp;—&hairsp;the request includes a self-signed anonymous bearer token.
+5. **No session**&hairsp;—&hairsp;none of the above matched.
 
 Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
-On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` or `jwtPublicKey` on the backend context to verify external JWTs there too, but not both. Application session cookies are resolved by your app server, not by the Jazz CLI server; once you have a Jazz session from an application cookie, use `context.forSession(session)`. If the sync server should authenticate WebSocket upgrades from a Jazz JWT cookie, configure `--auth-cookie-name` / `JAZZ_AUTH_COOKIE_NAME` as described in [Server Setup](/docs/getting-started/server-setup).
+On TypeScript backends, `await createJazzContext(...).forRequest(req)` accepts external and
+local-first bearer tokens, but not anonymous bearer tokens. Configure `jwksUrl` or `jwtPublicKey` on
+the backend context to verify external JWTs there too, but not both. Application session cookies are
+resolved by your app server, not by the Jazz CLI server; once you have a Jazz session from an
+application cookie, use `context.forSession(session)`. If the sync server should authenticate
+WebSocket upgrades from a Jazz JWT cookie, configure `--auth-cookie-name` /
+`JAZZ_AUTH_COOKIE_NAME` as described in [Server Setup](/docs/getting-started/server-setup).
 
 ### Upgrading to external auth
 

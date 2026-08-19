@@ -1,20 +1,25 @@
 <!-- #region provider-svelte -->
 <script lang="ts">
-  import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+  import { LocalFirstAuth, createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
   import TodoList from './TodoList.svelte';
 
-  const client = createJazzClient({
-    appId: '<your-app-id>',
-  });
+  const auth = new LocalFirstAuth();
+  const client = $derived(
+    !auth.isLoading && auth.secret
+      ? createJazzClient({ appId: '<your-app-id>', secret: auth.secret })
+      : null,
+  );
 </script>
 
-<JazzSvelteProvider {client}>
-  {#snippet children()}
-    <h1>Todos</h1>
-    <TodoList />
-  {/snippet}
-  {#snippet fallback()}
-    <p>Loading...</p>
-  {/snippet}
-</JazzSvelteProvider>
+{#if client}
+  <JazzSvelteProvider {client}>
+    {#snippet children()}
+      <h1>Todos</h1>
+      <TodoList />
+    {/snippet}
+    {#snippet fallback()}
+      <p>Loading...</p>
+    {/snippet}
+  </JazzSvelteProvider>
+{/if}
 <!-- #endregion provider-svelte -->

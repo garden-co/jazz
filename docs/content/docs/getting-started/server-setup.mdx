@@ -1,7 +1,7 @@
 ---
 title: Server Setup
 description: Hosted and self-hosted database server configuration, app provisioning, and backend context setup.
-reviewedAt: "3384730e1"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -77,7 +77,7 @@ On the client side, queries automatically run as the logged-in user. On a server
 
 In TypeScript backends, create the context once with both `app` and `permissions`, then use `context.asBackend()` for server-owned work and `await context.forRequest(req)` when you need a bearer-JWT-scoped high-level `Db`.
 
-`forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work. Configure `jwksUrl` or `jwtPublicKey` on `createJazzContext(...)` if those bearer tokens come from an external IdP, but do not set both at once. Without either one, backend `forRequest()` only accepts Jazz self-signed tokens; set `allowLocalFirstAuth: false` to disable those too.
+`forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work. Configure `jwksUrl` or `jwtPublicKey` on `createJazzContext(...)` if those bearer tokens come from an external IdP, but do not set both at once. Without either one, backend `forRequest()` only accepts Jazz local-first tokens; set `allowLocalFirstAuth: false` to disable those too. It does not currently accept anonymous bearer tokens.
 
 For cookie-based auth on your own backend, resolve the cookie with your framework or auth provider
 first, then call `context.forSession(session)` once you have a Jazz `Session`. `forRequest(...)`

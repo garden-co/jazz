@@ -1,0 +1,163 @@
+---
+title: Transactions
+description: Group related reads and writes into one mergeable or exclusive transaction.
+reviewedAt: "b29b48d1a"
+---
+
+A transaction groups related writes under one commit. Reads made through the transaction can see
+its staged writes, while code outside the transaction cannot see them until it commits.
+
+Jazz has two transaction types. The difference is how they handle concurrent changes:
+
+- A mergeable transaction commits locally, even when the device is offline. When it syncs, Jazz
+  combines it with concurrent work using the normal conflict rules. Jazz does not reject it just
+  because another client changed the same data.
+- An exclusive transaction uses a stable view of the data. Before accepting it, the authority checks
+  whether another write made a conflicting change. If so, it rejects the whole transaction
+  and Jazz removes its local changes. Use this when accepting both changes would break a rule.
+
+Most applications should start with a mergeable transaction.
+
+<Accordions type="single">
+<Accordion title="What's the authority?">
+The authority is the part of Jazz that accepts or rejects writes. It checks permissions and other
+rules before accepting them. For an exclusive transaction, it also checks that the data read by the
+transaction has not changed in a conflicting way.
+
+For most apps, the authority is the server at the `global` durability tier. This is why an exclusive
+transaction cannot be accepted while the device is offline. For an app without a sync server, the
+authority runs locally instead.
+
+</Accordion>
+</Accordions>
+
+## Choose a transaction type
+
+| Use                 | Mergeable transaction                           | Exclusive transaction                                                  |
+| ------------------- | ----------------------------------------------- | ---------------------------------------------------------------------- |
+| Best for            | Grouping normal local-first writes              | Enforcing an invariant across reads and writes                         |
+| Concurrent work     | Merges using Jazz's normal conflict rules       | The authority validates the transaction as one serialisable unit       |
+| TypeScript callback | `db.transaction(...)`                           | `db.exclusiveTransaction(...)`                                         |
+| TypeScript wait     | `wait({ tier: "local" \| "edge" \| "global" })` | `wait()`                                                               |
+| Offline             | Can commit locally and sync later               | Can be staged, but cannot be accepted until the authority is reachable |
+
+You do not need a transaction for every write. `insert`, `update`, `upsert`, `delete` and `restore`
+already apply locally first and sync in the background.
+
+<Callout type="info" title="One commit does not mean one UI update">
+  Jazz sends every transaction upstream as one unit, and the authority decides that unit as a whole.
+  Other clients can still receive rows from a mergeable transaction in separate updates. An
+  exclusive transaction is shown atomically within each subscription view.
+</Callout>
+
+## Use a callback for normal work
+
+The callback form commits automatically when the callback finishes. In TypeScript, Jazz rolls the
+transaction back if the callback throws or returns a rejected promise. In Rust, it leaves the
+transaction uncommitted if the callback returns `Err`.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="app.rs"'>
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-transaction-rust
+    </include>
+  </Tab>
+</Tabs>
+
+The TypeScript callback returns the new row ID. Jazz exposes that value as `result.value`, and
+`result.wait(...)` resolves to the same value. In Rust, `Db::transaction` returns the callback value
+and the committed transaction ID as a tuple.
+
+Inside a TypeScript transaction:
+
+| Method                                      | Returns                                                   |
+| ------------------------------------------- | --------------------------------------------------------- |
+| `insert(...)`, `restore(...)`               | The staged row                                            |
+| `update(...)`, `upsert(...)`, `delete(...)` | `void`                                                    |
+| `all(...)`                                  | A promise for all matching rows, including staged changes |
+| `one(...)`                                  | A promise for the first matching row, or `null`           |
+
+Use the `tx` object for every read and write that belongs to the transaction. A query made through
+the outer `db` does not read the transaction's staged changes.
+
+## Know what each await means
+
+In TypeScript, committing and waiting for durability are separate steps:
+
+| Code                                 | What it proves                                                                     |
+| ------------------------------------ | ---------------------------------------------------------------------------------- |
+| `await db.transaction(...)`          | The callback finished and Jazz created the committed mergeable transaction locally |
+| `result.value`                       | The value returned by the callback                                                 |
+| `await result.transactionId`         | The committed transaction has an ID                                                |
+| `await result.wait({ tier })`        | The mergeable transaction reached that durability tier, or was rejected            |
+| `await db.exclusiveTransaction(...)` | Jazz created the committed exclusive transaction locally                           |
+| `await result.wait()`                | The authority accepted the exclusive transaction, or rejected it                   |
+
+If your next action depends on server acceptance, keep the result and call `wait(...)`. Awaiting
+`db.transaction(...)` by itself is not enough.
+
+See [Durability Tiers](/docs/reference/durability-tiers) for the meaning of `local`, `edge` and
+`global`.
+
+## Handle errors
+
+A transaction can fail at three points:
+
+1. While the callback runs, a write can throw immediately or an awaited read can reject, for
+   example because its input is invalid.
+2. The callback or local commit can fail. Jazz rolls back a callback transaction and rejects
+   `db.transaction(...)` or `db.exclusiveTransaction(...)`.
+3. The authority can reject a committed transaction later. In TypeScript, `wait(...)` then rejects
+   with `PersistedWriteRejectedError` and Jazz removes the rejected local changes.
+
+<include cwd lang="ts" meta='title="app.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-errors-ts
+</include>
+
+Use `db.onMutationError(...)` as a fallback for later rejections when your code does not keep and
+wait on the transaction result.
+
+## Use an exclusive transaction to reject conflicts
+
+An exclusive transaction reads from a stable transaction snapshot. The authority checks the reads
+and writes, then accepts or rejects the transaction as one serialisable unit. This is useful when a
+write is valid only if the data you just read has not changed in a conflicting transaction.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-exclusive-transaction-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="app.rs"'>
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-exclusive-transaction-rust
+    </include>
+  </Tab>
+</Tabs>
+
+In TypeScript, `wait()` takes no durability tier for an exclusive transaction. It resolves if the
+authority accepts the transaction and rejects if the authority rejects it.
+
+The Rust example uses the embedded `jazz::db::Db` API. An owning `ExclusiveTx` abandons the open
+transaction if it is dropped before `commit()` succeeds.
+
+## Manage a transaction yourself only when needed
+
+Use `beginTransaction()` when the work cannot fit in one callback. You then own the transaction and
+must call `commit()` or `rollback()`.
+
+<include cwd lang="ts" meta='title="app.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-manual-transaction-ts
+</include>
+
+For an exclusive transaction, use `beginExclusiveTransaction()` instead. Call `wait()` on the
+commit result to wait for the authority to accept or reject the transaction. You do not choose a
+durability tier, it is always settled by the authority.
+
+If a mergeable transaction has no writes, `commit()` throws. Call `rollback()` instead.

@@ -1,14 +1,18 @@
 <script setup lang="ts">
-import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+import { computed } from "vue";
+import { createJazzClient, JazzProvider, useLocalFirstAuth } from "jazz-tools/vue";
 import TodoList from "./TodoList.vue";
 
-const client = createJazzClient({
-  appId: "<your-app-id>",
-});
+const { secret, isLoading } = useLocalFirstAuth();
+const client = computed(() =>
+  !isLoading.value && secret.value
+    ? createJazzClient({ appId: "<your-app-id>", secret: secret.value })
+    : null,
+);
 </script>
 
 <template>
-  <JazzProvider :client="client">
+  <JazzProvider v-if="client" :client="client">
     <h1>Todos</h1>
     <TodoList />
 

@@ -1,8 +1,10 @@
 ---
 title: How Sync Works
 description: An overview of how Jazz syncs data between clients, covering query subscriptions, infrastructure tiers, offline behavior, and eventual consistency.
-reviewedAt: "6027cae2"
+reviewedAt: "b29b48d1a"
 ---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
 Traditional apps send queries to a remote server, which queries a database and returns data.
 
@@ -53,7 +55,7 @@ routes follower tabs through it. If the leader tab closes, a new leader is elect
 Even without a network connection, your app can still read data it already has locally, whether
 that data was synced earlier or written locally on the device.
 
-[Writes](/docs/writing/writing-data) behave the same way: they are stored locally immediately so the
+[Writes](/docs/writing/writing-data) behave the same way: they are applied locally immediately so the
 UI updates without waiting on a round-trip. Jazz queues the corresponding row-version updates for
 upstream sync. When the client reconnects, queued writes are sent and active query subscriptions are
 replayed automatically.
@@ -117,9 +119,23 @@ All of that still converges. Row versions propagate upward, are durably stored a
 flow back down to every subscribed client that needs them.
 
 When clients write concurrently to the same field of the same row, Jazz uses
-**last-writer-wins (LWW)** to decide the current visible result. Even row versions that lose that
-race remain in row history, so the system keeps enough information to reconcile deterministically
-and to support richer history-aware behavior later.
+**last-writer-wins (LWW)** with deterministic hybrid logical clock ordering to decide the current
+visible result. Even row versions that lose that race remain in row history, so the system keeps
+enough information to reconcile deterministically and to support richer history-aware behaviour
+later.
+
+<Accordions type="single">
+<Accordion id="hybrid-logical-clock" title="What is a hybrid logical clock?">
+A hybrid logical clock gives each write a timestamp made from the device's clock time and a counter.
+The counter moves the timestamp forwards when several writes happen in the same millisecond or when
+the device's clock has fallen behind an earlier write.
+
+If two devices still produce the same timestamp, Jazz uses the ID of the writing node as a final
+tie-breaker. Once replicas have received the same updates, they choose the same winner regardless of
+the order in which the updates arrived.
+
+</Accordion>
+</Accordions>
 
 ## See it in action
 

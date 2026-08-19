@@ -1,7 +1,7 @@
 ---
 title: Lifecycle
 description: "Client auth lifecycle: local-first identity storage, sign-in and sign-out, storage reset, and upgrading to external auth."
-reviewedAt: "unreviewed"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -26,7 +26,7 @@ Local-first auth derives the user's Jazz identity from a 32-byte secret. The sam
 produces the same Jazz user ID, so preserving the secret preserves identity across app restarts.
 
 ```ts
-const secret = await BrowserAuthSecretStore.getOrCreateSecret();
+const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" });
 
 const db = await createDb({
   appId: "my-app",
@@ -34,9 +34,9 @@ const db = await createDb({
 });
 ```
 
-`useLocalFirstAuth()` wraps this storage for React and Expo apps. Its `signOut()` method clears the
-stored secret, which means the next login without a restored secret creates a different Jazz
-identity.
+`useLocalFirstAuth()` wraps this storage for React, Expo, Vue, and Solid apps. Its `signOut()` method
+clears the stored secret, which means the next login without a restored secret creates a different
+Jazz identity. Svelte provides the equivalent `LocalFirstAuth` class.
 
 <Callout type="warn">
   The local-first secret is the user's identity. If it is lost, rows owned only by that identity may
@@ -117,14 +117,14 @@ proof-token flow.
 
 ## Related APIs
 
-| API                               | Use it for                                                                           |
-| --------------------------------- | ------------------------------------------------------------------------------------ |
-| `BrowserAuthSecretStore`          | Browser local-first secret storage                                                   |
-| `ExpoAuthSecretStore`             | Expo secure local-first secret storage                                               |
-| `useLocalFirstAuth()`             | React/Expo hook (and Vue composable) for loading, replacing, and clearing the secret |
-| `LocalFirstAuth`                  | Svelte reactive class for loading, replacing, and clearing the secret                |
-| `db.updateAuthToken(jwt)`         | Refreshing a bearer JWT for the same principal                                       |
-| `db.updateCookieSession(session)` | Updating a mirrored cookie-backed session for the same principal                     |
-| `db.logout()`                     | Shutting down a client during logout or principal switch                             |
-| `db.logout({ wipeData: true })`   | Logout plus browser OPFS database wipe                                               |
-| `db.deleteClientStorage()`        | Development-only browser OPFS storage reset                                          |
+| API                               | Use it for                                                                         |
+| --------------------------------- | ---------------------------------------------------------------------------------- |
+| `BrowserAuthSecretStore`          | Browser local-first secret storage                                                 |
+| `ExpoAuthSecretStore`             | Expo secure local-first secret storage                                             |
+| `useLocalFirstAuth()`             | React, Expo, Vue, and Solid helper for loading, replacing, and clearing the secret |
+| `LocalFirstAuth`                  | Svelte reactive class for loading, replacing, and clearing the secret              |
+| `db.updateAuthToken(jwt)`         | Refreshing a bearer JWT for the same principal                                     |
+| `db.updateCookieSession(session)` | Updating a mirrored cookie-backed session for the same principal                   |
+| `db.logout()`                     | Shutting down a client during logout or principal switch                           |
+| `db.logout({ wipeData: true })`   | Logout plus browser OPFS database wipe                                             |
+| `db.deleteClientStorage()`        | Development-only browser OPFS storage reset                                        |

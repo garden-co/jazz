@@ -1,7 +1,7 @@
 ---
 title: TypeScript Server
 description: Build a server-side to-do API with Jazz and Hono, step by step.
-reviewedAt: "22485728"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -67,6 +67,7 @@ Generate an app ID:
 ```bash title="Terminal"
 pnpm dlx jazz-tools@alpha create app
 # outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
+export JAZZ_APP_ID=019d0ba1-519a-7e01-b0eb-0059ee898e4d
 ```
 
 Create `src/index.ts`. This quickstart puts everything in one file; a real app would split across multiple modules.
@@ -79,7 +80,7 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 - `app` is your typed schema export.
 - `permissions` is the server-side policy bundle.
 - `serverUrl` + `backendSecret` let request-scoped handles sync through a Jazz server.
-- `jwksUrl` verifies external JWTs inside `await context.forRequest(req)`. Without it, the backend only accepts Jazz self-signed tokens unless you set `allowLocalFirstAuth: false`.
+- `jwksUrl` verifies external JWTs inside `await context.forRequest(req)`. Without it, the backend only accepts Jazz local-first tokens unless you set `allowLocalFirstAuth: false`. It does not currently accept anonymous bearer tokens.
 - `dataPath` controls where local server state persists.
 
 Each route handler awaits `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
@@ -143,7 +144,7 @@ npx tsx src/index.ts
 Try it out with a self-signed dev token:
 
 ```bash title="Terminal"
-TOKEN=$(node -e 'const { mintLocalFirstToken } = require("jazz-napi"); const seed = Buffer.alloc(32, 7).toString("base64url"); console.log(mintLocalFirstToken(seed, "todo-server-ts", 3600));')
+TOKEN=$(node -e 'const { mintLocalFirstToken } = require("jazz-napi"); const seed = Buffer.alloc(32, 7).toString("base64url"); console.log(mintLocalFirstToken(seed, process.env.JAZZ_APP_ID ?? "todo-server-ts", 3600));')
 
 curl -X POST http://localhost:3000/api/todos \
   -H "Content-Type: application/json" \
