@@ -2393,17 +2393,17 @@ mod tests {
         ));
     }
 
-    fn reverse_prefix_values<S: OrderedKvStorage>(
+    async fn reverse_prefix_values<S: OrderedKvStorage>(
         storage: &S,
         cf: &str,
         prefix: &[u8],
     ) -> Result<Vec<KeyValue>, Error> {
-        let mut values = Vec::new();
-        storage.scan_prefix_reverse(cf, prefix, &mut |key, value| {
-            values.push((key.to_vec(), value.to_vec()));
-            Ok(())
-        })?;
-        Ok(values)
+        collect_scan(
+            storage
+                .scan_prefix_reverse(cf.to_owned(), prefix.to_vec())
+                .await?,
+        )
+        .await
     }
 
     fn complex_record_descriptor_and_values() -> (RecordDescriptor, Vec<Value>) {
@@ -2458,57 +2458,86 @@ mod tests {
         )
     }
 
-    #[test]
-    fn record_store_round_trips_exhaustive_record_descriptor() {
+    #[futures_test::test]
+    async fn record_store_round_trips_exhaustive_record_descriptor() {
         let storage = MemoryStorage::new(&["records"]);
         let (descriptor, values) = complex_record_descriptor_and_values();
         let raw = descriptor.create(&values).unwrap();
-        storage.set("records", b"row:1", &raw).unwrap();
+        storage
+            .set("records".into(), b"row:1".to_vec(), raw.clone())
+            .await
+            .unwrap();
         let store = RecordStore::new(&storage, "records", &descriptor);
 
-        let record = store.get(b"row:1").unwrap().unwrap();
+        let record = store.get(b"row:1").await.unwrap().unwrap();
         assert_eq!(record.to_values().unwrap(), values);
-        assert_eq!(store.get_raw(b"row:1").unwrap().unwrap(), raw);
+        assert_eq!(store.get_raw(b"row:1").await.unwrap().unwrap(), raw);
 
-        let prefix = store.prefix(b"row:").unwrap();
+        let prefix = store.prefix(b"row:").await.unwrap();
         assert_eq!(prefix, vec![(b"row:1".to_vec(), raw.clone())]);
-        let ranged = store.range(b"row:", b"row;").unwrap();
+        let ranged = store.range(b"row:", b"row;").await.unwrap();
         assert_eq!(ranged, vec![(b"row:1".to_vec(), raw)]);
     }
 
-    #[test]
-    fn class_layout_keeps_logical_keys_isolated_inside_shared_physical_cf() {
+    #[futures_test::test]
+    async fn class_layout_keeps_logical_keys_isolated_inside_shared_physical_cf() {
         let physical_cfs = StorageLayout::jazz_class_v1().physical_column_families([
             "jazz_albums_history",
             "jazz_tracks_history",
             "jazz_albums_register",
         ]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            LayoutStorage::new(MemoryStorage::new(&refs), StorageLayout::jazz_class_v1()).unwrap();
+        let storage = LayoutStorage::new(MemoryStorage::new(&refs), StorageLayout::jazz_class_v1())
+            .await
+            .unwrap();
 
         storage
-            .set("jazz_albums_history", b"row:1", b"album-one")
+            .set(
+                "jazz_albums_history".into(),
+                b"row:1".to_vec(),
+                b"album-one".to_vec(),
+            )
+            .await
             .unwrap();
         storage
-            .set("jazz_albums_history", b"row:3", b"album-three")
+            .set(
+                "jazz_albums_history".into(),
+                b"row:3".to_vec(),
+                b"album-three".to_vec(),
+            )
+            .await
             .unwrap();
         storage
-            .set("jazz_tracks_history", b"row:2", b"track-two")
+            .set(
+                "jazz_tracks_history".into(),
+                b"row:2".to_vec(),
+                b"track-two".to_vec(),
+            )
+            .await
             .unwrap();
         storage
-            .set("jazz_albums_register", b"row:2", b"album-register")
+            .set(
+                "jazz_albums_register".into(),
+                b"row:2".to_vec(),
+                b"album-register".to_vec(),
+            )
+            .await
             .unwrap();
 
         assert_eq!(
-            storage.prefix("jazz_albums_history", b"row:").unwrap(),
+            storage
+                .prefix("jazz_albums_history".into(), b"row:".to_vec())
+                .await
+                .unwrap(),
             vec![
                 (b"row:1".to_vec(), b"album-one".to_vec()),
                 (b"row:3".to_vec(), b"album-three".to_vec()),
             ]
         );
         assert_eq!(
-            reverse_prefix_values(&storage, "jazz_albums_history", b"row:").unwrap(),
+            reverse_prefix_values(&storage, "jazz_albums_history", b"row:")
+                .await
+                .unwrap(),
             vec![
                 (b"row:3".to_vec(), b"album-three".to_vec()),
                 (b"row:1".to_vec(), b"album-one".to_vec()),
@@ -2516,13 +2545,19 @@ mod tests {
         );
         assert_eq!(
             storage
-                .last_with_prefix("jazz_albums_history", b"row:")
+                .last_with_prefix("jazz_albums_history".into(), b"row:".to_vec())
+                .await
                 .unwrap(),
             Some((b"row:3".to_vec(), b"album-three".to_vec()))
         );
         assert_eq!(
             storage
-                .range("jazz_albums_history", b"row:1", b"row:4")
+                .range(
+                    "jazz_albums_history".into(),
+                    b"row:1".to_vec(),
+                    b"row:4".to_vec()
+                )
+                .await
                 .unwrap(),
             vec![
                 (b"row:1".to_vec(), b"album-one".to_vec()),
@@ -2531,8 +2566,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn class_layout_isolates_every_jazz_physical_class() {
+    #[futures_test::test]
+    async fn class_layout_isolates_every_jazz_physical_class() {
         let logical_cfs = [
             ("jazz_albums_history", "jazz_tracks_history"),
             ("jazz_albums_register", "jazz_tracks_register"),
@@ -2556,64 +2591,90 @@ mod tests {
         let layout = StorageLayout::jazz_class_v1_for(all_logical.iter().copied());
         let physical_cfs = layout.physical_column_families(all_logical.iter().copied());
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout).unwrap();
+        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout)
+            .await
+            .unwrap();
 
         for (left, right) in logical_cfs {
-            storage.set(left, b"k:1", left.as_bytes()).unwrap();
-            storage.set(right, b"k:2", right.as_bytes()).unwrap();
+            storage
+                .set(left.into(), b"k:1".to_vec(), left.as_bytes().to_vec())
+                .await
+                .unwrap();
+            storage
+                .set(right.into(), b"k:2".to_vec(), right.as_bytes().to_vec())
+                .await
+                .unwrap();
 
             assert_eq!(
-                storage.prefix(left, b"k:").unwrap(),
+                storage.prefix(left.into(), b"k:".to_vec()).await.unwrap(),
                 vec![(b"k:1".to_vec(), left.as_bytes().to_vec())],
                 "{left} must not read rows from {right}"
             );
             assert_eq!(
-                reverse_prefix_values(&storage, right, b"k:").unwrap(),
+                reverse_prefix_values(&storage, right, b"k:").await.unwrap(),
                 vec![(b"k:2".to_vec(), right.as_bytes().to_vec())],
                 "{right} reverse scan must not read rows from {left}"
             );
             assert_eq!(
-                storage.last_with_prefix(left, b"k:").unwrap(),
+                storage
+                    .last_with_prefix(left.into(), b"k:".to_vec())
+                    .await
+                    .unwrap(),
                 Some((b"k:1".to_vec(), left.as_bytes().to_vec())),
                 "{left} last_with_prefix must stay within its logical prefix"
             );
         }
     }
 
-    #[test]
-    fn class_layout_rejects_missing_marker_with_legacy_mapped_families() {
+    #[futures_test::test]
+    async fn class_layout_rejects_missing_marker_with_legacy_mapped_families() {
         let storage = MemoryStorage::new(&["__groove_class_meta", "jazz_albums_history"]);
         assert!(matches!(
-            LayoutStorage::new(storage, StorageLayout::jazz_class_v1()),
+            LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).await,
             Err(Error::InvalidStorageLayout(_))
         ));
     }
 
-    #[test]
-    fn class_layout_accepts_truly_empty_store_and_writes_marker() {
+    #[futures_test::test]
+    async fn class_layout_accepts_truly_empty_store_and_writes_marker() {
         let storage = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"]);
-        let storage = LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
+        let storage = LayoutStorage::new(storage, StorageLayout::jazz_class_v1())
+            .await
+            .unwrap();
         assert_eq!(
             storage
                 .inner
-                .get("__groove_class_meta", CLASS_LAYOUT_MARKER_KEY)
+                .get(
+                    "__groove_class_meta".into(),
+                    CLASS_LAYOUT_MARKER_KEY.to_vec()
+                )
+                .await
                 .unwrap(),
             Some(CLASS_LAYOUT_MARKER_VALUE.to_vec())
         );
     }
 
-    #[test]
-    fn class_layout_preserves_missing_logical_cf_errors_when_declared_set_is_known() {
+    #[futures_test::test]
+    async fn class_layout_preserves_missing_logical_cf_errors_when_declared_set_is_known() {
         let layout = StorageLayout::jazz_class_v1_for(["jazz_albums_history"]);
         let physical_cfs = layout.physical_column_families(["jazz_albums_history"]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout).unwrap();
+        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout)
+            .await
+            .unwrap();
 
         storage
-            .set("jazz_albums_history", b"row:1", b"album-one")
+            .set(
+                "jazz_albums_history".into(),
+                b"row:1".to_vec(),
+                b"album-one".to_vec(),
+            )
+            .await
             .unwrap();
         assert!(matches!(
-            storage.get("jazz_tracks_history", b"row:1"),
+            storage
+                .get("jazz_tracks_history".into(), b"row:1".to_vec())
+                .await,
             Err(Error::ColumnFamilyNotFound(_))
         ));
     }
