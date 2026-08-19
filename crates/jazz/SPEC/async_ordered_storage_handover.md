@@ -1,75 +1,502 @@
-# Async storage consolidation handover
+# Async storage reimplementation handover
 
-This note records the deliberately pushed, temporarily non-green checkpoint on
-`experiment/async-ordered-storage`. The design and ordered implementation plan
-remain in [async_ordered_storage.md](async_ordered_storage.md), especially
-“Addendum: evolve the owners instead of grafting parallel async facades” and
-its numbered steps 1–8.
+This document proposes a fresh implementation from the integration base
+`codex/jazz-core-engine-swap` (`7695d9eae`). It is a design and landing plan,
+not a description of an intermediate implementation.
 
-## Current checkpoint
+The goal is one engine whose storage may complete immediately or asynchronously,
+while preserving Jazz's local-first visibility, durability, synchronization,
+and end-to-end incremental-delivery contracts. The smallest safe route is to
+clarify the synchronous architecture first, make its operation boundaries
+explicit and owned, and introduce suspension only after those boundaries are
+covered by black-box tests.
 
-- `DbCore` has been deleted. `Db` is the sole high-level Jazz database owner,
-  owns the demand-driven runtime, and exposes async reads and writes.
-- Typed schemas are inert `DbSchemaView` tokens; short-lived `DbView<'_>` values
-  borrow the sole owner instead of owning a second runtime.
-- The old synchronous transaction handles and traits were removed. Callers use
-  caller-owned `OpenBatchId`s with async begin/stage/commit operations.
-- Production `cargo check --workspace` passed after the consolidation. The
-  all-target/test migration is intentionally incomplete at this checkpoint.
-- Dead synchronous NodeState commit/read helpers found during the migration
-  were removed rather than retained as compatibility paths.
+## Non-negotiable properties
 
-The local commit sequence at handover is:
+1. There is one query and IVM implementation. Immediate and suspending storage
+   do not select different semantic paths.
+2. Important abstractions evolve in place. Do not add `Async*`,
+   `DemandDriven*`, `Immediate*`, or similarly named wrapper owners that retain
+   the old database, node, evaluator, or storage API as a parallel real path.
+3. Groove owns query/IVM residency. A non-resident Groove input is an internal
+   Groove scheduling concern, not a retry protocol driven by Jazz.
+4. Jazz owns Jazz synchronization, authority, policy/read-view selection,
+   optimistic publication, and durable/external publication.
+5. A local write is visible to the appropriate local current-state view before
+   its durability tier advances. `None`, `Local`, `Edge`, and `Global` remain
+   provenance/durability facts, not storage-completion modes.
+6. Preparation may suspend and must be mutation-free. Publication is one
+   non-suspending state transition. Persistence and external release are later,
+   explicitly ordered phases.
+7. A low-level subscription has one initial value and then only incremental
+   changes relative to it. If continuity is lost, it ends. A high-level Jazz
+   subscription may install another low-level subscription.
+8. Hash-equal IVM nodes remain shareable across queries and low-level
+   subscription reinstallations.
+9. Steady-state incremental delivery may not rebuild complete results merely
+   to make a possible future restart convenient.
+10. Existing correctness tests are specifications. Behavior changes must be
+    explicit; tests must not be mechanically rewritten to make migration pass.
 
-1. `bf941dd46` — consolidate database ownership in async `Db`
-2. `3cbce048b` — remove superseded synchronous database paths
-3. `c6cafa76d` — adapt publication benchmarks to mutable state
-4. `f6151c067` — adapt the CLI dry-run client pump
+## Evolve abstractions in place
 
-An unintegrated, preserved caller-migration checkpoint exists at `467a89a84`
-(`wip: migrate async integration callers`). Inspect or cherry-pick it rather
-than repeating those mechanical edits blindly.
+The synchronous implementation is not a legacy core to wrap. It is the engine
+whose storage-facing operations need to become suspendable.
 
-## Work in progress when paused
+The target ownership graph keeps the important existing names and roles:
 
-Step 1 of the addendum (“Make `Db` the sole high-level owner”) was in its final
-caller/test cleanup. The main remaining work was:
+```text
+Db
+ `-- Node
+      |-- Jazz control-plane and canonical state
+      |-- ordered storage session
+      `-- Groove Database
+           |-- resident working set
+           |-- shared IVM graph
+           `-- terminal sessions
+```
 
-1. Finish compiling all Jazz test and benchmark targets against `&mut Db` and
-   the explicit async transaction API. Do not restore synchronous handles or a
-   compatibility owner.
-2. Clean mechanically introduced `unused_mut` warnings in internal Db tests.
-3. Remove or relocate the now-unused prepared-query graph handles. Their fields
-   and `plan_for_tier` currently only support test diagnostics, so default
-   clippy reports them as dead. Prefer an async-owner-native plan cache over
-   retaining dead handles in the public prepared query value.
-4. Investigate the behavior failure in
-   `maintained_authorization_restores_an_ordered_page_after_scope_reentry`:
-   `update_for_identity` returned `Ok` where the existing assertion requires a
-   write-only principal to be rejected. Treat this as a possible authorization
-   regression; do not weaken the test to finish migration.
-5. Run the immediate-visibility proof matrix from the main design: resident
-   direct writes must synchronously publish callbacks and subsequent one-shot
-   reads, while unloaded joins/includes may suspend as explicitly allowed.
-6. Run full workspace checks/tests, clippy, format, diff checks, and an
-   adversarial review before replacing this checkpoint with a green commit.
+`Db`, `Node`, and Groove `Database` should gain owned operation state and async
+entry points directly. There must not be a lasting graph such as:
 
-After step 1 is green, continue the numbered plan in the main document: make
-`Node` the sole node owner, finish schema-view consolidation, make Groove
-`Database` its sole owner, unify constructors/opening, share the operation
-driver, and only then revisit publication receipts.
+```text
+AsyncDb -> Db
+DemandDrivenNode -> Node
+AsyncDatabase -> Database
+```
 
-## Guardrails
+Temporary migration helpers are acceptable only when private, narrowly scoped,
+and removed in the same bounded step that moves responsibility into the real
+owner. A wrapper must not become the place where semantics live while the
+wrapped abstraction remains a separately usable execution path.
 
-- There is one core, not synchronous and asynchronous modes. A backend that
-  completes immediately naturally gives its callers immediate completion.
-- Memory is immediate but never claims `Local` durability; RocksDB may be both
-  immediate and locally durable.
-- Simulated latency and IndexedDB must exercise the same async storage
-  abstraction as production.
-- Local visibility is guaranteed for the rows directly written when their
-  required inputs are resident. A cold referenced row needed only by a join or
-  include may complete asynchronously.
-- Do not reintroduce `DbCore`, storage-generic high-level `Db` owners,
-  synchronous transaction handle traits, or test-only alternate database
-  modes to make callers compile.
+Likewise, completion timing is not a constructor or backend mode. Memory and
+warm native storage naturally make the same future ready immediately.
+
+## Ownership boundaries
+
+```text
+durable ordered storage session
+        |
+        +-- Jazz control-plane and canonical-state operations
+        |
+        `-- Jazz-provided Groove storage capability
+                    |
+              Groove Database
+                    |
+              shared IVM graph nodes
+                    |
+              Groove terminal session
+                    |
+               Jazz query session
+                    |
+          high-level Jazz subscription
+```
+
+The durable backend may use one ordered scheduler, but each layer owns the
+meaning of its requests. Jazz supplies Groove with a capability for a fixed
+Jazz read view; Groove decides which inputs within it must become resident and
+when to load them.
+
+### Groove Database
+
+Groove owns:
+
+- the resident working set used by its synchronous evaluator;
+- missing-input discovery across the whole runnable IVM frontier;
+- deduplication and sharing of in-flight loads;
+- hydration of loaded inputs;
+- resumption of affected evaluations;
+- prepared IVM transitions and terminal state;
+- Groove persistence operations and their ordering where applicable.
+
+The normal surface should look like an ordinary future or stream:
+
+```rust,ignore
+let result = groove.evaluate(read_capability, query).await?;
+let terminal = groove.subscribe(read_capability, graph).await?;
+```
+
+The internal evaluator may report a missing-input frontier, but `NotResident`
+must not escape to Jazz query, mutation, or subscription orchestration.
+
+### Jazz Node and Db
+
+Jazz owns:
+
+- selection of database read view and durability tier;
+- schema, lens, authorization, branch, and authority semantics;
+- Jazz sync ingress and egress;
+- canonical transaction and fate state;
+- optimistic local publication;
+- ordered durable publication and external release;
+- construction of the capability supplied to Groove;
+- composition of local Groove output with remote authority information.
+
+Jazz does not inspect Groove storage misses, collect Groove load requests, or
+retry Groove evaluation closures. It awaits Groove operations and handles only
+completed semantic outputs or terminal failures.
+
+### Groove storage capability
+
+The capability fixes the Jazz context in which Groove may load:
+
+```rust,ignore
+struct GrooveReadCapability {
+    read_view: ReadViewId,
+    storage_mapping: StorageMappingId,
+    scheduler: StorageSchedulerHandle,
+}
+```
+
+It loads only data already available locally in that read view. It does not
+perform Jazz sync or wait for remote authority. Later replicated facts enter
+through Jazz sync, are committed locally, and advance Groove normally.
+
+The adapter returns Groove-native inputs. Jazz-specific physical mapping and
+decoding live in the adapter, not Groove's evaluator.
+
+## Clarify the synchronous architecture first
+
+These changes should land against the integration base while storage is still
+synchronous. Each is independently useful and reduces the eventual async diff.
+
+### 1. Name prepare, publish, persist, and release
+
+For every mutation or ingress family, make these phases visible in types:
+
+```text
+prepare       acquire/validate inputs; no visible mutation
+publish       one synchronous resident transition
+persist       submit one ordered durable unit
+release       expose durability-dependent receipts/messages/fates
+```
+
+Use operation-specific prepared values, not generic replayable closures:
+
+```rust,ignore
+struct PreparedLocalUpdate { /* owned validated inputs */ }
+struct PreparedViewIngress { /* owned decoded frame */ }
+
+fn prepare_local_update(...) -> Result<PreparedLocalUpdate, Error>;
+fn publish_local_update(prepared: PreparedLocalUpdate) -> Publication;
+```
+
+Preparation purity should follow from ownership and visibility, not from a
+runtime check that a replayed closure happened not to emit writes.
+
+### 2. Put the residency frontier inside Groove
+
+Introduce an internal Groove result for a complete blocked frontier:
+
+```rust,ignore
+enum ResidentAttempt<T> {
+    Ready(T),
+    Blocked(InputFrontier),
+}
+```
+
+The evaluator visits independent runnable branches and unions their demands.
+Newly loaded inputs may reveal another dependent frontier. Scheduling,
+deduplication, hydration, and retry stay in Groove even while loading is still
+synchronous.
+
+This establishes the correct ownership and scaling without adding futures,
+bindings, or a parallel database owner.
+
+### 3. Separate subscription lifetimes
+
+Define these layers behind the current public protocol:
+
+```rust,ignore
+struct GrooveTerminalSession {
+    initial: TerminalValue,
+    updates: Stream<Result<TerminalPatch, GrooveSessionEnd>>,
+}
+
+struct JazzQuerySession {
+    initial: RelationSnapshot,
+    updates: Stream<Result<JazzPatch, JazzSessionEnd>>,
+    status: SubscriptionStatus,
+}
+```
+
+A Groove session covers one terminal baseline. A Jazz session covers one
+continuous public-result baseline and may compose a local terminal with remote
+authority input. The stable high-level Jazz subscription reinstalls a Jazz
+session after a recoverable end.
+
+For compatibility, a new session's `initial` may initially be encoded as the
+existing `reset: true` event. Ordinary low-level updates never reset.
+
+Settlement is Jazz status, separate from data:
+
+```rust,ignore
+enum SubscriptionStatus {
+    Provisional,
+    Settled { through: AuthorityFrontier },
+}
+```
+
+Settlement changes neither the Groove terminal baseline nor the public value.
+
+### 4. Remove eager replacement-result maintenance
+
+A structured terminal emits its initial value once and then structural patches.
+Jazz must not also decode and store a complete nested root on every child
+change solely to support a possible later reset.
+
+When a low-level session is reinstalled, materialize its new initial value at
+that boundary. Start with this rare O(result size) path. Consider a persistent
+structurally shared tree only if measured reinstall latency requires it.
+
+The relation/include incremental canary must remain scale-independent.
+
+### 5. Separate status, reconciliation, and continuity
+
+Authority generation or settlement changes do not inherently invalidate patch
+continuity. For a Jazz query session:
+
+- status-only change: publish status, no data work;
+- exact visible change: publish patches in the same session;
+- discontinuous replacement: end the session and let the high-level owner
+  install a new one.
+
+Do not use an empty patch list to mean unchanged, unsupported, reconcile, or
+reset. Classify these where enough information remains.
+
+### 6. Preserve public owners during semantic cleanup
+
+Do not begin by deleting synchronous `Db`, `Node`, transaction, test, benchmark,
+or binding surfaces. Improve the boundaries inside the existing owners and keep
+the integration base green. Do not propagate a repository-wide `&mut Db`
+migration while the async semantics are still being discovered.
+
+## Make operations async-ready without suspending
+
+After the synchronous clarifications are green, make state crossing operation
+boundaries owned and restart-safe while still using immediate storage.
+
+### 7. Introduce owned storage operations narrowly
+
+Add owned point, range, commit, flush, and close values beside the existing
+storage interface. The first consumer should be Groove's capability, not every
+Jazz caller.
+
+Keep these distinct:
+
+- logical request value;
+- backend request identity;
+- backend execution/future;
+- terminal success, failure, or cancellation.
+
+Jazz query code must not manage Groove backend request identities.
+
+### 8. Evolve the existing storage/session abstraction
+
+Give the real ordered storage session a submission API returning a non-`Send`
+future where browser thread affinity requires it. Do not introduce a second
+pollable storage trait and adapt every backend into a parallel hierarchy.
+
+The session owns:
+
+- ordering of conflicting operations;
+- read-after-write frontiers;
+- cancellation and ambiguous outcomes;
+- wakeups;
+- poisoning and reopen requirements.
+
+Unrelated reads should not automatically wait for every older durable commit.
+Order them against the exact frontier they require.
+
+### 9. Make prepared work fully owned
+
+Prepared operations that may later survive a yield have:
+
+- no borrowed rows, schemas, frames, or scan visitors;
+- no visible mutation before publication;
+- explicit read-view/frontier identity;
+- explicit runtime/session generation where stale completion is possible;
+- bounded retained memory with test receipts.
+
+Do not stage complete maintained results when a compact source delta or terminal
+patch is the semantic operation.
+
+### 10. Establish stale-work guards
+
+Work that can outlive a poll captures the generation of the owner or low-level
+session it targets. Completion against a replacement generation is discarded
+before mutation. These are internal guards, not necessarily public epochs.
+
+### 11. Extract behavioral proof suites
+
+Run the same black-box behavior through the evolved existing abstraction with
+immediate storage:
+
+- direct write visibility and callback ordering;
+- one-shot reads after local writes;
+- joins/includes with resident inputs;
+- subscription initial/patch/session-end ordering;
+- authority status changes without data replacement;
+- durable publication exactly once;
+- transaction, peer-ingress, and branch atomicity;
+- all incremental-delivery scaling canaries.
+
+Mechanism tests may inspect retained memory, load coalescing, or evaluator work,
+but correctness should be asserted through public APIs.
+
+## Introduce actual suspension incrementally
+
+Only after the immediate path passes the proof suites should operations be
+allowed to return `Pending`.
+
+### 12. Async Groove reads first
+
+Make the storage capability genuinely asynchronous for point and range loads.
+Keep Jazz public ownership and persistence otherwise unchanged.
+
+Prove:
+
+- independent missing inputs load as one frontier;
+- dependent inputs take frontier rounds, not one miss per retry;
+- hash-equal nodes share in-flight loads;
+- one slow load does not serialize unrelated resident evaluations;
+- cancellation cannot hydrate a replacement runtime;
+- Jazz never observes `NotResident`.
+
+This is the first milestone where query evaluation actually suspends.
+
+### 13. Async Groove subscription installation
+
+Open a terminal at a named logical frontier, capture its initial value, and
+queue every later patch before returning the session. If initial materialization
+loads data, patches remain behind the initial publication barrier.
+
+Do not publish a stream handle or Jazz coverage state until installation
+succeeds. A failed installation leaves no retainers or staged graph nodes.
+
+### 14. Async Groove writes and persistence
+
+After reads and terminal installation are stable, make Groove write preparation
+and persistence suspendable in the existing `Database`. Preserve one
+non-suspending resident publication after preparation. Immediate storage makes
+the same operation ready without selecting another type.
+
+### 15. Async Jazz control-plane reads
+
+Convert Jazz-owned storage consumers by narrow domain in the existing `Node`:
+
+1. node-opening control metadata;
+2. catalogue/schema and aliases;
+3. branch metadata;
+4. transaction/history witnesses;
+5. settled binding and authorization state;
+6. recovery and repair indices.
+
+Each domain gets typed preparation and focused correctness/scaling tests. Do not
+wrap arbitrary synchronous `NodeState` closures in a generic retry loop.
+
+### 16. Async Jazz persistence and external release
+
+Submit ordered durable work behind proven resident publication. On success,
+release the correct durability-dependent consequences exactly once. On
+ambiguous failure, stop dependent publication and reopen coherent durable state.
+
+Keep optimistic visibility and durable/external release separate in code/tests.
+
+### 17. Peer ingress
+
+Treat one decoded inbound frame as the semantic operation:
+
+```text
+receive without consuming
+prepare owned typed ingress
+publish resident state exactly once
+persist if required
+advance connection/release output exactly once
+```
+
+Transport backpressure retains produced output; it never replays ingress.
+Convert message families incrementally rather than routing the whole peer tick
+through a generic async retry driver.
+
+### 18. Simplify ownership after convergence
+
+If temporary internal adapters remain, fold them into the existing `Database`,
+`Node`, and `Db` as each domain converges. This step removes scaffolding; it must
+not introduce a new owner hierarchy or define new semantics.
+
+Schema views remain inert identity tokens or short borrows, never parallel
+database owners. Constructor differences may describe client, authority, or
+catalogue semantics, but not synchronous versus asynchronous completion.
+
+### 19. Bindings and browser backend last
+
+Adapt NAPI, WASM, React Native, server shells, and workers only after Rust owner
+and operation contracts stabilize. Preserve callback ordering explicitly.
+
+Land a production browser backend separately. Page-store work, artifact
+staging, CI tuning, and engine semantics should not share one implementation
+series.
+
+## Subscription recovery and replay
+
+End-to-end incrementality benefits from a resumable Jazz query session:
+
+```rust,ignore
+struct PatchCursor {
+    session: SessionId,
+    sequence: u64,
+}
+```
+
+On reconnect, resume if the producer can replay from the cursor. Otherwise end
+with `PatchHistoryUnavailable`; the high-level subscription installs another
+session and publishes its initial value using the compatibility reset encoding.
+
+A transport reconnect alone does not replace a Groove terminal or Jazz query
+session. Terminal/runtime replacement ends the Groove session; Jazz ends its
+query session only when exact public patch continuity cannot be preserved.
+
+## Suggested landing sequence
+
+1. synchronous prepare/publish types and tests;
+2. synchronous Groove residency frontier owned by Groove;
+3. low-level/high-level subscription types behind compatibility events;
+4. remove eager structured replacement rows and restore scaling canaries;
+5. owned request values in the existing storage/session abstraction;
+6. owned prepared state and generation guards;
+7. async Groove reads;
+8. async Groove subscription installation;
+9. async Groove writes/persistence;
+10. typed Jazz control-plane domains, one family at a time;
+11. Jazz persistence/external release;
+12. peer-ingress families;
+13. delete temporary internal migration seams;
+14. bindings;
+15. browser backend and end-to-end receipts.
+
+Per step, run focused tests plus every incremental-delivery canary and a
+low-seed maintained-vs-one-shot oracle. Before pushing a batch, run the full
+canonical gates, benchmark smoke suite, and sensitive-data guard.
+
+## Stop conditions
+
+Stop and redesign the current step if any of these appear:
+
+- a new async/demand-driven wrapper becomes an alternate database or node;
+- the existing important abstraction remains usable as a parallel path;
+- Jazz catches or interprets a Groove `NotResident` error;
+- a generic closure may execute twice without type-level preparation purity;
+- ordinary patch delivery rebuilds a complete result;
+- unrelated operations share one untyped pending slot;
+- a cold read drains all persistence without an explicit frontier dependency;
+- a test is weakened solely to accommodate completion timing;
+- a binding/backend migration dominates the semantic engine diff;
+- the immediate path no longer preserves integration-base behavior;
+- a scaling canary exceeds its constant-work band.
+
+The desired result is not an async facade around Jazz. It is the existing Jazz
+and Groove architecture, evolved in place with explicit operation and
+subscription lifetimes, Groove-owned residency, and Jazz-owned durable and
+control-plane scheduling that may suspend without changing semantics.
