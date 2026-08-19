@@ -24,7 +24,7 @@ struct PendingPersistKey {
 }
 
 pub(super) async fn apply_persist_delta(
-    storage: &impl OrderedKvStorage,
+    storage: &dyn OrderedKvStorage,
     durable_storage: &DurableStorage,
     key_fields: &[usize],
     unique: bool,
@@ -114,7 +114,7 @@ pub(super) async fn apply_persist_delta(
 }
 
 async fn apply_index_persist_delta(
-    storage: &impl OrderedKvStorage,
+    storage: &dyn OrderedKvStorage,
     durable_storage: &DurableStorage,
     unique: bool,
     delta: &RecordDeltas,

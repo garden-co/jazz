@@ -32,6 +32,10 @@ where
     /// ```
     pub async fn flush(&mut self) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .drive_pending_incremental()
+            .await
+            .map_err(Error::IvmRuntime)?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         let tick = self
             .ivm_runtime
@@ -100,10 +104,10 @@ where
     /// Publish resident rows and unblocked terminal deltas before ordered
     /// persistence. The returned handle owns persistence and no longer borrows
     /// this database, so resident queries may continue while storage suspends.
-    pub async fn publish_batch(
-        &mut self,
-        batch: DatabaseBatch,
-    ) -> Result<PublishedBatch<S>, Error> {
+    pub async fn publish_batch(&mut self, batch: DatabaseBatch) -> Result<PublishedBatch<S>, Error>
+    where
+        S: 'static,
+    {
         self.ensure_not_poisoned()?;
         let pending_writes = self.pending_writes_from_batch(batch)?;
         let descriptors = pending_writes
@@ -124,7 +128,7 @@ where
             .collect::<Vec<_>>();
         let table_deltas =
             compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
-        let mut staged_operations = pending_writes
+        let staged_operations = pending_writes
             .iter()
             .map(|write| match write {
                 PendingTableWrite::Set { key, .. } => OwnedWriteOperation::Set {
@@ -138,13 +142,22 @@ where
                 },
             })
             .collect::<Vec<_>>();
-        let storage = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let staged_state = Rc::new(RefCell::new(StagedWriteState::from(staged_operations)));
+        let storage = Rc::new(StagedWriteOverlay::new_owned(
+            resident_overlay,
+            Rc::clone(&staged_state),
+        ));
         let publication = PublicationId(self.next_publication_id);
         self.next_publication_id = self.next_publication_id.saturating_add(1);
         self.ivm_runtime
-            .tick_resident_staged(table_deltas, &storage, &mut staged_operations, publication)
+            .tick_resident_staged(table_deltas, OwnedStorage::new(storage), publication)
             .await
             .map_err(Error::IvmRuntime)?;
+        let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
 
         self.resident_writes
             .borrow_mut()

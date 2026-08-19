@@ -32,6 +32,41 @@ struct EvaluationSession<'a> {
     work_queue: EvaluationWorkQueue,
 }
 
+pub(super) struct IncrementalEvaluation<'a> {
+    table_deltas: Vec<TableDelta>,
+    binding_deltas: Vec<BindingDelta>,
+    binding_snapshots: HashMap<String, RecordDeltas>,
+    current_tick: u64,
+    metrics: TickMetrics,
+    retained_roots: Vec<NodeId>,
+    storage: OwnedStorage<'a>,
+    storage_requests: StorageRequests<'a>,
+    evaluation_inputs: Option<EvaluationInputs>,
+    work_queue: EvaluationWorkQueue,
+    published_subscriptions: HashSet<SubscriptionId>,
+    terminal_deltas: HashMap<NodeId, TerminalDeltas>,
+    root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
+    notification_publication: Option<PublicationId>,
+}
+
+#[derive(Default)]
+pub(super) struct PendingIncrementalEvaluation(Rc<RefCell<Option<IncrementalEvaluation<'static>>>>);
+
+impl Clone for PendingIncrementalEvaluation {
+    fn clone(&self) -> Self {
+        Self(Rc::clone(&self.0))
+    }
+}
+
+impl std::fmt::Debug for PendingIncrementalEvaluation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingIncrementalEvaluation")
+            .field("pending", &self.0.borrow().is_some())
+            .finish()
+    }
+}
+
 /// Discovers storage leaves for all reachable siblings without recursively
 /// evaluating through the first blocked branch. Hash-consed nodes enter the
 /// queue once, so discovery is linear in the reachable graph slice.
@@ -196,6 +231,191 @@ impl EvaluationWorkQueue {
 
     fn is_complete(&self, node: NodeId) -> bool {
         self.entries.get(&node) == Some(&EvaluationEntry::Complete)
+    }
+}
+
+impl IncrementalEvaluation<'_> {
+    fn poll(
+        &mut self,
+        runtime: &mut IvmRuntime,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
+        self.storage_requests.poll(cx);
+        let ready = match self.storage_requests.drain_ready() {
+            Ok(ready) => ready,
+            Err(error) => return Poll::Ready(Err(error.into())),
+        };
+        self.work_queue.storage_ready(ready.keys().cloned());
+        if let Some(inputs) = &mut self.evaluation_inputs {
+            inputs.install(ready);
+        }
+
+        let mut dropped_subscriptions = Vec::new();
+        let mut deferred_notifications = Vec::new();
+        let mut evaluator = TickEvaluator {
+            schema: &runtime.schema,
+            graph: &runtime.graph,
+            variant_projections: &runtime.variant_projections,
+            table_deltas: &self.table_deltas,
+            binding_deltas: &self.binding_deltas,
+            binding_snapshots: &self.binding_snapshots,
+            current_tick: self.current_tick,
+            operator_states: &mut runtime.operator_states,
+            arrangement_states: &mut runtime.arrangement_states,
+            arrangement_keys_by_input: &mut runtime.arrangement_keys_by_input,
+            eval_memo: &mut runtime.eval_memo,
+            eval_memo_bytes: &mut runtime.eval_memo_bytes,
+            table_frontiers: &runtime.table_frontiers,
+            binding_frontiers: &runtime.binding_frontiers,
+            memo_use_clock: &mut runtime.memo_use_clock,
+            node_meta: &mut runtime.node_meta,
+            storage: Some(self.storage.as_ref()),
+            evaluation_inputs: self.evaluation_inputs.as_mut(),
+            context: EvalContext::root(),
+            metrics: &mut self.metrics,
+            terminal_deltas: std::mem::take(&mut self.terminal_deltas),
+            root_ordering_windows: std::mem::take(&mut self.root_ordering_windows),
+        };
+
+        while let Some(node) = self.work_queue.runnable.pop_front() {
+            let result = {
+                let mut future = evaluator.update_node(node);
+                Pin::new(&mut future).poll(cx)
+            };
+            match result {
+                Poll::Ready(Ok(_)) => self.work_queue.complete(node),
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked)),
+            }
+        }
+
+        for (subscription_id, subscription) in &runtime.multisink_subscriptions {
+            if self.published_subscriptions.contains(subscription_id)
+                || subscription.outputs.values().any(|output| {
+                    !self.work_queue.is_complete(output.node)
+                        || output
+                            .root_ordering_node
+                            .is_some_and(|node| !self.work_queue.is_complete(node))
+                })
+            {
+                continue;
+            }
+            let mut sinks = BTreeMap::new();
+            let mut terminal_sinks = BTreeMap::new();
+            for (sink, output) in &subscription.outputs {
+                let records = {
+                    let mut future = evaluator.update_node(output.node);
+                    match Pin::new(&mut future).poll(cx) {
+                        Poll::Ready(result) => result?,
+                        Poll::Pending => {
+                            return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
+                        }
+                    }
+                };
+                if !records.deltas.is_empty()
+                    && !records.descriptor.registry_compatible_with(&output.output)
+                {
+                    return Poll::Ready(Err(IvmRuntimeError::GraphOutputMismatch));
+                }
+                let structured = evaluator.output_is_structured_collect_by(output.node)?;
+                let public_root = evaluator.output_has_public_root(output.node)?;
+                let terminal_owned = output.root_ordering_node.is_some() || structured;
+                let records = records.as_ref().clone();
+                if terminal_owned {
+                    let terminal = if structured {
+                        if let Some(terminal) =
+                            evaluator.take_terminal_deltas_for_output(output.node)?
+                        {
+                            Some(terminal)
+                        } else if !public_root && !records.is_empty() {
+                            Some(terminal_deltas_from_record_deltas(&records)?)
+                        } else if output.root_ordering_node.is_some() {
+                            Some(TerminalDeltas {
+                                operations: Vec::new(),
+                            })
+                        } else {
+                            None
+                        }
+                    } else if !records.is_empty() {
+                        Some(terminal_deltas_from_record_deltas(&records)?)
+                    } else if output.root_ordering_node.is_some() {
+                        Some(TerminalDeltas {
+                            operations: Vec::new(),
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(mut terminal) = terminal {
+                        if let Some(root_ordering_node) = output.root_ordering_node {
+                            evaluator.apply_root_ordering(
+                                root_ordering_node,
+                                output.output,
+                                &mut terminal,
+                            )?;
+                        }
+                        if !terminal.is_empty() {
+                            terminal_sinks.insert(sink.clone(), terminal);
+                        }
+                    }
+                }
+                if !records.is_empty() {
+                    sinks.insert(sink.clone(), records);
+                }
+            }
+            let records = MultisinkDeltas {
+                sinks,
+                terminal_sinks,
+            };
+            if !records.is_empty() {
+                evaluator.metrics.notifications_sent += 1;
+                evaluator.metrics.notification_records += multisink_deltas_record_count(&records);
+                evaluator.metrics.notification_encoded_bytes +=
+                    multisink_deltas_encoded_bytes(&records);
+            }
+            let mut queued = QueuedMultisinkDeltas::new(records);
+            queued.publication = self.notification_publication;
+            if !queued.deltas.is_empty() {
+                if runtime.defer_subscription_notifications {
+                    deferred_notifications.push((*subscription_id, queued));
+                } else if subscription.sender.send(queued).is_err() {
+                    dropped_subscriptions.push(*subscription_id);
+                }
+            }
+            self.published_subscriptions.insert(*subscription_id);
+        }
+        runtime
+            .staged_subscription_notifications
+            .append(&mut deferred_notifications);
+        self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
+        self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
+
+        if self.storage_requests.has_pending() {
+            return Poll::Pending;
+        }
+
+        for node in std::mem::take(&mut self.retained_roots) {
+            let mut future = evaluator.update_node(node);
+            match Pin::new(&mut future).poll(cx) {
+                Poll::Ready(Ok(_)) => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked)),
+            }
+        }
+        drop(evaluator);
+        runtime
+            .operator_states
+            .retain(|key, _| key.scope == ScopeId::root());
+        for subscription_id in dropped_subscriptions {
+            runtime.unsubscribe(subscription_id);
+        }
+        debug_assert!(runtime.retained_recursive_nodes_are_current(self.current_tick));
+        runtime.evict_eval_memo();
+        self.metrics.runtime_stats = if runtime.collect_tick_runtime_stats {
+            runtime.stats()
+        } else {
+            runtime.cheap_stats()
+        };
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -401,8 +621,13 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.tick_with_params(table_deltas, Vec::new(), storage, None)
-            .await
+        self.tick_with_params(
+            table_deltas,
+            Vec::new(),
+            OwnedStorage::new(Rc::new(storage)),
+            None,
+        )
+        .await
     }
 
     pub(super) async fn flush_pending_binding_retractions<S>(
@@ -418,8 +643,13 @@ impl IvmRuntime {
             // so it must first bring queued retractions into arranged state;
             // otherwise the snapshot could observe a binding as live while
             // its retraction is already committed to the lifecycle queue.
-            self.tick_with_params(Vec::new(), Vec::new(), storage, None)
-                .await?;
+            self.tick_with_params(
+                Vec::new(),
+                Vec::new(),
+                OwnedStorage::new(Rc::new(storage)),
+                None,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -441,7 +671,12 @@ impl IvmRuntime {
         let overlay = StagedWriteOverlay::new(storage, &staged_overlay);
         self.defer_subscription_notifications = true;
         let tick = self
-            .tick_with_params(table_deltas, Vec::new(), &overlay, None)
+            .tick_with_params(
+                table_deltas,
+                Vec::new(),
+                OwnedStorage::new(Rc::new(&overlay)),
+                None,
+            )
             .await;
         self.defer_subscription_notifications = false;
         overlay.drain_into(staged_writes);
@@ -451,24 +686,50 @@ impl IvmRuntime {
         tick
     }
 
-    pub(crate) async fn tick_resident_staged<S>(
+    pub(crate) async fn tick_resident_staged(
         &mut self,
         table_deltas: Vec<TableDelta>,
-        storage: &S,
-        staged_writes: &mut Vec<OwnedWriteOperation>,
+        storage: OwnedStorage<'static>,
         publication: PublicationId,
-    ) -> Result<TickMetrics, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
+    ) -> Result<TickMetrics, IvmRuntimeError> {
         debug_assert!(!self.defer_subscription_notifications);
-        let staged_overlay = RefCell::new(StagedWriteState::from(std::mem::take(staged_writes)));
-        let overlay = StagedWriteOverlay::new(storage, &staged_overlay);
-        let tick = self
-            .tick_with_params(table_deltas, Vec::new(), &overlay, Some(publication))
-            .await;
-        overlay.drain_into(staged_writes);
-        tick
+        if self.pending_incremental.0.borrow().is_some() {
+            return Err(IvmRuntimeError::EvaluationBlocked);
+        }
+        let mut evaluation = self
+            .begin_tick_with_params(table_deltas, Vec::new(), storage, Some(publication))
+            .await?;
+        let progress = std::future::poll_fn(|cx| Poll::Ready(evaluation.poll(self, cx))).await;
+        match progress {
+            Poll::Ready(Ok(())) => Ok(evaluation.metrics),
+            Poll::Ready(Err(error)) => Err(error),
+            Poll::Pending => {
+                let metrics = evaluation.metrics.clone();
+                *self.pending_incremental.0.borrow_mut() = Some(evaluation);
+                Ok(metrics)
+            }
+        }
+    }
+
+    pub(crate) fn poll_pending_incremental(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
+        let slot = Rc::clone(&self.pending_incremental.0);
+        let Some(mut evaluation) = slot.borrow_mut().take() else {
+            return Poll::Ready(Ok(()));
+        };
+        match evaluation.poll(self, cx) {
+            Poll::Pending => {
+                *slot.borrow_mut() = Some(evaluation);
+                Poll::Pending
+            }
+            ready => ready,
+        }
+    }
+
+    pub(crate) async fn drive_pending_incremental(&mut self) -> Result<(), IvmRuntimeError> {
+        std::future::poll_fn(|cx| self.poll_pending_incremental(cx)).await
     }
 
     /// Release subscription output computed by the preceding staged durable
@@ -503,16 +764,32 @@ impl IvmRuntime {
         self.staged_subscription_notifications.clear();
     }
 
-    pub(super) async fn tick_with_params<S>(
+    pub(super) async fn tick_with_params<'a>(
+        &mut self,
+        table_deltas: Vec<TableDelta>,
+        binding_deltas: Vec<BindingDelta>,
+        storage: OwnedStorage<'a>,
+        notification_publication: Option<PublicationId>,
+    ) -> Result<TickMetrics, IvmRuntimeError> {
+        let mut evaluation = self
+            .begin_tick_with_params(
+                table_deltas,
+                binding_deltas,
+                storage,
+                notification_publication,
+            )
+            .await?;
+        std::future::poll_fn(|cx| evaluation.poll(self, cx)).await?;
+        Ok(evaluation.metrics)
+    }
+
+    async fn begin_tick_with_params<'a>(
         &mut self,
         table_deltas: Vec<TableDelta>,
         mut binding_deltas: Vec<BindingDelta>,
-        storage: &S,
+        storage: OwnedStorage<'a>,
         notification_publication: Option<PublicationId>,
-    ) -> Result<TickMetrics, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
+    ) -> Result<IncrementalEvaluation<'a>, IvmRuntimeError> {
         if !self.pending_binding_retractions.is_empty() {
             let mut pending = std::mem::take(&mut self.pending_binding_retractions);
             pending.extend(binding_deltas);
@@ -529,24 +806,21 @@ impl IvmRuntime {
             .any(|delta| delta.weight < 0);
         let recursive_storage_dependencies =
             self.recursive_recompute_storage_dependencies(&negative_tables, has_negative_bindings)?;
-        let needs_recompute_inputs = !recursive_storage_dependencies.is_empty();
-        let owned_storage = OwnedStorage::new(Rc::new(storage));
         let mut storage_requests = StorageRequests::new();
         for request in recursive_storage_dependencies.keys().cloned() {
-            storage_requests.request(request, &owned_storage);
+            storage_requests.request(request, &storage);
         }
-        let mut evaluation_inputs = EvaluationInputs::default();
+        let evaluation_inputs =
+            (!recursive_storage_dependencies.is_empty()).then(EvaluationInputs::default);
         let current_tick = self.advance_tick();
         self.bump_input_frontiers(&table_deltas, &binding_deltas);
         let table_delta_records = table_deltas
             .iter()
             .map(|delta| delta.deltas.len())
             .sum::<usize>();
-        self.tick_durable_nodes(&table_deltas, current_tick, storage)
+        self.tick_durable_nodes(&table_deltas, current_tick, storage.as_ref())
             .await?;
-        let mut dropped_subscriptions = Vec::new();
-        let mut deferred_notifications = Vec::new();
-        let mut metrics = TickMetrics {
+        let metrics = TickMetrics {
             tick: current_tick,
             table_delta_records,
             ..TickMetrics::default()
@@ -578,184 +852,24 @@ impl IvmRuntime {
             .collect::<Vec<_>>();
         active_roots.sort_unstable();
         active_roots.dedup();
-        let (_, mut work_queue) = EvaluationWorkQueue::new(active_roots)
+        let (_, work_queue) = EvaluationWorkQueue::new(active_roots)
             .discover_incremental(&self.graph, recursive_storage_dependencies)?;
-        let mut evaluator = TickEvaluator {
-            schema: &self.schema,
-            graph: &self.graph,
-            variant_projections: &self.variant_projections,
-            table_deltas: &table_deltas,
-            binding_deltas: &binding_deltas,
-            binding_snapshots: &binding_snapshots,
+        Ok(IncrementalEvaluation {
+            table_deltas,
+            binding_deltas,
+            binding_snapshots,
             current_tick,
-            operator_states: &mut self.operator_states,
-            arrangement_states: &mut self.arrangement_states,
-            arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
-            eval_memo: &mut self.eval_memo,
-            eval_memo_bytes: &mut self.eval_memo_bytes,
-            table_frontiers: &self.table_frontiers,
-            binding_frontiers: &self.binding_frontiers,
-            memo_use_clock: &mut self.memo_use_clock,
-            node_meta: &mut self.node_meta,
-            storage: Some(storage),
-            evaluation_inputs: needs_recompute_inputs.then_some(&mut evaluation_inputs),
-            context: EvalContext::root(),
-            metrics: &mut metrics,
+            metrics,
+            retained_roots,
+            storage,
+            storage_requests,
+            evaluation_inputs,
+            work_queue,
+            published_subscriptions: HashSet::default(),
             terminal_deltas: HashMap::default(),
             root_ordering_windows: HashMap::default(),
-        };
-        let mut published_subscriptions: HashSet<SubscriptionId> = HashSet::default();
-
-        loop {
-            while let Some(node) = work_queue.runnable.pop_front() {
-                evaluator.update_node(node).await?;
-                work_queue.complete(node);
-            }
-
-            for (subscription_id, subscription) in &self.multisink_subscriptions {
-                if published_subscriptions.contains(subscription_id)
-                    || subscription.outputs.values().any(|output| {
-                        !work_queue.is_complete(output.node)
-                            || output
-                                .root_ordering_node
-                                .is_some_and(|node| !work_queue.is_complete(node))
-                    })
-                {
-                    continue;
-                }
-                let mut sinks = BTreeMap::new();
-                let mut terminal_sinks = BTreeMap::new();
-                for (sink, output) in &subscription.outputs {
-                    let records = evaluator.update_node(output.node).await?;
-                    if !records.deltas.is_empty()
-                        && !records.descriptor.registry_compatible_with(&output.output)
-                    {
-                        return Err(IvmRuntimeError::GraphOutputMismatch);
-                    }
-                    let structured = evaluator.output_is_structured_collect_by(output.node)?;
-                    let public_root = evaluator.output_has_public_root(output.node)?;
-                    let terminal_owned = output.root_ordering_node.is_some() || structured;
-                    let records = records.as_ref().clone();
-                    if terminal_owned {
-                        let terminal = if structured {
-                            if let Some(terminal) =
-                                evaluator.take_terminal_deltas_for_output(output.node)?
-                            {
-                                Some(terminal)
-                            } else if !public_root && !records.is_empty() {
-                                Some(terminal_deltas_from_record_deltas(&records)?)
-                            } else if output.root_ordering_node.is_some() {
-                                // A root TopBy can change positions while the
-                                // structured projection has no payload delta.
-                                // Preserve the ordering channel with an empty
-                                // terminal; `apply_root_ordering` adds only the
-                                // necessary root Move edits.
-                                Some(TerminalDeltas {
-                                    operations: Vec::new(),
-                                })
-                            } else {
-                                None
-                            }
-                        } else if !records.is_empty() {
-                            // The ordering node can be above a wider source row.
-                            // It contributes only root positions; terminal payloads
-                            // must be encoded from the public sink descriptor.
-                            Some(terminal_deltas_from_record_deltas(&records)?)
-                        } else if output.root_ordering_node.is_some() {
-                            // An unprojected sort-key change can reorder visible
-                            // roots without changing any rendered payload. Start
-                            // an empty terminal so root ordering can still emit
-                            // its positional Move operations.
-                            Some(TerminalDeltas {
-                                operations: Vec::new(),
-                            })
-                        } else {
-                            None
-                        };
-                        if let Some(mut terminal) = terminal {
-                            if let Some(root_ordering_node) = output.root_ordering_node {
-                                evaluator.apply_root_ordering(
-                                    root_ordering_node,
-                                    output.output,
-                                    &mut terminal,
-                                )?;
-                            }
-                            if !terminal.is_empty() {
-                                terminal_sinks.insert(sink.clone(), terminal);
-                            }
-                        }
-                    }
-                    if !records.is_empty() {
-                        // Keep the rendered terminal record available for legacy
-                        // single-sink consumers and hydration. Structured carriers
-                        // select `terminal_sinks` for incremental delivery.
-                        sinks.insert(sink.clone(), records);
-                    }
-                }
-                let records = MultisinkDeltas {
-                    sinks,
-                    terminal_sinks,
-                };
-                if !records.is_empty() {
-                    evaluator.metrics.notifications_sent += 1;
-                    evaluator.metrics.notification_records +=
-                        multisink_deltas_record_count(&records);
-                    evaluator.metrics.notification_encoded_bytes +=
-                        multisink_deltas_encoded_bytes(&records);
-                }
-                let mut queued = QueuedMultisinkDeltas::new(records);
-                queued.publication = notification_publication;
-                if !queued.deltas.is_empty() {
-                    if self.defer_subscription_notifications {
-                        deferred_notifications.push((*subscription_id, queued));
-                    } else if subscription.sender.send(queued).is_err() {
-                        dropped_subscriptions.push(*subscription_id);
-                    }
-                }
-                published_subscriptions.insert(*subscription_id);
-            }
-            self.staged_subscription_notifications
-                .append(&mut deferred_notifications);
-            if !storage_requests.has_pending() {
-                break;
-            }
-            std::future::poll_fn(|cx| {
-                if storage_requests.poll(cx) > 0 {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                }
-            })
-            .await;
-            let ready = storage_requests.drain_ready()?;
-            work_queue.storage_ready(ready.keys().cloned());
-            evaluator
-                .evaluation_inputs
-                .as_deref_mut()
-                .expect("recursive storage dependencies have evaluation inputs")
-                .install(ready);
-        }
-        // Retained roots are background maintenance. Active subscriptions must
-        // see the tick's deltas before retained-only roots can advance shared
-        // recursive/operator state.
-        for node in retained_roots {
-            evaluator.update_node(node).await?;
-        }
-        drop(evaluator);
-        self.operator_states
-            .retain(|key, _| key.scope == ScopeId::root());
-
-        for subscription_id in dropped_subscriptions {
-            self.unsubscribe(subscription_id);
-        }
-        debug_assert!(self.retained_recursive_nodes_are_current(current_tick));
-        self.evict_eval_memo();
-        metrics.runtime_stats = if self.collect_tick_runtime_stats {
-            self.stats()
-        } else {
-            self.cheap_stats()
-        };
-        Ok(metrics)
+            notification_publication,
+        })
     }
 
     fn recursive_recompute_storage_dependencies(
@@ -1096,15 +1210,12 @@ impl IvmRuntime {
         Ok(false)
     }
 
-    async fn tick_durable_nodes<S>(
+    async fn tick_durable_nodes(
         &mut self,
         table_deltas: &[TableDelta],
         current_tick: u64,
-        storage: &S,
-    ) -> Result<(), IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
+        storage: &dyn OrderedKvStorage,
+    ) -> Result<(), IvmRuntimeError> {
         let durable_nodes = self
             .retained_node_ids()
             .into_iter()

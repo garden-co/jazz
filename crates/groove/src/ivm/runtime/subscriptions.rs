@@ -1,6 +1,8 @@
 //! Prepared shapes, routed bindings, and subscription delivery state.
 
 use super::*;
+use crate::storage::OwnedStorage;
+use std::rc::Rc;
 use std::sync::Mutex;
 
 /// Stable handle returned to callers for subscription management.
@@ -1949,7 +1951,12 @@ impl IvmRuntime {
         };
         if !binding_delta.deltas.is_empty()
             && let Err(error) = self
-                .tick_with_params(Vec::new(), vec![binding_delta], storage, None)
+                .tick_with_params(
+                    Vec::new(),
+                    vec![binding_delta],
+                    OwnedStorage::new(Rc::new(storage)),
+                    None,
+                )
                 .await
         {
             self.remove_multisink_retainers(subscription_id, &outputs);
@@ -2141,8 +2148,13 @@ impl IvmRuntime {
                 && let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
                 && !param_delta.deltas.is_empty()
             {
-                self.tick_with_params(Vec::new(), vec![param_delta], storage, None)
-                    .await?;
+                self.tick_with_params(
+                    Vec::new(),
+                    vec![param_delta],
+                    OwnedStorage::new(Rc::new(storage)),
+                    None,
+                )
+                .await?;
                 self.remove_unreferenced_auto_family(shape_id);
             }
             return Ok(removed);

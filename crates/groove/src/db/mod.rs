@@ -33,8 +33,8 @@ use crate::schema::{
     PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableVariant,
 };
 use crate::storage::{
-    LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
-    StagedWriteState, StorageLayout,
+    LayoutStorage, OrderedKvStorage, OwnedStorage, OwnedWriteOperation, RecordStore,
+    StagedWriteOverlay, StagedWriteState, StorageLayout,
 };
 use thiserror::Error;
 
