@@ -35,11 +35,11 @@ where
     /// assert!(database.last_commit_metrics().is_none());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn new(schema: DatabaseSchema, storage: S) -> Result<Self, Error> {
-        Self::new_with_storage_layout(schema, storage, StorageLayout::Identity)
+    pub async fn new(schema: DatabaseSchema, storage: S) -> Result<Self, Error> {
+        Self::new_with_storage_layout(schema, storage, StorageLayout::Identity).await
     }
 
-    pub fn new_with_storage_layout(
+    pub async fn new_with_storage_layout(
         schema: DatabaseSchema,
         storage: S,
         storage_layout: StorageLayout,
@@ -47,7 +47,7 @@ where
         validate_durable_key_schema(&schema)?;
         let ivm_runtime = IvmRuntime::new(schema)?;
         Ok(Self {
-            storage: LayoutStorage::new(storage, storage_layout)?,
+            storage: LayoutStorage::new(storage, storage_layout).await?,
             ivm_runtime,
             last_commit_metrics: None,
             last_tick_metrics: None,
@@ -116,28 +116,28 @@ where
 
     /// Return approximate live bytes for one backing class/column family when
     /// the storage backend exposes that optional capability.
-    pub fn approximate_class_bytes(&self, cf: &str) -> Result<Option<u64>, Error> {
-        Ok(self.storage.approximate_class_bytes(cf)?)
+    pub async fn approximate_class_bytes(&self, cf: &str) -> Result<Option<u64>, Error> {
+        Ok(self.storage.approximate_class_bytes(cf.to_owned()).await?)
     }
 
     pub fn into_storage(self) -> S {
         self.storage.into_inner()
     }
 
-    pub fn close(&self) -> Result<(), Error> {
-        Ok(self.storage.close()?)
+    pub async fn close(&self) -> Result<(), Error> {
+        Ok(self.storage.close().await?)
     }
 
     /// Configure explicit storage durability boundaries for future committed
     /// write batches.
-    pub fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
-        Ok(self.storage.set_write_flush_cadence(every)?)
+    pub async fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+        Ok(self.storage.set_write_flush_cadence(every).await?)
     }
 
     /// Complete the current storage durability boundary.
-    pub fn flush_write_boundary(&self) -> Result<(), Error> {
+    pub async fn flush_write_boundary(&self) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
-        Ok(self.storage.flush_write_boundary()?)
+        Ok(self.storage.flush_write_boundary().await?)
     }
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {

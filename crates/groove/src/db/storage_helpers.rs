@@ -49,40 +49,51 @@ where
         &self.value
     }
 
-    pub fn set(&self, key: &[Value], value: &[Value]) -> Result<(), Error> {
+    pub async fn set(&self, key: &[Value], value: &[Value]) -> Result<(), Error> {
         let key = self.key_bytes(key)?;
         let record = self.value.create(value)?;
         self.storage
-            .write_many(&[WriteOperation::set(&self.name, &key, &record)])
+            .write_many(vec![OwnedWriteOperation::Set {
+                cf: self.name.clone(),
+                key,
+                value: record,
+            }])
+            .await
             .map_err(Error::from)
     }
 
-    pub fn get(&self, key: &[Value]) -> Result<Option<Record<'_>>, Error> {
+    pub async fn get(&self, key: &[Value]) -> Result<Option<Record<'_>>, Error> {
         let key = self.key_bytes(key)?;
         Ok(self
             .record_store()
-            .get_raw(&key)?
+            .get_raw(&key)
+            .await?
             .map(|record| self.value.bind_owned(record)))
     }
 
-    pub fn delete(&self, key: &[Value]) -> Result<(), Error> {
+    pub async fn delete(&self, key: &[Value]) -> Result<(), Error> {
         let key = self.key_bytes(key)?;
         self.storage
-            .write_many(&[WriteOperation::delete(&self.name, &key)])
+            .write_many(vec![OwnedWriteOperation::Delete {
+                cf: self.name.clone(),
+                key,
+            }])
+            .await
             .map_err(Error::from)
     }
 
-    pub fn range(&self, start: &[Value], end: &[Value]) -> Result<Vec<Record<'_>>, Error> {
+    pub async fn range(&self, start: &[Value], end: &[Value]) -> Result<Vec<Record<'_>>, Error> {
         let start = self.key_prefix_bytes(start)?;
         let end = self.key_prefix_bytes(end)?;
         self.record_store()
-            .range(&start, &end)?
+            .range(&start, &end)
+            .await?
             .into_iter()
             .map(|(_, value)| Ok(self.value.bind_owned(value)))
             .collect()
     }
 
-    pub fn range_entries(
+    pub async fn range_entries(
         &self,
         start: &[Value],
         end: &[Value],
@@ -90,7 +101,8 @@ where
         let start = self.key_prefix_bytes(start)?;
         let end = self.key_prefix_bytes(end)?;
         self.record_store()
-            .range(&start, &end)?
+            .range(&start, &end)
+            .await?
             .into_iter()
             .map(|(key, value)| {
                 Ok(DirectRecordStoreEntry {
@@ -101,22 +113,24 @@ where
             .collect()
     }
 
-    pub fn prefix(&self, prefix: &[Value]) -> Result<Vec<Record<'_>>, Error> {
+    pub async fn prefix(&self, prefix: &[Value]) -> Result<Vec<Record<'_>>, Error> {
         let prefix = self.key_prefix_bytes(prefix)?;
         self.record_store()
-            .prefix(&prefix)?
+            .prefix(&prefix)
+            .await?
             .into_iter()
             .map(|(_, value)| Ok(self.value.bind_owned(value)))
             .collect()
     }
 
-    pub fn prefix_entries(
+    pub async fn prefix_entries(
         &self,
         prefix: &[Value],
     ) -> Result<Vec<DirectRecordStoreEntry<'_>>, Error> {
         let prefix = self.key_prefix_bytes(prefix)?;
         self.record_store()
-            .prefix(&prefix)?
+            .prefix(&prefix)
+            .await?
             .into_iter()
             .map(|(key, value)| {
                 Ok(DirectRecordStoreEntry {
@@ -127,7 +141,7 @@ where
             .collect()
     }
 
-    pub fn write_many(&self, operations: &[DirectRecordStoreWrite]) -> Result<(), Error> {
+    pub async fn write_many(&self, operations: &[DirectRecordStoreWrite]) -> Result<(), Error> {
         let mut encoded = Vec::with_capacity(operations.len());
         for operation in operations {
             match operation {
@@ -146,11 +160,7 @@ where
                 }
             }
         }
-        let borrowed = encoded
-            .iter()
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        self.storage.write_many(&borrowed).map_err(Error::from)
+        self.storage.write_many(encoded).await.map_err(Error::from)
     }
 
     pub(super) fn key_bytes(&self, values: &[Value]) -> Result<Vec<u8>, Error> {
@@ -847,7 +857,7 @@ impl PendingTableWrite {
     }
 }
 
-pub(super) fn compute_table_deltas<S>(
+pub(super) async fn compute_table_deltas<S>(
     pending_writes: &[PendingTableWrite],
     stores: &[RecordStore<'_, S>],
     schema: &DatabaseSchema,
@@ -874,7 +884,7 @@ where
         ) {
             None
         } else {
-            store.get_raw(write.key())?
+            store.get_raw(write.key()).await?
         };
         if matches!(
             write,

@@ -88,12 +88,12 @@ where
     /// assert_eq!(database.last_commit_metrics().unwrap().storage_write_count, 2);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
+    pub async fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
         let pending_writes = self.pending_writes_from_batch(batch)?;
-        self.commit_pending_writes(pending_writes)
+        self.commit_pending_writes(pending_writes).await
     }
 
-    pub fn update_raw(
+    pub async fn update_raw(
         &mut self,
         table: &str,
         key: PrimaryKeyValue,
@@ -104,10 +104,10 @@ where
             key,
             record: record.into(),
         })?;
-        self.commit_pending_writes(vec![pending])
+        self.commit_pending_writes(vec![pending]).await
     }
 
-    pub(super) fn commit_pending_writes(
+    pub(super) async fn commit_pending_writes(
         &mut self,
         pending_writes: Vec<PendingTableWrite>,
     ) -> Result<(), Error> {
@@ -127,7 +127,7 @@ where
             })
             .collect::<Vec<_>>();
         let table_deltas =
-            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema())?;
+            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
         let mut staged_operations = pending_writes
             .iter()
             .map(|write| match write {
@@ -174,30 +174,13 @@ where
         let txn = self.storage.begin_txn();
         drop(operations);
         txn.stage_owned_operations(staged_operations);
-        match txn.commit_outcome() {
-            WriteManyOutcome::Committed => {}
-            WriteManyOutcome::DefinitelyNotCommitted(error) => {
-                self.ivm_runtime.discard_staged_subscription_notifications();
-                let mut rollback_operations = Vec::new();
-                if self
-                    .ivm_runtime
-                    .tick_staged(rollback_deltas, &storage, &mut rollback_operations)
-                    .is_err()
-                {
-                    self.poisoned = true;
-                }
-                self.ivm_runtime.discard_staged_subscription_notifications();
-                return Err(Error::from(error));
-            }
-            WriteManyOutcome::PossiblyCommitted(error) => {
-                // The batch might be durable even though its acknowledgement
-                // failed. Replaying or rolling back in-process would split
-                // durable history from IVM/subscription state, so fail closed
-                // until a fresh open reconstructs the runtime from storage.
-                self.ivm_runtime.discard_staged_subscription_notifications();
-                self.poisoned = true;
-                return Err(Error::from(error));
-            }
+        if let Err(error) = txn.commit().await {
+            // The runtime has already advanced in memory by this point. The v0
+            // policy is to make the Database instance fatal on final commit
+            // failure rather than serve possibly torn in-memory state.
+            self.ivm_runtime.discard_staged_subscription_notifications();
+            self.poisoned = true;
+            return Err(Error::from(error));
         }
         if self
             .durable_publication_state
