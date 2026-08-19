@@ -1,5 +1,5 @@
 import { Show, type JSX } from "solid-js";
-import { JazzProvider, createSolidJazzClient, useLocalFirstAuth } from "jazz-tools/solid";
+import { JazzProvider, useLocalFirstAuth } from "jazz-tools/solid";
 import type { DbConfig } from "jazz-tools";
 import { Toaster } from "solid-sonner";
 import { TodoList } from "./TodoList.js";
@@ -33,10 +33,9 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
 
 function ReadyApp(props: { secret: string; config?: Partial<DbConfig>; fallback?: JSX.Element }) {
   const resolvedConfig = () => defaultConfig(props.secret, props.config ?? {});
-  const client = createSolidJazzClient(resolvedConfig);
 
   return (
-    <JazzProvider client={client} fallback={props.fallback ?? <p>Loading...</p>}>
+    <JazzProvider config={resolvedConfig()} fallback={props.fallback ?? <p>Loading...</p>}>
       <h1>Todos</h1>
       <TodoList />
       <Toaster />

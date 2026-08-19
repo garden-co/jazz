@@ -1,25 +1,26 @@
 import { createContext, useContext, type JSX, type Accessor, Show, createEffect } from "solid-js";
 import type { Session } from "../runtime/context.js";
 import {
+  createSolidJazzClient,
   isPendingSolidJazzClientReady,
   type SolidJazzClient,
   type PendingSolidJazzClient,
 } from "./create-solid-jazz-client.js";
-import { Db } from "../runtime/db.js";
+import type { Db, DbConfig } from "../runtime/db.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 
 type JazzClientContextValue = SolidJazzClient;
 
 export const JazzClientContext = createContext<JazzClientContextValue | undefined>(undefined);
 
-export type JazzProviderProps = {
+export type JazzClientProviderProps = {
   client: PendingSolidJazzClient;
   fallback?: JSX.Element;
   children: JSX.Element;
   autoAttachDevTools?: boolean;
 };
 
-export function JazzProvider(props: JazzProviderProps) {
+export function JazzClientProvider(props: JazzClientProviderProps) {
   const clientReady = () =>
     isPendingSolidJazzClientReady(props.client) ? props.client : undefined;
 
@@ -36,6 +37,24 @@ export function JazzProvider(props: JazzProviderProps) {
         <JazzClientContext.Provider value={client}>{props.children}</JazzClientContext.Provider>
       )}
     </Show>
+  );
+}
+
+export type JazzProviderProps = Omit<JazzClientProviderProps, "client"> & {
+  config: DbConfig;
+};
+
+export function JazzProvider(props: JazzProviderProps) {
+  const client = createSolidJazzClient(() => props.config);
+
+  return (
+    <JazzClientProvider
+      client={client}
+      fallback={props.fallback}
+      autoAttachDevTools={props.autoAttachDevTools}
+    >
+      {props.children}
+    </JazzClientProvider>
   );
 }
 
