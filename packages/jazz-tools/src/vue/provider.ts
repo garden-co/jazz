@@ -1,6 +1,7 @@
 import {
   computed,
   defineComponent,
+  h,
   inject,
   onUnmounted,
   provide,
@@ -13,14 +14,19 @@ import {
   type ShallowRef,
 } from "vue";
 import type { Session } from "../runtime/context.js";
-import type { Db } from "../runtime/db.js";
-import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import type { Db, DbConfig } from "../runtime/db.js";
+import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 
 export type JazzClientContextValue = CreatedJazzClient;
 
-export interface JazzProviderProps {
+export interface JazzClientProviderProps {
   client: CreatedJazzClient | Promise<CreatedJazzClient>;
+  autoAttachDevTools?: boolean;
+}
+
+export interface JazzProviderProps {
+  config: DbConfig;
   autoAttachDevTools?: boolean;
 }
 
@@ -30,11 +36,11 @@ const JazzContextKey: InjectionKey<ShallowRef<JazzClientContextValue | null>> = 
  * Makes a Jazz client available to child components through Vue dependency injection.
  * Pass a pre-created client or a promise that resolves to one.
  */
-export const JazzProvider = defineComponent({
-  name: "JazzProvider",
+export const JazzClientProvider = defineComponent({
+  name: "JazzClientProvider",
   props: {
     client: {
-      type: Object as PropType<JazzProviderProps["client"]>,
+      type: Object as PropType<JazzClientProviderProps["client"]>,
       required: true,
     },
     autoAttachDevTools: {
@@ -46,7 +52,6 @@ export const JazzProvider = defineComponent({
     const clientRef = shallowRef<JazzClientContextValue | null>(null);
     const errorRef = shallowRef<Error | null>(null);
     let runId = 0;
-    let resolvedClient: CreatedJazzClient | null = null;
 
     provide(JazzContextKey, clientRef);
 
@@ -55,14 +60,8 @@ export const JazzProvider = defineComponent({
       (nextClient, _previousClient, onCleanup) => {
         runId += 1;
         const activeRunId = runId;
-        const previousClient = resolvedClient;
-        resolvedClient = null;
         clientRef.value = null;
         errorRef.value = null;
-
-        if (previousClient) {
-          void previousClient.shutdown();
-        }
 
         let cancelled = false;
         let stopSessionSync: (() => void) | null = null;
@@ -74,11 +73,9 @@ export const JazzProvider = defineComponent({
         Promise.resolve(nextClient)
           .then((client) => {
             if (cancelled || activeRunId !== runId) {
-              void client.shutdown();
               return;
             }
 
-            resolvedClient = client;
             clientRef.value = client;
             stopSessionSync = client.db.onAuthChanged(() => {
               if (cancelled || activeRunId !== runId) {
@@ -104,13 +101,7 @@ export const JazzProvider = defineComponent({
 
     onUnmounted(() => {
       runId += 1;
-      const activeClient = resolvedClient;
-      resolvedClient = null;
       clientRef.value = null;
-
-      if (activeClient) {
-        void activeClient.shutdown();
-      }
     });
 
     return () => {
@@ -123,6 +114,94 @@ export const JazzProvider = defineComponent({
       }
 
       return slots.fallback?.() ?? null;
+    };
+  },
+});
+
+/**
+ * Creates a Jazz client from a reactive config and makes it available to child components.
+ * Clients created by this provider are shut down when the config changes or the provider unmounts.
+ */
+export const JazzProvider = defineComponent({
+  name: "JazzProvider",
+  props: {
+    config: {
+      type: Object as PropType<JazzProviderProps["config"]>,
+      required: true,
+    },
+    autoAttachDevTools: {
+      type: Boolean,
+      default: true,
+    },
+  },
+  setup(props, { slots }) {
+    const clientRef = shallowRef<CreatedJazzClient | null>(null);
+    const errorRef = shallowRef<Error | null>(null);
+    let activeClient: CreatedJazzClient | null = null;
+    let lifecycle = Promise.resolve();
+    let runId = 0;
+
+    watch(
+      () => props.config,
+      (config) => {
+        const activeRunId = ++runId;
+        const configSnapshot = { ...config } as DbConfig;
+        clientRef.value = null;
+        errorRef.value = null;
+
+        lifecycle = lifecycle
+          .then(async () => {
+            if (activeClient) {
+              const previousClient = activeClient;
+              activeClient = null;
+              await previousClient.shutdown();
+            }
+            if (activeRunId !== runId) return;
+
+            const client = await createJazzClient(configSnapshot);
+            if (activeRunId !== runId) {
+              await client.shutdown();
+              return;
+            }
+
+            activeClient = client;
+            clientRef.value = client;
+          })
+          .catch((reason) => {
+            if (activeRunId === runId) {
+              errorRef.value = reason instanceof Error ? reason : new Error(String(reason));
+            }
+          });
+      },
+      { deep: true, immediate: true },
+    );
+
+    onUnmounted(() => {
+      runId += 1;
+      clientRef.value = null;
+      const shuttingDown = lifecycle.then(async () => {
+        if (activeClient) {
+          const client = activeClient;
+          activeClient = null;
+          await client.shutdown();
+        }
+      });
+      shuttingDown.catch(() => {});
+      lifecycle = shuttingDown;
+    });
+
+    return () => {
+      if (errorRef.value) throw errorRef.value;
+      if (!clientRef.value) return slots.fallback?.() ?? null;
+
+      return h(
+        JazzClientProvider,
+        {
+          client: clientRef.value,
+          autoAttachDevTools: props.autoAttachDevTools,
+        },
+        { default: slots.default, fallback: slots.fallback },
+      );
     };
   },
 });

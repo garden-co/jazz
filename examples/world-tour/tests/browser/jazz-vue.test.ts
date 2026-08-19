@@ -1,7 +1,7 @@
 /**
  * Browser tests for the world-tour Jazz + Vue integration.
  *
- * Mounts small Vue components inside a JazzProvider against a Jazz client
+ * Mounts small Vue components inside a JazzClientProvider against a Jazz client
  * connected to the per-suite local Jazz server (see global-setup.ts), then
  * exercises the schema through the public composables (useDb, useAll,
  * useSession).
@@ -19,7 +19,7 @@ import { afterEach, describe, expect, inject, it } from "vitest";
 import { type App, createApp, defineComponent, h } from "vue";
 import {
   type JazzClient,
-  JazzProvider,
+  JazzClientProvider,
   createJazzClient,
   useAll,
   useDb,
@@ -111,7 +111,7 @@ async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted
     setup() {
       return () =>
         h(
-          JazzProvider,
+          JazzClientProvider,
           { client },
           {
             default: () => h(child),
@@ -127,7 +127,7 @@ async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted
   await waitFor(
     () => el.querySelector("#jazz-loading") === null,
     5000,
-    "JazzProvider should resolve and render its default slot",
+    "JazzClientProvider should resolve and render its default slot",
   );
 
   const m = { el, client, vueApp };

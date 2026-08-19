@@ -1,18 +1,18 @@
 <!-- #region context-setup-vue-runtime-sources -->
 <script setup lang="ts">
-import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+import { JazzProvider } from "jazz-tools/vue";
 
-const client = createJazzClient({
+const config = {
   appId: "my-app",
   serverUrl: "https://my-jazz-server.example.com",
   runtimeSources: {
     baseUrl: "/assets/jazz/",
   },
-});
+};
 </script>
 
 <template>
-  <JazzProvider :client="client">
+  <JazzProvider :config="config">
     <!-- ... -->
   </JazzProvider>
 </template>
