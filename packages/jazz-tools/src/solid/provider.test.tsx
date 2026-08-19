@@ -123,4 +123,74 @@ describe("Solid providers", () => {
     await flushMicrotasks();
     expect(secondClient.shutdown).toHaveBeenCalledOnce();
   });
+
+  it("JazzProvider skips obsolete factories and never overlaps client lifecycles", async () => {
+    const pendingClients = new Map<string, Deferred<JazzClient>>();
+    createJazzClient.mockImplementation((config) => {
+      const pending = deferred<JazzClient>();
+      pendingClients.set(config.appId, pending);
+      return pending.promise;
+    });
+
+    const [config, setConfig] = createSignal<DbConfig>({ appId: "first" });
+    const dispose = render(
+      () => (
+        <JazzProvider config={config()} fallback={<p>Loading</p>}>
+          <p>Ready</p>
+        </JazzProvider>
+      ),
+      container,
+    );
+
+    await flushMicrotasks();
+    const firstShutdown = deferred<void>();
+    pendingClients.get("first")!.resolve(
+      makeClient(
+        "first",
+        vi.fn(() => firstShutdown.promise),
+      ),
+    );
+    await flushMicrotasks();
+
+    setConfig({ appId: "second" });
+    await flushMicrotasks();
+    setConfig({ appId: "third" });
+    await flushMicrotasks();
+    expect(createJazzClient.mock.calls.map(([next]) => next.appId)).toEqual(["first"]);
+
+    firstShutdown.resolve();
+    await flushMicrotasks();
+    expect(createJazzClient.mock.calls.map(([next]) => next.appId)).toEqual(["first", "third"]);
+
+    setConfig({ appId: "fourth" });
+    await flushMicrotasks();
+    expect(createJazzClient.mock.calls.map(([next]) => next.appId)).toEqual(["first", "third"]);
+
+    const thirdShutdown = deferred<void>();
+    const thirdClient = makeClient(
+      "third",
+      vi.fn(() => thirdShutdown.promise),
+    );
+    pendingClients.get("third")!.resolve(thirdClient);
+    await flushMicrotasks();
+    expect(thirdClient.shutdown).toHaveBeenCalledOnce();
+    expect(createJazzClient.mock.calls.map(([next]) => next.appId)).toEqual(["first", "third"]);
+
+    thirdShutdown.resolve();
+    await flushMicrotasks();
+    expect(createJazzClient.mock.calls.map(([next]) => next.appId)).toEqual([
+      "first",
+      "third",
+      "fourth",
+    ]);
+
+    const fourthClient = makeClient("fourth");
+    pendingClients.get("fourth")!.resolve(fourthClient);
+    await flushMicrotasks();
+    expect(container.textContent).toBe("Ready");
+
+    dispose();
+    await flushMicrotasks();
+    expect(fourthClient.shutdown).toHaveBeenCalledOnce();
+  });
 });
