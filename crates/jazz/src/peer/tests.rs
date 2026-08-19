@@ -1,4 +1,5 @@
 use super::*;
+use crate::legacy_test_future::{OptionFutureExt as _, ResultFutureExt as _};
 
 use std::collections::BTreeMap;
 

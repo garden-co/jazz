@@ -91,6 +91,60 @@
 //! assert!(!core.row_history("todos", row).unwrap().is_empty());
 //! ```
 
+// Legacy synchronous tests import these traits explicitly while the async API
+// migration is in progress. New async lifecycle tests intentionally do not:
+// they poll futures directly so suspension and ordering remain observable.
+#[cfg(test)]
+pub(crate) mod legacy_test_future {
+    use std::future::Future;
+
+    pub(crate) trait ResultFutureExt<T, E>: Future<Output = Result<T, E>> {
+        fn unwrap(self) -> T
+        where
+            Self: Sized,
+            E: std::fmt::Debug,
+        {
+            crate::db::block_on(self).unwrap()
+        }
+
+        fn expect(self, message: &str) -> T
+        where
+            Self: Sized,
+            E: std::fmt::Debug,
+        {
+            crate::db::block_on(self).expect(message)
+        }
+
+        fn unwrap_or_else<F>(self, op: F) -> T
+        where
+            Self: Sized,
+            F: FnOnce(E) -> T,
+        {
+            crate::db::block_on(self).unwrap_or_else(op)
+        }
+    }
+
+    impl<F, T, E> ResultFutureExt<T, E> for F where F: Future<Output = Result<T, E>> {}
+
+    pub(crate) trait OptionFutureExt<T>: Future<Output = Option<T>> {
+        fn unwrap(self) -> T
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self).unwrap()
+        }
+
+        fn expect(self, message: &str) -> T
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self).expect(message)
+        }
+    }
+
+    impl<F, T> OptionFutureExt<T> for F where F: Future<Output = Option<T>> {}
+}
+
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 

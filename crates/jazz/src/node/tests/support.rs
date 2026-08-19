@@ -412,71 +412,75 @@ impl ReopenRefusingMemoryStorage {
 impl OrderedKvStorage for ReopenRefusingMemoryStorage {
     fn get(
         &self,
-        cf: &ColumnFamilyName,
-        key: &Key,
-    ) -> Result<Option<StorageValue>, groove::storage::Error> {
+        cf: String,
+        key: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<Vec<u8>>, groove::storage::Error>> {
         self.inner.get(cf, key)
     }
 
     fn set(
         &self,
-        cf: &ColumnFamilyName,
-        key: &Key,
-        value: &[u8],
-    ) -> Result<(), groove::storage::Error> {
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.set(cf, key, value)
     }
 
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), groove::storage::Error> {
+    fn delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.delete(cf, key)
     }
 
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.scan_range(cf, start, end, visit)
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+        self.inner.scan_range(cf, start, end)
     }
 
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.scan_prefix(cf, prefix, visit)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+        self.inner.scan_prefix(cf, prefix)
     }
 
     fn scan_prefix_reverse(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.scan_prefix_reverse(cf, prefix, visit)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+        self.inner.scan_prefix_reverse(cf, prefix)
     }
 
     fn last_with_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<groove::storage::KeyValue>, groove::storage::Error> {
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<groove::storage::KeyValue>, groove::storage::Error>> {
         self.inner.last_with_prefix(cf, prefix)
     }
 
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<groove::storage::KeyValue>, groove::storage::Error> {
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<groove::storage::KeyValue>, groove::storage::Error>> {
         self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
     }
 
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
+    fn write_many(
+        &self,
+        operations: Vec<groove::storage::OwnedWriteOperation>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.write_many(operations)
     }
 
@@ -486,10 +490,15 @@ impl OrderedKvStorage for ReopenRefusingMemoryStorage {
 }
 
 impl ReopenableStorage for ReopenRefusingMemoryStorage {
-    fn reopen(self, _column_families: &[&str]) -> Result<Self, groove::storage::Error> {
-        Err(groove::storage::Error::InvalidStorageLayout(
-            "test storage must not reopen for logical table additions".to_owned(),
-        ))
+    fn reopen(
+        self,
+        _column_families: Vec<String>,
+    ) -> groove::storage::StorageFuture<'static, Result<Self, groove::storage::Error>> {
+        Box::pin(async {
+            Err(groove::storage::Error::InvalidStorageLayout(
+                "test storage must not reopen for logical table additions".to_owned(),
+            ))
+        })
     }
 }
 
