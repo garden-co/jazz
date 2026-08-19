@@ -441,20 +441,7 @@ fn json_claim_to_policy_claim(
 
 /// Deterministically map an auth subject to a Jazz author id.
 pub fn author_id_from_subject(subject: &str) -> AuthorId {
-    if let Ok(uuid) = uuid::Uuid::parse_str(subject.trim()) {
-        return AuthorId::from_bytes(*uuid.as_bytes());
-    }
-    let mut lanes = [0xcbf29ce484222325_u64, 0x84222325cbf29ce4_u64];
-    for (index, byte) in subject.as_bytes().iter().copied().enumerate() {
-        let lane = index & 1;
-        lanes[lane] ^= u64::from(byte);
-        lanes[lane] = lanes[lane].wrapping_mul(0x100000001b3);
-        lanes[lane] ^= (index as u64).rotate_left((byte & 31).into());
-    }
-    let mut bytes = [0_u8; 16];
-    bytes[..8].copy_from_slice(&lanes[0].to_be_bytes());
-    bytes[8..].copy_from_slice(&lanes[1].to_be_bytes());
-    AuthorId::from_bytes(bytes)
+    crate::tools::identity::author_id_from_principal(subject)
 }
 
 /// Extract a bearer token from an `Authorization` header value.
