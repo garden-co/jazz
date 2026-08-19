@@ -88,6 +88,32 @@ not a fallback to one-shot sorting. Prepared graph lowering MUST preserve the
 semantics of every accepted predicate shape and explicitly reject unsupported
 predicate shapes (`INV-LOWER-11`).
 
+🔶 **Open question: how should queries name the physical row id when a schema
+declares an `id` column?** A declared `id` is user data, while every stored row
+also has an engine-owned `RowUuid`. The query language needs one consistent
+answer for addressing that physical identity. `_id` is a possible reserved
+alias, but its contract has not been chosen and its current partial use MUST NOT
+be treated as the final public design.
+
+Before standardizing an alias, decide all of the following together:
+
+- whether it is accepted everywhere a column operand is accepted, including
+  filters, ordering, aggregates, joins, correlations, reachability, and nested
+  queries;
+- whether it can be selected and appears in returned row shapes, or exists only
+  as an input operand;
+- its exact type and nullability;
+- whether `_id` is reserved and therefore forbidden as a declared column, or
+  how a collision with a user-declared `_id` is resolved;
+- whether bare `id` continues to mean the physical `RowUuid` for legacy schemas
+  that do not declare an `id` column; and
+- whether explicit row-id join APIs remain a separate typed operation or become
+  syntax over the same alias.
+
+Until this is resolved, implementations MUST preserve the documented declared
+`id` semantics and existing explicit `RowId` operations, and MUST NOT infer a
+universal `_id` contract from support in an individual query form.
+
 **Implementation status (2026-07-27).** Parameterized `!=` predicates are
 accepted for maintained subscriptions; the behavior is covered by
 `maintained_subscription_view_ne_param_stays_maintained` in
