@@ -362,6 +362,8 @@ mod tests {
         assert_eq!(id.get_version_num(), 5);
     }
 
+    // This byte-level test is needed because the public WorkOS flow proves interoperability but
+    // cannot assert the exact cross-language author bytes for opaque subjects.
     #[test]
     fn non_canonical_uuid_subjects_are_mapped_from_their_exact_bytes() {
         let cases = [
