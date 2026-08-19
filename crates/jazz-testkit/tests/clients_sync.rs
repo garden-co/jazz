@@ -350,13 +350,11 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_
             vec![("completed".to_string(), Value::Boolean(true))],
         )
         .expect("update todo from client a");
-    client_a
-        .wait_for_transaction(
-            transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("update reaches edge");
+    support::wait_for_edge_txs(
+        &client_a,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let expected_values = vec![
         Value::Text("update-through-server".to_string()),
@@ -426,13 +424,11 @@ async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
     .await;
 
     let transaction_id = client_a.delete(todo_id).expect("delete todo from client a");
-    client_a
-        .wait_for_transaction(
-            transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("delete reaches edge");
+    support::wait_for_edge_txs(
+        &client_a,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let rows_after_delete = wait_for_query(
         &client_b,
@@ -521,7 +517,7 @@ async fn wait_for_transaction_reaches_edge_and_global_tiers() {
             let schema = test_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
             let alice = jazz_testkit::connect(
-                server.make_client_context_for_user(schema, "alice-direct-wait-for-batch"),
+                server.make_client_context_for_user(schema, "alice-direct-wait-for-tx"),
             )
             .await
             .expect("connect alice");

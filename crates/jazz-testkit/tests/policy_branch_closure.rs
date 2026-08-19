@@ -160,53 +160,21 @@ fn gathered_resource_access_policy() -> PolicyExpr {
     }
 }
 
-async fn wait_edge_batch(
-    client: &JazzClient,
-    transaction_id: jazz::tools::TransactionId,
-    label: &str,
-) {
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        client.wait_for_transaction(transaction_id, DurabilityTier::EdgeServer),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("{label} timed out waiting for edge batch"))
-    .unwrap_or_else(|err| panic!("{label} failed waiting for edge batch: {err}"));
-}
-
 async fn seed_policy_branch_closure_rows(admin: &JazzClient) {
-    let (seed_team, _, seed_batch) = admin
+    let (seed_team, _, seed_tx) = admin
         .insert("teams", row_input!("identity_key" => MEMBER_ID))
         .expect("insert member seed team");
-    wait_edge_batch(
-        admin,
-        seed_batch.expect("ordinary mutation commits immediately"),
-        "member seed team",
-    )
-    .await;
-    let (parent_team, _, parent_batch) = admin
+    let (parent_team, _, parent_tx) = admin
         .insert("teams", row_input!("identity_key" => "unrelated-parent"))
         .expect("insert parent team");
-    wait_edge_batch(
-        admin,
-        parent_batch.expect("ordinary mutation commits immediately"),
-        "parent team",
-    )
-    .await;
-    let (_, _, team_edge_batch) = admin
+    let (_, _, team_edge_tx) = admin
         .insert(
             "team_team_edges",
             row_input!("child_team" => seed_team, "parent_team" => parent_team),
         )
         .expect("insert team closure edge");
-    wait_edge_batch(
-        admin,
-        team_edge_batch.expect("ordinary mutation commits immediately"),
-        "team closure edge",
-    )
-    .await;
 
-    let (_, _, plain_batch) = admin
+    let (_, _, plain_tx) = admin
         .insert(
             "resources",
             row_input!(
@@ -216,13 +184,7 @@ async fn seed_policy_branch_closure_rows(admin: &JazzClient) {
             ),
         )
         .expect("insert plain-visible resource");
-    wait_edge_batch(
-        admin,
-        plain_batch.expect("ordinary mutation commits immediately"),
-        "plain-visible resource",
-    )
-    .await;
-    let (gathered, _, gathered_batch) = admin
+    let (gathered, _, gathered_tx) = admin
         .insert(
             "resources",
             row_input!(
@@ -232,13 +194,7 @@ async fn seed_policy_branch_closure_rows(admin: &JazzClient) {
             ),
         )
         .expect("insert gather-visible resource");
-    wait_edge_batch(
-        admin,
-        gathered_batch.expect("ordinary mutation commits immediately"),
-        "gather-visible resource",
-    )
-    .await;
-    let (_, _, third_batch) = admin
+    let (_, _, third_tx) = admin
         .insert(
             "resources",
             row_input!(
@@ -248,13 +204,7 @@ async fn seed_policy_branch_closure_rows(admin: &JazzClient) {
             ),
         )
         .expect("insert third-branch resource");
-    wait_edge_batch(
-        admin,
-        third_batch.expect("ordinary mutation commits immediately"),
-        "third-branch resource",
-    )
-    .await;
-    let (hidden, _, hidden_batch) = admin
+    let (hidden, _, hidden_tx) = admin
         .insert(
             "resources",
             row_input!(
@@ -264,35 +214,32 @@ async fn seed_policy_branch_closure_rows(admin: &JazzClient) {
             ),
         )
         .expect("insert hidden resource");
-    wait_edge_batch(
-        admin,
-        hidden_batch.expect("ordinary mutation commits immediately"),
-        "hidden resource",
-    )
-    .await;
 
-    let (_, _, access_batch) = admin
+    let (_, _, access_tx) = admin
         .insert(
             "resource_access_edges",
             row_input!("resource" => gathered, "team" => parent_team, "grant_role" => "viewer"),
         )
         .expect("insert gathered resource access edge");
-    wait_edge_batch(
-        admin,
-        access_batch.expect("ordinary mutation commits immediately"),
-        "gathered resource access edge",
-    )
-    .await;
-    let (_, _, hidden_access_batch) = admin
+    let (_, _, hidden_access_tx) = admin
         .insert(
             "resource_access_edges",
             row_input!("resource" => hidden, "team" => seed_team, "grant_role" => "blocked"),
         )
         .expect("insert non-matching hidden resource access edge");
-    wait_edge_batch(
+    support::wait_for_edge_txs(
         admin,
-        hidden_access_batch.expect("ordinary mutation commits immediately"),
-        "non-matching hidden resource access edge",
+        &[
+            seed_tx.expect("ordinary mutation commits immediately"),
+            parent_tx.expect("ordinary mutation commits immediately"),
+            team_edge_tx.expect("ordinary mutation commits immediately"),
+            plain_tx.expect("ordinary mutation commits immediately"),
+            gathered_tx.expect("ordinary mutation commits immediately"),
+            third_tx.expect("ordinary mutation commits immediately"),
+            hidden_tx.expect("ordinary mutation commits immediately"),
+            access_tx.expect("ordinary mutation commits immediately"),
+            hidden_access_tx.expect("ordinary mutation commits immediately"),
+        ],
     )
     .await;
 }

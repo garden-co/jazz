@@ -172,13 +172,11 @@ async fn query_applies_claims_select_policy() {
                     row_input!("name" => "Party Room", "join_code" => "secret-123"),
                 )
                 .expect("admin creates claims-gated room");
-            admin
-                .wait_for_transaction(
-                    transaction_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("room reaches edge");
+            support::wait_for_edge_txs(
+                &admin,
+                &[transaction_id.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
             let query = jazz::query::Query::from("rooms");
 
@@ -262,32 +260,26 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 .connect()
                 .await;
 
-            let (integer_row_id, _, integer_batch) = admin
+            let (integer_row_id, _, integer_tx) = admin
                 .insert(
                     "integer_claim_rows",
                     row_input!("access_level" => Value::Integer(-7)),
                 )
                 .expect("admin creates integer claims row");
-            admin
-                .wait_for_transaction(
-                    integer_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("integer row reaches edge");
-            let (bigint_row_id, _, bigint_batch) = admin
+            let (bigint_row_id, _, bigint_tx) = admin
                 .insert(
                     "bigint_claim_rows",
                     row_input!("access_level" => Value::BigInt(7)),
                 )
                 .expect("admin creates bigint claims row");
-            admin
-                .wait_for_transaction(
-                    bigint_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("bigint row reaches edge");
+            support::wait_for_edge_txs(
+                &admin,
+                &[
+                    integer_tx.expect("ordinary mutation commits immediately"),
+                    bigint_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             let bigint_claim_user = TestingClient::builder()
                 .with_server(&server)
@@ -365,26 +357,20 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                 .connect()
                 .await;
 
-            let (in_list_row_id, _, in_list_batch_id) = admin
+            let (in_list_row_id, _, in_list_tx_id) = admin
                 .insert("role_in_list_rooms", row_input!("name" => "in-list room"))
                 .expect("admin creates in-list room");
-            admin
-                .wait_for_transaction(
-                    in_list_batch_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("in-list room reaches edge");
-            let (or_row_id, _, or_batch_id) = admin
+            let (or_row_id, _, or_tx_id) = admin
                 .insert("role_or_rooms", row_input!("name" => "or room"))
                 .expect("admin creates or room");
-            admin
-                .wait_for_transaction(
-                    or_batch_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("or room reaches edge");
+            support::wait_for_edge_txs(
+                &admin,
+                &[
+                    in_list_tx_id.expect("ordinary mutation commits immediately"),
+                    or_tx_id.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             let in_list_query = jazz::query::Query::from("role_in_list_rooms");
             let or_query = jazz::query::Query::from("role_or_rooms");
@@ -504,13 +490,11 @@ async fn subscription_matches_claims_select_query() {
                     row_input!("name" => "Subscription Room", "join_code" => "secret-123"),
                 )
                 .expect("admin creates claims-gated room");
-            admin
-                .wait_for_transaction(
-                    transaction_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("room reaches edge");
+            support::wait_for_edge_txs(
+                &admin,
+                &[transaction_id.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
             let query = jazz::query::Query::from("rooms");
 
@@ -649,16 +633,13 @@ async fn same_identity_sessions_keep_claims_isolated() {
                 .await;
             let query = jazz::query::Query::from("admin_rooms");
 
-            let (initial_id, _, initial_batch) = writer
+            let (initial_id, _, initial_tx) = writer
                 .insert(
                     "admin_rooms",
                     row_input!("name" => "visible before revocation"),
                 )
                 .expect("writer inserts initially visible room");
-            writer
-                .wait_for_transaction(initial_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
-                .await
-                .expect("initial room reaches edge");
+            support::wait_for_edge_txs(&writer, &[initial_tx.expect("ordinary mutation commits immediately")]).await;
 
             let mut stream = authorized
                 .subscribe(query.clone())
@@ -695,13 +676,10 @@ async fn same_identity_sessions_keep_claims_isolated() {
             // has the same user id. It must not implicitly revoke or widen
             // the existing session's authorization; global revocation requires
             // a distinct authenticated control signal.
-            let (future_id, _, future_batch) = writer
+            let (future_id, _, future_tx) = writer
                 .insert("admin_rooms", row_input!("name" => "visible to original session"))
                 .expect("writer inserts a later room");
-            writer
-                .wait_for_transaction(future_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
-                .await
-                .expect("later room reaches edge");
+            support::wait_for_edge_txs(&writer, &[future_tx.expect("ordinary mutation commits immediately")]).await;
             wait_for_subscription_update(
                 &mut stream,
                 &mut stream_log,
@@ -745,32 +723,26 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 .connect()
                 .await;
 
-            let (alpha_id, _, alpha_batch) = admin
+            let (alpha_id, _, alpha_tx) = admin
                 .insert(
                     "rooms",
                     row_input!("name" => "Alpha Room", "join_code" => "alpha"),
                 )
                 .expect("admin creates alpha room");
-            admin
-                .wait_for_transaction(
-                    alpha_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("alpha room reaches edge");
-            let (beta_id, _, beta_batch) = admin
+            let (beta_id, _, beta_tx) = admin
                 .insert(
                     "rooms",
                     row_input!("name" => "Beta Room", "join_code" => "beta"),
                 )
                 .expect("admin creates beta room");
-            admin
-                .wait_for_transaction(
-                    beta_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("beta room reaches edge");
+            support::wait_for_edge_txs(
+                &admin,
+                &[
+                    alpha_tx.expect("ordinary mutation commits immediately"),
+                    beta_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             let query = jazz::query::Query::from("rooms");
 
@@ -1134,19 +1106,17 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                 .ready_on("integer_claim_rows", READY_TIMEOUT)
                 .connect()
                 .await;
-            let (_, _, integer_batch) = bigint_claim_user
+            let (_, _, integer_tx) = bigint_claim_user
                 .insert(
                     "integer_claim_rows",
                     row_input!("access_level" => Value::Integer(-7)),
                 )
                 .expect("I64 claim creates I32 row");
-            bigint_claim_user
-                .wait_for_transaction(
-                    integer_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("I64 claim matches I32 write policy");
+            support::wait_for_edge_txs(
+                &bigint_claim_user,
+                &[integer_tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
             let integer_claim_user = TestingClient::builder()
                 .with_server(&server)
@@ -1157,19 +1127,17 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                 .ready_on("bigint_claim_rows", READY_TIMEOUT)
                 .connect()
                 .await;
-            let (_, _, bigint_batch) = integer_claim_user
+            let (_, _, bigint_tx) = integer_claim_user
                 .insert(
                     "bigint_claim_rows",
                     row_input!("access_level" => Value::BigInt(7)),
                 )
                 .expect("U32 claim creates I64 row");
-            integer_claim_user
-                .wait_for_transaction(
-                    bigint_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("U32 claim matches I64 write policy");
+            support::wait_for_edge_txs(
+                &integer_claim_user,
+                &[bigint_tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
             bigint_claim_user
                 .shutdown()
