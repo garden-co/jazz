@@ -1814,6 +1814,28 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        // Binding changes several coupled runtime structures before its
+        // initial hydration can complete. Keep those changes in an operation-
+        // local runtime generation so cancellation is equivalent to never
+        // starting the bind.
+        let mut staged = self.clone();
+        let subscription = staged
+            .bind_shape_with_public_fields_staged(shape_id, binding_values, public_fields, storage)
+            .await?;
+        *self = staged;
+        Ok(subscription)
+    }
+
+    async fn bind_shape_with_public_fields_staged<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        public_fields: BTreeMap<String, Vec<String>>,
+        storage: &S,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
         self.flush_pending_binding_retractions(storage).await?;
         let shape = self
             .prepared_shapes
