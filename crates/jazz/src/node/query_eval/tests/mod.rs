@@ -28,7 +28,7 @@ use crate::protocol::{
 };
 use crate::query::{
     Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, PolicyBranch, Query, claim, col,
-    contains, eq, gt, in_list, lit, lte, param,
+    contains, eq, gt, in_list, lit, lte, param, table,
 };
 use crate::schema::{JazzSchema, Policy, TableSchema};
 
