@@ -105,7 +105,8 @@ where
         );
         if !matches!(stored.fate, Fate::Rejected(_)) {
             for version in &content_versions {
-                self.update_merge_heads_for_content_version(&mut batch, version)?;
+                self.update_merge_heads_for_content_version(&mut batch, version)
+                    .await?;
             }
         }
         if let Some(global_time) = stored.global_time {
@@ -132,7 +133,8 @@ where
             .copied()
             .filter(|global_time| Some(*global_time) != stored.global_time)
         {
-            self.prune_ahead_current_for_global_time(&mut batch, global_time)?;
+            self.prune_ahead_current_for_global_time(&mut batch, global_time)
+                .await?;
         }
         let rejected_payload = if cleanup_rejected_versions {
             self.remove_rejected_local_versions(tx_id, &stored, &mut batch).await?
@@ -516,11 +518,13 @@ where
         Ok(true)
     }
 
-    pub(super) async fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error>
+    pub(super) async fn drain_parked_commit_units(
+        &mut self,
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,
     {
-        let mut updates = Vec::new();
+        let mut updates = PublicationOutcome::settled(Vec::new());
         loop {
             let parked = self
                 .parking
@@ -826,7 +830,8 @@ where
                 &branch_key,
                 row_uuid,
                 tx_id,
-            )?;
+            )
+            .await?;
         }
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;

@@ -1542,6 +1542,44 @@ impl PublishedTransaction {
     }
 }
 
+/// The logical result of an operation together with every resident write that
+/// must be observed locally before it is persisted and released externally.
+pub(crate) struct PublicationOutcome<T> {
+    pub(crate) value: T,
+    pub(crate) publications: Vec<PublishedTransaction>,
+}
+
+impl<T> PublicationOutcome<T> {
+    pub(crate) fn settled(value: T) -> Self {
+        Self {
+            value,
+            publications: Vec::new(),
+        }
+    }
+
+    pub(crate) fn published(value: T, publication: PublishedTransaction) -> Self {
+        Self {
+            value,
+            publications: vec![publication],
+        }
+    }
+
+    pub(crate) fn append(&mut self, mut other: PublicationOutcome<()>) {
+        self.publications.append(&mut other.publications);
+    }
+}
+
+impl<T> PublicationOutcome<Vec<T>> {
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.append_outcome(other);
+    }
+
+    pub(crate) fn append_outcome(&mut self, mut other: Self) {
+        self.value.append(&mut other.value);
+        self.publications.append(&mut other.publications);
+    }
+}
+
 struct CatalogueOpenState {
     storage: BoxedStorage,
     schemas: BTreeMap<SchemaVersionId, SchemaVersion>,
