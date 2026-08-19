@@ -401,36 +401,40 @@ mod tests {
         BtreeStorage::from_file(MemoryFile::new(), column_families).unwrap()
     }
 
-    #[test]
-    fn write_many_prevalidates_column_families_before_writing() {
+    #[futures_test::test]
+    async fn write_many_prevalidates_column_families_before_writing() {
         let storage = memory_storage(&["records"]);
 
         let error = storage
-            .write_many(&[
-                WriteOperation::set("records", b"1", b"record"),
-                WriteOperation::set("missing", b"2", b"nope"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"1", b"record"),
+                OwnedWriteOperation::set("missing", b"2", b"nope"),
             ])
+            .await
             .unwrap_err();
 
         assert!(matches!(error, Error::ColumnFamilyNotFound(_)));
-        assert_eq!(storage.get("records", b"1").unwrap(), None);
+        assert_eq!(
+            storage.get("records".into(), b"1".to_vec()).await.unwrap(),
+            None
+        );
     }
 
-    #[test]
-    fn memory_file_conforms_to_order_and_atomic_batch_contract() {
+    #[futures_test::test]
+    async fn memory_file_conforms_to_order_and_atomic_batch_contract() {
         let storage = memory_storage(&["records"]);
 
-        super::super::conformance::persistence_order_and_batch_atomicity(storage);
+        super::super::conformance::persistence_order_and_batch_atomicity(storage).await;
     }
 
-    #[test]
-    fn memory_file_conforms_to_delta_append_contract() {
+    #[futures_test::test]
+    async fn memory_file_conforms_to_delta_append_contract() {
         let storage = memory_storage(&["records"]);
-        super::super::conformance::delta_append_current_winner_observes_merged_state(storage);
+        super::super::conformance::delta_append_current_winner_observes_merged_state(storage).await;
     }
 
-    #[test]
-    fn write_many_flushes_replayable_wal_without_eager_checkpoint() {
+    #[futures_test::test]
+    async fn write_many_flushes_replayable_wal_without_eager_checkpoint() {
         // This is intentionally a storage-level test: public database APIs can
         // observe persistence, but not whether browser-fidelity BTree batches
         // use the WAL path instead of rewriting checkpoint pages per batch.
@@ -438,7 +442,8 @@ mod tests {
         let storage = BtreeStorage::from_file(file.clone(), &["records"]).unwrap();
 
         storage
-            .write_many(&[WriteOperation::set("records", b"1", b"record")])
+            .write_many(vec![OwnedWriteOperation::set("records", b"1", b"record")])
+            .await
             .unwrap();
 
         let checkpoint_len = storage.tree.borrow().checkpoint_state().total_pages
@@ -450,19 +455,19 @@ mod tests {
 
         let reopened = BtreeStorage::from_file(file.clone(), &["records"]).unwrap();
         assert_eq!(
-            reopened.get("records", b"1").unwrap(),
+            reopened.get("records".into(), b"1".to_vec()).await.unwrap(),
             Some(b"record".to_vec())
         );
         drop(reopened);
 
-        storage.close().unwrap();
+        storage.close().await.unwrap();
         let checkpoint_len = storage.tree.borrow().checkpoint_state().total_pages
             * BTreeOptions::default().page_size as u64;
         assert_eq!(file.len().unwrap(), checkpoint_len);
     }
 
-    #[test]
-    fn configured_cadence_flushes_at_the_boundary_and_final_partial_batch() {
+    #[futures_test::test]
+    async fn configured_cadence_flushes_at_the_boundary_and_final_partial_batch() {
         // This is intentionally a storage-level test: the public Db API cannot
         // observe OPFS SyncAccessHandle flush calls, which are the physical
         // durability boundary exercised by this setting.
@@ -474,22 +479,25 @@ mod tests {
         .unwrap();
         let storage = BtreeStorage::from_tree(tree, &["records"]).unwrap();
         let baseline = file.flushes();
-        storage.set_write_flush_cadence(2).unwrap();
+        storage.set_write_flush_cadence(2).await.unwrap();
 
         storage
-            .write_many(&[WriteOperation::set("records", b"1", b"first")])
+            .write_many(vec![OwnedWriteOperation::set("records", b"1", b"first")])
+            .await
             .unwrap();
         assert_eq!(file.flushes(), baseline, "first write is below cadence");
 
         storage
-            .write_many(&[WriteOperation::set("records", b"2", b"second")])
+            .write_many(vec![OwnedWriteOperation::set("records", b"2", b"second")])
+            .await
             .unwrap();
         assert_eq!(file.flushes(), baseline + 1, "second write crosses cadence");
 
         storage
-            .write_many(&[WriteOperation::set("records", b"3", b"third")])
+            .write_many(vec![OwnedWriteOperation::set("records", b"3", b"third")])
+            .await
             .unwrap();
-        storage.flush_write_boundary().unwrap();
+        storage.flush_write_boundary().await.unwrap();
         assert_eq!(
             file.flushes(),
             baseline + 2,
@@ -505,23 +513,23 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_btree_conforms_to_order_and_atomic_batch_contract() {
+    #[futures_test::test]
+    async fn native_btree_conforms_to_order_and_atomic_batch_contract() {
         let storage = native_storage(&["records"]);
-        super::super::conformance::persistence_order_and_batch_atomicity(storage);
+        super::super::conformance::persistence_order_and_batch_atomicity(storage).await;
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_btree_conforms_to_delta_append_contract() {
+    #[futures_test::test]
+    async fn native_btree_conforms_to_delta_append_contract() {
         let storage = native_storage(&["records"]);
-        super::super::conformance::delta_append_current_winner_observes_merged_state(storage);
+        super::super::conformance::delta_append_current_winner_observes_merged_state(storage).await;
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_btree_reopen_adds_column_families_without_losing_data() {
+    #[futures_test::test]
+    async fn native_btree_reopen_adds_column_families_without_losing_data() {
         let storage = native_storage(&["records"]);
-        super::super::conformance::reopen_preserves_data_and_adds_families(storage);
+        super::super::conformance::reopen_preserves_data_and_adds_families(storage).await;
     }
 }

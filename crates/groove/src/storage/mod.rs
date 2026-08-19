@@ -1212,6 +1212,40 @@ pub enum OwnedWriteOperation {
 }
 
 impl OwnedWriteOperation {
+    #[cfg(test)]
+    pub(crate) fn set(
+        cf: impl Into<String>,
+        key: impl Into<Vec<u8>>,
+        value: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::Set {
+            cf: cf.into(),
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delete(cf: impl Into<String>, key: impl Into<Vec<u8>>) -> Self {
+        Self::Delete {
+            cf: cf.into(),
+            key: key.into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delta(
+        cf: impl Into<String>,
+        key: impl Into<Vec<u8>>,
+        delta: StorageDelta,
+    ) -> Self {
+        Self::Delta {
+            cf: cf.into(),
+            key: key.into(),
+            delta,
+        }
+    }
+
     pub fn as_write_operation(&self) -> WriteOperation<'_> {
         match self {
             Self::Set { cf, key, value } => WriteOperation::set(cf, key, value),
@@ -2131,18 +2165,36 @@ impl From<crate::records::Error> for Error {
 pub(crate) mod conformance {
     use super::*;
 
-    pub(crate) fn persistence_order_and_batch_atomicity<S>(storage: S)
+    pub(crate) async fn persistence_order_and_batch_atomicity<S>(storage: S)
     where
         S: OrderedKvStorage,
     {
-        storage.set("records", b"user:2", b"two").unwrap();
-        storage.set("records", b"user:1", b"one").unwrap();
-        storage.set("records", b"user:10", b"ten").unwrap();
-        storage.set("records", &[0xff, 0x00], b"ff-zero").unwrap();
-        storage.set("records", &[0xff, 0x01], b"ff-one").unwrap();
+        storage
+            .set("records".into(), b"user:2".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"user:1".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"user:10".to_vec(), b"ten".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), vec![0xff, 0x00], b"ff-zero".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), vec![0xff, 0x01], b"ff-one".to_vec())
+            .await
+            .unwrap();
 
         assert_eq!(
-            storage.range("records", b"user:", b"user;").unwrap(),
+            storage
+                .range("records".into(), b"user:".to_vec(), b"user;".to_vec())
+                .await
+                .unwrap(),
             vec![
                 (b"user:1".to_vec(), b"one".to_vec()),
                 (b"user:10".to_vec(), b"ten".to_vec()),
@@ -2150,7 +2202,7 @@ pub(crate) mod conformance {
             ]
         );
         assert_eq!(
-            storage.prefix("records", &[0xff]).unwrap(),
+            storage.prefix("records".into(), vec![0xff]).await.unwrap(),
             vec![
                 (vec![0xff, 0x00], b"ff-zero".to_vec()),
                 (vec![0xff, 0x01], b"ff-one".to_vec()),
@@ -2158,22 +2210,33 @@ pub(crate) mod conformance {
         );
 
         let error = storage
-            .write_many(&[
-                WriteOperation::set("records", b"user:3", b"three"),
-                WriteOperation::set("missing", b"user:4", b"four"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"user:3", b"three"),
+                OwnedWriteOperation::set("missing", b"user:4", b"four"),
             ])
+            .await
             .unwrap_err();
         assert!(matches!(error, Error::ColumnFamilyNotFound(_)));
-        assert_eq!(storage.get("records", b"user:3").unwrap(), None);
+        assert_eq!(
+            storage
+                .get("records".into(), b"user:3".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
 
         storage
-            .write_many(&[
-                WriteOperation::set("records", b"user:3", b"three"),
-                WriteOperation::delete("records", b"user:2"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"user:3", b"three"),
+                OwnedWriteOperation::delete("records", b"user:2"),
             ])
+            .await
             .unwrap();
         assert_eq!(
-            storage.prefix("records", b"user:").unwrap(),
+            storage
+                .prefix("records".into(), b"user:".to_vec())
+                .await
+                .unwrap(),
             vec![
                 (b"user:1".to_vec(), b"one".to_vec()),
                 (b"user:10".to_vec(), b"ten".to_vec()),
@@ -2182,26 +2245,38 @@ pub(crate) mod conformance {
         );
     }
 
-    pub(crate) fn reopen_preserves_data_and_adds_families<S>(storage: S)
+    pub(crate) async fn reopen_preserves_data_and_adds_families<S>(storage: S)
     where
-        S: ReopenableStorage,
+        S: ReopenableStorage + 'static,
     {
-        storage.set("records", b"1", b"record").unwrap();
+        storage
+            .set("records".into(), b"1".to_vec(), b"record".to_vec())
+            .await
+            .unwrap();
 
-        let storage = storage.reopen(&["records", "indices"]).unwrap();
-        storage.set("indices", b"name:record", b"1").unwrap();
+        let storage = storage
+            .reopen(vec!["records".into(), "indices".into()])
+            .await
+            .unwrap();
+        storage
+            .set("indices".into(), b"name:record".to_vec(), b"1".to_vec())
+            .await
+            .unwrap();
 
         assert_eq!(
-            storage.get("records", b"1").unwrap(),
+            storage.get("records".into(), b"1".to_vec()).await.unwrap(),
             Some(b"record".to_vec())
         );
         assert_eq!(
-            storage.get("indices", b"name:record").unwrap(),
+            storage
+                .get("indices".into(), b"name:record".to_vec())
+                .await
+                .unwrap(),
             Some(b"1".to_vec())
         );
     }
 
-    pub(crate) fn delta_append_current_winner_observes_merged_state<S>(storage: S)
+    pub(crate) async fn delta_append_current_winner_observes_merged_state<S>(storage: S)
     where
         S: OrderedKvStorage,
     {
@@ -2234,40 +2309,68 @@ pub(crate) mod conformance {
         let loser = record(9, 9, b"loser");
 
         storage
-            .write_many(&[WriteOperation::delta(
+            .write_many(vec![OwnedWriteOperation::delta(
                 "records",
                 b"row",
-                &delta(10, 1, Vec::new(), older.clone()),
+                delta(10, 1, Vec::new(), older.clone()),
             )])
+            .await
             .unwrap();
-        assert_eq!(storage.get("records", b"row").unwrap(), Some(older.clone()));
+        assert_eq!(
+            storage
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(older.clone())
+        );
 
         storage
-            .write_many(&[WriteOperation::delta(
+            .write_many(vec![OwnedWriteOperation::delta(
                 "records",
                 b"row",
-                &delta(20, 1, Vec::new(), newer.clone()),
+                delta(20, 1, Vec::new(), newer.clone()),
             )])
+            .await
             .unwrap();
-        assert_eq!(storage.get("records", b"row").unwrap(), Some(newer.clone()));
+        assert_eq!(
+            storage
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(newer.clone())
+        );
 
         storage
-            .write_many(&[WriteOperation::delta(
+            .write_many(vec![OwnedWriteOperation::delta(
                 "records",
                 b"row",
-                &delta(11, 2, vec![(20, 1)], child.clone()),
+                delta(11, 2, vec![(20, 1)], child.clone()),
             )])
+            .await
             .unwrap();
-        assert_eq!(storage.get("records", b"row").unwrap(), Some(child.clone()));
+        assert_eq!(
+            storage
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(child.clone())
+        );
 
         storage
-            .write_many(&[WriteOperation::delta(
+            .write_many(vec![OwnedWriteOperation::delta(
                 "records",
                 b"row",
-                &delta(9, 9, Vec::new(), loser),
+                delta(9, 9, Vec::new(), loser),
             )])
+            .await
             .unwrap();
-        assert_eq!(storage.get("records", b"row").unwrap(), Some(child));
+        assert_eq!(
+            storage
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(child)
+        );
     }
 }
 
@@ -3372,22 +3475,22 @@ mod tests {
         assert_eq!(storage.get("records", b"1").unwrap(), None);
     }
 
-    #[test]
-    fn memory_storage_conforms_to_order_and_atomic_batch_contract() {
+    #[futures_test::test]
+    async fn memory_storage_conforms_to_order_and_atomic_batch_contract() {
         let storage = MemoryStorage::new(&["records"]);
-        conformance::persistence_order_and_batch_atomicity(storage);
+        conformance::persistence_order_and_batch_atomicity(storage).await;
     }
 
-    #[test]
-    fn memory_storage_reopen_adds_column_families_without_losing_data() {
+    #[futures_test::test]
+    async fn memory_storage_reopen_adds_column_families_without_losing_data() {
         let storage = MemoryStorage::new(&["records"]);
-        conformance::reopen_preserves_data_and_adds_families(storage);
+        conformance::reopen_preserves_data_and_adds_families(storage).await;
     }
 
-    #[test]
-    fn memory_storage_conforms_to_delta_append_contract() {
+    #[futures_test::test]
+    async fn memory_storage_conforms_to_delta_append_contract() {
         let storage = MemoryStorage::new(&["records"]);
-        conformance::delta_append_current_winner_observes_merged_state(storage);
+        conformance::delta_append_current_winner_observes_merged_state(storage).await;
     }
 
     #[test]
@@ -3408,13 +3511,13 @@ mod tests {
         assert_eq!(stored.get_idx(0).unwrap(), Value::U64(42));
     }
 
-    #[test]
-    fn native_durable_test_store_conforms_to_delta_append_contract() {
+    #[futures_test::test]
+    async fn native_durable_test_store_conforms_to_delta_append_contract() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                 .unwrap();
-        conformance::delta_append_current_winner_observes_merged_state(storage);
+        conformance::delta_append_current_winner_observes_merged_state(storage).await;
     }
 
     #[test]
