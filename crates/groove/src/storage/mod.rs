@@ -1509,6 +1509,19 @@ fn overlay_point_value(
     Ok(value)
 }
 
+fn snapshot_staged_operations(
+    staged_writes: &RefCell<StagedWriteState>,
+    include: impl Fn(&OwnedWriteOperation) -> bool,
+) -> Vec<OwnedWriteOperation> {
+    staged_writes
+        .borrow()
+        .operations
+        .iter()
+        .filter(|operation| include(operation))
+        .cloned()
+        .collect()
+}
+
 impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
@@ -1520,17 +1533,19 @@ where
             return self.base.get(cf, key);
         }
 
-        if let Some(index) = staged_writes.latest_index(&cf, &key) {
-            match &staged_writes.operations[index] {
-                OwnedWriteOperation::Set { value, .. } => {
-                    let value = value.clone();
-                    return Box::pin(async move { Ok(Some(value)) });
-                }
-                OwnedWriteOperation::Delete { .. } => {
-                    return Box::pin(async { Ok(None) });
-                }
-                OwnedWriteOperation::Delta { .. } => {}
+        let Some(index) = staged_writes.latest_index(&cf, &key) else {
+            drop(staged_writes);
+            return self.base.get(cf, key);
+        };
+        match &staged_writes.operations[index] {
+            OwnedWriteOperation::Set { value, .. } => {
+                let value = value.clone();
+                return Box::pin(async move { Ok(Some(value)) });
             }
+            OwnedWriteOperation::Delete { .. } => {
+                return Box::pin(async { Ok(None) });
+            }
+            OwnedWriteOperation::Delta { .. } => {}
         }
 
         let operations = staged_writes
@@ -1540,10 +1555,6 @@ where
             .cloned()
             .collect::<Vec<_>>();
         drop(staged_writes);
-
-        if operations.is_empty() {
-            return self.base.get(cf, key);
-        }
 
         Box::pin(async move {
             let base = self.base.get(cf.clone(), key.clone()).await?;
@@ -1572,7 +1583,11 @@ where
         start: Vec<u8>,
         end: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let operations = self.staged_writes.borrow().operations.clone();
+        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
+            operation.cf() == cf
+                && operation.key() >= start.as_slice()
+                && operation.key() < end.as_slice()
+        });
         Box::pin(async move {
             let mut values = collect_scan(
                 self.base
@@ -1596,7 +1611,9 @@ where
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let operations = self.staged_writes.borrow().operations.clone();
+        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
+            operation.cf() == cf && operation.key().starts_with(&prefix)
+        });
         Box::pin(async move {
             let mut values =
                 collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
@@ -1623,7 +1640,9 @@ where
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
-        let operations = self.staged_writes.borrow().operations.clone();
+        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
+            operation.cf() == cf && operation.key().starts_with(&prefix)
+        });
         Box::pin(async move {
             let staged = RefCell::new(StagedWriteState::from(operations));
             let needs_full_merge = staged.borrow().operations.iter().any(|operation| {
@@ -1664,7 +1683,11 @@ where
         prefix: Vec<u8>,
         upper: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
-        let operations = self.staged_writes.borrow().operations.clone();
+        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
+            operation.cf() == cf
+                && operation.key().starts_with(&prefix)
+                && operation.key() <= upper.as_slice()
+        });
         Box::pin(async move {
             let staged = RefCell::new(StagedWriteState::from(operations));
             let needs_full_merge = staged.borrow().operations.iter().any(|operation| {
@@ -1761,7 +1784,11 @@ where
         start: Vec<u8>,
         end: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let operations = self.staged_writes.borrow().operations.clone();
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
+            operation.cf() == cf
+                && operation.key() >= start.as_slice()
+                && operation.key() < end.as_slice()
+        });
         Box::pin(async move {
             let mut values = collect_scan(
                 self.base
@@ -1785,7 +1812,9 @@ where
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let operations = self.staged_writes.borrow().operations.clone();
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
+            operation.cf() == cf && operation.key().starts_with(&prefix)
+        });
         Box::pin(async move {
             let mut values =
                 collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
@@ -1800,7 +1829,9 @@ where
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let operations = self.staged_writes.borrow().operations.clone();
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
+            operation.cf() == cf && operation.key().starts_with(&prefix)
+        });
         Box::pin(async move {
             let mut values =
                 collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
@@ -3081,6 +3112,101 @@ mod tests {
         assert_eq!(
             storage.get("indices".into(), b"a".to_vec()).await.unwrap(),
             Some(b"base-a".to_vec())
+        );
+    }
+
+    // Internal receipt: the regression is work performed inside the storage overlay and is not
+    // observable through a higher-level public API except as elapsed time.
+    #[futures_test::test]
+    #[ignore = "manual scaling receipt for narrow reads over a large staged transaction"]
+    async fn staged_overlay_narrow_scan_scaling_receipt() {
+        const UNRELATED_ROWS: usize = 20_000;
+        const REPETITIONS: usize = 20;
+
+        let storage = MemoryStorage::new(&["records"]);
+        let transaction = StorageTransaction::new(&storage);
+        let payload = vec![7; 512];
+        transaction.stage_owned_operations((0..UNRELATED_ROWS).map(|index| {
+            OwnedWriteOperation::set(
+                "records",
+                format!("unrelated:{index:05}").as_bytes(),
+                payload.clone(),
+            )
+        }));
+        transaction.stage_owned_operations((0..10).map(|index| {
+            OwnedWriteOperation::set(
+                "records",
+                format!("target:{index:05}").as_bytes(),
+                index.to_string().as_bytes(),
+            )
+        }));
+
+        let whole_snapshot_started = std::time::Instant::now();
+        for _ in 0..(REPETITIONS * 5) {
+            std::hint::black_box(transaction.staged_writes.borrow().operations.clone());
+        }
+        let whole_snapshot_elapsed = whole_snapshot_started.elapsed();
+
+        let started = std::time::Instant::now();
+        for _ in 0..REPETITIONS {
+            let range = collect_scan(
+                transaction
+                    .scan_range("records".into(), b"target:".to_vec(), b"target;".to_vec())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(range.len(), 10);
+
+            let prefix = collect_scan(
+                transaction
+                    .scan_prefix("records".into(), b"target:".to_vec())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(prefix.len(), 10);
+
+            let reverse = collect_scan(
+                transaction
+                    .scan_prefix_reverse("records".into(), b"target:".to_vec())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reverse.len(), 10);
+
+            assert_eq!(
+                transaction
+                    .last_with_prefix("records".into(), b"target:".to_vec())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+                b"target:00009"
+            );
+            assert_eq!(
+                transaction
+                    .last_with_prefix_before_or_at(
+                        "records".into(),
+                        b"target:".to_vec(),
+                        b"target:00004".to_vec(),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+                b"target:00004"
+            );
+        }
+
+        println!(
+            "staged_overlay_narrow_scan_scaling_receipt unrelated_rows={UNRELATED_ROWS} repetitions={REPETITIONS} removed_whole_snapshot_ms={:.3} five_filtered_read_shapes_ms={:.3}",
+            whole_snapshot_elapsed.as_secs_f64() * 1000.0,
+            started.elapsed().as_secs_f64() * 1000.0
         );
     }
 
