@@ -145,22 +145,8 @@ where
             .collect::<Vec<_>>();
         let tick_start = Instant::now();
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        // A storage transaction can fail after the runtime has applied the
-        // corresponding tick. Keep the inverse delta so a rare failure can
-        // undo just this tick without cloning all retained runtime state on
-        // every successful commit.
-        let rollback_deltas = table_deltas
-            .iter()
-            .cloned()
-            .map(|mut delta| {
-                for record in &mut delta.deltas {
-                    record.weight = -record.weight;
-                }
-                delta
-            })
-            .collect::<Vec<_>>();
-        let tick = self
-            .ivm_runtime
+        let mut staged_runtime = self.ivm_runtime.clone();
+        let tick = staged_runtime
             .tick_staged(table_deltas, &storage, &mut staged_operations)
             .await
             .map_err(Error::IvmRuntime)?;
@@ -177,13 +163,11 @@ where
         drop(operations);
         txn.stage_owned_operations(staged_operations);
         if let Err(error) = txn.commit().await {
-            // The runtime has already advanced in memory by this point. The v0
-            // policy is to make the Database instance fatal on final commit
-            // failure rather than serve possibly torn in-memory state.
-            self.ivm_runtime.discard_staged_subscription_notifications();
+            staged_runtime.discard_staged_subscription_notifications();
             self.poisoned = true;
             return Err(Error::from(error));
         }
+        self.ivm_runtime = staged_runtime;
         if self
             .durable_publication_state
             .lock()
