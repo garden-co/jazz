@@ -39,27 +39,27 @@ fn edges_by_src_shape_graph() -> GraphBuilder {
     ])
 }
 
-fn open_db() -> (tempfile::TempDir, Database<RocksDbStorage>) {
+async fn open_db() -> (tempfile::TempDir, Database<RocksDbStorage>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &["edges"], Durability::WalNoSync)
             .unwrap();
-    let db = Database::new(edges_schema(), storage).unwrap();
+    let db = Database::new(edges_schema(), storage).await.unwrap();
     (temp_dir, db)
 }
 
-fn insert_edge(db: &mut Database<RocksDbStorage>, id: u64, src: u64, dst: u64) {
+async fn insert_edge(db: &mut Database<RocksDbStorage>, id: u64, src: u64, dst: u64) {
     let mut batch = db.open_batch();
     batch.insert(
         "edges",
         vec![Value::U64(id), Value::U64(src), Value::U64(dst)],
     );
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
 }
 
-#[test]
-fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
-    let (_dir, mut db) = open_db();
+#[futures_test::test]
+async fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
+    let (_dir, mut db) = open_db().await;
     let shape = db
         .prepare_one_sink(
             edges_by_src_shape_graph(),
@@ -67,26 +67,29 @@ fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
             binding_descriptor(),
             ["src"],
         )
+        .await
         .unwrap();
 
     // Subscriber for src=7, whose receiver is dropped without unsubscribe.
     let sub1 = db
         .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .await
         .unwrap();
     let _initial = sub1.recv().unwrap();
     drop(sub1);
 
     // This commit produces a delta for src=7, the send fails, and the runtime
     // auto-unsubscribes through the storage-less path.
-    insert_edge(&mut db, 1, 7, 100);
+    insert_edge(&mut db, 1, 7, 100).await;
 
     // Re-subscribing the same binding must start from weight 1, not 2.
     let sub2 = db
         .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .await
         .unwrap();
     let _initial = sub2.recv().unwrap();
 
-    insert_edge(&mut db, 2, 7, 200);
+    insert_edge(&mut db, 2, 7, 200).await;
     let deltas = sub2.recv().unwrap();
     let weights: Vec<i64> = deltas.iter().map(|(_, weight)| weight).collect();
     assert_eq!(
@@ -96,9 +99,9 @@ fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
     );
 }
 
-#[test]
-fn second_identical_shape_does_not_wipe_existing_bindings() {
-    let (_dir, mut db) = open_db();
+#[futures_test::test]
+async fn second_identical_shape_does_not_wipe_existing_bindings() {
+    let (_dir, mut db) = open_db().await;
     let shape_a = db
         .prepare_one_sink(
             edges_by_src_shape_graph(),
@@ -106,13 +109,15 @@ fn second_identical_shape_does_not_wipe_existing_bindings() {
             binding_descriptor(),
             ["src"],
         )
+        .await
         .unwrap();
     let sub_a = db
         .bind_shape_one_sink(shape_a.id(), &[Value::U64(7)])
+        .await
         .unwrap();
     let _initial = sub_a.recv().unwrap();
 
-    insert_edge(&mut db, 1, 7, 100);
+    insert_edge(&mut db, 1, 7, 100).await;
     assert_eq!(
         sub_a.recv().unwrap().iter().count(),
         1,
@@ -127,18 +132,19 @@ fn second_identical_shape_does_not_wipe_existing_bindings() {
             binding_descriptor(),
             ["src"],
         )
+        .await
         .unwrap();
 
-    insert_edge(&mut db, 2, 7, 200);
+    insert_edge(&mut db, 2, 7, 200).await;
     let deltas = sub_a
         .try_recv()
         .expect("sub_a must still receive deltas after a second shape is created");
     assert_eq!(deltas.iter().count(), 1);
 }
 
-#[test]
-fn pending_retraction_does_not_corrupt_freshly_hydrated_sibling_shape() {
-    let (_dir, mut db) = open_db();
+#[futures_test::test]
+async fn pending_retraction_does_not_corrupt_freshly_hydrated_sibling_shape() {
+    let (_dir, mut db) = open_db().await;
     // Shape A: src/dst projection.
     let shape_a = db
         .prepare_one_sink(
@@ -147,15 +153,17 @@ fn pending_retraction_does_not_corrupt_freshly_hydrated_sibling_shape() {
             binding_descriptor(),
             ["src"],
         )
+        .await
         .unwrap();
     let sub_a = db
         .bind_shape_one_sink(shape_a.id(), &[Value::U64(7)])
+        .await
         .unwrap();
     let _initial = sub_a.recv().unwrap();
     drop(sub_a);
 
     // Tick detects the dropped receiver and queues the binding-7 retraction.
-    insert_edge(&mut db, 1, 7, 100);
+    insert_edge(&mut db, 1, 7, 100).await;
 
     // Shape B: different shape (dst only), same binding source. Its fresh
     // arrangement is hydrated from a snapshot that already excludes binding 7,
@@ -174,14 +182,16 @@ fn pending_retraction_does_not_corrupt_freshly_hydrated_sibling_shape() {
             binding_descriptor(),
             ["binding_src"],
         )
+        .await
         .unwrap();
 
     let sub_b = db
         .bind_shape_one_sink(shape_b.id(), &[Value::U64(7)])
+        .await
         .unwrap();
     let _initial = sub_b.recv().unwrap();
 
-    insert_edge(&mut db, 2, 7, 200);
+    insert_edge(&mut db, 2, 7, 200).await;
     let deltas = sub_b
         .try_recv()
         .expect("shape B subscriber must receive deltas for binding 7");

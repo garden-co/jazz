@@ -35,7 +35,7 @@ fn schema() -> DatabaseSchema {
     ])
 }
 
-fn open_db() -> (tempfile::TempDir, Database<RocksDbStorage>) {
+async fn open_db() -> (tempfile::TempDir, Database<RocksDbStorage>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open_with_durability(
         temp_dir.path(),
@@ -43,7 +43,7 @@ fn open_db() -> (tempfile::TempDir, Database<RocksDbStorage>) {
         Durability::WalNoSync,
     )
     .unwrap();
-    let db = Database::new(schema(), storage).unwrap();
+    let db = Database::new(schema(), storage).await.unwrap();
     (temp_dir, db)
 }
 
@@ -56,10 +56,10 @@ fn anti_join() -> GraphBuilder {
     )
 }
 
-#[test]
-fn same_tick_left_and_blocking_right_emit_nothing() {
-    let (_dir, mut db) = open_db();
-    let sub = db.subscribe_one_sink(anti_join()).unwrap();
+#[futures_test::test]
+async fn same_tick_left_and_blocking_right_emit_nothing() {
+    let (_dir, mut db) = open_db().await;
+    let sub = db.subscribe_one_sink(anti_join()).await.unwrap();
     let _initial = sub.recv().unwrap();
 
     // Album and its blocker arrive in one commit: the album is suppressed
@@ -67,7 +67,7 @@ fn same_tick_left_and_blocking_right_emit_nothing() {
     let mut batch = db.open_batch();
     batch.insert("albums", vec![Value::U64(1), Value::U64(11)]);
     batch.insert("blockers", vec![Value::U64(1), Value::U64(11)]);
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
 
     let mut materialized = BTreeMap::<String, i64>::new();
     while let Ok(deltas) = sub.try_recv() {
@@ -82,17 +82,17 @@ fn same_tick_left_and_blocking_right_emit_nothing() {
     );
 }
 
-#[test]
-fn same_tick_left_insert_and_last_blocker_retraction_emit_once() {
-    let (_dir, mut db) = open_db();
-    let sub = db.subscribe_one_sink(anti_join()).unwrap();
+#[futures_test::test]
+async fn same_tick_left_insert_and_last_blocker_retraction_emit_once() {
+    let (_dir, mut db) = open_db().await;
+    let sub = db.subscribe_one_sink(anti_join()).await.unwrap();
     let _initial = sub.recv().unwrap();
 
     // Pre-existing blocked album.
     let mut batch = db.open_batch();
     batch.insert("albums", vec![Value::U64(1), Value::U64(11)]);
     batch.insert("blockers", vec![Value::U64(1), Value::U64(11)]);
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
     while sub.try_recv().is_ok() {}
 
     // One commit: a second album for the artist arrives while the artist's
@@ -100,7 +100,7 @@ fn same_tick_left_insert_and_last_blocker_retraction_emit_once() {
     let mut batch = db.open_batch();
     batch.insert("albums", vec![Value::U64(2), Value::U64(11)]);
     batch.delete("blockers", PrimaryKeyValue::U64(1));
-    db.commit_batch(batch).unwrap();
+    db.commit_batch(batch).await.unwrap();
 
     let mut materialized = BTreeMap::<String, i64>::new();
     while let Ok(deltas) = sub.try_recv() {
