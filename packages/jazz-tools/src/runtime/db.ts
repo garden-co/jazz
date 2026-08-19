@@ -26,7 +26,7 @@ import {
   type MutationErrorEvent,
   WriteHandle,
   type TransactionKind,
-  type CreateOptions,
+  type InsertOptions,
   type RestoreOptions,
   type UpdateOptions,
   type DurabilityTier,
@@ -71,7 +71,7 @@ type WriteOperationName = "Insert" | "Update" | "Upsert" | "Restore";
 /**
  * Configuration for creating a Db instance.
  */
-export interface DbConfig {
+export type DbConfig = {
   /** Application identifier (used for isolation) */
   appId: string;
   /** Storage driver mode (defaults to persistent). */
@@ -84,10 +84,6 @@ export interface DbConfig {
   env?: string;
   /** User branch name (default: "main") */
   userBranch?: string;
-  /** JWT token for server authentication */
-  jwtToken?: string;
-  /** Mirrored session for local permission evaluation when sync auth uses cookies. */
-  cookieSession?: Session;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
   /** Backend secret for backend-scoped sync auth with cookieSession. */
@@ -106,9 +102,26 @@ export interface DbConfig {
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
-  /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
-  secret?: string;
-}
+} & (
+  | {
+      /** Local-first auth via a local seed. */
+      secret?: string;
+      jwtToken?: never;
+      cookieSession?: never;
+    }
+  | {
+      secret?: never;
+      /** JWT token for server authentication. */
+      jwtToken?: string;
+      cookieSession?: never;
+    }
+  | {
+      secret?: never;
+      jwtToken?: never;
+      /** Mirrored session for local permission evaluation when sync auth uses cookies. */
+      cookieSession?: Session;
+    }
+);
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
@@ -696,7 +709,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * The insert is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
     this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -1220,7 +1233,7 @@ export class Db {
    * @param data Init object with column values
    * @returns Write result containing the inserted row
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): WriteResult<T> {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): WriteResult<T> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -1837,8 +1850,14 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     throw new Error("DbConfig error: jwtToken and cookieSession are mutually exclusive");
   }
 
-  let resolvedConfig = { ...config };
+  let resolvedConfig: DbConfig = { ...config };
   await runtimeSource.load(config);
+  const {
+    secret: _secret,
+    jwtToken: _jwtToken,
+    cookieSession: _cookieSession,
+    ...configWithoutAuth
+  } = config;
 
   // Local-first auth: resolve seed and mint a JWT
   let localFirstSecret: string | null = null;
@@ -1850,7 +1869,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       const jwtToken = runtimeSource.mintLocalFirstToken(
         createRuntimeTokenOptions(secret, config.appId, 3600),
       );
-      resolvedConfig = { ...resolvedConfig, jwtToken };
+      resolvedConfig = { ...configWithoutAuth, jwtToken };
     }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
@@ -1860,7 +1879,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     const jwtToken = runtimeSource.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
-    resolvedConfig = { ...resolvedConfig, jwtToken };
+    resolvedConfig = { ...configWithoutAuth, jwtToken };
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);

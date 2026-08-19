@@ -282,7 +282,7 @@ export interface MutationErrorEvent {
   transaction: LocalTransactionRecord;
 }
 
-export interface CreateOptions extends TimestampOverrideOptions {
+export interface InsertOptions extends TimestampOverrideOptions {
   id?: string;
 }
 
@@ -783,7 +783,7 @@ export class JazzClient {
   insert(
     table: string,
     values: InsertValues,
-    options?: CreateOptions,
+    options?: InsertOptions,
     session?: Session,
     attribution?: string,
   ): WriteResult<Row> {
@@ -797,7 +797,7 @@ export class JazzClient {
   insertInternal(
     table: string,
     values: InsertValues,
-    options?: CreateOptions,
+    options?: InsertOptions,
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
