@@ -34,7 +34,7 @@ impl<S> SourceResolver for CurrentQuerySourceResolver<'_, S>
 where
     S: OrderedKvStorage,
 {
-    fn resolve_source(
+    async fn resolve_source(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError> {
@@ -105,6 +105,7 @@ where
                             let schema_version_alias = self
                                 .node
                                 .ensure_schema_version_alias(self.read_view.read_schema)
+                                .await
                                 .map_err(|_| {
                                     source_resolution_error(request, SourceGap::Coverage)
                                 })?;
@@ -814,6 +815,7 @@ where
                     &request.source.table,
                     include_deleted,
                 )
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
             let (graph, descriptor) = if include_deleted {
                 let rows = rows
@@ -842,11 +844,13 @@ where
             && self.needs_projected_current_source(&request.source.table)
         {
             if !request.requirements.metadata.is_empty() {
-                let source = self.projected_maintained_visible_current_source_graph(
-                    request,
-                    &table,
-                    graph_tier.expect("visible current source has a tier"),
-                )?;
+                let source = self
+                    .projected_maintained_visible_current_source_graph(
+                        request,
+                        &table,
+                        graph_tier.expect("visible current source has a tier"),
+                    )
+                    .await?;
                 resolved_current_source_graph(
                     self.node,
                     &table,
@@ -860,11 +864,13 @@ where
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             } else {
-                let source = self.projected_visible_current_source_graph(
-                    request,
-                    &table,
-                    graph_tier.expect("visible current source has a tier"),
-                )?;
+                let source = self
+                    .projected_visible_current_source_graph(
+                        request,
+                        &table,
+                        graph_tier.expect("visible current source has a tier"),
+                    )
+                    .await?;
                 let graph = match &authorization {
                     SourceAuthorizationRequest::System => source.graph,
                     SourceAuthorizationRequest::PolicyFiltered {
@@ -1013,11 +1019,13 @@ where
                 BTreeSet::new(),
             )
         } else {
-            let selected_base = self.selected_global_current_source_graph(
-                request,
-                &table,
-                graph_tier.expect("visible current source has a tier"),
-            )?;
+            let selected_base = self
+                .selected_global_current_source_graph(
+                    request,
+                    &table,
+                    graph_tier.expect("visible current source has a tier"),
+                )
+                .await?;
             if selected_base.is_none() {
                 self.node.query_engine_read_metrics.source_full_scans += 1;
             }
@@ -1041,13 +1049,15 @@ where
             history_position,
             open_tx_overlay,
         )?;
-        let content_version = self.content_version_source_for_request(
-            request,
-            &table,
-            graph_tier,
-            history_position,
-            open_tx_overlay,
-        )?;
+        let content_version = self
+            .content_version_source_for_request(
+                request,
+                &table,
+                graph_tier,
+                history_position,
+                open_tx_overlay,
+            )
+            .await?;
         Ok(ResolvedSource {
             table_schema: table,
             graph,
@@ -1119,7 +1129,7 @@ where
         }
     }
 
-    pub(crate) fn selected_global_current_source_graph(
+    pub(crate) async fn selected_global_current_source_graph(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1149,6 +1159,7 @@ where
                         &prefix,
                         &projection_target,
                     )
+                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 self.node.query_engine_read_metrics.source_index_probes += 1;
                 Ok(Some(rows))
@@ -1199,7 +1210,7 @@ where
         }))
     }
 
-    pub(crate) fn content_version_source_for_request(
+    pub(crate) async fn content_version_source_for_request(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1226,7 +1237,8 @@ where
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(ContentVersionSource {
                 graph: self
-                    .projected_content_current_source_graph(request, table, tier, false, false)?,
+                    .projected_content_current_source_graph(request, table, tier, false, false)
+                    .await?,
                 row_uuid_field: "row_uuid".to_owned(),
             }));
         }
@@ -1266,7 +1278,7 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))
     }
 
-    pub(crate) fn projected_maintained_visible_current_source_graph(
+    pub(crate) async fn projected_maintained_visible_current_source_graph(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1277,8 +1289,9 @@ where
         // graph would independently decode every enum cell, defeating a
         // title-only old-schema subscription before its narrowed source has a
         // chance to replace unused enum values with typed nulls.
-        let projected =
-            self.projected_content_current_source_graph(request, table, tier, true, true)?;
+        let projected = self
+            .projected_content_current_source_graph(request, table, tier, true, true)
+            .await?;
         Ok(CurrentSourceGraph {
             graph: projected,
             descriptor: current_row_descriptor(table),
@@ -1395,7 +1408,7 @@ where
         .project(fields))
     }
 
-    pub(crate) fn projected_content_current_source_graph(
+    pub(crate) async fn projected_content_current_source_graph(
         &mut self,
         request: &SourceRequest,
         read_table: &TableSchema,
@@ -1436,6 +1449,7 @@ where
                             &prefix,
                             &projection_target,
                         )
+                        .await
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
                 }
                 None => {
@@ -1473,6 +1487,7 @@ where
                 self.read_view.read_schema,
                 &request.source.table,
             )
+            .await
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let post_winner_fields = self
             .node
@@ -1521,6 +1536,7 @@ where
                         &projection_target,
                         raw_global_output.clone(),
                     )
+                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             }
             _ => {
@@ -1616,7 +1632,7 @@ where
         .project_fields(fields))
     }
 
-    pub(crate) fn projected_visible_current_source_graph(
+    pub(crate) async fn projected_visible_current_source_graph(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1626,7 +1642,8 @@ where
             // Project heterogeneous physical rows at the source boundary so the
             // rest of the query graph retains the requested logical descriptor.
             graph: self
-                .projected_content_current_source_graph(request, table, tier, false, true)?
+                .projected_content_current_source_graph(request, table, tier, false, true)
+                .await?
                 .project_fields(storage_to_canonical_current_source_fields(
                     table, true, false,
                 )),
@@ -2600,7 +2617,7 @@ where
         Ok(())
     }
 
-    fn physical_global_current_source_for_index_scan(
+    async fn physical_global_current_source_for_index_scan(
         &self,
         table: &TableSchema,
         schema_version: SchemaVersionId,
@@ -2616,9 +2633,10 @@ where
             projection_target,
             table.global_current_storage_tables()[0].record_schema(),
         )
+        .await
     }
 
-    fn physical_global_current_source_for_index_scan_with_output(
+    async fn physical_global_current_source_for_index_scan_with_output(
         &self,
         table: &TableSchema,
         schema_version: SchemaVersionId,
@@ -2643,11 +2661,14 @@ where
                 "physical current index column mapping missing",
             ))?;
         let storage_table = physical_global_current_table_name(mapping.table_id);
-        let indexed = self.database.index_scan_raw(
-            &storage_table,
-            &physical_current_index_name(column_id),
-            prefix,
-        )?;
+        let indexed = self
+            .database
+            .index_scan_raw(
+                &storage_table,
+                &physical_current_index_name(column_id),
+                prefix,
+            )
+            .await?;
         let mut records = Vec::with_capacity(indexed.len());
         for raw in indexed {
             let variant_tag = raw.variant_tag();
