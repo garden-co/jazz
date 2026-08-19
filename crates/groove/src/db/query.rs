@@ -2,7 +2,7 @@ use super::*;
 
 impl<S> Database<S>
 where
-    S: OrderedKvStorage,
+    S: OrderedKvStorage + 'static,
 {
     /// Subscribe to an IVM graph and receive an initial snapshot followed by
     /// deltas from committed batches.
@@ -42,7 +42,10 @@ where
     /// ```
     pub async fn subscribe_one_sink(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let storage = MeteredStorage::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.storage_read_metrics),
+        );
         self.ivm_runtime
             .subscribe_one_sink(graph, &storage)
             .await
@@ -59,7 +62,10 @@ where
         K: Into<String>,
     {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let storage = MeteredStorage::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.storage_read_metrics),
+        );
         self.ivm_runtime
             .subscribe(sinks, &storage)
             .await

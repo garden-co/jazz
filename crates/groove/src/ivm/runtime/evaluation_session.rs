@@ -4,9 +4,7 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::storage::{
-    Error as StorageError, KeyValue, OrderedKvStorage, OwnedStorage, StorageFuture,
-};
+use crate::storage::{Error as StorageError, KeyValue, OwnedStorage, StorageFuture};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum StorageRequestKey {
@@ -75,10 +73,7 @@ impl<'a> StorageRequests<'a> {
 
     /// Register a request if neither its future nor result already exists.
     /// Returns `true` only for the caller that created the in-flight work.
-    pub(super) fn request<S>(&mut self, key: StorageRequestKey, storage: &OwnedStorage<S>) -> bool
-    where
-        S: OrderedKvStorage + 'a,
-    {
+    pub(super) fn request(&mut self, key: StorageRequestKey, storage: &OwnedStorage<'a>) -> bool {
         if self.pending.contains_key(&key) || self.ready.contains_key(&key) {
             return false;
         }
