@@ -19,7 +19,7 @@ where
 {
     pub(super) transport: Box<dyn Transport>,
     pub(super) staged_inbound: VecDeque<StagedInboundMessage>,
-    pub(super) node: Rc<RefCell<NodeState<S>>>,
+    pub(super) node: SharedNodeState<S>,
     pub(super) subscriptions: SubscriptionList,
     pub(super) upstream_subscription_owners: UpstreamSubscriptionOwners,
     pub(super) latest_coverage_subscriptions: LatestCoverageSubscriptions,
@@ -2562,7 +2562,7 @@ fn stage_initial_coverage_clear_for_update(
 }
 
 fn apply_pending_authority_view_updates<S>(
-    node: &Rc<RefCell<NodeState<S>>>,
+    node: &SharedNodeState<S>,
     pending: &mut Vec<PendingAuthorityViewUpdate>,
     awaiting: &AwaitingInitialAuthorityCoverage,
     clears: &mut BTreeSet<CoverageKey>,
@@ -2718,7 +2718,7 @@ where
 /// keys, registers canonical shapes in the receiver, and only then sends the
 /// ordinary view updates in authority-scope envelopes.
 fn serve_authorization_scope_intent<S>(
-    node: &Rc<RefCell<NodeState<S>>>,
+    node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
     identity: AuthorId,
@@ -3209,7 +3209,7 @@ fn operand_is_id(operand: &Operand) -> bool {
     matches!(operand, Operand::Column(column) if column == "id")
 }
 
-fn drop_peer_request<S>(node: &Rc<RefCell<NodeState<S>>>)
+fn drop_peer_request<S>(node: &SharedNodeState<S>)
 where
     S: OrderedKvStorage,
 {
@@ -3217,7 +3217,7 @@ where
 }
 
 fn handle_transport_backpressure<S>(
-    node: &Rc<RefCell<NodeState<S>>>,
+    node: &SharedNodeState<S>,
     scheduler: &SharedTickScheduler,
     error: &TransportError,
 ) -> bool
@@ -3235,7 +3235,7 @@ where
 }
 
 fn handle_db_backpressure<S>(
-    node: &Rc<RefCell<NodeState<S>>>,
+    node: &SharedNodeState<S>,
     scheduler: &SharedTickScheduler,
     error: &Error,
 ) -> bool
@@ -3342,7 +3342,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
 }
 
 fn send_with_sync_context<S>(
-    node: &Rc<RefCell<NodeState<S>>>,
+    node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
     message: SyncMessage,
@@ -3374,7 +3374,7 @@ where
 /// Trusted edge links have no application subscription during bootstrap, so
 /// catalogue propagation must not depend on a later ViewUpdate or fate.
 fn send_catalogue_snapshot_if_needed<S>(
-    node: &Rc<RefCell<NodeState<S>>>,
+    node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
 ) -> Result<(), Error>
@@ -3403,7 +3403,7 @@ fn send_sync_message_chunked(
 }
 
 fn send_with_local_sync_context<S>(
-    node: &Rc<RefCell<NodeState<S>>>,
+    node: &SharedNodeState<S>,
     transport: &mut dyn Transport,
     message: SyncMessage,
 ) -> Result<(), Error>
@@ -3484,7 +3484,7 @@ fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) -> bool 
 }
 
 fn handle_write_state_update<S>(
-    node: &Rc<RefCell<NodeState<S>>>,
+    node: &SharedNodeState<S>,
     waiters: &WriteStateWaiters,
     mutation_errors: &SharedMutationErrors,
     scheduler: &SharedTickScheduler,

@@ -73,6 +73,15 @@ DemandDrivenNode -> Node
 AsyncDatabase -> Database
 ```
 
+During the initial Jazz conversion, `Node` serializes access to its canonical
+`NodeState` with a thread-local async mutex. This is a pragmatic correctness
+boundary: no `RefCell` guard may survive a storage suspension, cancellation
+releases the mutex automatically, and concurrent local operations wait instead
+of panicking on a dynamic borrow. It is not the ideal final scheduler. Revisit
+whether explicit owned operation sessions can provide clearer fairness,
+reentrancy, and observability once the operation lifecycles are stable, without
+introducing a second database or node facade.
+
 Temporary migration helpers are acceptable only when private, narrowly scoped,
 and removed in the same bounded step that moves responsibility into the real
 owner. A wrapper must not become the place where semantics live while the

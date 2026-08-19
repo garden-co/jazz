@@ -17,6 +17,7 @@ use std::sync::{
 };
 use std::task::{Context, Poll, Waker};
 
+use futures::lock::Mutex as LocalMutex;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_channel::oneshot;
 use futures_core::Stream;
@@ -77,6 +78,36 @@ mod wire_transport;
 #[cfg(test)]
 use wire_transport::LogicalMessageReassembler;
 pub use wire_transport::WireTransportAdapter;
+
+/// Pragmatic single-threaded serialization boundary for canonical Jazz state.
+///
+/// Storage-facing operations may suspend, so a `RefCell` borrow cannot safely
+/// represent exclusive ownership for their full lifetime. This local mutex is
+/// intentionally part of the existing `Node` owner rather than a parallel
+/// async facade. A future operation scheduler may replace it with finer-grained
+/// owned sessions once the async lifecycle has settled.
+pub(crate) type SharedNodeState<S> = Rc<LocalMutex<NodeState<S>>>;
+pub(crate) type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
+
+/// Temporary source-compatibility for node operations that are still wholly
+/// synchronous. Storage-facing call sites must use `lock().await` instead.
+/// Remove this trait as the remaining domains become suspendable.
+trait LocalMutexBorrow<T> {
+    fn borrow(&self) -> futures::lock::MutexGuard<'_, T>;
+    fn borrow_mut(&self) -> futures::lock::MutexGuard<'_, T>;
+}
+
+impl<T> LocalMutexBorrow<T> for Rc<LocalMutex<T>> {
+    fn borrow(&self) -> futures::lock::MutexGuard<'_, T> {
+        self.try_lock()
+            .expect("synchronous node operation reentered a suspended operation")
+    }
+
+    fn borrow_mut(&self) -> futures::lock::MutexGuard<'_, T> {
+        self.try_lock()
+            .expect("synchronous node operation reentered a suspended operation")
+    }
+}
 
 /// How urgently a runtime should service pending peer-connection work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -365,12 +396,12 @@ fn register_local_fate_route(
     });
 }
 
-fn queue_local_acknowledgements<S>(routes: &LocalFateRoutes, node: &Rc<RefCell<NodeState<S>>>)
+async fn queue_local_acknowledgements<S>(routes: &LocalFateRoutes, node: &SharedNodeState<S>)
 where
     S: OrderedKvStorage,
 {
     let mut routes = routes.borrow_mut();
-    let mut node = node.borrow_mut();
+    let mut node = node.lock().await;
     routes.retain(|tx_id, pending| {
         let locally_durable = node
             .transaction_state(*tx_id)
@@ -1925,7 +1956,7 @@ pub struct WriteHandle<S>
 where
     S: OrderedKvStorage,
 {
-    node: Weak<RefCell<NodeState<S>>>,
+    node: WeakNodeState<S>,
     row_uuid: RowUuid,
     tx_id: TxId,
     local_tier: DurabilityTier,
@@ -1971,7 +2002,7 @@ where
         if tier <= self.local_tier {
             return Ok(self.tx_id);
         }
-        let state = self.write_state()?;
+        let state = self.write_state().await?;
         match state.fate {
             Fate::Rejected(reason) => Err(write_rejected(self.tx_id, reason)),
             Fate::Pending if tier >= DurabilityTier::Edge => Err(Error::new(
@@ -1987,14 +2018,14 @@ where
     }
 
     /// Return the locally observed fate and durability for this write.
-    pub fn write_state(&self) -> Result<WriteState, Error> {
+    pub async fn write_state(&self) -> Result<WriteState, Error> {
         let Some(node) = self.node.upgrade() else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
                 "database handle was dropped",
             ));
         };
-        let Some((fate, _, durability)) = node.borrow_mut().transaction_state(self.tx_id) else {
+        let Some((fate, _, durability)) = node.lock().await.transaction_state(self.tx_id) else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("transaction {:?} is not known locally", self.tx_id),
