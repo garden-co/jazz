@@ -372,10 +372,6 @@ impl IvmRuntime {
         }
     }
 
-    pub(super) fn queued_multisink_deltas(&self, deltas: MultisinkDeltas) -> QueuedMultisinkDeltas {
-        QueuedMultisinkDeltas::new(deltas)
-    }
-
     pub(super) fn hydration_snapshot<S>(
         &mut self,
         output_node: NodeId,
