@@ -3355,8 +3355,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn staged_overlay_reverse_prefix_scans_match_trait_default() {
+    #[futures_test::test]
+    async fn staged_overlay_reverse_prefix_scans_match_trait_default() {
         struct DefaultReverse<'a, S>(&'a StagedWriteOverlay<'a, S>);
 
         impl<S> OrderedKvStorage for DefaultReverse<'_, S>
@@ -3409,7 +3409,7 @@ mod tests {
             }
         }
 
-        fn assert_case(
+        async fn assert_case(
             name: &str,
             base_rows: &[(&[u8], &[u8])],
             staged_rows: Vec<OwnedWriteOperation>,
@@ -3418,34 +3418,48 @@ mod tests {
         ) {
             let storage = MemoryStorage::new(&["indices"]);
             for (key, value) in base_rows {
-                storage.set("indices", key, value).unwrap();
+                storage
+                    .set("indices".into(), key.to_vec(), value.to_vec())
+                    .await
+                    .unwrap();
             }
-            storage.set("indices", b"view:1", b"base-view").unwrap();
+            storage
+                .set("indices".into(), b"view:1".to_vec(), b"base-view".to_vec())
+                .await
+                .unwrap();
             let staged = RefCell::new(StagedWriteState::from(staged_rows));
             let overlay = StagedWriteOverlay::new(&storage, &staged);
             let default_reverse = DefaultReverse(&overlay);
 
-            let mut optimized = Vec::new();
-            overlay
-                .scan_prefix_reverse("indices", prefix, &mut |key, value| {
-                    optimized.push((key.to_vec(), value.to_vec()));
-                    Ok(())
-                })
-                .unwrap();
+            let optimized = collect_scan(
+                overlay
+                    .scan_prefix_reverse("indices".into(), prefix.to_vec())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-            let mut defaulted = Vec::new();
-            default_reverse
-                .scan_prefix_reverse("indices", prefix, &mut |key, value| {
-                    defaulted.push((key.to_vec(), value.to_vec()));
-                    Ok(())
-                })
-                .unwrap();
+            let defaulted = collect_scan(
+                default_reverse
+                    .scan_prefix_reverse("indices".into(), prefix.to_vec())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
             assert_eq!(optimized, defaulted, "{name}");
             assert_eq!(optimized, expected, "{name}");
             assert_eq!(
-                overlay.last_with_prefix("indices", prefix).unwrap(),
-                default_reverse.last_with_prefix("indices", prefix).unwrap(),
+                overlay
+                    .last_with_prefix("indices".into(), prefix.to_vec())
+                    .await
+                    .unwrap(),
+                default_reverse
+                    .last_with_prefix("indices".into(), prefix.to_vec())
+                    .await
+                    .unwrap(),
                 "{name}"
             );
         }
@@ -3484,7 +3498,8 @@ mod tests {
                 (b"user:2".to_vec(), b"staged-2".to_vec()),
                 (b"user:1".to_vec(), b"base-1".to_vec()),
             ],
-        );
+        )
+        .await;
 
         assert_case(
             "staged delete of base last key",
@@ -3502,7 +3517,8 @@ mod tests {
                 (b"user:2".to_vec(), b"base-2".to_vec()),
                 (b"user:1".to_vec(), b"base-1".to_vec()),
             ],
-        );
+        )
+        .await;
 
         assert_case(
             "empty staged buffer",
@@ -3513,7 +3529,8 @@ mod tests {
                 (b"user:2".to_vec(), b"base-2".to_vec()),
                 (b"user:1".to_vec(), b"base-1".to_vec()),
             ],
-        );
+        )
+        .await;
 
         assert_case(
             "staged-only prefix",
@@ -3525,7 +3542,8 @@ mod tests {
             }],
             b"team:",
             vec![(b"team:1".to_vec(), b"staged-team".to_vec())],
-        );
+        )
+        .await;
 
         assert_case(
             "base empty for prefix",
@@ -3547,11 +3565,12 @@ mod tests {
                 (b"user:3".to_vec(), b"staged-3".to_vec()),
                 (b"user:1".to_vec(), b"staged-1".to_vec()),
             ],
-        );
+        )
+        .await;
     }
 
-    #[test]
-    fn staged_overlay_last_with_prefix_no_delete_uses_one_base_seek() {
+    #[futures_test::test]
+    async fn staged_overlay_last_with_prefix_no_delete_uses_one_base_seek() {
         struct CountingStorage<S> {
             inner: S,
             prefix_scans: Cell<usize>,
@@ -3642,8 +3661,14 @@ mod tests {
         }
 
         let storage = CountingStorage::new(MemoryStorage::new(&["indices"]));
-        storage.set("indices", b"user:1", b"base-1").unwrap();
-        storage.set("indices", b"user:2", b"base-2").unwrap();
+        storage
+            .set("indices".into(), b"user:1".to_vec(), b"base-1".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("indices".into(), b"user:2".to_vec(), b"base-2".to_vec())
+            .await
+            .unwrap();
         let staged = RefCell::new(StagedWriteState::from(vec![
             OwnedWriteOperation::Set {
                 cf: "indices".to_owned(),
@@ -3659,7 +3684,10 @@ mod tests {
         let overlay = StagedWriteOverlay::new(&storage, &staged);
 
         assert_eq!(
-            overlay.last_with_prefix("indices", b"user:").unwrap(),
+            overlay
+                .last_with_prefix("indices".into(), b"user:".to_vec())
+                .await
+                .unwrap(),
             Some((b"user:3".to_vec(), b"staged-3".to_vec()))
         );
         assert_eq!(storage.last_with_prefix_calls.get(), 1);
@@ -3667,18 +3695,22 @@ mod tests {
         assert_eq!(storage.reverse_prefix_scans.get(), 0);
     }
 
-    #[test]
-    fn memory_storage_write_many_validates_column_families_before_writing() {
+    #[futures_test::test]
+    async fn memory_storage_write_many_validates_column_families_before_writing() {
         let storage = MemoryStorage::new(&["records"]);
         let error = storage
-            .write_many(&[
-                WriteOperation::set("records", b"1", b"record"),
-                WriteOperation::set("missing", b"2", b"nope"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"1", b"record"),
+                OwnedWriteOperation::set("missing", b"2", b"nope"),
             ])
+            .await
             .unwrap_err();
 
         assert!(matches!(error, Error::ColumnFamilyNotFound(_)));
-        assert_eq!(storage.get("records", b"1").unwrap(), None);
+        assert_eq!(
+            storage.get("records".into(), b"1".to_vec()).await.unwrap(),
+            None
+        );
     }
 
     #[futures_test::test]
@@ -3699,8 +3731,8 @@ mod tests {
         conformance::delta_append_current_winner_observes_merged_state(storage).await;
     }
 
-    #[test]
-    fn record_store_writes_and_reads_typed_records() {
+    #[futures_test::test]
+    async fn record_store_writes_and_reads_typed_records() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
@@ -3711,9 +3743,9 @@ mod tests {
         let record = descriptor.create(&[Value::U64(42)]).unwrap();
         let op = store.set(key, &record);
 
-        storage.write_many(&[op]).unwrap();
+        storage.write_many(vec![op]).await.unwrap();
 
-        let stored = store.get(key).unwrap().unwrap();
+        let stored = store.get(key).await.unwrap().unwrap();
         assert_eq!(stored.get_idx(0).unwrap(), Value::U64(42));
     }
 
@@ -3726,8 +3758,8 @@ mod tests {
         conformance::delta_append_current_winner_observes_merged_state(storage).await;
     }
 
-    #[test]
-    fn native_durable_delta_append_survives_reopen() {
+    #[futures_test::test]
+    async fn native_durable_delta_append_survives_reopen() {
         fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
             let mut bytes = Vec::new();
             bytes.extend(time.to_le_bytes());
@@ -3753,25 +3785,30 @@ mod tests {
                 TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                     .unwrap();
             storage
-                .write_many(&[WriteOperation::delta(
+                .write_many(vec![OwnedWriteOperation::delta(
                     "records",
                     b"row",
-                    &delta(10, 1, record(10, 1, b"older")),
+                    delta(10, 1, record(10, 1, b"older")),
                 )])
+                .await
                 .unwrap();
             storage
-                .write_many(&[WriteOperation::delta(
+                .write_many(vec![OwnedWriteOperation::delta(
                     "records",
                     b"row",
-                    &delta(20, 2, record(20, 2, b"newer")),
+                    delta(20, 2, record(20, 2, b"newer")),
                 )])
+                .await
                 .unwrap();
         }
         let reopened =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                 .unwrap();
         assert_eq!(
-            reopened.get("records", b"row").unwrap(),
+            reopened
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
             Some(record(20, 2, b"newer"))
         );
     }
