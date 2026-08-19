@@ -81,7 +81,7 @@ fn key_for_joined_title(results: &[QueryResult], title: &str) -> ResultKey {
 
 fn joined_todos(sources: &[(&str, &str, &str)]) -> Query {
     sources.iter().fold(
-        Query::from(table("todos").alias("root")).filter(eq(col("done"), lit(false))),
+        Query::from(table("todos").alias("root")).filter(eq(col("root.done"), lit(false))),
         |query, (alias, left, right)| query.flat_join(table("todos").alias(*alias), *left, *right),
     )
 }

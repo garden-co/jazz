@@ -185,6 +185,44 @@ fn normalize_predicates(
     }
 }
 
+fn route_flat_join_filters(
+    predicate: &Predicate,
+    root_scope: &str,
+    routed: &mut BTreeMap<String, Vec<Predicate>>,
+) -> Result<(), Error> {
+    if let Predicate::All(predicates) = predicate {
+        for predicate in predicates {
+            route_flat_join_filters(predicate, root_scope, routed)?;
+        }
+        return Ok(());
+    }
+
+    let sources = crate::query::flat_join_predicate_sources(predicate)?;
+    let scope = sources
+        .iter()
+        .next()
+        .map(String::as_str)
+        .unwrap_or(root_scope);
+    routed
+        .entry(scope.to_owned())
+        .or_default()
+        .push(crate::query::unqualify_flat_join_predicate(
+            predicate, scope,
+        )?);
+    Ok(())
+}
+
+fn flat_join_filters_by_source(
+    filters: &[Predicate],
+    root_scope: &str,
+) -> Result<BTreeMap<String, Vec<Predicate>>, Error> {
+    let mut routed = BTreeMap::new();
+    for predicate in filters {
+        route_flat_join_filters(predicate, root_scope, &mut routed)?;
+    }
+    Ok(routed)
+}
+
 pub(super) fn root_literal_equalities(
     query: &JazzQuery,
     binding: &Binding,
@@ -2497,6 +2535,11 @@ where
         let inheritance_path = InheritanceExpansionPath::default();
 
         let binding_source_shape = PENDING_BINDING_SOURCE_SHAPE.to_owned();
+        let query_chain_filters: &[Predicate] = if query.flat_join.is_some() {
+            &[]
+        } else {
+            &query.filters
+        };
         let unsupported_policy_branch = unsupported_policy_branch_reason(query);
         if unsupported_policy_branch.is_none() && !query.policy_branches.is_empty() {
             let mut union_inputs = Vec::new();
@@ -2519,7 +2562,7 @@ where
                     base_source_node,
                     "policy_branch:base",
                     PolicyAtomChain {
-                        filters: &query.filters,
+                        filters: query_chain_filters,
                         joins: &query.joins,
                         inherits: &query.inherits,
                         reachable: &query.reachable,
@@ -2626,7 +2669,7 @@ where
                 current,
                 "query",
                 PolicyAtomChain {
-                    filters: &query.filters,
+                    filters: query_chain_filters,
                     joins: &query.joins,
                     inherits: &query.inherits,
                     reachable: &query.reachable,
@@ -2647,7 +2690,19 @@ where
                 .as_deref()
                 .unwrap_or(query.table.as_str())
                 .to_owned();
-            let mut sources = BTreeMap::from([(root_name, root_source.clone())]);
+            let mut routed_filters = flat_join_filters_by_source(&query.filters, &root_name)?;
+            if let Some(filters) = routed_filters.remove(&root_name) {
+                let filter_node = RowSetNodeId("flat_join:root_filter".to_owned());
+                nodes.insert(
+                    filter_node.clone(),
+                    RowSetExpr::Filter {
+                        input: current,
+                        predicate: normalize_predicates(schema, &root_source, &filters)?,
+                    },
+                );
+                current = filter_node;
+            }
+            let mut sources = BTreeMap::from([(root_name.clone(), root_source.clone())]);
             let mut tuple_sources = vec![root_source.clone()];
             let mut output_sources = vec![(
                 flat_join
@@ -2678,6 +2733,19 @@ where
                         visibility: RowVisibility::Visible,
                     },
                 );
+                let right_input = if let Some(filters) = routed_filters.remove(&name) {
+                    let filter_node = RowSetNodeId(format!("flat_join:{index}:filter"));
+                    nodes.insert(
+                        filter_node.clone(),
+                        RowSetExpr::Filter {
+                            input: source_node,
+                            predicate: normalize_predicates(schema, &source, &filters)?,
+                        },
+                    );
+                    filter_node
+                } else {
+                    source_node
+                };
                 auxiliary_sources.insert(source.clone());
                 let value_ref = |field: &str| -> Result<NormalizedValueRef, Error> {
                     let (scope, column) = field.rsplit_once('.').ok_or_else(|| {
@@ -2705,7 +2773,7 @@ where
                     join_node.clone(),
                     RowSetExpr::Join {
                         left: current,
-                        right: source_node,
+                        right: right_input,
                         mode: NormalizedJoinMode::Inner,
                         on: NormalizedPredicateExpr::Compare {
                             left: value_ref(&join.on.left)?,
@@ -2727,6 +2795,12 @@ where
                 sources.insert(name.clone(), source.clone());
                 output_sources.push((name, source.clone()));
                 tuple_sources.push(source);
+            }
+
+            if let Some(scope) = routed_filters.keys().next() {
+                return Err(Error::QueryLowering(format!(
+                    "flat join filter references unknown source {scope}"
+                )));
             }
 
             let projection_node = RowSetNodeId("flat_join:output".to_owned());

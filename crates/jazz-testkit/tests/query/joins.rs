@@ -149,7 +149,6 @@ async fn subscribe_all_join_returns_base_and_joined_table_values() {
 
 local_tokio_test! {
 /// Verifies that filters can target a column supplied by the joined table.
-#[ignore = "post-join filters cannot lower fields from a joined source"]
 async fn subscribe_all_join_filter_on_joined_table_column() {
     let pair = ClientPair::start().await;
 
@@ -188,7 +187,6 @@ async fn subscribe_all_join_filter_on_joined_table_column() {
 local_tokio_test! {
 /// Verifies that alias-qualified filters resolve against the intended side of
 /// a join.
-#[ignore = "flat joins do not route alias-qualified filters to joined sources"]
 async fn subscribe_all_join_filter_on_scoped_alias_columns() {
     let pair = ClientPair::start().await;
 

@@ -257,6 +257,7 @@ fn validate_query_canonical_parts(
         let sources = flat_join_source_tables(schema, &query.table, flat_join)?;
         for predicate in &mut resolved_query.filters {
             qualify_flat_join_predicate(predicate, &sources)?;
+            validate_flat_join_filter_routing(predicate)?;
         }
         let filter_schema = flat_join_filter_schema(&sources)?;
         for predicate in &mut resolved_query.filters {
@@ -373,18 +374,27 @@ fn qualify_flat_join_predicate(
     predicate: &mut Predicate,
     sources: &BTreeMap<String, TableSchema>,
 ) -> Result<(), QueryError> {
-    let qualify_operand = |operand: &mut Operand| -> Result<(), QueryError> {
+    rewrite_flat_join_predicate_columns(predicate, &mut |column| {
+        qualify_flat_join_column(column, sources)
+    })
+}
+
+fn rewrite_flat_join_predicate_columns(
+    predicate: &mut Predicate,
+    rewrite: &mut impl FnMut(&str) -> Result<String, QueryError>,
+) -> Result<(), QueryError> {
+    let mut rewrite_operand = |operand: &mut Operand| -> Result<(), QueryError> {
         let Operand::Column(column) = operand else {
             return Ok(());
         };
-        *column = qualify_flat_join_column(column, sources)?;
+        *column = rewrite(column)?;
         Ok(())
     };
     match predicate {
         Predicate::All(predicates) | Predicate::Any(predicates) => predicates
             .iter_mut()
-            .try_for_each(|predicate| qualify_flat_join_predicate(predicate, sources)),
-        Predicate::Not(predicate) => qualify_flat_join_predicate(predicate, sources),
+            .try_for_each(|predicate| rewrite_flat_join_predicate_columns(predicate, rewrite)),
+        Predicate::Not(predicate) => rewrite_flat_join_predicate_columns(predicate, rewrite),
         Predicate::Eq(left, right)
         | Predicate::Ne(left, right)
         | Predicate::Gt(left, right)
@@ -392,19 +402,73 @@ fn qualify_flat_join_predicate(
         | Predicate::Lt(left, right)
         | Predicate::Lte(left, right)
         | Predicate::Contains(left, right) => {
-            qualify_operand(left)?;
-            qualify_operand(right)
+            rewrite_operand(left)?;
+            rewrite_operand(right)
         }
         Predicate::In(value, options) => {
-            qualify_operand(value)?;
-            options.iter_mut().try_for_each(qualify_operand)
+            rewrite_operand(value)?;
+            options.iter_mut().try_for_each(rewrite_operand)
         }
         Predicate::EnumMatch { column, .. } => {
-            *column = qualify_flat_join_column(column, sources)?;
+            *column = rewrite(column)?;
             Ok(())
         }
-        Predicate::IsNull(operand) => qualify_operand(operand),
+        Predicate::IsNull(operand) => rewrite_operand(operand),
     }
+}
+
+pub(crate) fn flat_join_predicate_sources(
+    predicate: &Predicate,
+) -> Result<BTreeSet<String>, QueryError> {
+    let mut predicate = predicate.clone();
+    let mut sources = BTreeSet::new();
+    rewrite_flat_join_predicate_columns(&mut predicate, &mut |column| {
+        let (scope, _) = flat_join_qualified_field(column)?;
+        sources.insert(scope.to_owned());
+        Ok(column.to_owned())
+    })?;
+    Ok(sources)
+}
+
+pub(crate) fn unqualify_flat_join_predicate(
+    predicate: &Predicate,
+    expected_scope: &str,
+) -> Result<Predicate, QueryError> {
+    let mut predicate = predicate.clone();
+    rewrite_flat_join_predicate_columns(&mut predicate, &mut |column| {
+        let (scope, field) = flat_join_qualified_field(column)?;
+        if scope != expected_scope {
+            return Err(QueryError::UnsupportedFlatJoinCombination {
+                feature: "filters spanning multiple sources".to_owned(),
+            });
+        }
+        Ok(field.to_owned())
+    })?;
+    Ok(predicate)
+}
+
+pub(crate) fn qualify_flat_join_source_predicate(
+    mut predicate: Predicate,
+    scope: &str,
+) -> Result<Predicate, QueryError> {
+    rewrite_flat_join_predicate_columns(&mut predicate, &mut |column| {
+        Ok(format!("{scope}.{column}"))
+    })?;
+    Ok(predicate)
+}
+
+fn validate_flat_join_filter_routing(predicate: &Predicate) -> Result<(), QueryError> {
+    if let Predicate::All(predicates) = predicate {
+        return predicates
+            .iter()
+            .try_for_each(validate_flat_join_filter_routing);
+    }
+    if flat_join_predicate_sources(predicate)?.len() > 1 {
+        return Err(QueryError::UnsupportedFlatJoinCombination {
+            feature: "filters spanning multiple sources".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn qualify_flat_join_column(
