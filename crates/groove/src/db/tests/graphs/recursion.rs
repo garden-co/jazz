@@ -2,19 +2,22 @@
 
 use super::*;
 
-#[test]
-fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
+#[futures_test::test]
+async fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
     insert_edge(&mut batch, 3, 3, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let mut values = expect_recv_vals(&subscription_id);
     sort_pairs_by_value(&mut values);
 
@@ -31,19 +34,22 @@ fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
     );
 }
 
-#[test]
-fn recursive_graph_subscriptions_retract_derived_paths_after_delete() {
+#[futures_test::test]
+async fn recursive_graph_subscriptions_retract_derived_paths_after_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
     insert_edge(&mut batch, 3, 3, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         database
             .last_commit_metrics()
@@ -56,7 +62,7 @@ fn recursive_graph_subscriptions_retract_derived_paths_after_delete() {
 
     let mut batch = database.open_batch();
     batch.delete("edges", PrimaryKeyValue::U64(2));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         database
             .last_commit_metrics()
@@ -79,15 +85,16 @@ fn recursive_graph_subscriptions_retract_derived_paths_after_delete() {
     );
 }
 
-#[test]
-fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete() {
+#[futures_test::test]
+async fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let shape = prepared_reachability_shape(&mut database);
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     let _empty = subscription.recv().unwrap();
 
@@ -95,12 +102,12 @@ fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete() {
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
     insert_edge(&mut batch, 3, 3, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial = expect_recv_vals(&subscription);
 
     let mut batch = database.open_batch();
     batch.delete("edges", PrimaryKeyValue::U64(2));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let mut values = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut values);
 
@@ -113,15 +120,15 @@ fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete() {
     );
 }
 
-#[test]
-fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
+#[futures_test::test]
+async fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "docs"],
     )
     .unwrap();
-    let mut database = Database::new(edges_docs_schema(), storage).unwrap();
+    let mut database = Database::new(edges_docs_schema(), storage).await.unwrap();
     let shape = database
         .prepare_one_sink(
             prepared_reachability_graph(GraphBuilder::table("edges"), 16),
@@ -129,9 +136,11 @@ fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
             RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed".to_owned()],
         )
+        .await
         .unwrap();
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -141,7 +150,7 @@ fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let mut initial = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut initial);
     assert_eq!(
@@ -154,7 +163,7 @@ fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
 
     let mut batch = database.open_batch();
     batch.insert("docs", vec![Value::U64(11), Value::U64(99)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         database
             .last_commit_metrics()
@@ -166,15 +175,16 @@ fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
     assert!(subscription.try_recv().is_err());
 }
 
-#[test]
-fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
+#[futures_test::test]
+async fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let shape = prepared_reachability_shape(&mut database);
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -183,7 +193,7 @@ fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     // Sanctioned by ARC 2 step-delta recursion instruction: the insert half
     // used to pin a recompute mechanism, not semantics. Positive step-table
     // inserts now run semi-naive incrementally; retractions below still
@@ -203,7 +213,7 @@ fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
 
     let mut batch = database.open_batch();
     batch.delete("edges", PrimaryKeyValue::U64(1));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         database
             .last_commit_metrics()
@@ -218,15 +228,16 @@ fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
     );
 }
 
-#[test]
-fn prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompute() {
+#[futures_test::test]
+async fn prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompute() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let shape = prepared_reachability_shape(&mut database);
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -239,7 +250,7 @@ fn prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompu
     for (idx, (src, dst)) in inserts.into_iter().enumerate() {
         let mut batch = database.open_batch();
         insert_edge(&mut batch, idx as u64 + 1, src, dst);
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
         assert_eq!(
             database
                 .last_commit_metrics()
@@ -275,15 +286,16 @@ fn prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompu
     }
 }
 
-#[test]
-fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
+#[futures_test::test]
+async fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let shape = prepared_reachability_shape(&mut database);
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     let _empty = subscription.recv().unwrap();
 
@@ -291,12 +303,12 @@ fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
     insert_edge(&mut batch, 3, 3, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial = expect_recv_vals(&subscription);
 
     let mut batch = database.open_batch();
     batch.delete("edges", PrimaryKeyValue::U64(1));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let mut values = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut values);
 
@@ -310,15 +322,16 @@ fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
     );
 }
 
-#[test]
-fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
+#[futures_test::test]
+async fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let shape = prepared_reachability_shape(&mut database);
     let first = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     let _empty = first.recv().unwrap();
 
@@ -327,7 +340,7 @@ fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
     insert_edge(&mut batch, 2, 2, 3);
     insert_edge(&mut batch, 3, 9, 10);
     insert_edge(&mut batch, 4, 5, 6);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let mut initial = expect_recv_vals(&first);
     sort_pairs_by_value(&mut initial);
@@ -341,6 +354,7 @@ fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
 
     let second = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(9)])
+        .await
         .unwrap();
     let mut next = expect_recv_vals(&second);
     sort_pairs_by_value(&mut next);
@@ -355,9 +369,9 @@ fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
     drop(first);
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 5, 3, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
-    database.flush().unwrap();
+    database.flush().await.unwrap();
     assert_eq!(
         database.last_tick_metrics().unwrap().recursive_recomputes,
         1
@@ -365,6 +379,7 @@ fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
 
     let third = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(5)])
+        .await
         .unwrap();
     let mut third_values = expect_recv_vals(&third);
     sort_pairs_by_value(&mut third_values);
@@ -377,18 +392,21 @@ fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
     );
 }
 
-#[test]
-fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_input() {
+#[futures_test::test]
+async fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_input() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage)
+        .await
+        .unwrap();
     let shape = prepared_reachability_with_antijoin_shape(&mut database);
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     let _empty = subscription.recv().unwrap();
 
@@ -396,7 +414,7 @@ fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_input() {
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
     insert_edge(&mut batch, 3, 3, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial = expect_recv_vals(&subscription);
 
     let mut batch = database.open_batch();
@@ -404,7 +422,7 @@ fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_input() {
         "blockers",
         vec![Value::U64(1), Value::U64(2), Value::U64(3)],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let mut values = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut values);
 
@@ -417,18 +435,21 @@ fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_input() {
     );
 }
 
-#[test]
-fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
+#[futures_test::test]
+async fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage)
+        .await
+        .unwrap();
     let shape = prepared_reachability_with_antijoin_shape(&mut database);
     let subscription = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     let _empty = subscription.recv().unwrap();
 
@@ -436,7 +457,7 @@ fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
     insert_edge(&mut batch, 3, 3, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial = expect_recv_vals(&subscription);
 
     let mut batch = database.open_batch();
@@ -444,7 +465,7 @@ fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
         "blockers",
         vec![Value::U64(1), Value::U64(1), Value::U64(2)],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let mut values = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut values);
 
@@ -458,42 +479,48 @@ fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
     );
 }
 
-#[test]
-fn recursive_graph_subscriptions_collapse_duplicate_derivations() {
+#[futures_test::test]
+async fn recursive_graph_subscriptions_collapse_duplicate_derivations() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 1, 3);
     insert_edge(&mut batch, 3, 2, 4);
     insert_edge(&mut batch, 4, 3, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let values = expect_recv_vals(&subscription_id);
 
     assert!(values.contains(&(vec![Value::U64(1), Value::U64(4)], 1)));
 }
 
-#[test]
-fn recursive_graph_subscriptions_recompute_after_edge_update() {
+#[futures_test::test]
+async fn recursive_graph_subscriptions_recompute_after_edge_update() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial_reach = expect_recv_vals(&subscription_id);
 
     let mut batch = database.open_batch();
     update_edge(&mut batch, 2, 2, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let mut values = expect_recv_vals(&subscription_id);
     sort_pairs_by_value(&mut values);
 
@@ -508,17 +535,20 @@ fn recursive_graph_subscriptions_recompute_after_edge_update() {
     );
 }
 
-#[test]
-fn recursive_graph_subscriptions_incrementally_extend_existing_reach_with_new_edge() {
+#[futures_test::test]
+async fn recursive_graph_subscriptions_incrementally_extend_existing_reach_with_new_edge() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         database
             .last_commit_metrics()
@@ -531,7 +561,7 @@ fn recursive_graph_subscriptions_incrementally_extend_existing_reach_with_new_ed
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 2, 2, 3);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         database
             .last_commit_metrics()
@@ -552,22 +582,25 @@ fn recursive_graph_subscriptions_incrementally_extend_existing_reach_with_new_ed
     );
 }
 
-#[test]
-fn recursive_graph_subscriptions_incrementally_extend_new_seed_with_existing_edge() {
+#[futures_test::test]
+async fn recursive_graph_subscriptions_incrementally_extend_new_seed_with_existing_edge() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 2, 3);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial_reach = expect_recv_vals(&subscription_id);
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 2, 1, 2);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let mut values = expect_recv_vals(&subscription_id);
     sort_pairs_by_value(&mut values);
 
@@ -580,29 +613,32 @@ fn recursive_graph_subscriptions_incrementally_extend_new_seed_with_existing_edg
     );
 }
 
-#[test]
-fn recursive_graph_subscriptions_converge_on_self_cycles() {
+#[futures_test::test]
+async fn recursive_graph_subscriptions_converge_on_self_cycles() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription = database.subscribe_one_sink(reachability_graph(2)).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(reachability_graph(2))
+        .await
+        .unwrap();
     let _initial = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 1);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let values = subscription.recv().unwrap().to_values().unwrap();
 
     assert_eq!(values, [(vec![Value::U64(1), Value::U64(1)], 1)]);
 }
 
-#[test]
-fn recursive_graphs_reject_seed_and_step_output_descriptor_mismatch() {
+#[futures_test::test]
+async fn recursive_graphs_reject_seed_and_step_output_descriptor_mismatch() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let frontier = GraphBuilder::frontier_source(
         "frontier",
         RecordDescriptor::new([
@@ -619,17 +655,17 @@ fn recursive_graphs_reject_seed_and_step_output_descriptor_mismatch() {
     );
 
     assert!(matches!(
-        database.subscribe_one_sink(graph).unwrap_err(),
+        database.subscribe_one_sink(graph).await.unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::GraphOutputMismatch)
     ));
 }
 
-#[test]
-fn recursive_graphs_reject_nested_recursion_for_v0() {
+#[futures_test::test]
+async fn recursive_graphs_reject_nested_recursion_for_v0() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let reach = RecordDescriptor::new([
         ("src", ColumnType::U64.clone()),
         ("dst", ColumnType::U64.clone()),
@@ -642,26 +678,29 @@ fn recursive_graphs_reject_nested_recursion_for_v0() {
     );
 
     assert!(matches!(
-        database.subscribe_one_sink(graph).unwrap_err(),
+        database.subscribe_one_sink(graph).await.unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::UnsupportedNestedRecursion)
     ));
 }
 
-#[test]
-fn recursive_graphs_fail_when_frontier_exceeds_max_iters() {
+#[futures_test::test]
+async fn recursive_graphs_fail_when_frontier_exceeds_max_iters() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
     insert_edge(&mut batch, 3, 3, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert!(matches!(
-        database.query_graph(reachability_graph(1)).unwrap_err(),
+        database
+            .query_graph(reachability_graph(1))
+            .await
+            .unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::RecursiveIterationLimit { max_iters: 1, .. })
     ));
 }
