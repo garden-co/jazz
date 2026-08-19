@@ -28,12 +28,13 @@ where
     /// assert!(database.last_tick_metrics().is_some());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn flush(&mut self) -> Result<(), Error> {
+    pub async fn flush(&mut self) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         let tick = self
             .ivm_runtime
             .tick(Vec::new(), &storage)
+            .await
             .map_err(Error::IvmRuntime)?;
         self.last_tick_metrics = Some(tick);
         Ok(())
@@ -146,6 +147,7 @@ where
         let tick = self
             .ivm_runtime
             .tick_staged(table_deltas, &storage, &mut staged_operations)
+            .await
             .map_err(Error::IvmRuntime)?;
         let ivm_tick_time = tick_start.elapsed();
         let operations = staged_operations

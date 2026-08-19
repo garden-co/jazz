@@ -1,6 +1,7 @@
 //! Per-tick evaluator state, memoization, arrangements, and recursive execution.
 
 use super::*;
+use crate::storage::StorageFuture;
 
 #[derive(Clone, Debug)]
 pub(super) enum OperatorState {
@@ -209,7 +210,7 @@ impl<'a, S> GraphRuntimeView<'a, S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn eval_with_binding(
+    pub(super) async fn eval_with_binding(
         &mut self,
         sub_tick: u64,
         binding: FrontierName,
@@ -240,10 +241,11 @@ where
         };
         evaluator
             .update_node(node)
+            .await
             .map(|records| records.as_ref().clone())
     }
 
-    pub(super) fn eval_with_binding_and_table_deltas(
+    pub(super) async fn eval_with_binding_and_table_deltas(
         &mut self,
         table_deltas: &[TableDelta],
         sub_tick: u64,
@@ -283,6 +285,7 @@ where
         };
         evaluator
             .update_node(node)
+            .await
             .map(|records| records.as_ref().clone())
     }
 
@@ -291,7 +294,10 @@ where
             .retain(|key, _| key.scope != self.scope);
     }
 
-    pub(super) fn eval_root(&mut self, node: NodeId) -> Result<RecordDeltas, IvmRuntimeError> {
+    pub(super) async fn eval_root(
+        &mut self,
+        node: NodeId,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut evaluator = TickEvaluator {
             schema: self.schema,
             graph: self.graph,
@@ -324,6 +330,7 @@ where
         };
         evaluator
             .update_node(node)
+            .await
             .map(|records| records.as_ref().clone())
     }
 }
@@ -498,294 +505,298 @@ where
     pub(super) fn update_node(
         &mut self,
         node: NodeId,
-    ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
-        let graph_node = self
-            .graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        let signature = self.input_signature(node)?;
-        let memo_key = self.memo_key(node, &signature)?;
-        let current_watermark = self.input_generation(node);
-        let requires_state_rebuild = (self.context.hydrate_arrangements
-            && self.node_depends_on_aggregate(node)?
-            && !self.aggregate_arrangements_are_current(node)?)
-            || (self.context.eval_mode == EvalMode::Tick
-                && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
-        if !requires_state_rebuild
-            && let Some(entry) = self.eval_memo.get_mut(&memo_key)
-            && entry.input_watermark == current_watermark
-        {
-            *self.memo_use_clock += 1;
-            entry.last_used = *self.memo_use_clock;
-            if self.context.eval_mode == EvalMode::Hydrate {
-                self.metrics.hydration_memo_hits += 1;
+    ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        Box::pin(async move {
+            let graph_node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            let signature = self.input_signature(node)?;
+            let memo_key = self.memo_key(node, &signature)?;
+            let current_watermark = self.input_generation(node);
+            let requires_state_rebuild = (self.context.hydrate_arrangements
+                && self.node_depends_on_aggregate(node)?
+                && !self.aggregate_arrangements_are_current(node)?)
+                || (self.context.eval_mode == EvalMode::Tick
+                    && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
+            if !requires_state_rebuild
+                && let Some(entry) = self.eval_memo.get_mut(&memo_key)
+                && entry.input_watermark == current_watermark
+            {
+                *self.memo_use_clock += 1;
+                entry.last_used = *self.memo_use_clock;
+                if self.context.eval_mode == EvalMode::Hydrate {
+                    self.metrics.hydration_memo_hits += 1;
+                }
+                return Ok(Arc::clone(&entry.records));
             }
-            return Ok(Arc::clone(&entry.records));
-        }
 
-        if self.context.eval_mode == EvalMode::Hydrate {
-            self.metrics.hydration_memo_computes += 1;
-            self.metrics.hydration_memo_computed_nodes.insert(node);
-        }
+            if self.context.eval_mode == EvalMode::Hydrate {
+                self.metrics.hydration_memo_computes += 1;
+                self.metrics.hydration_memo_computed_nodes.insert(node);
+            }
 
-        let output_desc = graph_node.descriptor.output;
-        if self.context.sub_tick > 1 && !self.depends_on_context(node)? {
-            let result = Arc::new(RecordDeltas::empty(output_desc));
+            let output_desc = graph_node.descriptor.output;
+            if self.context.sub_tick > 1 && !self.depends_on_context(node)? {
+                let result = Arc::new(RecordDeltas::empty(output_desc));
+                *self.memo_use_clock += 1;
+                if let Some(previous) = self.eval_memo.insert(
+                    memo_key,
+                    EvalMemoEntry::new(
+                        Arc::clone(&result),
+                        current_watermark,
+                        0,
+                        *self.memo_use_clock,
+                    ),
+                ) {
+                    *self.eval_memo_bytes =
+                        self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
+                }
+                return Ok(result);
+            }
+            let result = match &graph_node.descriptor.operator {
+                OpType::TableSource(input) => NodeState::update_table_source(
+                    input,
+                    self.schema,
+                    self.variant_projections,
+                    &output_desc,
+                    self.table_deltas,
+                ),
+                OpType::IndexSource(input) => {
+                    NodeState::update_index_source(
+                        input,
+                        self.schema,
+                        self.variant_projections,
+                        &output_desc,
+                        self.table_deltas,
+                        self.storage,
+                        self.context.eval_mode,
+                    )
+                    .await
+                }
+                OpType::InlineRecords(inline) if self.context.eval_mode == EvalMode::Hydrate => {
+                    Ok(RecordDeltas {
+                        descriptor: output_desc,
+                        deltas: inline
+                            .records
+                            .iter()
+                            .cloned()
+                            .map(|record| RecordDelta {
+                                record: record.into(),
+                                weight: 1,
+                            })
+                            .collect(),
+                    })
+                }
+                OpType::InlineRecords(_) => Ok(RecordDeltas::empty(output_desc)),
+                OpType::BindingSource(input) => NodeState::update_binding_source(
+                    input,
+                    &output_desc,
+                    self.binding_deltas,
+                    self.binding_snapshots,
+                    self.context.arrangement_update_mode,
+                ),
+                OpType::FrontierSource(frontier_source) => {
+                    self.frontier_source(frontier_source, &graph_node.descriptor.output)
+                }
+                OpType::Filter(filter) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    NodeState::update_filter(filter, output_desc, &input)
+                }
+                OpType::MapProject(project) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    let raw_projection =
+                        self.raw_projection_fields(node, project, &input.descriptor, output_desc)?;
+                    let result = NodeState::update_map_project(
+                        project,
+                        output_desc,
+                        &input,
+                        raw_projection.as_deref(),
+                        false,
+                    );
+                    #[cfg(feature = "cold-settle-attribution")]
+                    if let Ok(output) = &result {
+                        crate::cold_settle_attribution::record_map(
+                            self.context.eval_mode == EvalMode::Hydrate,
+                            self.depends_on_dominant_child(node)?,
+                            input.deltas.len(),
+                            output.deltas.len(),
+                        );
+                    }
+                    result
+                }
+                OpType::UnwrapNullable(unwrap) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    NodeState::update_unwrap_nullable(unwrap, output_desc, &input)
+                }
+                OpType::Unnest(unnest) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    NodeState::update_unnest(unnest, output_desc, &input)
+                }
+                OpType::VariantProject(variant_project) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    NodeState::update_variant_project(variant_project, output_desc, &input)
+                }
+                OpType::ArgMaxBy(arg_max_by) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    self.update_arg_by(
+                        node,
+                        ArgBySpec {
+                            group_fields: &arg_max_by.group_fields,
+                            group_field_indices: &arg_max_by.group_field_indices,
+                            primary_key_field_indices: &arg_max_by.primary_key_field_indices,
+                            direction: ArgByDirection::Max,
+                        },
+                        output_desc,
+                        &input,
+                    )
+                }
+                OpType::ArgMinBy(arg_min_by) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    self.update_arg_by(
+                        node,
+                        ArgBySpec {
+                            group_fields: &arg_min_by.group_fields,
+                            group_field_indices: &arg_min_by.group_field_indices,
+                            primary_key_field_indices: &arg_min_by.primary_key_field_indices,
+                            direction: ArgByDirection::Min,
+                        },
+                        output_desc,
+                        &input,
+                    )
+                }
+                OpType::TopBy(top_by) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    self.update_top_by(node, top_by, output_desc, &input)
+                }
+                OpType::CollectBy(collect_by) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    self.update_collect_by(node, collect_by, output_desc, &input)
+                }
+                OpType::Aggregate(aggregate) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    self.update_aggregate(node, aggregate, output_desc, &input)
+                }
+                OpType::IndexBy(index_by) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    let trace = std::env::var_os("GROOVE_TRACE_INDEX_BY").is_some();
+                    let start = trace.then(std::time::Instant::now);
+                    let input_len = input.deltas.len();
+                    let result = NodeState::update_index_by(index_by, output_desc, &input);
+                    if trace && input_len > 0 {
+                        let output_len = result
+                            .as_ref()
+                            .map(|records| records.deltas.len())
+                            .unwrap_or(0);
+                        let index_name = index_by
+                            .explicit_index
+                            .as_ref()
+                            .map(|index| index.name.as_str())
+                            .unwrap_or("<derived>");
+                        let key_fields = index_by
+                            .key_expressions
+                            .iter()
+                            .map(|expr| format!("{expr:?}"))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        eprintln!(
+                            "GROOVE_TRACE_INDEX_BY node={node:?} index={index_name} input={input_len} output={output_len} unique={} append_value_to_key={} store_value={} scan={} key_fields=[{}] elapsed_ms={:.3}",
+                            index_by.unique,
+                            index_by.append_value_to_key,
+                            index_by.store_value,
+                            index_by.scan.is_some(),
+                            key_fields,
+                            start.expect("trace start").elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    result
+                }
+                OpType::Union => {
+                    let input_nodes = graph_node.descriptor.inputs.clone();
+                    let mut ready_inputs = Vec::with_capacity(input_nodes.len());
+                    for input in input_nodes {
+                        ready_inputs.push(self.update_node(input).await?);
+                    }
+                    NodeState::update_union(output_desc, ready_inputs)
+                }
+                OpType::Join(join) => {
+                    let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
+                        return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                    };
+                    let left = self.update_node(*left_input).await?;
+                    let right = self.update_node(*right_input).await?;
+                    self.update_join(
+                        node,
+                        join,
+                        output_desc,
+                        *left_input,
+                        *right_input,
+                        &left.deltas,
+                        &right.deltas,
+                    )
+                }
+                OpType::SemiJoin(join) => {
+                    let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
+                        return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                    };
+                    let left = self.update_node(*left_input).await?;
+                    let right = self.update_node(*right_input).await?;
+                    self.update_semi_join(
+                        node,
+                        join,
+                        output_desc,
+                        *left_input,
+                        *right_input,
+                        &left.deltas,
+                        &right.deltas,
+                    )
+                }
+                OpType::AntiJoin(join) => {
+                    let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
+                        return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                    };
+                    let left = self.update_node(*left_input).await?;
+                    let right = self.update_node(*right_input).await?;
+                    self.update_anti_join(
+                        node,
+                        join,
+                        output_desc,
+                        *left_input,
+                        *right_input,
+                        &left.deltas,
+                        &right.deltas,
+                    )
+                }
+                OpType::Recursive(recursive) => {
+                    let [seed, step] = graph_node.descriptor.inputs.as_slice() else {
+                        return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                    };
+                    self.update_recursive(node, recursive, output_desc, *seed, *step)
+                        .await
+                }
+                // Durable writes are an async preparation boundary driven outside
+                // this borrowed evaluator frame by `tick_durable_nodes`.
+                OpType::Persist(_) => Err(IvmRuntimeError::UnsupportedOperator),
+                _ => Err(IvmRuntimeError::UnsupportedOperator),
+            }?;
+            self.metrics.records_processed += result.deltas.len();
+            let result = Arc::new(result);
+            let payload_bytes = record_deltas_encoded_bytes(&result);
             *self.memo_use_clock += 1;
             if let Some(previous) = self.eval_memo.insert(
                 memo_key,
                 EvalMemoEntry::new(
                     Arc::clone(&result),
                     current_watermark,
-                    0,
+                    payload_bytes,
                     *self.memo_use_clock,
                 ),
             ) {
                 *self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
             }
-            return Ok(result);
-        }
-        let result = match &graph_node.descriptor.operator {
-            OpType::TableSource(input) => NodeState::update_table_source(
-                input,
-                self.schema,
-                self.variant_projections,
-                &output_desc,
-                self.table_deltas,
-            ),
-            OpType::IndexSource(input) => NodeState::update_index_source(
-                input,
-                self.schema,
-                self.variant_projections,
-                &output_desc,
-                self.table_deltas,
-                self.storage,
-                self.context.eval_mode,
-            ),
-            OpType::InlineRecords(inline) if self.context.eval_mode == EvalMode::Hydrate => {
-                Ok(RecordDeltas {
-                    descriptor: output_desc,
-                    deltas: inline
-                        .records
-                        .iter()
-                        .cloned()
-                        .map(|record| RecordDelta {
-                            record: record.into(),
-                            weight: 1,
-                        })
-                        .collect(),
-                })
-            }
-            OpType::InlineRecords(_) => Ok(RecordDeltas::empty(output_desc)),
-            OpType::BindingSource(input) => NodeState::update_binding_source(
-                input,
-                &output_desc,
-                self.binding_deltas,
-                self.binding_snapshots,
-                self.context.arrangement_update_mode,
-            ),
-            OpType::FrontierSource(frontier_source) => {
-                self.frontier_source(frontier_source, &graph_node.descriptor.output)
-            }
-            OpType::Filter(filter) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_filter(filter, output_desc, &input)
-            }
-            OpType::MapProject(project) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                let raw_projection =
-                    self.raw_projection_fields(node, project, &input.descriptor, output_desc)?;
-                let result = NodeState::update_map_project(
-                    project,
-                    output_desc,
-                    &input,
-                    raw_projection.as_deref(),
-                    false,
-                );
-                #[cfg(feature = "cold-settle-attribution")]
-                if let Ok(output) = &result {
-                    crate::cold_settle_attribution::record_map(
-                        self.context.eval_mode == EvalMode::Hydrate,
-                        self.depends_on_dominant_child(node)?,
-                        input.deltas.len(),
-                        output.deltas.len(),
-                    );
-                }
-                result
-            }
-            OpType::UnwrapNullable(unwrap) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_unwrap_nullable(unwrap, output_desc, &input)
-            }
-            OpType::Unnest(unnest) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_unnest(unnest, output_desc, &input)
-            }
-            OpType::VariantProject(variant_project) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_variant_project(variant_project, output_desc, &input)
-            }
-            OpType::ArgMaxBy(arg_max_by) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                self.update_arg_by(
-                    node,
-                    ArgBySpec {
-                        group_fields: &arg_max_by.group_fields,
-                        group_field_indices: &arg_max_by.group_field_indices,
-                        primary_key_field_indices: &arg_max_by.primary_key_field_indices,
-                        direction: ArgByDirection::Max,
-                    },
-                    output_desc,
-                    &input,
-                )
-            }
-            OpType::ArgMinBy(arg_min_by) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                self.update_arg_by(
-                    node,
-                    ArgBySpec {
-                        group_fields: &arg_min_by.group_fields,
-                        group_field_indices: &arg_min_by.group_field_indices,
-                        primary_key_field_indices: &arg_min_by.primary_key_field_indices,
-                        direction: ArgByDirection::Min,
-                    },
-                    output_desc,
-                    &input,
-                )
-            }
-            OpType::TopBy(top_by) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                self.update_top_by(node, top_by, output_desc, &input)
-            }
-            OpType::CollectBy(collect_by) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                self.update_collect_by(node, collect_by, output_desc, &input)
-            }
-            OpType::Aggregate(aggregate) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                self.update_aggregate(node, aggregate, output_desc, &input)
-            }
-            OpType::IndexBy(index_by) => {
-                let input = self.update_unary_input(graph_node, node)?;
-                let trace = std::env::var_os("GROOVE_TRACE_INDEX_BY").is_some();
-                let start = trace.then(std::time::Instant::now);
-                let input_len = input.deltas.len();
-                let result = NodeState::update_index_by(index_by, output_desc, &input);
-                if trace && input_len > 0 {
-                    let output_len = result
-                        .as_ref()
-                        .map(|records| records.deltas.len())
-                        .unwrap_or(0);
-                    let index_name = index_by
-                        .explicit_index
-                        .as_ref()
-                        .map(|index| index.name.as_str())
-                        .unwrap_or("<derived>");
-                    let key_fields = index_by
-                        .key_expressions
-                        .iter()
-                        .map(|expr| format!("{expr:?}"))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    eprintln!(
-                        "GROOVE_TRACE_INDEX_BY node={node:?} index={index_name} input={input_len} output={output_len} unique={} append_value_to_key={} store_value={} scan={} key_fields=[{}] elapsed_ms={:.3}",
-                        index_by.unique,
-                        index_by.append_value_to_key,
-                        index_by.store_value,
-                        index_by.scan.is_some(),
-                        key_fields,
-                        start.expect("trace start").elapsed().as_secs_f64() * 1000.0
-                    );
-                }
-                result
-            }
-            OpType::Union => {
-                let inputs = graph_node
-                    .descriptor
-                    .inputs
-                    .iter()
-                    .map(|input| self.update_node(*input))
-                    .collect::<Result<Vec<_>, _>>()?;
-                NodeState::update_union(output_desc, inputs)
-            }
-            OpType::Join(join) => {
-                let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
-                    return Err(IvmRuntimeError::GraphInputArityMismatch(node));
-                };
-                let left = self.update_node(*left_input)?;
-                let right = self.update_node(*right_input)?;
-                self.update_join(
-                    node,
-                    join,
-                    output_desc,
-                    *left_input,
-                    *right_input,
-                    &left.deltas,
-                    &right.deltas,
-                )
-            }
-            OpType::SemiJoin(join) => {
-                let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
-                    return Err(IvmRuntimeError::GraphInputArityMismatch(node));
-                };
-                let left = self.update_node(*left_input)?;
-                let right = self.update_node(*right_input)?;
-                self.update_semi_join(
-                    node,
-                    join,
-                    output_desc,
-                    *left_input,
-                    *right_input,
-                    &left.deltas,
-                    &right.deltas,
-                )
-            }
-            OpType::AntiJoin(join) => {
-                let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
-                    return Err(IvmRuntimeError::GraphInputArityMismatch(node));
-                };
-                let left = self.update_node(*left_input)?;
-                let right = self.update_node(*right_input)?;
-                self.update_anti_join(
-                    node,
-                    join,
-                    output_desc,
-                    *left_input,
-                    *right_input,
-                    &left.deltas,
-                    &right.deltas,
-                )
-            }
-            OpType::Recursive(recursive) => {
-                let [seed, step] = graph_node.descriptor.inputs.as_slice() else {
-                    return Err(IvmRuntimeError::GraphInputArityMismatch(node));
-                };
-                self.update_recursive(node, recursive, output_desc, *seed, *step)
-            }
-            OpType::Persist(persist) => {
-                let storage = self.storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
-                let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_persist(persist, output_desc, &input, storage)
-            }
-            _ => Err(IvmRuntimeError::UnsupportedOperator),
-        }?;
-        self.metrics.records_processed += result.deltas.len();
-        let result = Arc::new(result);
-        let payload_bytes = record_deltas_encoded_bytes(&result);
-        *self.memo_use_clock += 1;
-        if let Some(previous) = self.eval_memo.insert(
-            memo_key,
-            EvalMemoEntry::new(
-                Arc::clone(&result),
-                current_watermark,
-                payload_bytes,
-                *self.memo_use_clock,
-            ),
-        ) {
-            *self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
-        }
-        *self.eval_memo_bytes = self.eval_memo_bytes.saturating_add(payload_bytes);
-        Ok(result)
+            *self.eval_memo_bytes = self.eval_memo_bytes.saturating_add(payload_bytes);
+            Ok(result)
+        })
     }
 
     pub(super) fn memo_key(
@@ -1968,7 +1979,7 @@ where
         }
     }
 
-    fn update_recursive(
+    async fn update_recursive(
         &mut self,
         node: NodeId,
         recursive: &RecursiveOp,
@@ -2013,7 +2024,8 @@ where
                 self.binding_snapshots,
                 self.current_tick,
                 scope,
-            )?;
+            )
+            .await?;
             recursive_as_of.value_mut().replace_with(next);
             let accumulated = RecordDeltas {
                 descriptor: output_desc,
@@ -2039,7 +2051,8 @@ where
                 scope,
                 self.metrics,
             );
-            hydrate_recursive_arrangements(&mut runtime, recursive, step, accumulated.clone())?;
+            hydrate_recursive_arrangements(&mut runtime, recursive, step, accumulated.clone())
+                .await?;
             recursive_as_of
                 .value_mut()
                 .mark_step_arrangements_hydrated();
@@ -2074,7 +2087,8 @@ where
             output_desc,
             seed,
             step,
-        )?;
+        )
+        .await?;
         recursive_as_of.mark_forward_as_of(Tick(self.current_tick))?;
         self.operator_states.insert(operator_key, operator);
         Ok(RecordDeltas {
@@ -2083,7 +2097,7 @@ where
         })
     }
 
-    fn update_unary_input(
+    async fn update_unary_input(
         &mut self,
         graph_node: &crate::ivm::GraphNode,
         node: NodeId,
@@ -2093,6 +2107,6 @@ where
             .inputs
             .first()
             .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
-        self.update_node(input)
+        self.update_node(input).await
     }
 }
