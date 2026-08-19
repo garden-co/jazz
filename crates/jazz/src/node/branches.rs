@@ -342,13 +342,16 @@ where
         }
         if identity != AuthorId::SYSTEM
             && let Some(branch) = &source_branch
-            && !self.branch_read_policy_allows(branch, identity)?
+            && !self.branch_read_policy_allows(branch, identity).await?
         {
             return Err(Error::AuthorizationDenied);
         }
         if let BranchLineage::Branch(target_branch) = target {
             self.ensure_branch_open(target_branch)?;
-            if !self.branch_write_policy_allows(target_branch, identity)? {
+            if !self
+                .branch_write_policy_allows(target_branch, identity)
+                .await?
+            {
                 return Err(Error::AuthorizationDenied);
             }
         }
@@ -380,7 +383,8 @@ where
                     .map_err(|_| Error::BranchMergeCalculation("source read binding is invalid"))?;
                 let readable = match source {
                     BranchLineage::Root => {
-                        self.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)?
+                        self.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)
+                            .await?
                     }
                     BranchLineage::Branch(branch_id) => {
                         self.query_rows_on_branch_for_link(branch_id, &shape, &binding, identity)
@@ -441,7 +445,8 @@ where
                                 &cells,
                                 identity,
                                 false,
-                            )?
+                            )
+                            .await?
                         } else {
                             true
                         };
@@ -740,7 +745,10 @@ where
         }
         self.ensure_branch_open(branch_id)?;
         let permission_subject = commits[0].effective_permission_subject();
-        if !self.branch_write_policy_allows(branch_id, permission_subject)? {
+        if !self
+            .branch_write_policy_allows(branch_id, permission_subject)
+            .await?
+        {
             return Err(Error::AuthorizationDenied);
         }
         for commit in &commits {
@@ -908,11 +916,12 @@ where
             }
             return Err(Error::BranchNotFound(branch_id));
         };
-        if !self.branch_read_policy_allows(&branch, identity)? {
+        if !self.branch_read_policy_allows(&branch, identity).await? {
             return Ok(Vec::new());
         }
-        let mut rows =
-            self.query_rows_on_branch_query_engine(branch_id, shape, binding, identity)?;
+        let mut rows = self
+            .query_rows_on_branch_query_engine(branch_id, shape, binding, identity)
+            .await?;
         sort_current_rows(&mut rows);
         Ok(rows)
     }
@@ -930,13 +939,14 @@ where
         if !self.branches.branches.contains_key(&branch_id) {
             return Ok(Vec::new());
         }
-        let mut rows =
-            self.query_rows_on_branch_query_engine_for_client(branch_id, shape, binding, identity)?;
+        let mut rows = self
+            .query_rows_on_branch_query_engine_for_client(branch_id, shape, binding, identity)
+            .await?;
         sort_current_rows(&mut rows);
         Ok(rows)
     }
 
-    fn branch_read_policy_allows(
+    async fn branch_read_policy_allows(
         &mut self,
         branch: &BranchRecord,
         identity: AuthorId,
@@ -945,6 +955,7 @@ where
             return Ok(true);
         }
         self.branch_read_policy_authorized_branch_ids(branch.branch_id, identity)
+            .await
             .map(|branches| branches.contains(&RowUuid(branch.branch_id.0)))
     }
 
@@ -952,7 +963,7 @@ where
     /// is deliberately the same first-level branch gate as branch reads, so
     /// metadata cannot become a branch-existence oracle when an empty result
     /// is otherwise legitimate.
-    pub(crate) fn branch_metadata_visible_to(
+    pub(crate) async fn branch_metadata_visible_to(
         &mut self,
         branch_id: BranchId,
         identity: AuthorId,
@@ -960,10 +971,10 @@ where
         let Some(branch) = self.branches.branches.get(&branch_id).cloned() else {
             return Ok(false);
         };
-        self.branch_read_policy_allows(&branch, identity)
+        self.branch_read_policy_allows(&branch, identity).await
     }
 
-    pub(super) fn branch_write_policy_allows(
+    pub(super) async fn branch_write_policy_allows(
         &mut self,
         branch_id: BranchId,
         identity: AuthorId,
@@ -998,6 +1009,7 @@ where
             identity,
             false,
         )
+        .await
     }
 
     pub(super) async fn branch_table_write_policy_allows_version_record(
@@ -1028,15 +1040,17 @@ where
                         .map(|value| (column.name.clone(), value))
                 })
                 .collect();
-            return self.branch_write_policy_query_allows_candidate(
-                branch.branch_id,
-                table,
-                &policy,
-                row.row_uuid(),
-                &cells,
-                author,
-                false,
-            );
+            return self
+                .branch_write_policy_query_allows_candidate(
+                    branch.branch_id,
+                    table,
+                    &policy,
+                    row.row_uuid(),
+                    &cells,
+                    author,
+                    false,
+                )
+                .await;
         }
         let previous = self
             .branch_delete_subject_row(branch, table, version)
@@ -1052,15 +1066,18 @@ where
                 })
                 .collect();
             if let Some(policy) = table.write_policies.update_using.clone() {
-                if !self.branch_write_policy_query_allows_candidate(
-                    branch.branch_id,
-                    table,
-                    &policy,
-                    previous.row_uuid(),
-                    &previous_cells,
-                    author,
-                    false,
-                )? {
+                if !self
+                    .branch_write_policy_query_allows_candidate(
+                        branch.branch_id,
+                        table,
+                        &policy,
+                        previous.row_uuid(),
+                        &previous_cells,
+                        author,
+                        false,
+                    )
+                    .await?
+                {
                     return Ok(false);
                 }
             }
@@ -1077,15 +1094,17 @@ where
                         .map(|value| (column.name.clone(), value))
                 })
                 .collect();
-            return self.branch_write_policy_query_allows_candidate(
-                branch.branch_id,
-                table,
-                &policy,
-                version.row_uuid(),
-                &cells,
-                author,
-                false,
-            );
+            return self
+                .branch_write_policy_query_allows_candidate(
+                    branch.branch_id,
+                    table,
+                    &policy,
+                    version.row_uuid(),
+                    &cells,
+                    author,
+                    false,
+                )
+                .await;
         }
         let Some(policy) = table.write_policies.insert_check.clone() else {
             return Ok(true);
@@ -1109,6 +1128,7 @@ where
             author,
             true,
         )
+        .await
     }
 
     async fn branch_delete_subject_row(
@@ -1215,7 +1235,7 @@ where
             .collect::<BTreeMap<_, _>>();
         if let Some(base) = &branch.base {
             let base_rows = if read_schema_version == self.catalogue.current_schema_version_id {
-                self.current_rows_at(table, base.global_base)?
+                self.current_rows_at(table, base.global_base).await?
             } else {
                 self.projected_historical_current_rows(
                     table,
@@ -1256,7 +1276,7 @@ where
             return Ok(Vec::new());
         };
         if read_schema_version == self.catalogue.current_schema_version_id {
-            self.current_rows_at(table, base.global_base)
+            self.current_rows_at(table, base.global_base).await
         } else {
             self.projected_historical_current_rows(table, read_schema_version, base.global_base)
         }
