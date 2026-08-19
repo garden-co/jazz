@@ -2598,22 +2598,34 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn get_set_and_delete_values() {
+    #[futures_test::test]
+    async fn get_set_and_delete_values() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                 .unwrap();
 
-        storage.set("records", b"a", b"one").unwrap();
-        assert_eq!(storage.get("records", b"a").unwrap(), Some(b"one".to_vec()));
+        storage
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("records".into(), b"a".to_vec()).await.unwrap(),
+            Some(b"one".to_vec())
+        );
 
-        storage.delete("records", b"a").unwrap();
-        assert_eq!(storage.get("records", b"a").unwrap(), None);
+        storage
+            .delete("records".into(), b"a".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("records".into(), b"a".to_vec()).await.unwrap(),
+            None
+        );
     }
 
-    #[test]
-    fn native_durable_test_store_keeps_writes_enabled() {
+    #[futures_test::test]
+    async fn native_durable_test_store_keeps_writes_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = TestBtreeStorage::open_with_sync_policy(
             temp_dir.path().join("groove-test.btree"),
@@ -2622,24 +2634,42 @@ mod tests {
         )
         .unwrap();
 
-        storage.set("records", b"a", b"one").unwrap();
+        storage
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
 
-        assert_eq!(storage.get("records", b"a").unwrap(), Some(b"one".to_vec()));
+        assert_eq!(
+            storage.get("records".into(), b"a".to_vec()).await.unwrap(),
+            Some(b"one".to_vec())
+        );
     }
 
-    #[test]
-    fn range_returns_ordered_values_between_start_and_end() {
+    #[futures_test::test]
+    async fn range_returns_ordered_values_between_start_and_end() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                 .unwrap();
 
-        storage.set("records", b"a", b"one").unwrap();
-        storage.set("records", b"b", b"two").unwrap();
-        storage.set("records", b"c", b"three").unwrap();
+        storage
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"b".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"c".to_vec(), b"three".to_vec())
+            .await
+            .unwrap();
 
         assert_eq!(
-            storage.range("records", b"a", b"c").unwrap(),
+            storage
+                .range("records".into(), b"a".to_vec(), b"c".to_vec())
+                .await
+                .unwrap(),
             vec![
                 (b"a".to_vec(), b"one".to_vec()),
                 (b"b".to_vec(), b"two".to_vec())
@@ -2647,19 +2677,31 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prefix_returns_ordered_values_with_matching_prefix() {
+    #[futures_test::test]
+    async fn prefix_returns_ordered_values_with_matching_prefix() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                 .unwrap();
 
-        storage.set("records", b"user:1", b"a").unwrap();
-        storage.set("records", b"user:2", b"b").unwrap();
-        storage.set("records", b"view:1", b"c").unwrap();
+        storage
+            .set("records".into(), b"user:1".to_vec(), b"a".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"user:2".to_vec(), b"b".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"view:1".to_vec(), b"c".to_vec())
+            .await
+            .unwrap();
 
         assert_eq!(
-            storage.prefix("records", b"user:").unwrap(),
+            storage
+                .prefix("records".into(), b"user:".to_vec())
+                .await
+                .unwrap(),
             vec![
                 (b"user:1".to_vec(), b"a".to_vec()),
                 (b"user:2".to_vec(), b"b".to_vec())
@@ -2667,19 +2709,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prefix_handles_prefixes_without_a_finite_upper_bound() {
+    #[futures_test::test]
+    async fn prefix_handles_prefixes_without_a_finite_upper_bound() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                 .unwrap();
 
-        storage.set("records", &[0xfe], b"before").unwrap();
-        storage.set("records", &[0xff, 0x00], b"a").unwrap();
-        storage.set("records", &[0xff, 0x01], b"b").unwrap();
+        storage
+            .set("records".into(), vec![0xfe], b"before".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), vec![0xff, 0x00], b"a".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), vec![0xff, 0x01], b"b".to_vec())
+            .await
+            .unwrap();
 
         assert_eq!(
-            storage.prefix("records", &[0xff]).unwrap(),
+            storage.prefix("records".into(), vec![0xff]).await.unwrap(),
             vec![
                 (vec![0xff, 0x00], b"a".to_vec()),
                 (vec![0xff, 0x01], b"b".to_vec())
@@ -2687,61 +2738,71 @@ mod tests {
         );
     }
 
-    #[test]
-    fn direct_operations_report_missing_column_families() {
+    #[futures_test::test]
+    async fn direct_operations_report_missing_column_families() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                 .unwrap();
 
         assert!(matches!(
-            storage.get("missing", b"a"),
+            storage.get("missing".into(), b"a".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.set("missing", b"a", b"one"),
+            storage.set("missing".into(), b"a".to_vec(), b"one".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.delete("missing", b"a"),
+            storage.delete("missing".into(), b"a".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.range("missing", b"a", b"z"),
+            storage.range("missing".into(), b"a".to_vec(), b"z".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.prefix("missing", b"a"),
+            storage.prefix("missing".into(), b"a".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.scan_range("missing", b"a", b"z", &mut |_, _| Ok(())),
+            storage.scan_range("missing".into(), b"a".to_vec(), b"z".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.scan_prefix("missing", b"a", &mut |_, _| Ok(())),
+            storage.scan_prefix("missing".into(), b"a".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
     }
 
-    #[test]
-    fn scans_visit_ordered_values_without_materializing_in_storage_api() {
+    #[futures_test::test]
+    async fn scans_visit_ordered_values_without_materializing_in_storage_api() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
             TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
                 .unwrap();
 
-        storage.set("records", b"a", b"one").unwrap();
-        storage.set("records", b"b", b"two").unwrap();
-        storage.set("records", b"c", b"three").unwrap();
-
-        let mut visited = Vec::new();
         storage
-            .scan_range("records", b"a", b"c", &mut |key, value| {
-                visited.push((key.to_vec(), value.to_vec()));
-                Ok(())
-            })
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
             .unwrap();
+        storage
+            .set("records".into(), b"b".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"c".to_vec(), b"three".to_vec())
+            .await
+            .unwrap();
+
+        let visited = collect_scan(
+            storage
+                .scan_range("records".into(), b"a".to_vec(), b"c".to_vec())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             visited,
