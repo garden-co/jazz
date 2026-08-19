@@ -191,6 +191,12 @@ function nativeAddedRawRecord(id: string, index: number, data: Uint8Array): Uint
   return Uint8Array.from(bytes);
 }
 
+function nativeRemovedRecord(id: string, index: number): Uint8Array {
+  const bytes: number[] = [...uuidBytes(id)];
+  pushU32(bytes, index);
+  return Uint8Array.from(bytes);
+}
+
 describe("SubscriptionManager", () => {
   it("transforms wire deltas into typed deltas", () => {
     const manager = new SubscriptionManager<TestItem>();
@@ -396,6 +402,54 @@ describe("SubscriptionManager", () => {
     expect(result.delta[0]?.id).toBe(
       `result:01${Array.from(uuidBytes(id), (byte) => byte.toString(16).padStart(2, "0")).join("")}${Array.from(uuidBytes(joinedId), (byte) => byte.toString(16).padStart(2, "0")).join("")}`,
     );
+  });
+
+  it("removes a legacy physical root before a packed composite terminal update", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const joinedId = "00000000-0000-4000-8000-000000000002";
+    const key = [10, ...uuidBytes(id), 10, ...uuidBytes(joinedId)];
+    const occurrence = Uint8Array.from([1, ...uuidBytes(id), ...uuidBytes(joinedId)]);
+
+    manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRecord(id, 0, "before", 6),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+      },
+      transform,
+      nativeColumns,
+    );
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: nativeRemovedRecord(id, 0),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 1,
+        updatedCount: 0,
+        removedOccurrenceKeys: [occurrence],
+        terminalOperations: [
+          {
+            root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
+            path: [],
+            edit: { Update: { key, value: [...terminalRowData(id, "after", 7)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result.all).toEqual([]);
+    expect(manager.all()).toEqual([]);
   });
 
   it("does not collapse malformed or typed terminal root keys to their leading UUID", () => {
@@ -1636,6 +1690,213 @@ describe("SubscriptionManager", () => {
     expect(result.all).toEqual([
       { id: rootId, title: "root", children: [{ id: childId, name: "child" }] },
     ]);
+  });
+
+  it("discards descendant teardown after a packed removal of its exact root occurrence", () => {
+    type IncludedRoot = {
+      id: string;
+      title: string;
+      children: Array<{ id: string; name: string }>;
+    };
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const childId = "00000000-0000-4000-8000-000000000002";
+    const rootKey = [10, ...uuidBytes(rootId)];
+    const childKey = [10, ...uuidBytes(childId)];
+    const childColumns: ColumnDescriptor[] = [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+    ];
+    const rootColumns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "children",
+        column_type: { type: "Array", element: { type: "Row", columns: childColumns } },
+        nullable: false,
+      },
+    ];
+    const transformIncluded = (row: WasmRow): IncludedRoot => {
+      const byName = (row as WasmRow & { valuesByColumn: Map<string, Value> }).valuesByColumn;
+      const children = byName.get("children");
+      return {
+        id: row.id,
+        title: (byName.get("title") as { type: "Text"; value: string }).value,
+        children:
+          children?.type === "Array"
+            ? children.value.map((value) => {
+                if (value.type !== "Row") throw new Error("expected child row");
+                return {
+                  id: value.value.id!,
+                  name: (value.value.values[0] as { type: "Text"; value: string }).value,
+                };
+              })
+            : [],
+      };
+    };
+
+    manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRawRecord(rootId, 0, nativeRootWithEmptyChildren("original")),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            path: [{ Collection: "children" }],
+            edit: {
+              Insert: { index: 0, key: childKey, value: [...terminalTextChild(childId, "child")] },
+            },
+          },
+        ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+
+    const removed = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: nativeRemovedRecord(rootId, 0),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 1,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            path: [{ Collection: "children" }],
+            edit: { Remove: { key: childKey } },
+          },
+        ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+    expect(removed.all).toEqual([]);
+
+    // A later root insertion must not replay the prior frame's teardown.
+    const reopened = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            rootDescriptor: currentRowTerminalDescriptor(rootColumns),
+            path: [],
+            edit: {
+              Insert: {
+                index: 0,
+                key: rootKey,
+                value: [...terminalRootWithEmptyChildren(rootId, "reopened")],
+              },
+            },
+          },
+        ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+    expect(reopened.all).toEqual([{ id: rootId, title: "reopened", children: [] }]);
+
+    // Only teardown removals are subsumed. A child insert after the packed root
+    // removal is invalid and rolls the whole frame back.
+    expect(() =>
+      manager.handleDelta(
+        {
+          __jazzNativeRowDelta: true,
+          added: new Uint8Array(),
+          removed: nativeRemovedRecord(rootId, 0),
+          updated: new Uint8Array(),
+          addedCount: 0,
+          removedCount: 1,
+          updatedCount: 0,
+          terminalOperations: [
+            {
+              root_key: rootKey,
+              path: [{ Collection: "children" }],
+              edit: {
+                Insert: {
+                  index: 0,
+                  key: childKey,
+                  value: [...terminalTextChild(childId, "rejected")],
+                },
+              },
+            },
+          ],
+        },
+        transformIncluded,
+        rootColumns,
+      ),
+    ).toThrow(/terminal child edit addressed a root removed in the same packed frame/);
+    expect(manager.all()).toEqual([{ id: rootId, title: "reopened", children: [] }]);
+
+    // The packed removal must not broadly suppress a teardown for another
+    // occurrence: it remains pending and fails once that unrelated root arrives
+    // without the addressed child.
+    const unrelated = new SubscriptionManager<IncludedRoot>();
+    const otherRootId = "00000000-0000-4000-8000-000000000003";
+    const otherChildId = "00000000-0000-4000-8000-000000000004";
+    const otherRootKey = [10, ...uuidBytes(otherRootId)];
+    const otherChildKey = [10, ...uuidBytes(otherChildId)];
+    unrelated.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: nativeRemovedRecord(rootId, 0),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 1,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: otherRootKey,
+            path: [{ Collection: "children" }],
+            edit: { Remove: { key: otherChildKey } },
+          },
+        ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+    expect(() =>
+      unrelated.handleDelta(
+        {
+          __jazzNativeRowDelta: true,
+          added: new Uint8Array(),
+          removed: new Uint8Array(),
+          updated: new Uint8Array(),
+          addedCount: 0,
+          removedCount: 0,
+          updatedCount: 0,
+          terminalOperations: [
+            {
+              root_key: otherRootKey,
+              rootDescriptor: currentRowTerminalDescriptor(rootColumns),
+              path: [],
+              edit: {
+                Insert: {
+                  index: 0,
+                  key: otherRootKey,
+                  value: [...terminalRootWithEmptyChildren(otherRootId, "other")],
+                },
+              },
+            },
+          ],
+        },
+        transformIncluded,
+        rootColumns,
+      ),
+    ).toThrow(/terminal child removal addressed missing key/);
   });
 
   it("clears tracked state before applying native reset frames", () => {
