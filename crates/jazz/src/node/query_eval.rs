@@ -268,7 +268,7 @@ where
         self.query.registered_shapes.get(&shape_id).cloned()
     }
 
-    fn compile_current_query_program(
+    async fn compile_current_query_program(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -284,9 +284,10 @@ where
             output,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
-    fn compile_current_query_program_in_authorization_mode(
+    async fn compile_current_query_program_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -305,10 +306,11 @@ where
             None,
             authorization_mode,
         )
+        .await
     }
 
     #[cfg(test)]
-    fn compile_current_query_program_for_read_view(
+    async fn compile_current_query_program_for_read_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -326,9 +328,10 @@ where
             read_view,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
-    fn compile_current_query_program_for_read_view_in_authorization_mode(
+    async fn compile_current_query_program_for_read_view_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -348,9 +351,10 @@ where
             None,
             authorization_mode,
         )
+        .await
     }
 
-    fn compile_current_query_program_with_settled_view(
+    async fn compile_current_query_program_with_settled_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -372,9 +376,10 @@ where
             authorization_mode,
             PreparedClaimBindingMode::Strict,
         )
+        .await
     }
 
-    fn compile_current_query_program_with_settled_view_and_prepared_claim_mode(
+    async fn compile_current_query_program_with_settled_view_and_prepared_claim_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -398,10 +403,10 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_current_query_program_for_one_shot_read(
+    async fn compile_current_query_program_for_one_shot_read(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -422,9 +427,10 @@ where
             authorization_mode,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
-    fn compile_current_query_program_with_access_paths(
+    async fn compile_current_query_program_with_access_paths(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -443,9 +449,10 @@ where
             QueryAuthorizationMode::TrustedServing,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
-    fn compile_historical_query_program(
+    async fn compile_historical_query_program(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -474,10 +481,10 @@ where
             input,
             output: current_query_output_request(output, shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_include_deleted_query_program_in_authorization_mode(
+    async fn compile_include_deleted_query_program_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -516,10 +523,10 @@ where
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_open_tx_query_program(
+    async fn compile_open_tx_query_program(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
@@ -568,10 +575,10 @@ where
             input,
             output: current_query_output_request(output, lowered_shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_branch_query_program_in_authorization_mode(
+    async fn compile_branch_query_program_in_authorization_mode(
         &mut self,
         branch_id: BranchId,
         shape: &ValidatedQuery,
@@ -614,10 +621,10 @@ where
             input,
             output: current_query_output_request(output, lowered_shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    pub(super) fn query_rows_on_branch_query_engine(
+    pub(super) async fn query_rows_on_branch_query_engine(
         &mut self,
         branch_id: BranchId,
         shape: &ValidatedQuery,
@@ -631,9 +638,10 @@ where
             identity,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
-    pub(super) fn query_rows_on_branch_query_engine_for_client(
+    pub(super) async fn query_rows_on_branch_query_engine_for_client(
         &mut self,
         branch_id: BranchId,
         shape: &ValidatedQuery,
@@ -647,9 +655,10 @@ where
             identity,
             QueryAuthorizationMode::ClientLocal,
         )
+        .await
     }
 
-    fn query_rows_on_branch_query_engine_in_authorization_mode(
+    async fn query_rows_on_branch_query_engine_in_authorization_mode(
         &mut self,
         branch_id: BranchId,
         shape: &ValidatedQuery,
@@ -658,17 +667,20 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self.query_output_table(shape.query(), shape.schema_version())?;
-        let program = self.compile_branch_query_program_in_authorization_mode(
-            branch_id,
-            shape,
-            binding,
-            identity,
-            CurrentQueryProgramOutput::AppRows,
-            authorization_mode,
-        )?;
+        let program = self
+            .compile_branch_query_program_in_authorization_mode(
+                branch_id,
+                shape,
+                binding,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+                authorization_mode,
+            )
+            .await?;
         let deltas = self
             .database
             .query_graph(lowered_materialization_app_rows_graph(&program)?)
+            .await
             .map_err(Error::Groove)?;
         let mut rows = if shape.query().aggregate.is_some() {
             self.materialize_aggregate_query_rows(shape.query(), &table, deltas)

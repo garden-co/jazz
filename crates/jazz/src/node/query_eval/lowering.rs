@@ -404,14 +404,15 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn compile_query_program_request(
+    pub(super) async fn compile_query_program_request(
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_access_paths(request, BTreeMap::new())
+            .await
     }
 
-    pub(super) fn compile_query_program_request_with_access_paths(
+    pub(super) async fn compile_query_program_request_with_access_paths(
         &mut self,
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
@@ -421,9 +422,10 @@ where
             BTreeMap::new(),
             access_paths,
         )
+        .await
     }
 
-    pub(super) fn compile_query_program_request_with_inline_sources_and_access_paths(
+    pub(super) async fn compile_query_program_request_with_inline_sources_and_access_paths(
         &mut self,
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
@@ -460,7 +462,7 @@ where
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
-        let result = lower_query_program(request, &mut resolver);
+        let result = lower_query_program(request, &mut resolver).await;
         if let Some(request) = trace_request {
             trace_capability_compile(
                 node_uuid,
