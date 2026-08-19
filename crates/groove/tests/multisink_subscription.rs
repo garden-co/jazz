@@ -25,13 +25,13 @@ fn albums_schema() -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
 }
 
-async fn database() -> Database<MemoryStorage> {
+async fn database() -> Database {
     Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
         .await
         .unwrap()
 }
 
-async fn insert_album(db: &mut Database<MemoryStorage>, id: u64, title: &str, year: u64) {
+async fn insert_album(db: &mut Database, id: u64, title: &str, year: u64) {
     let mut batch = db.open_batch();
     batch.insert(
         "albums",
@@ -77,7 +77,7 @@ fn route_descriptor() -> RecordDescriptor {
     ])
 }
 
-async fn project_database() -> Database<MemoryStorage> {
+async fn project_database() -> Database {
     Database::new(project_schema(), MemoryStorage::new(&["docs", "comments"]))
         .await
         .unwrap()

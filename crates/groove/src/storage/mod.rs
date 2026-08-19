@@ -736,22 +736,26 @@ fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
 
 /// Storage view that keeps logical CF names at the database boundary while
 /// reading and writing a physical class-CF layout below it.
-pub struct LayoutStorage<S> {
-    inner: S,
+pub struct LayoutStorage {
+    inner: BoxedStorage,
     layout: StorageLayout,
 }
 
-impl<S> LayoutStorage<S>
-where
-    S: OrderedKvStorage,
-{
-    pub async fn new(inner: S, layout: StorageLayout) -> Result<Self, Error> {
+impl LayoutStorage {
+    pub async fn new<S>(inner: S, layout: StorageLayout) -> Result<Self, Error>
+    where
+        S: ReopenableStorage + 'static,
+    {
+        Self::new_boxed(BoxedStorage::new(inner), layout).await
+    }
+
+    pub async fn new_boxed(inner: BoxedStorage, layout: StorageLayout) -> Result<Self, Error> {
         let storage = Self { inner, layout };
         storage.ensure_layout_marker().await?;
         Ok(storage)
     }
 
-    pub fn into_inner(self) -> S {
+    pub fn into_inner(self) -> BoxedStorage {
         self.inner
     }
 
@@ -843,10 +847,7 @@ where
     }
 }
 
-impl<S> OrderedKvStorage for LayoutStorage<S>
-where
-    S: OrderedKvStorage,
-{
+impl OrderedKvStorage for LayoutStorage {
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         let (physical_cf, physical_key) = self.physical_key(&cf, &key);
         self.inner.get(physical_cf, physical_key)

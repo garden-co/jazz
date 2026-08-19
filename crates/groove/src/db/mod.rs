@@ -33,8 +33,8 @@ use crate::schema::{
     PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableVariant,
 };
 use crate::storage::{
-    LayoutStorage, OrderedKvStorage, OwnedStorage, OwnedWriteOperation, RecordStore,
-    StagedWriteOverlay, StagedWriteState, StorageLayout,
+    BoxedStorage, LayoutStorage, OrderedKvStorage, OwnedStorage, OwnedWriteOperation, RecordStore,
+    ReopenableStorage, StagedWriteOverlay, StagedWriteState, StorageLayout,
 };
 use thiserror::Error;
 
@@ -45,8 +45,8 @@ pub use crate::ivm::{
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
-pub struct Database<S> {
-    storage: Rc<LayoutStorage<S>>,
+pub struct Database {
+    storage: Rc<LayoutStorage>,
     /// Owns query/index maintenance over the storage-backed base tables.
     ivm_runtime: IvmRuntime,
     last_commit_metrics: Option<CommitMetrics>,
@@ -68,17 +68,14 @@ pub struct Database<S> {
 /// One resident publication whose ordered storage write can progress without
 /// borrowing the database runtime.
 #[must_use = "an immediate publication must be persisted and settled"]
-pub struct PublishedBatch<S> {
+pub struct PublishedBatch {
     publication: PublicationId,
-    storage: Rc<LayoutStorage<S>>,
+    storage: Rc<LayoutStorage>,
     operations: Vec<OwnedWriteOperation>,
     order: Rc<RefCell<PublicationPersistenceOrder>>,
 }
 
-impl<S> PublishedBatch<S>
-where
-    S: OrderedKvStorage,
-{
+impl PublishedBatch {
     pub fn publication(&self) -> PublicationId {
         self.publication
     }
@@ -146,7 +143,7 @@ impl DurablePublicationScope {
     /// Successfully complete this scope. Publication occurs only when this is
     /// the outermost scope and no nested scope aborted.
     #[doc(hidden)]
-    pub fn finish<S: OrderedKvStorage>(mut self, database: &mut Database<S>) {
+    pub fn finish(mut self, database: &mut Database) {
         assert!(
             Arc::ptr_eq(&self.state, &database.durable_publication_state),
             "durable publication scope belongs to a different database"
@@ -157,7 +154,7 @@ impl DurablePublicationScope {
 
     /// Abort this scope and poison its whole nested publication unit.
     #[doc(hidden)]
-    pub fn abort<S: OrderedKvStorage>(mut self, database: &mut Database<S>) {
+    pub fn abort(mut self, database: &mut Database) {
         assert!(
             Arc::ptr_eq(&self.state, &database.durable_publication_state),
             "durable publication scope belongs to a different database"

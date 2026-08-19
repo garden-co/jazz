@@ -111,11 +111,7 @@ fn jazz_docs_history_schema() -> DatabaseSchema {
     ))])
 }
 
-async fn seed_jazz_docs_history<S: OrderedKvStorage>(
-    database: &mut Database<S>,
-    start_idx: u64,
-    row_count: u64,
-) {
+async fn seed_jazz_docs_history(database: &mut Database, start_idx: u64, row_count: u64) {
     let mut batch = database.open_batch();
     for idx in start_idx..start_idx + row_count {
         batch.insert(

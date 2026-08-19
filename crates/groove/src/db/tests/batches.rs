@@ -136,7 +136,7 @@ async fn staged_batch_reads_observe_uncommitted_writes() {
 }
 
 async fn vec_derived_primary_key_scan_raw(
-    database: &Database<MemoryStorage>,
+    database: &Database,
     batch: &DatabaseBatch,
     table: &str,
     prefix: &[Value],

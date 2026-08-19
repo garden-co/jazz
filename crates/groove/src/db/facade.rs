@@ -1,9 +1,6 @@
 use super::*;
 
-impl<S> Database<S>
-where
-    S: OrderedKvStorage,
-{
+impl Database {
     /// Open a schema-aware database over an ordered key/value store.
     ///
     /// `Database::new` does not create storage column families itself. The
@@ -37,15 +34,21 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// # }).unwrap();
     /// ```
-    pub async fn new(schema: DatabaseSchema, storage: S) -> Result<Self, Error> {
+    pub async fn new<S>(schema: DatabaseSchema, storage: S) -> Result<Self, Error>
+    where
+        S: ReopenableStorage + 'static,
+    {
         Self::new_with_storage_layout(schema, storage, StorageLayout::Identity).await
     }
 
-    pub async fn new_with_storage_layout(
+    pub async fn new_with_storage_layout<S>(
         schema: DatabaseSchema,
         storage: S,
         storage_layout: StorageLayout,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage + 'static,
+    {
         validate_durable_key_schema(&schema)?;
         let ivm_runtime = IvmRuntime::new(schema)?;
         Ok(Self {
@@ -124,7 +127,7 @@ where
         Ok(self.storage.approximate_class_bytes(cf.to_owned()).await?)
     }
 
-    pub fn into_storage(self) -> S {
+    pub fn into_storage(self) -> BoxedStorage {
         Rc::try_unwrap(self.storage)
             .unwrap_or_else(|_| panic!("database storage still has an outstanding operation"))
             .into_inner()
@@ -151,10 +154,7 @@ where
     }
 }
 
-impl<S> Database<S>
-where
-    S: OrderedKvStorage,
-{
+impl Database {
     /// Include arrangement and recursive-state size walks in future tick metrics.
     ///
     /// The default is `false` because those walks are diagnostic-only and scale
@@ -186,7 +186,7 @@ where
     /// Open a staged batch whose reads observe writes already added to the
     /// batch. Committing the staged batch runs exactly one IVM tick and one
     /// storage write, just like [`Database::commit_batch`].
-    pub fn open_staged_batch(&mut self) -> StagedDatabaseBatch<'_, S> {
+    pub fn open_staged_batch(&mut self) -> StagedDatabaseBatch<'_> {
         StagedDatabaseBatch {
             database: self,
             batch: DatabaseBatch::default(),
@@ -228,7 +228,7 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// # }).unwrap();
     /// ```
-    pub fn direct_record_store(&self, name: &str) -> Result<DirectRecordStore<'_, S>, Error> {
+    pub fn direct_record_store(&self, name: &str) -> Result<DirectRecordStore<'_>, Error> {
         let schema = self.direct_record_store_schema(name)?;
         Ok(DirectRecordStore {
             storage: &self.storage,

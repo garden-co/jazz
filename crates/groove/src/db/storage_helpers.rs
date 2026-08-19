@@ -27,17 +27,14 @@ use super::*;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// # }).unwrap();
 /// ```
-pub struct DirectRecordStore<'a, S> {
-    pub(super) storage: &'a LayoutStorage<S>,
+pub struct DirectRecordStore<'a> {
+    pub(super) storage: &'a LayoutStorage,
     pub(super) name: String,
     pub(super) key: RecordDescriptor,
     pub(super) value: RecordDescriptor,
 }
 
-impl<S> DirectRecordStore<'_, S>
-where
-    S: OrderedKvStorage,
-{
+impl DirectRecordStore<'_> {
     /// Return the schema-declared column family name backing this direct store.
     pub fn name(&self) -> &str {
         &self.name
@@ -199,7 +196,7 @@ where
         Ok(bytes)
     }
 
-    pub(super) fn record_store(&self) -> RecordStore<'_, LayoutStorage<S>> {
+    pub(super) fn record_store(&self) -> RecordStore<'_, LayoutStorage> {
         RecordStore::new(self.storage, &self.name, &self.value)
     }
 

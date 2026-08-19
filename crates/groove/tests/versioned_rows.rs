@@ -21,7 +21,7 @@ fn versioned_schema() -> DatabaseSchema {
     .with_variant(2, ["id", "title", "completed"])])
 }
 
-async fn open_database() -> Result<Database<MemoryStorage>, Error> {
+async fn open_database() -> Result<Database, Error> {
     let schema = versioned_schema();
     let storage = MemoryStorage::new(&schema.column_families());
     Database::new(schema, storage).await

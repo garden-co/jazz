@@ -3,18 +3,12 @@ use super::*;
 /// Mutable staged table writes whose reads observe writes already added to the
 /// stage. Commit runs one normal database batch commit, so current callers of
 /// [`Database::commit_batch`] and staged callers share the final tick/write path.
-pub struct StagedDatabaseBatch<'a, S>
-where
-    S: OrderedKvStorage,
-{
-    pub(super) database: &'a mut Database<S>,
+pub struct StagedDatabaseBatch<'a> {
+    pub(super) database: &'a mut Database,
     pub(super) batch: DatabaseBatch,
 }
 
-impl<S> StagedDatabaseBatch<'_, S>
-where
-    S: OrderedKvStorage,
-{
+impl StagedDatabaseBatch<'_> {
     pub fn reserve(&mut self, additional: usize) {
         self.batch.reserve(additional);
     }

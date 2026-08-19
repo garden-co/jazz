@@ -1,9 +1,6 @@
 use super::*;
 
-impl<S> Database<S>
-where
-    S: OrderedKvStorage + 'static,
-{
+impl Database {
     pub fn poll_subscription(
         &mut self,
         subscription: &Subscription,
@@ -136,7 +133,7 @@ where
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
     /// # use groove::storage::MemoryStorage;
-    /// # async fn db() -> Result<Database<MemoryStorage>, groove::db::Error> {
+    /// # async fn db() -> Result<Database, groove::db::Error> {
     /// #     let schema = DatabaseSchema::new([TableSchema::new("albums", [
     /// #         ColumnSchema::new("id", ColumnType::U64),
     /// #         ColumnSchema::new("title", ColumnType::String),
@@ -207,7 +204,7 @@ where
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
     /// # use groove::storage::MemoryStorage;
-    /// # async fn db() -> Result<Database<MemoryStorage>, groove::db::Error> {
+    /// # async fn db() -> Result<Database, groove::db::Error> {
     /// #     let schema = DatabaseSchema::new([TableSchema::new("albums", [
     /// #         ColumnSchema::new("id", ColumnType::U64),
     /// #         ColumnSchema::new("title", ColumnType::String),

@@ -29,7 +29,7 @@ fn schema() -> DatabaseSchema {
     .with_variant(4, ["id", "owner", "body", "extra"])])
 }
 
-fn register_projection(database: &mut Database<MemoryStorage>) -> Result<(), groove::db::Error> {
+fn register_projection(database: &mut Database) -> Result<(), groove::db::Error> {
     database.define_variant_projection(
         "entries",
         "receipt",

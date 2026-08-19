@@ -39,7 +39,7 @@ fn edges_by_src_shape_graph() -> GraphBuilder {
     ])
 }
 
-async fn open_db() -> (tempfile::TempDir, Database<RocksDbStorage>) {
+async fn open_db() -> (tempfile::TempDir, Database) {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &["edges"], Durability::WalNoSync)
@@ -48,7 +48,7 @@ async fn open_db() -> (tempfile::TempDir, Database<RocksDbStorage>) {
     (temp_dir, db)
 }
 
-async fn insert_edge(db: &mut Database<RocksDbStorage>, id: u64, src: u64, dst: u64) {
+async fn insert_edge(db: &mut Database, id: u64, src: u64, dst: u64) {
     let mut batch = db.open_batch();
     batch.insert(
         "edges",

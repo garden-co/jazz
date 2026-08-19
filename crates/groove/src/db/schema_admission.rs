@@ -95,10 +95,7 @@ pub(super) fn validate_table_schema_variants(table: &TableSchema) -> Result<(), 
     Ok(())
 }
 
-impl<S> Database<S>
-where
-    S: OrderedKvStorage,
-{
+impl Database {
     /// Return the live schema for a table.
     pub fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
         self.table(table)
