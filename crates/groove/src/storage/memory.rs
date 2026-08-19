@@ -285,48 +285,87 @@ impl ReopenableStorage for MemoryStorage {
 mod tests {
     use super::*;
 
-    #[test]
-    fn snapshot_round_trip_preserves_column_families_and_values() {
+    #[futures_test::test]
+    async fn snapshot_round_trip_preserves_column_families_and_values() {
         let storage = MemoryStorage::new(&["rows", "meta"]);
-        storage.set("rows", b"a", b"one").unwrap();
-        storage.set("rows", b"b", b"two").unwrap();
-        storage.set("meta", b"schema", b"v1").unwrap();
+        storage
+            .set("rows".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("rows".into(), b"b".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("meta".into(), b"schema".to_vec(), b"v1".to_vec())
+            .await
+            .unwrap();
 
         let snapshot = storage.export_snapshot().unwrap();
         let restored = MemoryStorage::default();
         restored.import_snapshot(&snapshot).unwrap();
 
-        assert_eq!(restored.get("rows", b"a").unwrap(), Some(b"one".to_vec()));
-        assert_eq!(restored.get("rows", b"b").unwrap(), Some(b"two".to_vec()));
         assert_eq!(
-            restored.get("meta", b"schema").unwrap(),
+            restored.get("rows".into(), b"a".to_vec()).await.unwrap(),
+            Some(b"one".to_vec())
+        );
+        assert_eq!(
+            restored.get("rows".into(), b"b".to_vec()).await.unwrap(),
+            Some(b"two".to_vec())
+        );
+        assert_eq!(
+            restored
+                .get("meta".into(), b"schema".to_vec())
+                .await
+                .unwrap(),
             Some(b"v1".to_vec())
         );
     }
 
-    #[test]
-    fn import_snapshot_replaces_existing_contents() {
+    #[futures_test::test]
+    async fn import_snapshot_replaces_existing_contents() {
         let source = MemoryStorage::new(&["rows"]);
-        source.set("rows", b"a", b"one").unwrap();
+        source
+            .set("rows".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
         let snapshot = source.export_snapshot().unwrap();
 
         let target = MemoryStorage::new(&["other"]);
-        target.set("other", b"stale", b"value").unwrap();
+        target
+            .set("other".into(), b"stale".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
         target.import_snapshot(&snapshot).unwrap();
 
-        assert_eq!(target.get("rows", b"a").unwrap(), Some(b"one".to_vec()));
+        assert_eq!(
+            target.get("rows".into(), b"a".to_vec()).await.unwrap(),
+            Some(b"one".to_vec())
+        );
         assert!(matches!(
-            target.get("other", b"stale"),
+            target.get("other".into(), b"stale".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(_))
         ));
     }
 
-    #[test]
-    fn approximate_class_bytes_sums_keys_and_values_exactly() {
+    #[futures_test::test]
+    async fn approximate_class_bytes_sums_keys_and_values_exactly() {
         let storage = MemoryStorage::new(&["rows"]);
-        storage.set("rows", b"a", b"one").unwrap();
-        storage.set("rows", b"bb", b"two").unwrap();
+        storage
+            .set("rows".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("rows".into(), b"bb".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
 
-        assert_eq!(storage.approximate_class_bytes("rows").unwrap(), Some(9));
+        assert_eq!(
+            storage
+                .approximate_class_bytes("rows".into())
+                .await
+                .unwrap(),
+            Some(9)
+        );
     }
 }

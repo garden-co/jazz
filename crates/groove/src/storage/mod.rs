@@ -2799,38 +2799,48 @@ mod tests {
         where
             S: OrderedKvStorage,
         {
-            fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+            fn get(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
                 self.0.get(cf, key)
             }
 
-            fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+            fn set(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
                 self.0.set(cf, key, value)
             }
 
-            fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+            fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
                 self.0.delete(cf, key)
             }
 
             fn scan_range(
                 &self,
-                cf: &ColumnFamilyName,
-                start: &Key,
-                end: &Key,
-                visit: &mut ScanVisitor<'_>,
-            ) -> Result<(), Error> {
-                self.0.scan_range(cf, start, end, visit)
+                cf: String,
+                start: Vec<u8>,
+                end: Vec<u8>,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.0.scan_range(cf, start, end)
             }
 
             fn scan_prefix(
                 &self,
-                cf: &ColumnFamilyName,
-                prefix: &Key,
-                visit: &mut ScanVisitor<'_>,
-            ) -> Result<(), Error> {
-                self.0.scan_prefix(cf, prefix, visit)
+                cf: String,
+                prefix: Vec<u8>,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.0.scan_prefix(cf, prefix)
             }
 
-            fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+            fn write_many(
+                &self,
+                operations: Vec<OwnedWriteOperation>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
                 self.0.write_many(operations)
             }
         }
@@ -3000,60 +3010,69 @@ mod tests {
         where
             S: OrderedKvStorage,
         {
-            fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+            fn get(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
                 self.inner.get(cf, key)
             }
 
-            fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+            fn set(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
                 self.inner.set(cf, key, value)
             }
 
-            fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+            fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
                 self.inner.delete(cf, key)
             }
 
             fn scan_range(
                 &self,
-                cf: &ColumnFamilyName,
-                start: &Key,
-                end: &Key,
-                visit: &mut ScanVisitor<'_>,
-            ) -> Result<(), Error> {
-                self.inner.scan_range(cf, start, end, visit)
+                cf: String,
+                start: Vec<u8>,
+                end: Vec<u8>,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.inner.scan_range(cf, start, end)
             }
 
             fn scan_prefix(
                 &self,
-                cf: &ColumnFamilyName,
-                prefix: &Key,
-                visit: &mut ScanVisitor<'_>,
-            ) -> Result<(), Error> {
+                cf: String,
+                prefix: Vec<u8>,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
                 self.prefix_scans.set(self.prefix_scans.get() + 1);
-                self.inner.scan_prefix(cf, prefix, visit)
+                self.inner.scan_prefix(cf, prefix)
             }
 
             fn scan_prefix_reverse(
                 &self,
-                cf: &ColumnFamilyName,
-                prefix: &Key,
-                visit: &mut ScanVisitor<'_>,
-            ) -> Result<(), Error> {
+                cf: String,
+                prefix: Vec<u8>,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
                 self.reverse_prefix_scans
                     .set(self.reverse_prefix_scans.get() + 1);
-                self.inner.scan_prefix_reverse(cf, prefix, visit)
+                self.inner.scan_prefix_reverse(cf, prefix)
             }
 
             fn last_with_prefix(
                 &self,
-                cf: &ColumnFamilyName,
-                prefix: &Key,
-            ) -> Result<Option<KeyValue>, Error> {
+                cf: String,
+                prefix: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
                 self.last_with_prefix_calls
                     .set(self.last_with_prefix_calls.get() + 1);
                 self.inner.last_with_prefix(cf, prefix)
             }
 
-            fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+            fn write_many(
+                &self,
+                operations: Vec<OwnedWriteOperation>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
                 self.inner.write_many(operations)
             }
         }
