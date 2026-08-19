@@ -1,3 +1,4 @@
+use jazz::db::ReadOpts;
 use jazz::query::OrderDirection;
 use jazz::tools::{JazzClient, Value};
 use jazz_server::JazzServer;
@@ -381,7 +382,6 @@ async fn subscribe_all_sorted_limited_subscription_reorders_when_new_top_row_arr
 local_tokio_test! {
 /// Verifies that a subscription preserves its sort order through pagination and projection
 /// (including magic columns) when an update changes the active sort key
-#[ignore = "projected ordered subscription emits no delta when its sort key changes"]
 async fn subscribe_all_preserves_sorting_on_sort_key_changes() {
     let client = JazzClient::test_client(subscription_schema()).await;
     let query = jazz::query::Query::from("todos")
@@ -389,7 +389,7 @@ async fn subscribe_all_preserves_sorting_on_sort_key_changes() {
         .order_by("priority", OrderDirection::Asc)
         .limit(3);
     let mut stream = client
-        .subscribe(query.clone())
+        .subscribe_with_opts(query.clone(), ReadOpts::default())
         .await
         .expect("subscribe to sorted projected query");
     let mut log = Vec::new();
