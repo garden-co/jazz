@@ -44,6 +44,12 @@ browser executors, so the interface must not require `Send` merely for
 convenience. Type erasure must preserve the same semantic interface; it must
 not select an alternate implementation path.
 
+Database ownership is type-erased once, at construction. `Database`, its
+layout mapper, publication handles, staged batches, and record-store handles do
+not propagate the concrete backend type. The erased backend retains the same
+ordered-storage and reopen contracts; evaluation does not downcast it or choose
+a backend-specific path.
+
 Cursor lifetimes are explicit. A storage adapter may wrap a cursor while
 borrowing executor-local state such as metrics or a transaction session; the
 cursor is not required to be `'static`. Those borrows belong to the cursor and
@@ -151,6 +157,12 @@ the same publication through Groove's resident write overlay. A terminal whose
 new include or join dependency is non-resident may remain blocked without
 delaying unrelated resident terminals.
 
+Terminal installation and one-shot reads use the same resident overlay as
+immediate maintained evaluation. A terminal opened after an unpublished local
+write therefore includes that resident write in its initial value. Hydration
+still runs through the ordinary evaluator against the database's current read
+view; this is not a second snapshot path.
+
 Each resident publication has a monotone `PublicationId`. Incremental terminal
 output carries that identity, and successful ordered persistence advances a
 contiguous durable publication frontier. Groove does not know whether a
@@ -182,6 +194,25 @@ initial value + incremental receiver
 
 Loss of continuity ends that low-level session. Reinstallation, if desired, is
 a consumer lifecycle concern, not a reset-shaped incremental update.
+
+### Failure lifecycle
+
+Evaluation failures are classified explicitly:
+
+- A storage or node-evaluation failure is scoped to that node's downstream
+  closure for the current publication. Every low-level terminal depending on
+  the closure receives one terminal error and then closes. Hash-equal terminals
+  sharing the failed work fail together. Independent nodes and terminals keep
+  running, including when the failure is immediately ready on its first poll.
+- Failed maintained state, arrangements, and memo entries in the affected
+  closure are invalidated before later work proceeds. Temporal waiter chains
+  remove the failed evaluation and release their next entry. A fresh terminal
+  installation may then evaluate cleanly.
+- An orchestration/invariant failure without a node scope is fatal. It poisons
+  the database rather than masquerading as a recoverable subscription failure.
+
+Persistence failure remains publication/database-level because it can make the
+durable frontier ambiguous; it is not converted into a terminal retry or reset.
 
 ## Migration boundary
 
