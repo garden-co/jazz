@@ -587,12 +587,12 @@ where
     }
 
     /// Commit an exclusive transaction and return its sync commit unit.
-    pub fn commit_exclusive(
+    pub async fn commit_exclusive(
         &mut self,
         open_batch_id: OpenTransactionId,
         made_by: AuthorId,
         now_ms: u64,
-    ) -> Result<(TxId, SyncMessage), Error> {
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
         if !matches!(
             self.open_tx(open_batch_id)?.kind,
             OpenTransactionKind::Exclusive
@@ -668,16 +668,16 @@ where
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge: None,
         };
-        self.ingest_transaction_and_versions(
-            tx.clone(),
-            versions.clone(),
-            Fate::Pending,
-            None,
-            self.authored_commit_durability,
-        )?;
+        let publication = self
+            .publish_pending_transaction_and_versions(
+                tx.clone(),
+                versions.clone(),
+                self.authored_commit_durability,
+            )
+            .await?;
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
-        Ok((tx_id, SyncMessage::CommitUnit { tx, versions }))
+        Ok((publication, SyncMessage::CommitUnit { tx, versions }))
     }
 
     fn open_exclusive_is_locally_serializable(
@@ -733,11 +733,11 @@ where
     }
 
     /// Commit a mergeable open transaction through the ordinary mergeable batch path.
-    pub(crate) fn commit_mergeable_open(
+    pub(crate) async fn commit_mergeable_open(
         &mut self,
         open_batch_id: OpenTransactionId,
         mut next_now_ms: impl FnMut() -> u64,
-    ) -> Result<TxId, Error> {
+    ) -> Result<PublishedTransaction, Error> {
         if !matches!(
             self.open_tx(open_batch_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -826,8 +826,9 @@ where
             "mergeable transaction requires at least one write",
         ))?;
         let made_at = self.mint_tx_time(first.1.now_ms);
-        let committed =
-            self.commit_mergeable_many_at_with_schema_versions(commits, made_at, None)?;
+        let committed = self
+            .commit_mergeable_many_at_with_schema_versions(commits, made_at, None)
+            .await?;
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
         Ok(committed)

@@ -30,6 +30,29 @@ where
         .await
     }
 
+    pub(super) async fn publish_pending_transaction_and_versions(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        durability: DurabilityTier,
+    ) -> Result<PublishedTransaction, Error> {
+        let tx_id = tx.tx_id;
+        let mut batch = self.database.open_batch();
+        self.stage_transaction_and_versions_with_current_indexes(
+            &mut batch,
+            tx,
+            versions,
+            Fate::Pending,
+            None,
+            durability,
+            true,
+        )
+        .await?;
+        let persistence = self.database.publish_batch(batch).await?;
+        self.invalidate_tx_version_table_names_cache(tx_id);
+        Ok(PublishedTransaction { tx_id, persistence })
+    }
+
     async fn ingest_transaction_and_versions_with_current_indexes(
         &mut self,
         tx: Transaction,
@@ -62,7 +85,7 @@ where
                 fate,
                 global_seq,
                 &mut staged_global_seqs,
-            )?;
+            ).await?;
             if !cleanup_batch.is_empty() {
                 self.database.commit_batch(cleanup_batch).await?;
                 self.persist_storage_consistency_marker_through(tx_id.time)
@@ -174,7 +197,7 @@ where
                         &table_schema.name,
                         stored.row_uuid(),
                         stored.layer(),
-                    )?;
+                    ).await?;
                     let previous_global_winner =
                         if let Some(previous) = previous_global_current.as_ref() {
                             Some((previous, self.version_tx_id(previous)?, previous.tx_time()))
@@ -230,7 +253,8 @@ where
         }
         if update_current_indexes && !matches!(fate, Fate::Rejected(_)) {
             for stored in &content_versions {
-                self.update_merge_heads_for_content_version_in_batch(batch, stored)?;
+                self.update_merge_heads_for_content_version_in_batch(batch, stored)
+                    .await?;
             }
         }
         if update_current_indexes && matches!(fate, Fate::Accepted) {
@@ -258,7 +282,7 @@ where
         Ok(())
     }
 
-    fn finalize_staged_transaction_ingest(
+    async fn finalize_staged_transaction_ingest(
         &mut self,
         batch: &mut DatabaseBatch,
         tx_id: TxId,
@@ -272,13 +296,13 @@ where
         {
             staged_global_seqs.push(global_seq);
             let advanced_global_seqs = self.record_applied_global_seq(global_seq);
-            self.cleanup_fated_ahead_current_for_tx(batch, tx_id)?;
+            self.cleanup_fated_ahead_current_for_tx(batch, tx_id).await?;
             if !advanced_global_seqs.is_empty() {
                 for advanced in advanced_global_seqs
                     .into_iter()
                     .filter(|advanced| *advanced != global_seq)
                 {
-                    self.prune_ahead_current_for_global_seq(batch, advanced)?;
+                    self.prune_ahead_current_for_global_seq(batch, advanced).await?;
                 }
             }
         }
@@ -385,7 +409,7 @@ where
             global_seq: None,
             durability: None,
         }];
-        updates.extend(self.cascade_rejections_from(tx.tx_id)?);
+        updates.extend(self.cascade_rejections_from(tx.tx_id).await?);
         Ok(updates)
     }
 
@@ -439,7 +463,7 @@ where
         fate: Fate,
     ) -> Result<(), Error> {
         if self.query_transaction(tx.tx_id).await?.is_some() {
-            return self.apply_fate_update(tx.tx_id, fate, None, None);
+            return self.apply_fate_update(tx.tx_id, fate, None, None).await;
         }
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         let mut batch = self.database.open_batch();

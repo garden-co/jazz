@@ -1129,13 +1129,8 @@ where
         published: PublishedTransaction,
     ) -> Result<WriteHandle<S>, Error> {
         let tx_id = published.tx_id;
-        self.refresh_subscriptions().await?;
-        let persistence = published.persist().await;
-        self.node
-            .node
-            .lock()
-            .await
-            .settle_published_transaction(persistence)?;
+        self.finish_publication_outcome(PublicationOutcome::published((), published))
+            .await?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.node.node),
@@ -1143,6 +1138,29 @@ where
             tx_id,
             local_tier,
         })
+    }
+
+    pub(super) async fn finish_publication_outcome<T>(
+        &self,
+        outcome: PublicationOutcome<T>,
+    ) -> Result<T, Error> {
+        let PublicationOutcome {
+            value,
+            publications,
+        } = outcome;
+        if publications.is_empty() {
+            return Ok(value);
+        }
+        self.refresh_subscriptions().await?;
+        let mut persisted = Vec::with_capacity(publications.len());
+        for publication in &publications {
+            persisted.push(publication.persist().await);
+        }
+        let mut node = self.node.node.lock().await;
+        for persistence in persisted {
+            node.settle_published_transaction(persistence)?;
+        }
+        Ok(value)
     }
 
     fn check_attribution_allowed(&self, made_by: AuthorId) -> Result<(), Error> {
