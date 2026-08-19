@@ -1405,6 +1405,63 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
         let state = std::mem::take(&mut *self.staged_writes.borrow_mut());
         target.extend(state.into_operations());
     }
+
+    fn scan_range_from_parts(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
+    where
+        S: OrderedKvStorage,
+    {
+        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
+            operation.cf() == cf
+                && operation.key() >= start.as_slice()
+                && operation.key() < end.as_slice()
+        });
+        let base = self.base;
+        Box::pin(async move {
+            let mut values = collect_scan(
+                base.scan_range(cf.clone(), start.clone(), end.clone())
+                    .await?,
+            )
+            .await?;
+            let staged = RefCell::new(StagedWriteState::from(operations));
+            overlay_values(
+                &mut values,
+                &cf,
+                |key| key >= start.as_slice() && key < end.as_slice(),
+                &staged,
+            )?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'a>)
+        })
+    }
+
+    fn scan_prefix_from_parts(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+        reverse: bool,
+    ) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
+    where
+        S: OrderedKvStorage,
+    {
+        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
+            operation.cf() == cf && operation.key().starts_with(&prefix)
+        });
+        let base = self.base;
+        Box::pin(async move {
+            let mut values =
+                collect_scan(base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
+            let staged = RefCell::new(StagedWriteState::from(operations));
+            overlay_values(&mut values, &cf, |key| key.starts_with(&prefix), &staged)?;
+            if reverse {
+                values.reverse();
+            }
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'a>)
+        })
+    }
 }
 
 fn overlay_point_value(
@@ -1502,27 +1559,7 @@ where
         start: Vec<u8>,
         end: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
-            operation.cf() == cf
-                && operation.key() >= start.as_slice()
-                && operation.key() < end.as_slice()
-        });
-        Box::pin(async move {
-            let mut values = collect_scan(
-                self.base
-                    .scan_range(cf.clone(), start.clone(), end.clone())
-                    .await?,
-            )
-            .await?;
-            let staged = RefCell::new(StagedWriteState::from(operations));
-            overlay_values(
-                &mut values,
-                &cf,
-                |key| key >= start.as_slice() && key < end.as_slice(),
-                &staged,
-            )?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
+        self.scan_range_from_parts(cf, start, end)
     }
 
     fn scan_prefix(
@@ -1530,16 +1567,7 @@ where
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let operations = snapshot_staged_operations(self.staged_writes, |operation| {
-            operation.cf() == cf && operation.key().starts_with(&prefix)
-        });
-        Box::pin(async move {
-            let mut values =
-                collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
-            let staged = RefCell::new(StagedWriteState::from(operations));
-            overlay_values(&mut values, &cf, |key| key.starts_with(&prefix), &staged)?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
+        self.scan_prefix_from_parts(cf, prefix, false)
     }
 
     fn scan_prefix_reverse(
@@ -1547,11 +1575,7 @@ where
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let mut values = collect_scan(self.scan_prefix(cf, prefix).await?).await?;
-            values.reverse();
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
+        self.scan_prefix_from_parts(cf, prefix, true)
     }
 
     fn last_with_prefix(
@@ -1703,27 +1727,8 @@ where
         start: Vec<u8>,
         end: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
-            operation.cf() == cf
-                && operation.key() >= start.as_slice()
-                && operation.key() < end.as_slice()
-        });
-        Box::pin(async move {
-            let mut values = collect_scan(
-                self.base
-                    .scan_range(cf.clone(), start.clone(), end.clone())
-                    .await?,
-            )
-            .await?;
-            let staged = RefCell::new(StagedWriteState::from(operations));
-            overlay_values(
-                &mut values,
-                &cf,
-                |key| key >= start.as_slice() && key < end.as_slice(),
-                &staged,
-            )?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
+        StagedWriteOverlay::new(self.base, &self.staged_writes)
+            .scan_range_from_parts(cf, start, end)
     }
 
     fn scan_prefix(
@@ -1731,16 +1736,8 @@ where
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
-            operation.cf() == cf && operation.key().starts_with(&prefix)
-        });
-        Box::pin(async move {
-            let mut values =
-                collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
-            let staged = RefCell::new(StagedWriteState::from(operations));
-            overlay_values(&mut values, &cf, |key| key.starts_with(&prefix), &staged)?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
+        StagedWriteOverlay::new(self.base, &self.staged_writes)
+            .scan_prefix_from_parts(cf, prefix, false)
     }
 
     fn scan_prefix_reverse(
@@ -1748,17 +1745,8 @@ where
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
-            operation.cf() == cf && operation.key().starts_with(&prefix)
-        });
-        Box::pin(async move {
-            let mut values =
-                collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
-            let staged = RefCell::new(StagedWriteState::from(operations));
-            overlay_values(&mut values, &cf, |key| key.starts_with(&prefix), &staged)?;
-            values.reverse();
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
+        StagedWriteOverlay::new(self.base, &self.staged_writes)
+            .scan_prefix_from_parts(cf, prefix, true)
     }
 
     fn write_many(
