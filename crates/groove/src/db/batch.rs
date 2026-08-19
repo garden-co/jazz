@@ -53,7 +53,7 @@ where
         self.batch.is_empty()
     }
 
-    pub fn primary_key_scan(
+    pub async fn primary_key_scan(
         &self,
         table: &str,
         prefix: &[Value],
@@ -63,9 +63,10 @@ where
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_scan_with_storage(&storage, table, prefix)
+            .await
     }
 
-    pub fn primary_key_scan_raw(
+    pub async fn primary_key_scan_raw(
         &self,
         table: &str,
         prefix: &[Value],
@@ -75,9 +76,10 @@ where
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_scan_raw_with_storage(&storage, table, prefix)
+            .await
     }
 
-    pub fn primary_key_last_raw(
+    pub async fn primary_key_last_raw(
         &self,
         table: &str,
         prefix: &[Value],
@@ -87,10 +89,11 @@ where
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_last_raw_with_storage(&storage, table, prefix)
+            .await
     }
 
-    pub fn commit(self) -> Result<(), Error> {
-        self.database.commit_batch(self.batch)
+    pub async fn commit(self) -> Result<(), Error> {
+        self.database.commit_batch(self.batch).await
     }
 }
 
