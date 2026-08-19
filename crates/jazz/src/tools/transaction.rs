@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_batch_id_is_stable_and_domain_derived() {
+    fn committed_transaction_id_is_stable_and_domain_derived() {
         let tx = TxId::new(TxTime::from(42), NodeUuid(Uuid::from_bytes([7; 16])));
         let first = TransactionId::from_committed_tx(tx);
         assert_eq!(first, TransactionId::from_committed_tx(tx));

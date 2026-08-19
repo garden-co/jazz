@@ -1341,7 +1341,9 @@ impl ClientDbInner {
                 if let Some(tx_id) = borrowed.write_map.get(&transaction_id).copied() {
                     tx_id
                 } else {
-                    return Err(JazzError::Sync(format!("unknown batch {transaction_id}")));
+                    return Err(JazzError::Sync(format!(
+                        "unknown transaction {transaction_id}"
+                    )));
                 }
             };
             let state = inner
@@ -1351,7 +1353,7 @@ impl ClientDbInner {
                 .map_err(|error| JazzError::Sync(error.to_string()))?;
             if let CoreFate::Rejected(reason) = state.fate {
                 return Err(JazzError::Sync(format!(
-                    "batch was rejected before reaching {tier:?} durability: {}",
+                    "transaction was rejected before reaching {tier:?} durability: {}",
                     core_rejection_reason_label(&reason)
                 )));
             }
@@ -1360,7 +1362,7 @@ impl ClientDbInner {
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(JazzError::Sync(format!(
-                    "timed out waiting for batch to reach {tier:?}"
+                    "timed out waiting for transaction to reach {tier:?}"
                 )));
             }
             if state.durability >= desired {
@@ -1378,7 +1380,7 @@ impl ClientDbInner {
                 state_change = tokio::time::timeout_at(deadline, db.next_write_state_change(tx_id)) => {
                     if state_change.is_err() {
                         return Err(JazzError::Sync(format!(
-                            "timed out waiting for batch to reach {tier:?}"
+                            "timed out waiting for transaction to reach {tier:?}"
                         )));
                     }
                 }
@@ -3102,6 +3104,7 @@ impl Drop for JazzClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::NodeUuid;
     use crate::tools::AppId;
     use crate::tools::public_schema::Schema;
     use crate::tools::{ClientStorage, ColumnType, QueryBuilder, SchemaBuilder, TableSchema};
@@ -3427,6 +3430,53 @@ mod tests {
         assert!(
             !data_dir.path().join("jazz-core.rocksdb").exists(),
             "memory storage should not create a RocksDB data directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn transaction_wait_errors_use_transaction_vocabulary() {
+        let client = JazzClient::connect(make_offline_context(
+            AppId::from_name("transaction-wait-error-vocabulary"),
+            TempDir::new().expect("temp client dir").keep(),
+            declared_todo_schema(),
+        ))
+        .await
+        .expect("connect offline client");
+        let unknown = TransactionId::from_committed_tx(CoreTxId::new(
+            crate::time::TxTime::from(42),
+            NodeUuid::from_bytes([0x42; 16]),
+        ));
+        let unknown_error = client
+            .wait_for_transaction_with_timeout_for_test(
+                unknown,
+                DurabilityTier::EdgeServer,
+                Duration::from_millis(1),
+            )
+            .await
+            .expect_err("unknown transaction must fail");
+        assert!(
+            matches!(unknown_error, JazzError::Sync(ref message) if message == &format!("unknown transaction {unknown}")),
+            "unexpected unknown-transaction error: {unknown_error}"
+        );
+
+        let (_row_id, _values, transaction_id) = client
+            .insert(
+                "todos",
+                crate::row_input!("title" => "pending", "completed" => false),
+            )
+            .expect("insert offline row");
+        let transaction_id = transaction_id.expect("ordinary mutation commits immediately");
+        let timeout_error = client
+            .wait_for_transaction_with_timeout_for_test(
+                transaction_id,
+                DurabilityTier::EdgeServer,
+                Duration::from_millis(1),
+            )
+            .await
+            .expect_err("offline transaction cannot reach edge");
+        assert!(
+            matches!(timeout_error, JazzError::Sync(ref message) if message == "timed out waiting for transaction to reach EdgeServer"),
+            "unexpected transaction timeout error: {timeout_error}"
         );
     }
 }

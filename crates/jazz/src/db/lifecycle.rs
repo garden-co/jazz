@@ -498,7 +498,7 @@ where
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
-                "transaction is not known locally",
+                format!("transaction {tx_id:?} is not known locally"),
             ));
         };
         Ok(WriteState { fate, durability })

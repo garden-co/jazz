@@ -1,3 +1,4 @@
+use jazz::db::{LocalTransactionRecord, TransactionFate, TransactionKind};
 use jazz::tools::{ColumnType, OpenTransactionId, TransactionId, Value, WriteContext};
 #[cfg(feature = "runtime")]
 use jazz::tools::{DurabilityTier, JazzClient, JazzTransaction};
@@ -20,6 +21,32 @@ fn public_api_uses_transaction_id_vocabulary() {
         Value::TransactionId(*transaction_id.as_bytes()).column_type(),
         Some(ColumnType::TransactionId),
     );
+}
+
+#[test]
+fn local_transaction_rejection_serializes_transaction_id_consistently() {
+    let transaction_id = "00000000000000000000000000000000"
+        .parse::<TransactionId>()
+        .expect("parse transaction id");
+    let record = LocalTransactionRecord {
+        transaction_id,
+        kind: TransactionKind::Mergeable,
+        sealed: true,
+        latest_settlement: TransactionFate::Rejected {
+            transaction_id,
+            code: "permission_denied".into(),
+            reason: "write rejected by policy".into(),
+        },
+    };
+
+    let wire = serde_json::to_value(record).expect("serialize local transaction record");
+    assert_eq!(wire["transactionId"], transaction_id.to_string());
+    assert_eq!(
+        wire["latestSettlement"]["transactionId"],
+        transaction_id.to_string()
+    );
+    assert!(wire.get("batchId").is_none());
+    assert!(wire["latestSettlement"].get("batchId").is_none());
 }
 
 #[allow(dead_code)]

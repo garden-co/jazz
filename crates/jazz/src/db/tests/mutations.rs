@@ -408,6 +408,12 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
         block_on(client.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Edge))
             .unwrap_err();
     assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(error.message.contains("AuthorizationDenied"));
+    assert!(
+        error
+            .message
+            .contains(&format!("{:?}", write.mergeable_tx_id()))
+    );
     client.tick().unwrap();
 
     assert!(events.borrow().is_empty());

@@ -885,7 +885,7 @@ export class NativeRuntimeAdapter implements Runtime {
     batchId = await batchId;
     const write = this.writes.get(batchId);
     if (!write) {
-      throw new Error(`Wait for batch failed: unknown batch ${batchId}`);
+      throw new Error(`Wait for transaction failed: unknown transaction ${batchId}`);
     }
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
@@ -2672,11 +2672,11 @@ function isPendingCoverageError(error: unknown): boolean {
 }
 
 function rejectedWaitError(
-  batchId: BatchId,
+  transactionId: BatchId,
   error: unknown,
 ): {
   kind: "rejected";
-  batchId: BatchId;
+  transactionId: BatchId;
   code: string;
   reason: string;
   /** An Error-compatible diagnostic for direct native callers. */
@@ -2686,13 +2686,13 @@ function rejectedWaitError(
   if (!message.includes("WriteRejected")) return null;
   const rejection: {
     kind: "rejected";
-    batchId: BatchId;
+    transactionId: BatchId;
     code: string;
     reason: string;
     message: string;
   } = {
     kind: "rejected",
-    batchId,
+    transactionId,
     code: rejectionCode(message),
     reason: rejectionReason(message),
     message,

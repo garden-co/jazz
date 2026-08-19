@@ -39,7 +39,7 @@ Invariant digest:
 - `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written row's current global content tx id MUST equal the single recorded parent, or absence when no parent is recorded.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
 - `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
-- `INV-TX-24`: A caller-generated `OpenBatchId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `BatchId`; only successful commit transitions `OpenBatchId` to `BatchId`.
+- `INV-TX-24`: A caller-generated `OpenTransactionId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `TransactionId`; only successful commit transitions `OpenTransactionId` to `TransactionId`.
 - `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and recovery markers MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or edge broadcast; reopen MUST either recover the entire unit or suppress it.
 
 ## Details
@@ -53,9 +53,9 @@ following terms:
 - `TxKind` is `Mergeable` or `Exclusive`.
 - `Fate` is `Pending`, `Accepted`, or `Rejected(RejectionReason)`.
 - `DurabilityTier` is `None`, `Local`, `Edge`, or `Global` — separate from fate.
-- `OpenBatchId` is a caller-generated UUIDv7 naming runtime-local mutable work. It
+- `OpenTransactionId` is a caller-generated UUIDv7 naming runtime-local mutable work. It
   is used unchanged for synchronous, thread-local, and worker-hosted runtimes.
-- `BatchId` names the immutable commit produced by a successful commit and is the
+- `TransactionId` names the immutable commit produced by a successful commit and is the
   only identifier accepted by durability waits. The two are nominally distinct.
 
 ### 3.2 Lifecycle and the atomic sync unit
@@ -71,18 +71,18 @@ transaction kinds sync _only at commit_, as one idempotent
 `SyncMessage::FateUpdate { tx_id, fate, global_seq, durability }` (ch. 8).
 Nothing partial travels upstream, and the core holds no open-transaction state.
 
-The API transition is exactly `commit(OpenBatchId) -> BatchId`. Opening rejects
-a duplicate live `OpenBatchId`; commit and rollback consume it, and every later
-use fails as a closed or unknown open batch. `BatchId` does not exist before a
+The API transition is exactly `commit(OpenTransactionId) -> TransactionId`. Opening rejects
+a duplicate live `OpenTransactionId`; commit and rollback consume it, and every later
+use fails as a closed or unknown open transaction. `TransactionId` does not exist before a
 successful commit. A worker command queue therefore carries complete commands
-with the caller's `OpenBatchId`; it does not allocate or translate a second
+with the caller's `OpenTransactionId`; it does not allocate or translate a second
 worker-local handle.
 
 An empty exclusive batch is a valid atomic commit and therefore produces a
-`BatchId`. An empty mergeable batch has no committed unit in the mergeable
+`TransactionId`. An empty mergeable transaction has no committed unit in the mergeable
 history representation, so commit rejects it explicitly and leaves the
-`OpenBatchId` open for rollback; callers must not receive a fabricated
-`BatchId` for that no-op.
+`OpenTransactionId` open for rollback; callers must not receive a fabricated
+`TransactionId` for that no-op.
 
 The word "atomic" has two relevant meanings here, and the distinction matters.
 Upstream, the commit is atomic because it syncs as one idempotent message and the

@@ -365,7 +365,9 @@ it("commits empty exclusive batches, rejects empty mergeable batches, and reject
   expect(committed).toBe("00000000000070008000000000000001");
   await expect(
     runtime.waitForTransaction("00000000000070008000000000000002" as BatchId, "local"),
-  ).rejects.toThrow("Wait for batch failed: unknown batch 00000000000070008000000000000002");
+  ).rejects.toThrow(
+    "Wait for transaction failed: unknown transaction 00000000000070008000000000000002",
+  );
 
   const reopened = new NativeRuntimeAdapter(
     {
@@ -381,7 +383,7 @@ it("commits empty exclusive batches, rejects empty mergeable batches, and reject
     true,
   );
   await expect(reopened.waitForTransaction(committed, "local")).rejects.toThrow(
-    `Wait for batch failed: unknown batch ${committed}`,
+    `Wait for transaction failed: unknown transaction ${committed}`,
   );
 });
 
@@ -423,12 +425,12 @@ it("emits an onMutationError event for an unawaited rejected write", async () =>
     code: "permission_denied",
     reason: "Write rejected by server authorization",
     transaction: {
-      batchId,
+      transactionId: batchId,
       kind: "mergeable",
       sealed: true,
       latestSettlement: {
         kind: "rejected",
-        batchId,
+        transactionId: batchId,
         code: "permission_denied",
         reason: "Write rejected by server authorization",
       },
@@ -440,12 +442,12 @@ it("emits an onMutationError event for an unawaited rejected write", async () =>
     code: "permission_denied",
     reason: "Write rejected by server authorization",
     transaction: {
-      batchId,
+      transactionId: batchId,
       kind: "mergeable",
       sealed: true,
       latestSettlement: {
         kind: "rejected",
-        batchId,
+        transactionId: batchId,
         code: "permission_denied",
         reason: "Write rejected by server authorization",
       },
@@ -500,7 +502,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
 
   await expect(wait).rejects.toMatchObject({
     kind: "rejected",
-    batchId,
+    transactionId: batchId,
     code: "permission_denied",
   });
   await new Promise((resolve) => setTimeout(resolve, 0));

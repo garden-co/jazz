@@ -150,7 +150,7 @@ pub enum TransactionFate {
     /// The authority rejected the transaction.
     Rejected {
         /// Stable public identity derived from the core transaction id.
-        #[serde(rename = "batchId")]
+        #[serde(rename = "transactionId")]
         transaction_id: TransactionId,
         /// Stable machine-readable rejection code.
         code: String,
@@ -1855,7 +1855,7 @@ where
         }
         let state = self.write_state()?;
         match state.fate {
-            Fate::Rejected(reason) => Err(write_rejected(reason)),
+            Fate::Rejected(reason) => Err(write_rejected(self.tx_id, reason)),
             Fate::Pending if tier >= DurabilityTier::Edge => Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("write has not been accepted at requested tier {tier:?}"),
@@ -1879,15 +1879,18 @@ where
         let Some((fate, _, durability)) = node.borrow_mut().transaction_state(self.tx_id) else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
-                "transaction is not known locally",
+                format!("transaction {:?} is not known locally", self.tx_id),
             ));
         };
         Ok(WriteState { fate, durability })
     }
 }
 
-fn write_rejected(reason: RejectionReason) -> Error {
-    Error::new(ErrorCode::WriteRejected, format!("{reason:?}"))
+fn write_rejected(transaction_id: impl std::fmt::Debug, reason: RejectionReason) -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        format!("transaction {transaction_id:?} was rejected: {reason:?}"),
+    )
 }
 
 /// Decode Groove's recursively assembled terminal value into Jazz's typed
