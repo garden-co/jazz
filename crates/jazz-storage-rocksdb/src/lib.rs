@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
-    Direction, IteratorMode, MergeOperands, Options, ReadOptions, UniversalCompactOptions,
-    WriteBatch, WriteBufferManager, WriteOptions, properties,
+    DBIteratorWithThreadMode, Direction, IteratorMode, MergeOperands, Options, ReadOptions,
+    UniversalCompactOptions, WriteBatch, WriteBufferManager, WriteOptions, properties,
 };
 use serde::Serialize;
 
@@ -101,22 +101,43 @@ impl StorageFactory for RocksDbStorageFactory {
     }
 }
 
-struct RocksDbCursor {
-    values: std::vec::IntoIter<KeyValue>,
+struct RocksDbCursor<'a> {
+    iterator: DBIteratorWithThreadMode<'a, DB>,
+    prefix: Option<Vec<u8>>,
+    done: bool,
 }
 
-impl RocksDbCursor {
-    fn new(values: Vec<KeyValue>) -> Self {
+impl<'a> RocksDbCursor<'a> {
+    fn new(iterator: DBIteratorWithThreadMode<'a, DB>, prefix: Option<Vec<u8>>) -> Self {
         Self {
-            values: values.into_iter(),
+            iterator,
+            prefix,
+            done: false,
         }
     }
 }
 
-impl StorageCursor for RocksDbCursor {
+impl StorageCursor for RocksDbCursor<'_> {
     fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
         Box::pin(async move {
-            let batch = self.values.by_ref().take(256).collect::<Vec<_>>();
+            if self.done {
+                return Ok(None);
+            }
+            let mut batch = Vec::with_capacity(256);
+            while batch.len() < 256 {
+                let Some(item) = self.iterator.next() else {
+                    self.done = true;
+                    break;
+                };
+                let (key, value) = item.storage()?;
+                if let Some(prefix) = &self.prefix
+                    && !key.starts_with(prefix)
+                {
+                    self.done = true;
+                    break;
+                }
+                batch.push((key.into_vec(), value.into_vec()));
+            }
             Ok((!batch.is_empty()).then_some(batch))
         })
     }
@@ -511,12 +532,7 @@ impl OrderedKvStorage for RocksDbStorage {
             } else {
                 self.db.iterator_cf_opt(self.cf_handle(&cf)?, options, mode)
             };
-            let mut values = Vec::new();
-            for item in iterator {
-                let (key, value) = item.storage()?;
-                values.push((key.to_vec(), value.to_vec()));
-            }
-            Ok(Box::new(RocksDbCursor::new(values)) as StorageScan<'_>)
+            Ok(Box::new(RocksDbCursor::new(iterator, None)) as StorageScan<'_>)
         })
     }
 
@@ -534,15 +550,7 @@ impl OrderedKvStorage for RocksDbStorage {
                 } else {
                     self.db.iterator_cf(self.cf_handle(&cf)?, mode)
                 };
-                let mut values = Vec::new();
-                for item in iterator {
-                    let (key, value) = item.storage()?;
-                    if !key.starts_with(&prefix) {
-                        break;
-                    }
-                    values.push((key.to_vec(), value.to_vec()));
-                }
-                return Ok(Box::new(RocksDbCursor::new(values)) as StorageScan<'_>);
+                return Ok(Box::new(RocksDbCursor::new(iterator, Some(prefix))) as StorageScan<'_>);
             }
 
             let mut options = ReadOptions::default();
@@ -554,12 +562,7 @@ impl OrderedKvStorage for RocksDbStorage {
             } else {
                 self.db.iterator_cf_opt(self.cf_handle(&cf)?, options, mode)
             };
-            let mut values = Vec::new();
-            for item in iterator {
-                let (key, value) = item.storage()?;
-                values.push((key.to_vec(), value.to_vec()));
-            }
-            Ok(Box::new(RocksDbCursor::new(values)) as StorageScan<'_>)
+            Ok(Box::new(RocksDbCursor::new(iterator, None)) as StorageScan<'_>)
         })
     }
 
