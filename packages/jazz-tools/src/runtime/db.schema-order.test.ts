@@ -344,8 +344,11 @@ describe("Db runtime schema order", () => {
       },
     };
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
-    const upsert = vi.fn<(...args: [string, InsertValues, { id: string }]) => WriteHandle>(() =>
-      makeWriteHandle("transaction-upsert"),
+    const upsert = vi.fn<(...args: Parameters<JazzClient["upsert"]>) => WriteHandle>(
+      (_table, receivedId) => {
+        expect(receivedId).toBe(externalId);
+        return makeWriteHandle("transaction-upsert");
+      },
     );
     const client = {
       getSchema: () => new Map(),
