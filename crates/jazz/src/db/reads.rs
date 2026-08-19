@@ -308,6 +308,29 @@ where
             }
             _ => ensure_default_read_view(&opts)?,
         }
+        if !opts.include_deleted
+            && authorization_mode == QueryAuthorizationMode::ClientLocal
+            && prepared
+                .shape
+                .query()
+                .reachable
+                .iter()
+                .any(|reachable| reachable.seed.is_some())
+        {
+            // Seeded reachability is an output-changing gather. Its recursive
+            // rows live in result-membership terminals, not only in the root
+            // app-row terminal used by ordinary membership-filtering reads.
+            if let Some(binding_view) = node.client_settled_binding_view_key_for_query(
+                &prepared.shape,
+                &prepared.binding,
+                tier,
+                &opts.read_view,
+            ) && let Some(snapshot) =
+                node.authoritative_reset_snapshot_for_binding_view(&prepared.shape, binding_view)?
+            {
+                return Ok(snapshot.rows);
+            }
+        }
         match (opts.include_deleted, authorization_mode) {
             (true, mode) => node.query_rows_including_deleted_in_authorization_mode(
                 &prepared.shape,
