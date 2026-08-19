@@ -711,18 +711,20 @@ where
         author: AuthorId,
     ) -> Result<PermissionAdvice, Error> {
         self.table_schema(table)?;
-        self.node
-            .node
-            .borrow_mut()
-            .dry_run_read_current_allows(table, row, author)
-            .map(|allowed| {
-                if allowed {
-                    PermissionAdvice::Allowed
-                } else {
-                    PermissionAdvice::Denied
-                }
-            })
-            .map_err(Into::into)
+        crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .dry_run_read_current_allows(table, row, author),
+        )
+        .map(|allowed| {
+            if allowed {
+                PermissionAdvice::Allowed
+            } else {
+                PermissionAdvice::Denied
+            }
+        })
+        .map_err(Into::into)
     }
 
     /// Advise whether an update may be allowed. Client-local replicas return

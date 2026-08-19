@@ -400,6 +400,7 @@ where
     ) -> Result<Self, Error>
     where
         T: ReopenableStorage + 'static,
+        S: ReopenableStorage,
     {
         let current_schema_version_id = schema.version_id();
         #[cfg(feature = "testing")]

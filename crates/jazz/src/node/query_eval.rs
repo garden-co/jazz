@@ -2814,7 +2814,7 @@ where
             .map_err(Error::Groove)?;
         let subscription_id = subscription.id();
         let snapshot = subscription.recv().map_err(|_| Error::SubscriptionClosed);
-        self.database.unsubscribe(subscription_id);
+        self.database.unsubscribe(subscription_id).await;
         snapshot
     }
 }

@@ -370,7 +370,7 @@ where
                     .await?
                     .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
             {
-                self.record_child_edges(child, [parent]);
+                self.record_child_edges(child, [parent]).await;
             }
         }
 

@@ -326,7 +326,7 @@ where
                 request_schema,
                 identity,
             )
-            ?
+            .await?
             {
                 continue;
             }

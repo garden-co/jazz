@@ -173,7 +173,7 @@ where
                 let previous_made_at = if previous_tx_id == tx.tx_id {
                     tx.tx_id.time
                 } else {
-                    self.version_made_at(previous)?
+                    self.version_made_at(previous).await?
                 };
                 Some((previous, previous_tx_id, previous_made_at))
             } else {
@@ -276,7 +276,7 @@ where
             self.rejections.child_txs_by_parent.remove(&tx.tx_id);
             self.prune_child_edges(tx.tx_id);
         } else if matches!(fate, Fate::Pending) {
-            self.record_child_edges(tx.tx_id, parent_edges);
+            self.record_child_edges(tx.tx_id, parent_edges).await;
         }
         self.cache_tx_versions(tx.tx_id, stored_versions);
         Ok(())

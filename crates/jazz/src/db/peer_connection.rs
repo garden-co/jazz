@@ -2398,8 +2398,8 @@ where
                                 continue;
                             }
                             let responses = {
-                                let mut node = self.node.borrow_mut();
-                                peer.serve_row_versions(&mut node, &requests)?
+                                let mut node = self.node.lock().await;
+                                peer.serve_row_versions(&mut node, &requests).await?
                             };
                             for response in responses {
                                 send_with_sync_context(
@@ -2773,7 +2773,7 @@ where
                         }
                     }
                 }
-                queue_local_acknowledgements(&self.local_fate_routes, &self.node);
+                queue_local_acknowledgements(&self.local_fate_routes, &self.node).await;
                 for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {
                     send_with_sync_context(&self.node, peer, self.transport.as_mut(), fate)?;
                 }
