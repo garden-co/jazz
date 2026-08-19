@@ -344,8 +344,11 @@ where
     // Evaluate the step once against snapshot table deltas and the full
     // accumulated relation. The result is discarded; the purpose is to prepare
     // shared arrangements so later positive ticks can probe old state.
-    let full_table_deltas =
-        snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, step).await?;
+    let full_table_deltas = if runtime.evaluation_inputs.is_some() {
+        Vec::new()
+    } else {
+        snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, step).await?
+    };
     if std::env::var_os("JAZZ_CLOSURE_TRACE").is_some() {
         let records = full_table_deltas
             .iter()
