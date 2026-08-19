@@ -963,7 +963,7 @@ where
         if self.query_transaction(tx.tx_id).await?.is_some() {
             return self.ingest_known_transaction(tx, versions, fate, global_seq, durability).await;
         }
-        self.stage_transaction_and_versions_with_current_indexes(
+        let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
             batch,
             tx.clone(),
             versions,
@@ -974,10 +974,10 @@ where
         ).await?;
         self.finalize_staged_transaction_ingest(
             batch,
-            tx.tx_id,
             fate,
             global_seq,
             staged_global_seqs,
+            &staged_versions,
         )
         .await
     }

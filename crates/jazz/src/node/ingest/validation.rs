@@ -38,7 +38,7 @@ where
     ) -> Result<PublishedTransaction, Error> {
         let tx_id = tx.tx_id;
         let mut batch = self.database.open_batch();
-        self.stage_transaction_and_versions_with_current_indexes(
+        let _ = self.stage_transaction_and_versions_with_current_indexes(
             &mut batch,
             tx,
             versions,
@@ -63,47 +63,34 @@ where
         update_current_indexes: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
-        let publication_scope = self.database.begin_durable_publication_scope()?;
-        let result = async {
-            let mut batch = self.database.open_batch();
-            self.stage_transaction_and_versions_with_current_indexes(
-                &mut batch,
-                tx,
-                versions,
-                fate.clone(),
-                global_seq,
-                durability,
-                update_current_indexes,
-            )
-            .await?;
-            self.database.commit_batch(batch).await?;
-            let mut staged_global_seqs = Vec::new();
-            let mut cleanup_batch = self.database.open_batch();
-            self.finalize_staged_transaction_ingest(
-                &mut cleanup_batch,
-                tx_id,
-                fate,
-                global_seq,
-                &mut staged_global_seqs,
-            ).await?;
-            if !cleanup_batch.is_empty() {
-                self.database.commit_batch(cleanup_batch).await?;
-                self.persist_storage_consistency_marker_through(tx_id.time)
-                    .await?;
-            }
-            Ok(())
+        let needs_consistency_marker = matches!(fate, Fate::Rejected(_)) || global_seq.is_some();
+        let mut batch = self.database.open_batch();
+        let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
+            &mut batch,
+            tx,
+            versions,
+            fate.clone(),
+            global_seq,
+            durability,
+            update_current_indexes,
+        )
+        .await?;
+        let mut staged_global_seqs = Vec::new();
+        self.finalize_staged_transaction_ingest(
+            &mut batch,
+            fate,
+            global_seq,
+            &mut staged_global_seqs,
+            &staged_versions,
+        )
+        .await?;
+        self.database.commit_batch(batch).await?;
+        self.invalidate_tx_version_table_names_cache(tx_id);
+        if needs_consistency_marker {
+            self.persist_storage_consistency_marker_through(tx_id.time)
+                .await?;
         }
-        .await;
-        match result {
-            Ok(()) => {
-                publication_scope.finish(&mut self.database);
-                Ok(())
-            }
-            Err(error) => {
-                publication_scope.abort(&mut self.database);
-                Err(error)
-            }
-        }
+        Ok(())
     }
 
     async fn stage_transaction_and_versions_with_current_indexes(
@@ -115,7 +102,7 @@ where
         global_seq: Option<GlobalSeq>,
         durability: DurabilityTier,
         update_current_indexes: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<VersionRow>, Error> {
         self.merge_tx_time(tx.tx_id.time);
         let update_current_indexes =
             update_current_indexes && tx.target_lineage == crate::tx::BranchLineage::Root;
@@ -278,25 +265,24 @@ where
         } else if matches!(fate, Fate::Pending) {
             self.record_child_edges(tx.tx_id, parent_edges).await;
         }
-        self.cache_tx_versions(tx.tx_id, stored_versions);
-        Ok(())
+        self.cache_tx_versions(tx.tx_id, stored_versions.clone());
+        Ok(stored_versions)
     }
 
     async fn finalize_staged_transaction_ingest(
         &mut self,
         batch: &mut DatabaseBatch,
-        tx_id: TxId,
         fate: Fate,
         global_seq: Option<GlobalSeq>,
         staged_global_seqs: &mut Vec<GlobalSeq>,
+        staged_versions: &[VersionRow],
     ) -> Result<(), Error> {
-        self.invalidate_tx_version_table_names_cache(tx_id);
         if matches!(fate, Fate::Accepted)
             && let Some(global_seq) = global_seq
         {
             staged_global_seqs.push(global_seq);
             let advanced_global_seqs = self.record_applied_global_seq(global_seq);
-            self.cleanup_fated_ahead_current_for_tx(batch, tx_id).await?;
+            self.cleanup_fated_ahead_current_for_versions(batch, staged_versions)?;
             if !advanced_global_seqs.is_empty() {
                 for advanced in advanced_global_seqs
                     .into_iter()

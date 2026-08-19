@@ -37,9 +37,7 @@ use crate::records::{
     RawProjectionScratch, RecordDescriptor, Value, ValueType,
 };
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
-use crate::storage::{
-    OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay, StagedWriteState,
-};
+use crate::storage::{OrderedKvStorage, RecordStore};
 use thiserror::Error;
 
 mod aggregate;
@@ -160,11 +158,6 @@ pub struct IvmRuntime {
     graph: IvmGraph,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
     subscriptions_by_output_node: HashMap<NodeId, HashSet<SubscriptionId>>,
-    /// Output from a staged durable tick.  `Database::commit_batch` releases
-    /// this only after its storage transaction commits, so a failed write can
-    /// never leak a speculative subscription delta.
-    staged_subscription_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
-    defer_subscription_notifications: bool,
     pending_incremental: runtime_tick::PendingIncrementalEvaluation,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
@@ -217,8 +210,6 @@ impl IvmRuntime {
             graph: IvmGraph::new(),
             multisink_subscriptions: HashMap::default(),
             subscriptions_by_output_node: HashMap::default(),
-            staged_subscription_notifications: Vec::new(),
-            defer_subscription_notifications: false,
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),

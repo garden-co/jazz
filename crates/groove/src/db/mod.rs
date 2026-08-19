@@ -13,7 +13,6 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::str;
-use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 
 use web_time::{Duration, Instant};
@@ -52,10 +51,6 @@ pub struct Database {
     last_commit_metrics: Option<CommitMetrics>,
     last_tick_metrics: Option<TickMetrics>,
     storage_read_metrics: Rc<RefCell<StorageReadMetrics>>,
-    /// Host-owned transactions may span several Groove storage commits while
-    /// remaining one externally atomic publication. Notifications stay queued
-    /// until the outermost host scope completes.
-    durable_publication_state: Arc<Mutex<DurablePublicationState>>,
     next_publication_id: u64,
     durable_publication_frontier: Option<PublicationId>,
     resident_publications: BTreeMap<PublicationId, Vec<OwnedWriteOperation>>,
@@ -73,6 +68,9 @@ pub struct PublishedBatch {
     storage: Rc<LayoutStorage>,
     operations: Vec<OwnedWriteOperation>,
     order: Rc<RefCell<PublicationPersistenceOrder>>,
+    ivm_tick_time: Duration,
+    storage_writes: StorageWriteMetrics,
+    tick: TickMetrics,
 }
 
 impl PublishedBatch {
@@ -90,7 +88,9 @@ impl PublishedBatch {
             Poll::Pending
         })
         .await;
+        let storage_start = Instant::now();
         let result = self.storage.write_many(self.operations.clone()).await;
+        let storage_write_time = storage_start.elapsed();
         if result.is_ok() {
             let waiters = {
                 let mut order = self.order.borrow_mut();
@@ -104,6 +104,14 @@ impl PublishedBatch {
         PublicationPersistence {
             publication: self.publication,
             result,
+            metrics: CommitMetrics {
+                storage_write_time,
+                ivm_tick_time: self.ivm_tick_time,
+                storage_write_count: self.storage_writes.total.count,
+                storage_write_bytes: self.storage_writes.total.bytes,
+                storage_writes: self.storage_writes,
+                tick: self.tick.clone(),
+            },
         }
     }
 }
@@ -118,68 +126,7 @@ struct PublicationPersistenceOrder {
 pub struct PublicationPersistence {
     publication: PublicationId,
     result: Result<(), crate::storage::Error>,
-}
-
-/// Capability token for one host-owned durable publication scope.
-///
-/// This is an internal cross-crate seam used by Jazz. The token is consumed by
-/// exactly one finish or abort operation, preventing double-finalization; the
-/// database tracks nesting so an inner abort makes every enclosing completion
-/// discard rather than publish.
-#[doc(hidden)]
-#[must_use = "a durable publication scope must be finished or aborted"]
-pub struct DurablePublicationScope {
-    state: Arc<Mutex<DurablePublicationState>>,
-    resolved: bool,
-}
-
-#[derive(Default)]
-struct DurablePublicationState {
-    depth: usize,
-    aborted: bool,
-}
-
-impl DurablePublicationScope {
-    /// Successfully complete this scope. Publication occurs only when this is
-    /// the outermost scope and no nested scope aborted.
-    #[doc(hidden)]
-    pub fn finish(mut self, database: &mut Database) {
-        assert!(
-            Arc::ptr_eq(&self.state, &database.durable_publication_state),
-            "durable publication scope belongs to a different database"
-        );
-        self.resolve(false);
-        database.settle_durable_publication_scopes();
-    }
-
-    /// Abort this scope and poison its whole nested publication unit.
-    #[doc(hidden)]
-    pub fn abort(mut self, database: &mut Database) {
-        assert!(
-            Arc::ptr_eq(&self.state, &database.durable_publication_state),
-            "durable publication scope belongs to a different database"
-        );
-        self.resolve(true);
-        database.settle_durable_publication_scopes();
-    }
-
-    fn resolve(&mut self, aborted: bool) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("durable publication state mutex poisoned");
-        state.depth = state.depth.saturating_sub(1);
-        state.aborted |= aborted;
-        self.resolved = true;
-    }
-}
-
-impl Drop for DurablePublicationScope {
-    fn drop(&mut self) {
-        if !self.resolved {
-            self.resolve(true);
-        }
-    }
+    metrics: CommitMetrics,
 }
 
 mod batch;

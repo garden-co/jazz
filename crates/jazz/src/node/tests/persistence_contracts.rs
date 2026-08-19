@@ -346,11 +346,11 @@ fn successful_authority_finalization_publishes_after_every_storage_batch() {
     ));
 }
 
-/// An inner failed authority scope poisons the whole nested publication unit.
-/// Completing outer cleanup is then a safe no-op: it must neither panic nor
-/// release the inner scope's speculative subscription output.
+/// Resident subscription output is visible synchronously even when the later
+/// persistence boundary fails. The database is poisoned rather than trying to
+/// retract an observation that local callers may already have consumed.
 #[test]
-fn nested_inner_failure_makes_outer_finish_safe_and_publishes_nothing() {
+fn persistence_failure_does_not_hide_resident_subscription_output() {
     let (mut writer, _) = fail_write_many_node();
     let (_tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -361,25 +361,23 @@ fn nested_inner_failure_makes_outer_finish_safe_and_publishes_nothing() {
     let (mut core, storage) = fail_write_many_node();
     let history = core.subscribe_history("todos").unwrap();
     assert!(history.recv().unwrap().is_empty());
-    let outer = core.database.begin_durable_publication_scope().unwrap();
     storage.fail_nth_following_write_many(2);
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("local write must produce a commit unit")
     };
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .expect_err("inner finalization failure must abort the nested publication unit");
-
-    outer.finish(&mut core.database);
+        .expect_err("persistence failure must fail the commit unit");
+    assert_eq!(history.try_recv().unwrap().to_values().unwrap().len(), 1);
     assert!(matches!(
         history.try_recv(),
         Err(std::sync::mpsc::TryRecvError::Empty)
     ));
 }
 
-/// Nested successful scopes retain all tick output until the outermost token is
-/// consumed, then publish the commit unit exactly once.
+/// A complete commit unit is one Groove publication and its resident delta is
+/// delivered immediately, exactly once.
 #[test]
-fn nested_success_publishes_exactly_once_at_outer_finish() {
+fn commit_unit_publishes_one_resident_delta_immediately() {
     let (mut writer, _) = fail_write_many_node();
     let (_tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -390,7 +388,6 @@ fn nested_success_publishes_exactly_once_at_outer_finish() {
     let (mut core, _) = fail_write_many_node();
     let history = core.subscribe_history("todos").unwrap();
     assert!(history.recv().unwrap().is_empty());
-    let outer = core.database.begin_durable_publication_scope().unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("local write must produce a commit unit")
     };
@@ -405,12 +402,6 @@ fn nested_success_publishes_exactly_once_at_outer_finish() {
             ..
         }]
     ));
-    assert!(matches!(
-        history.try_recv(),
-        Err(std::sync::mpsc::TryRecvError::Empty)
-    ));
-
-    outer.finish(&mut core.database);
     assert_eq!(history.try_recv().unwrap().to_values().unwrap().len(), 1);
     assert!(matches!(
         history.try_recv(),

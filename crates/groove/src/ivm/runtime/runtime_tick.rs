@@ -414,7 +414,6 @@ impl IncrementalEvaluation<'_> {
         }
 
         let mut dropped_subscriptions = Vec::new();
-        let mut deferred_notifications = Vec::new();
         let mut evaluator = TickEvaluator {
             schema: &runtime.schema,
             graph: &runtime.graph,
@@ -554,18 +553,11 @@ impl IncrementalEvaluation<'_> {
             }
             let mut queued = QueuedMultisinkDeltas::new(records);
             queued.publication = self.notification_publication;
-            if !queued.deltas.is_empty() {
-                if runtime.defer_subscription_notifications {
-                    deferred_notifications.push((*subscription_id, queued));
-                } else if subscription.sender.send(queued).is_err() {
-                    dropped_subscriptions.push(*subscription_id);
-                }
+            if !queued.deltas.is_empty() && subscription.sender.send(queued).is_err() {
+                dropped_subscriptions.push(*subscription_id);
             }
             self.published_subscriptions.insert(*subscription_id);
         }
-        runtime
-            .staged_subscription_notifications
-            .append(&mut deferred_notifications);
         self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
         self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
 
@@ -877,45 +869,12 @@ impl IvmRuntime {
         Ok(())
     }
 
-    pub(crate) async fn tick_staged<S>(
-        &mut self,
-        table_deltas: Vec<TableDelta>,
-        storage: &S,
-        staged_writes: &mut Vec<OwnedWriteOperation>,
-    ) -> Result<TickMetrics, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
-        debug_assert!(
-            !self.defer_subscription_notifications,
-            "a durable tick must not nest while computing subscription output"
-        );
-        let staged_overlay = RefCell::new(StagedWriteState::from(std::mem::take(staged_writes)));
-        let overlay = StagedWriteOverlay::new(storage, &staged_overlay);
-        self.defer_subscription_notifications = true;
-        let tick = self
-            .tick_with_params(
-                table_deltas,
-                Vec::new(),
-                OwnedStorage::new(Rc::new(&overlay)),
-                None,
-            )
-            .await;
-        self.defer_subscription_notifications = false;
-        overlay.drain_into(staged_writes);
-        if tick.is_err() {
-            self.staged_subscription_notifications.clear();
-        }
-        tick
-    }
-
     pub(crate) async fn tick_resident_staged(
         &mut self,
         table_deltas: Vec<TableDelta>,
         storage: OwnedStorage<'static>,
         publication: PublicationId,
     ) -> Result<TickMetrics, IvmRuntimeError> {
-        debug_assert!(!self.defer_subscription_notifications);
         let temporal_blockers = {
             let pending = self.pending_incremental.0.borrow();
             pending
@@ -1045,38 +1004,6 @@ impl IvmRuntime {
 
     pub(crate) async fn drive_pending_incremental(&mut self) -> Result<(), IvmRuntimeError> {
         std::future::poll_fn(|cx| self.poll_pending_incremental(cx)).await
-    }
-
-    /// Release subscription output computed by the preceding staged durable
-    /// tick.  This is deliberately separate from `tick_staged`: callers must
-    /// invoke it only after the matching storage transaction commits.
-    pub(crate) fn publish_staged_subscription_notifications(&mut self) {
-        let pending = std::mem::take(&mut self.staged_subscription_notifications);
-        let mut dropped = Vec::new();
-        for (subscription_id, queued) in pending {
-            let Some(subscription) = self.multisink_subscriptions.get(&subscription_id) else {
-                continue;
-            };
-            if subscription.sender.send(queued).is_err() {
-                dropped.push(subscription_id);
-            }
-        }
-        for subscription_id in dropped {
-            self.unsubscribe(subscription_id);
-        }
-    }
-
-    pub(crate) fn tag_staged_subscription_notifications(&mut self, publication: PublicationId) {
-        for (_, queued) in &mut self.staged_subscription_notifications {
-            queued.publication = Some(publication);
-        }
-    }
-
-    /// Forget output from a failed staged storage transaction.  The runtime is
-    /// generally poisoned by its caller after that failure, but clearing this
-    /// queue makes the no-publication boundary explicit and robust to teardown.
-    pub(crate) fn discard_staged_subscription_notifications(&mut self) {
-        self.staged_subscription_notifications.clear();
     }
 
     pub(super) async fn tick_with_params<'a>(
