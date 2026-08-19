@@ -2,15 +2,15 @@
 
 use super::*;
 
-#[test]
-fn arg_max_by_feeds_join_and_anti_join() {
+#[futures_test::test]
+async fn arg_max_by_feeds_join_and_anti_join() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let visible = database
         .subscribe_one_sink(GraphBuilder::anti_join(
@@ -19,13 +19,14 @@ fn arg_max_by_feeds_join_and_anti_join() {
             ["row"],
             ["row"],
         ))
+        .await
         .unwrap();
     assert!(visible.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     batch.insert("rows", vec![Value::U64(1), Value::String("one".to_owned())]);
     batch.insert("history", history_values(1, 10, 1, "a"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         database
             .query_graph(
@@ -41,6 +42,7 @@ fn arg_max_by_feeds_join_and_anti_join() {
                     ProjectField::renamed("right.label", "label"),
                 ]),
             )
+            .await
             .unwrap()
             .to_values()
             .unwrap(),
@@ -60,22 +62,22 @@ fn arg_max_by_feeds_join_and_anti_join() {
 
     let mut batch = database.open_batch();
     batch.insert("blockers", vec![Value::U64(1)]);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         visible.recv().unwrap().to_values().unwrap(),
         [(vec![Value::U64(1), Value::U64(10)], -1)]
     );
 }
 
-#[test]
-fn arg_max_by_routes_through_prepared_bindings() {
+#[futures_test::test]
+async fn arg_max_by_routes_through_prepared_bindings() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let params = RecordDescriptor::new([("row", ColumnType::U64.clone())]);
     let shape = database
         .prepare_one_sink(
@@ -93,24 +95,26 @@ fn arg_max_by_routes_through_prepared_bindings() {
             params,
             ["row"],
         )
+        .await
         .unwrap();
     let sub = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     assert!(sub.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 10, 1, "a"));
     batch.insert("history", history_values(2, 99, 1, "ignored"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         sub.recv().unwrap().to_values().unwrap(),
         [(vec![Value::U64(1), Value::U64(10)], 1)]
     );
 }
 
-#[test]
-fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
+#[futures_test::test]
+async fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
     #[derive(Clone)]
     struct Lcg(u64);
     impl Lcg {
@@ -132,7 +136,7 @@ fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
         &["history", "rows", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let mut rng = Lcg(0x0bad_cafe_1234_5678);
     let mut model = std::collections::BTreeMap::<(u64, u64, u64), String>::new();
 
@@ -156,7 +160,7 @@ fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
                 model.insert(key, title);
             }
         }
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
 
         let mut expected = std::collections::BTreeMap::<u64, (u64, u64, String)>::new();
         for (&(row, stamp, node), title) in &model {
@@ -178,6 +182,7 @@ fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
 
         let mut actual = database
             .query_graph(history_arg_max())
+            .await
             .unwrap()
             .to_values()
             .unwrap();
@@ -189,15 +194,17 @@ fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
     }
 }
 
-#[test]
-fn arg_max_by_tracks_union_of_filtered_sources() {
+#[futures_test::test]
+async fn arg_max_by_tracks_union_of_filtered_sources() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "history_shadow"],
     )
     .unwrap();
-    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage)
+        .await
+        .unwrap();
     let graph = GraphBuilder::arg_max_by(
         GraphBuilder::union([
             GraphBuilder::table("history").filter(PredicateExpr::gt("stamp", Value::U64(10))),
@@ -207,14 +214,14 @@ fn arg_max_by_tracks_union_of_filtered_sources() {
         ["row"],
         ["stamp", "node"],
     );
-    let subscription = database.subscribe_one_sink(graph.clone()).unwrap();
+    let subscription = database.subscribe_one_sink(graph.clone()).await.unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 20, 1, "left-winner"));
     batch.insert("history_shadow", history_values(1, 30, 1, "right-winner"));
     batch.insert("history_shadow", history_values(2, 40, 1, "other"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [
@@ -225,7 +232,7 @@ fn arg_max_by_tracks_union_of_filtered_sources() {
 
     let mut batch = database.open_batch();
     batch.delete("history_shadow", history_key(1, 30, 1));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [
@@ -234,7 +241,12 @@ fn arg_max_by_tracks_union_of_filtered_sources() {
         ]
     );
 
-    let mut actual = database.query_graph(graph).unwrap().to_values().unwrap();
+    let mut actual = database
+        .query_graph(graph)
+        .await
+        .unwrap()
+        .to_values()
+        .unwrap();
     actual.sort_by_key(|(values, _)| match &values[..] {
         [Value::U64(row), Value::U64(stamp), Value::U64(node), ..] => (*row, *stamp, *node),
         _ => unreachable!(),
@@ -248,15 +260,15 @@ fn arg_max_by_tracks_union_of_filtered_sources() {
     );
 }
 
-#[test]
-fn arg_max_by_tracks_join_filter_input() {
+#[futures_test::test]
+async fn arg_max_by_tracks_join_filter_input() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let joined_history = GraphBuilder::join(
         GraphBuilder::table("history"),
         GraphBuilder::table("rows").filter(PredicateExpr::eq(
@@ -273,7 +285,7 @@ fn arg_max_by_tracks_join_filter_input() {
         ProjectField::renamed("left.title", "title"),
     ]);
     let graph = GraphBuilder::arg_max_by(joined_history, ["row"], ["stamp", "node"]);
-    let subscription = database.subscribe_one_sink(graph.clone()).unwrap();
+    let subscription = database.subscribe_one_sink(graph.clone()).await.unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -288,7 +300,7 @@ fn arg_max_by_tracks_join_filter_input() {
     batch.insert("history", history_values(1, 10, 1, "old"));
     batch.insert("history", history_values(1, 20, 1, "winner"));
     batch.insert("history", history_values(2, 99, 1, "hidden"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [(history_values(1, 20, 1, "winner"), 1)]
@@ -296,7 +308,7 @@ fn arg_max_by_tracks_join_filter_input() {
 
     let mut batch = database.open_batch();
     batch.delete("history", history_key(1, 20, 1));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [
@@ -305,7 +317,12 @@ fn arg_max_by_tracks_join_filter_input() {
         ]
     );
 
-    let mut actual = database.query_graph(graph).unwrap().to_values().unwrap();
+    let mut actual = database
+        .query_graph(graph)
+        .await
+        .unwrap()
+        .to_values()
+        .unwrap();
     actual.sort_by_key(|(values, _)| match &values[..] {
         [Value::U64(row), Value::U64(stamp), Value::U64(node), ..] => (*row, *stamp, *node),
         _ => unreachable!(),
@@ -313,12 +330,12 @@ fn arg_max_by_tracks_join_filter_input() {
     assert_eq!(actual, [(history_values(1, 10, 1, "old"), 1)]);
 }
 
-#[test]
-fn predicate_or_filter_matches_either_branch() {
+#[futures_test::test]
+async fn predicate_or_filter_matches_either_branch() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
         TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let graph = GraphBuilder::table("albums").filter(
         PredicateExpr::Or(vec![
             PredicateExpr::eq("title", Value::String("Kind of Blue".to_owned())),
@@ -340,9 +357,14 @@ fn predicate_or_filter_matches_either_branch() {
         "albums",
         vec![Value::U64(11), Value::String("Speak No Evil".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
-    let mut actual = database.query_graph(graph).unwrap().to_values().unwrap();
+    let mut actual = database
+        .query_graph(graph)
+        .await
+        .unwrap()
+        .to_values()
+        .unwrap();
     actual.sort_by_key(|(values, _)| match &values[..] {
         [Value::U64(id), ..] => *id,
         _ => unreachable!(),
@@ -362,15 +384,15 @@ fn predicate_or_filter_matches_either_branch() {
     );
 }
 
-#[test]
-fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
+#[futures_test::test]
+async fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["history", "rows", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let err = database
         .subscribe_one_sink(GraphBuilder::arg_max_by(
@@ -378,6 +400,7 @@ fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
             ["row"],
             ["node", "stamp"],
         ))
+        .await
         .unwrap_err();
     assert!(format!("{err}").contains("requires primary key"));
 
@@ -394,11 +417,12 @@ fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
             "frontier",
             4,
         ))
+        .await
         .unwrap();
 }
 
-#[test]
-fn unwrap_nullable_can_feed_join_key() {
+#[futures_test::test]
+async fn unwrap_nullable_can_feed_join_key() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
@@ -414,6 +438,7 @@ fn unwrap_nullable_can_feed_join_key() {
         ]),
         storage,
     )
+    .await
     .unwrap();
 
     let mut batch = database.open_batch();
@@ -428,7 +453,7 @@ fn unwrap_nullable_can_feed_join_key() {
     batch.insert("tracks", track_values(1, 7, Some(1), "Intro"));
     batch.insert("tracks", track_values(2, 7, None, "Hidden"));
     batch.insert("tracks", track_values(3, 7, Some(2), "Outro"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let mut values = database
         .query_graph(
@@ -443,6 +468,7 @@ fn unwrap_nullable_can_feed_join_key() {
                 ProjectField::renamed("right.title", "album_title"),
             ]),
         )
+        .await
         .unwrap()
         .to_values()
         .unwrap();
@@ -459,21 +485,23 @@ fn unwrap_nullable_can_feed_join_key() {
     );
 }
 
-#[test]
-fn unwrap_nullable_can_feed_prepared_binding_join_key() {
+#[futures_test::test]
+async fn unwrap_nullable_can_feed_prepared_binding_join_key() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_tracks_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("tracks", track_values(1, 7, Some(1), "Intro"));
     batch.insert("tracks", track_values(2, 7, None, "Hidden"));
     batch.insert("tracks", track_values(3, 7, Some(2), "Outro"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("disc", ColumnType::U64.clone())]);
     let shape = database
@@ -492,9 +520,11 @@ fn unwrap_nullable_can_feed_prepared_binding_join_key() {
             binding_descriptor,
             ["id"],
         )
+        .await
         .unwrap();
     let disc_one = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&disc_one),
@@ -502,8 +532,8 @@ fn unwrap_nullable_can_feed_prepared_binding_join_key() {
     );
 }
 
-#[test]
-fn prepared_binding_join_hydrates_anti_join_input() {
+#[futures_test::test]
+async fn prepared_binding_join_hydrates_anti_join_input() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
@@ -515,12 +545,12 @@ fn prepared_binding_join_hydrates_anti_join_input() {
         TableSchema::new("blockers", [ColumnSchema::new("id", ColumnType::U64)])
             .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
     ]);
-    let mut database = Database::new(schema, storage).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("tracks", track_values(1, 7, Some(1), "Intro"));
     batch.insert("tracks", track_values(2, 7, Some(2), "Outro"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("disc", ColumnType::U64.clone())]);
     let visible = GraphBuilder::anti_join(
@@ -545,9 +575,11 @@ fn prepared_binding_join_hydrates_anti_join_input() {
             binding_descriptor,
             ["id"],
         )
+        .await
         .unwrap();
     let disc_one = database
         .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&disc_one),
@@ -555,8 +587,8 @@ fn prepared_binding_join_hydrates_anti_join_input() {
     );
 }
 
-#[test]
-fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
+#[futures_test::test]
+async fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
@@ -576,7 +608,7 @@ fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
         TableSchema::new("blockers", [ColumnSchema::new("id", ColumnType::U64)])
             .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
     ]);
-    let mut database = Database::new(schema, storage).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
     let owner = uuid::Uuid::from_bytes([1; 16]);
 
     let mut batch = database.open_batch();
@@ -596,7 +628,7 @@ fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
             Value::Nullable(Some(Box::new(Value::String("done".to_owned())))),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let binding_descriptor = RecordDescriptor::new([("owner", ColumnType::Uuid.clone())]);
     let visible = GraphBuilder::anti_join(
@@ -624,9 +656,11 @@ fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
             binding_descriptor,
             ["owner"],
         )
+        .await
         .unwrap();
     let bound = database
         .bind_shape_one_sink(shape.id(), &[Value::Uuid(owner)])
+        .await
         .unwrap();
     assert_eq!(
         expect_recv_vals(&bound),
