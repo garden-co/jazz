@@ -345,7 +345,7 @@ where
         if self.schema_view_is_fixed {
             return Ok(());
         }
-        Ok(self.node.node.borrow_mut().close()?)
+        Ok(crate::db::block_on(self.node.node.borrow_mut().close())?)
     }
 
     /// Configure this database as the optimistic, non-durable side of a
@@ -363,11 +363,12 @@ where
         &self,
         cadence: InitialSyncFlushCadence,
     ) -> Result<(), Error> {
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
-            .set_initial_sync_flush_cadence(cadence.writes())?)
+        Ok(crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .set_initial_sync_flush_cadence(cadence.writes()),
+        )?)
     }
 
     /// Create a snapshot-base branch immediately in local durable storage.
@@ -382,10 +383,12 @@ where
 
     /// Create a local snapshot-base branch with a caller-supplied stable id.
     pub fn create_branch_with_id(&self, branch: crate::ids::BranchId) -> Result<(), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .create_branch_as(branch, self.identity.author)?;
+        crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .create_branch_as(branch, self.identity.author),
+        )?;
         Ok(())
     }
 
@@ -398,19 +401,23 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         let row = self.row_id_source.borrow_mut().next_row_id();
         let cells = self.apply_insert_defaults(table, cells)?;
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .commit_mergeable_on_branch_in_schema(
-                branch,
-                self.schema_version_id,
-                MergeableCommit::new(table, row, self.next_now_ms())
-                    .made_by(self.identity.author)
-                    .cells(cells),
-            )?;
+        let published = crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .commit_mergeable_on_branch_in_schema(
+                    branch,
+                    self.schema_version_id,
+                    MergeableCommit::new(table, row, self.next_now_ms())
+                        .made_by(self.identity.author)
+                        .cells(cells),
+                ),
+        )?;
+        let tx_id = published.tx_id;
+        crate::db::block_on(
+            self.finish_publication_outcome(PublicationOutcome::published((), published)),
+        )?;
         let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.node.node),
             row_uuid: row,
@@ -433,17 +440,25 @@ where
         cells: RowCells,
     ) -> Result<TxId, Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
-        let tx_id = self.node.node.borrow_mut().commit_mergeable_in_schema(
-            self.schema_version_id,
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(made_by)
-                .cells(cells),
+        let published = crate::db::block_on(
+            self.node.node.borrow_mut().commit_mergeable_in_schema(
+                self.schema_version_id,
+                MergeableCommit::new(table, row, self.next_now_ms())
+                    .made_by(made_by)
+                    .cells(cells),
+            ),
         )?;
-        self.node
-            .node
-            .borrow_mut()
-            .finalize_local_mergeable_commit(tx_id)?;
-        self.refresh_subscriptions()?;
+        let tx_id = published.tx_id;
+        crate::db::block_on(
+            self.finish_publication_outcome(PublicationOutcome::published((), published)),
+        )?;
+        let outcome = crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .finalize_local_mergeable_commit(tx_id),
+        )?;
+        crate::db::block_on(self.finish_publication_outcome(outcome))?;
         self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
@@ -465,18 +480,29 @@ where
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.borrow_mut();
         if node.branch_record(branch).is_none() {
-            node.create_branch(branch)?;
+            crate::db::block_on(node.create_branch(branch))?;
         }
-        let tx_id = node.commit_mergeable_on_branch_in_schema(
-            branch,
-            self.schema_version_id,
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(made_by)
-                .cells(cells),
+        let published = crate::db::block_on(
+            node.commit_mergeable_on_branch_in_schema(
+                branch,
+                self.schema_version_id,
+                MergeableCommit::new(table, row, self.next_now_ms())
+                    .made_by(made_by)
+                    .cells(cells),
+            ),
         )?;
-        node.finalize_local_mergeable_commit(tx_id)?;
+        let tx_id = published.tx_id;
         drop(node);
-        self.refresh_subscriptions()?;
+        crate::db::block_on(
+            self.finish_publication_outcome(PublicationOutcome::published((), published)),
+        )?;
+        let outcome = crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .finalize_local_mergeable_commit(tx_id),
+        )?;
+        crate::db::block_on(self.finish_publication_outcome(outcome))?;
         self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
@@ -489,18 +515,21 @@ where
     /// before performing the same self-acceptance step as
     /// [`Db::seed_settled_mergeable_for_bootstrap`].
     pub fn finalize_local_mergeable_commit_for_test(&self, tx_id: TxId) -> Result<(), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .finalize_local_mergeable_commit(tx_id)?;
-        self.refresh_subscriptions()?;
+        let outcome = crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .finalize_local_mergeable_commit(tx_id),
+        )?;
+        crate::db::block_on(self.finish_publication_outcome(outcome))?;
         self.node.mark_subscriber_connections_dirty();
         Ok(())
     }
 
     /// Return the locally observed fate and durability for a write transaction.
     pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {
-        let Some((fate, _, durability)) = self.node.node.borrow_mut().transaction_state(tx_id)
+        let Some((fate, _, durability)) =
+            crate::db::block_on(self.node.node.borrow_mut().transaction_state(tx_id))
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
