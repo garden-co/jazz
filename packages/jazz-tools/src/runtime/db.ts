@@ -176,7 +176,7 @@ function nativeDbQueryOptions(options?: QueryOptions): QueryOptions {
   return options ?? {};
 }
 
-function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
+export function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
   return {
     get _table() {
       return query._table;

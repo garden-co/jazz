@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { flushSync } from "svelte";
+import type { QueryBuilder } from "../shared/index.js";
 import "./test-helpers.svelte.js";
 
 const mocks = vi.hoisted(() => {
@@ -39,10 +40,16 @@ vi.mock("./context.svelte.js", () => ({
   }),
 }));
 
-const { QuerySubscription } = await import("./use-all.svelte.js");
+const { QuerySubscription, QuerySubscriptionOne } = await import("./query-subscription.svelte.js");
 
 function makeQuery(marker = "todos") {
-  return { _marker: marker } as any;
+  return {
+    _marker: marker,
+    _table: marker,
+    _schema: {},
+    _rowType: {},
+    _build: () => JSON.stringify({ table: marker, limit: 10 }),
+  } as any;
 }
 
 async function settle() {
@@ -226,6 +233,50 @@ describe("svelte/QuerySubscription", () => {
     expect(withoutTier.current).toBeUndefined();
     expect(withTier.current).toBeUndefined();
 
+    cleanup();
+  });
+
+  it("QuerySubscriptionOne exposes a nullable row and reacts", async () => {
+    type Todo = { id: string; title: string };
+    let onDelta!: (delta: { all: Todo[]; delta: never[] }) => void;
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: [] },
+      subscribe: (callbacks: any) => {
+        onDelta = callbacks.onDelta;
+        return mocks.unsubscribe;
+      },
+    } as any);
+
+    const query = makeQuery("one") as QueryBuilder<Todo>;
+    const createSubscription = () => new QuerySubscriptionOne(query, { tier: "edge" });
+    let subscription!: ReturnType<typeof createSubscription>;
+    const cleanup = $effect.root(() => {
+      subscription = createSubscription();
+    });
+    await settle();
+
+    expectTypeOf(subscription.current).toEqualTypeOf<Todo | null | undefined>();
+    expect(subscription.current).toBeNull();
+    const [limitedQuery, queryOptions] = mocks.makeQueryKey.mock.calls.at(-1)!;
+    expect(JSON.parse(limitedQuery._build()).limit).toBe(1);
+    expect(queryOptions).toEqual({ tier: "edge" });
+
+    onDelta({ all: [{ id: "1", title: "first" }], delta: [] });
+    expect(subscription.current).toEqual({ id: "1", title: "first" });
+
+    onDelta({ all: [], delta: [] });
+    expect(subscription.current).toBeNull();
+    cleanup();
+  });
+
+  it("QuerySubscriptionOne accepts reactive query options", async () => {
+    const query = makeQuery("one") as QueryBuilder<{ id: string }>;
+    const cleanup = $effect.root(() => {
+      new QuerySubscriptionOne(query, () => ({ tier: "edge" as const }));
+    });
+    await settle();
+
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(expect.anything(), { tier: "edge" });
     cleanup();
   });
 });
