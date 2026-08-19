@@ -449,6 +449,84 @@ mod tests {
     }
 
     #[test]
+    fn flat_join_allows_nullable_scalar_keys() {
+        let schema = JazzSchema::new([
+            TableSchema::new(
+                "parents",
+                [ColumnSchema::new(
+                    "child_id",
+                    ColumnType::Uuid.nullable(),
+                )],
+            ),
+            TableSchema::new(
+                "children",
+                [ColumnSchema::new(
+                    "parent_id",
+                    ColumnType::Uuid.nullable(),
+                )],
+            ),
+        ]);
+
+        for (left, right) in [
+            ("parents.child_id", "children.id"),
+            ("parents.id", "children.parent_id"),
+        ] {
+            let mut query = Query::from("parents");
+            query.flat_join = Some(FlatJoin {
+                root_alias: None,
+                sources: vec![FlatJoinSource {
+                    table: "children".to_owned(),
+                    alias: None,
+                    on: FlatJoinOn {
+                        left: left.to_owned(),
+                        right: right.to_owned(),
+                    },
+                }],
+            });
+            query.validate(&schema).unwrap();
+        }
+    }
+
+    #[test]
+    fn flat_join_allows_array_element_keys() {
+        let schema = JazzSchema::new([
+            TableSchema::new(
+                "parents",
+                [ColumnSchema::new(
+                    "child_ids",
+                    ColumnType::Uuid.array_of(),
+                )],
+            ),
+            TableSchema::new(
+                "children",
+                [ColumnSchema::new(
+                    "parent_ids",
+                    ColumnType::Uuid.array_of(),
+                )],
+            ),
+        ]);
+
+        for (left, right) in [
+            ("parents.child_ids", "children.id"),
+            ("parents.id", "children.parent_ids"),
+        ] {
+            let mut query = Query::from("parents");
+            query.flat_join = Some(FlatJoin {
+                root_alias: None,
+                sources: vec![FlatJoinSource {
+                    table: "children".to_owned(),
+                    alias: None,
+                    on: FlatJoinOn {
+                        left: left.to_owned(),
+                        right: right.to_owned(),
+                    },
+                }],
+            });
+            query.validate(&schema).unwrap();
+        }
+    }
+
+    #[test]
     fn rejects_invalid_array_subquery_shapes() {
         let schema = schema();
 
