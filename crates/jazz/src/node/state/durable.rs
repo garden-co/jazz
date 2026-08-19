@@ -202,18 +202,20 @@ where
     }
 
     /// Return the legacy transaction fate tuple.
-    pub fn transaction_state(
+    pub async fn transaction_state(
         &mut self,
         tx_id: TxId,
     ) -> Option<(Fate, Option<GlobalSeq>, DurabilityTier)> {
         self.transaction_record(tx_id)
+            .await
             .map(|record| (record.fate, record.global_seq, record.durability))
     }
 
     /// Return the durable audit record for a transaction, including rejected
     /// transactions whose row versions were removed from history.
-    pub fn transaction_record(&mut self, tx_id: TxId) -> Option<TransactionRecord> {
+    pub async fn transaction_record(&mut self, tx_id: TxId) -> Option<TransactionRecord> {
         self.query_transaction(tx_id)
+            .await
             .ok()
             .flatten()
             .map(|stored| stored.to_record())
@@ -225,33 +227,34 @@ where
     /// upload queue. A transaction is locally originated only when both its
     /// creating node and author match the reopened client's identity; history
     /// from other devices sharing an author is never replayed by this client.
-    pub fn pending_transaction_ids_for(
+    pub async fn pending_transaction_ids_for(
         &mut self,
         node: NodeUuid,
         author: AuthorId,
     ) -> Result<Vec<TxId>, Error> {
-        Ok(self.pending_transaction_scan_for(node, author)?.tx_ids)
+        Ok(self.pending_transaction_scan_for(node, author).await?.tx_ids)
     }
 
     /// Return unsettled transactions by `author`, irrespective of their
     /// originating node. A dedicated browser relay uses this when it reopens:
     /// relayed main-thread commits retain the main thread's node id, so the
     /// relay's ordinary local-origin recovery scan cannot find them.
-    pub(crate) fn pending_transaction_ids_for_author(
+    pub(crate) async fn pending_transaction_ids_for_author(
         &mut self,
         author: AuthorId,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids_for_author(author, true)
+        self.below_global_transaction_ids_for_author(author, true).await
     }
 
-    pub(crate) fn unresolved_transaction_ids_for_author(
+    pub(crate) async fn unresolved_transaction_ids_for_author(
         &mut self,
         author: AuthorId,
     ) -> Result<Vec<TxId>, Error> {
         self.below_global_transaction_ids_for_author(author, false)
+            .await
     }
 
-    fn below_global_transaction_ids_for_author(
+    async fn below_global_transaction_ids_for_author(
         &mut self,
         author: AuthorId,
         include_accepted: bool,
@@ -261,7 +264,9 @@ where
             "jazz_transactions",
             "by_global_seq",
             &[Value::Nullable(None)],
-        )? {
+        )
+        .await?
+        {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
             if AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?) != author
@@ -289,7 +294,7 @@ where
         Ok(tx_ids)
     }
 
-    pub(crate) fn transaction_row_keys(
+    pub(crate) async fn transaction_row_keys(
         &mut self,
         tx_ids: &[TxId],
     ) -> Result<BTreeSet<(String, RowUuid)>, Error> {
@@ -308,7 +313,7 @@ where
     /// `by_global_seq`. The sequence/durability invariant makes every
     /// below-Global transaction sequence-null, so settled history is outside
     /// this scan without a second index or an upgrade backfill.
-    fn pending_transaction_scan_for(
+    async fn pending_transaction_scan_for(
         &mut self,
         node: NodeUuid,
         author: AuthorId,
@@ -322,7 +327,9 @@ where
             "jazz_transactions",
             "by_global_seq",
             &[Value::Nullable(None)],
-        )? {
+        )
+        .await?
+        {
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
@@ -354,12 +361,15 @@ where
         row.provenance()
     }
 
-    pub(crate) fn current_row_tx_id(&mut self, row: &CurrentRow) -> Option<TxId> {
+    pub(crate) async fn current_row_tx_id(&mut self, row: &CurrentRow) -> Option<TxId> {
         let (time, alias) = row.projected_tx_alias()?;
-        Some(TxId::new(time, self.resolve_node_alias(alias).ok()??))
+        Some(TxId::new(
+            time,
+            self.resolve_node_alias(alias).ok()??,
+        ))
     }
 
-    pub(crate) fn persist_known_state_fact(
+    pub(crate) async fn persist_known_state_fact(
         &self,
         binding_view_key: BindingViewKey,
         settled_through: GlobalSeq,
@@ -378,16 +388,17 @@ where
                             .unwrap_or(u64::MAX),
                     ),
                 ],
-            )?;
+            )
+            .await?;
         Ok(())
     }
 
-    pub(crate) fn load_known_state_fact(
+    pub(crate) async fn load_known_state_fact(
         &mut self,
         binding_view_key: BindingViewKey,
     ) -> Result<Option<GlobalSeq>, Error> {
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        let Some(record) = store.get(&known_state_fact_key(binding_view_key))? else {
+        let Some(record) = store.get(&known_state_fact_key(binding_view_key)).await? else {
             return Ok(None);
         };
         let settled_through = match record.get_idx(0)? {
@@ -411,23 +422,24 @@ where
         Ok(Some(settled_through))
     }
 
-    pub(crate) fn clear_all_known_state_facts(&mut self) -> Result<(), Error> {
+    pub(crate) async fn clear_all_known_state_facts(&mut self) -> Result<(), Error> {
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         let keys = store
-            .prefix_entries(&[])?
+            .prefix_entries(&[])
+            .await?
             .into_iter()
             .map(|entry| entry.key)
             .collect::<Vec<_>>();
         for key in keys {
-            store.delete(&key)?;
+            store.delete(&key).await?;
         }
         self.query.settled_through_by_binding_view.clear();
         self.query.authorization_progress_by_binding_view.clear();
-        self.clear_all_settled_result_state()?;
+        self.clear_all_settled_result_state().await?;
         Ok(())
     }
 
-    pub(crate) fn persist_settled_result_state_delta(
+    pub(crate) async fn persist_settled_result_state_delta(
         &self,
         binding_view_key: BindingViewKey,
         cleared: bool,
@@ -444,18 +456,20 @@ where
             member_adds,
             member_removes,
             member_rewrite,
-        )?;
+        )
+        .await?;
         self.persist_settled_program_facts_delta(
             binding_view_key,
             cleared,
             fact_adds,
             fact_removes,
             fact_rewrite,
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
-    fn persist_settled_result_members_delta(
+    async fn persist_settled_result_members_delta(
         &self,
         binding_view_key: BindingViewKey,
         cleared: bool,
@@ -469,7 +483,8 @@ where
         if cleared || rewrite.is_some() {
             let prefix = binding_view_store_prefix(binding_view_key);
             let keys = store
-                .prefix_entries(&prefix)?
+                .prefix_entries(&prefix)
+                .await?
                 .into_iter()
                 .map(|entry| entry.key)
                 .collect::<Vec<_>>();
@@ -492,7 +507,7 @@ where
                     });
                 }
             }
-            store.write_many(&operations)?;
+            store.write_many(&operations).await?;
             return Ok(());
         }
 
@@ -509,12 +524,12 @@ where
             });
         }
         if !operations.is_empty() {
-            store.write_many(&operations)?;
+            store.write_many(&operations).await?;
         }
         Ok(())
     }
 
-    fn persist_settled_program_facts_delta(
+    async fn persist_settled_program_facts_delta(
         &self,
         binding_view_key: BindingViewKey,
         cleared: bool,
@@ -528,7 +543,8 @@ where
         if cleared || rewrite.is_some() {
             let prefix = binding_view_store_prefix(binding_view_key);
             let keys = store
-                .prefix_entries(&prefix)?
+                .prefix_entries(&prefix)
+                .await?
                 .into_iter()
                 .map(|entry| entry.key)
                 .collect::<Vec<_>>();
@@ -551,7 +567,7 @@ where
                     });
                 }
             }
-            store.write_many(&operations)?;
+            store.write_many(&operations).await?;
             return Ok(());
         }
 
@@ -568,21 +584,22 @@ where
             });
         }
         if !operations.is_empty() {
-            store.write_many(&operations)?;
+            store.write_many(&operations).await?;
         }
         Ok(())
     }
 
-    fn clear_all_settled_result_state(&mut self) -> Result<(), Error> {
+    async fn clear_all_settled_result_state(&mut self) -> Result<(), Error> {
         for store_name in [SETTLED_RESULT_MEMBERS_STORE, SETTLED_PROGRAM_FACTS_STORE] {
             let store = self.database.direct_record_store(store_name)?;
             let keys = store
-                .prefix_entries(&[])?
+                .prefix_entries(&[])
+                .await?
                 .into_iter()
                 .map(|entry| entry.key)
                 .collect::<Vec<_>>();
             for key in keys {
-                store.delete(&key)?;
+                store.delete(&key).await?;
             }
         }
         self.query.settled_result_sets.clear();
@@ -591,10 +608,10 @@ where
         Ok(())
     }
 
-    pub(crate) fn close(&mut self) -> Result<(), Error> {
-        self.database.flush()?;
-        self.persist_clean_close_marker()?;
-        self.database.close()?;
+    pub(crate) async fn close(&mut self) -> Result<(), Error> {
+        self.database.flush().await?;
+        self.persist_clean_close_marker().await?;
+        self.database.close().await?;
         Ok(())
     }
 
@@ -741,7 +758,7 @@ where
     }
 
     /// Discard a locally-retained rejected transaction after the app acknowledges it.
-    pub fn discard_rejection(&mut self, tx_id: TxId) -> Result<(), Error> {
+    pub async fn discard_rejection(&mut self, tx_id: TxId) -> Result<(), Error> {
         if tx_id.node != self.node_uuid {
             return Ok(());
         }
@@ -758,7 +775,9 @@ where
             for raw in self.database.primary_key_scan_raw(
                 &storage_table,
                 &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
-            )? {
+            )
+            .await?
+            {
                 let record = raw.record();
                 let node_id = record.get_u64(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?;
                 let time = record.get_u64(RejectedVersionRowRecord::FIELD_TX_TIME_IDX)?;
@@ -771,7 +790,7 @@ where
                 );
             }
         }
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         self.rejections.rejected_transactions.remove(&tx_id);
         Ok(())
     }
@@ -786,7 +805,7 @@ where
     /// only stores versions it may hold. Rejected transaction versions are not
     /// returned because rejection cleanup removes their stored row versions;
     /// use [`SingleNode::transaction_record`] for the transaction audit state.
-    pub fn row_history(
+    pub async fn row_history(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -795,7 +814,8 @@ where
         for version in self.query_row_versions(table, row_uuid)? {
             let tx_id = self.version_tx_id(&version)?;
             let tx = self
-                .query_transaction(tx_id)?
+                .query_transaction(tx_id)
+                .await?
                 .ok_or(Error::MissingTransaction(tx_id))?;
             let local_current = self
                 .query_local_layer_winner(table, row_uuid, version.layer())?
@@ -825,44 +845,47 @@ where
     }
 
     /// Eagerly remove a Groove subscription from the runtime.
-    pub(crate) fn unsubscribe_groove_subscription(
+    pub(crate) async fn unsubscribe_groove_subscription(
         &mut self,
         subscription_id: groove::ivm::SubscriptionId,
     ) -> bool {
-        self.database.unsubscribe(subscription_id)
+        self.database.unsubscribe(subscription_id).await
     }
 
-    pub(crate) fn flush_query_runtime(&mut self) -> Result<(), Error> {
-        self.database.flush().map_err(Error::Groove)
+    pub(crate) async fn flush_query_runtime(&mut self) -> Result<(), Error> {
+        self.database.flush().await.map_err(Error::Groove)
     }
 
-    pub(crate) fn set_initial_sync_flush_cadence(&mut self, every: usize) -> Result<(), Error> {
+    pub(crate) async fn set_initial_sync_flush_cadence(
+        &mut self,
+        every: usize,
+    ) -> Result<(), Error> {
         debug_assert!(every > 0);
         self.initial_sync_flush_cadence = Some(every);
         // The cadence only relaxes durability while the first snapshot is
         // active. Normal client writes retain a boundary per committed batch.
-        self.database.set_write_flush_cadence(1)?;
+        self.database.set_write_flush_cadence(1).await?;
         Ok(())
     }
 
-    pub(super) fn begin_initial_sync_flush_cadence(&mut self) -> Result<(), Error> {
+    pub(super) async fn begin_initial_sync_flush_cadence(&mut self) -> Result<(), Error> {
         let Some(every) = self.initial_sync_flush_cadence else {
             return Ok(());
         };
         if self.initial_sync_flush_active || self.initial_sync_flush_completed {
             return Ok(());
         }
-        self.database.set_write_flush_cadence(every)?;
+        self.database.set_write_flush_cadence(every).await?;
         self.initial_sync_flush_active = true;
         Ok(())
     }
 
-    pub(super) fn finish_initial_sync_flush_cadence(&mut self) -> Result<(), Error> {
+    pub(super) async fn finish_initial_sync_flush_cadence(&mut self) -> Result<(), Error> {
         if !self.initial_sync_flush_active {
             return Ok(());
         }
-        self.database.flush_write_boundary()?;
-        self.database.set_write_flush_cadence(1)?;
+        self.database.flush_write_boundary().await?;
+        self.database.set_write_flush_cadence(1).await?;
         self.initial_sync_flush_active = false;
         self.initial_sync_flush_completed = true;
         Ok(())

@@ -24,7 +24,7 @@ where
     pub(super) coverage_refresh_generations: CoverageRefreshGenerations,
     pub(super) query_coverage_registrations: QueryCoverageRegistrations,
     pub(super) upstream_subscription_owners: UpstreamSubscriptionOwners,
-    pub(super) connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
+    pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
@@ -423,7 +423,7 @@ where
     pub fn connect_upstream(
         &self,
         transport: Box<dyn Transport>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         let local_receiver = self.receives_commits_as_local();
         let session_context = transport.connection_session_context();
         let connection_epoch = session_context
@@ -561,7 +561,7 @@ where
                 }
             }
         }
-        let connection = Rc::new(RefCell::new(PeerConnection {
+        let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
             node: Rc::clone(&self.node),
@@ -618,7 +618,7 @@ where
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorId,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_trust(transport, identity, CommitUnitTrust::Session)
     }
 
@@ -628,7 +628,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_claims_and_trust(
             transport,
             identity,
@@ -643,7 +643,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         trust: CommitUnitTrust,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_resume_and_trust(
             transport,
             identity,
@@ -660,7 +660,7 @@ where
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_resume_and_trust(transport, identity, trust, claims, None)
     }
 
@@ -670,7 +670,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_peer(
             transport,
             identity,
@@ -688,7 +688,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_peer(
             transport,
             identity,
@@ -706,7 +706,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         cursor: ResumeCursor,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_resume_and_trust(
             transport,
             identity,
@@ -723,7 +723,7 @@ where
         trust: CommitUnitTrust,
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         let peer = if self.receives_commits_as_local() {
             PeerState::relay()
         } else {
@@ -746,7 +746,7 @@ where
         cursor: Option<ResumeCursor>,
         peer: PeerState,
         edge_authority: bool,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         let local_receiver = self.receives_commits_as_local() && !edge_authority;
         let (peer, ingest_context, session_claims, session_claim_revision) = match cursor {
             Some(cursor) => {
@@ -780,7 +780,7 @@ where
         let startup_error = local_receiver
             .then(|| self.restore_local_subscriber(identity, &downstream_fates))
             .and_then(Result::err);
-        let connection = Rc::new(RefCell::new(PeerConnection {
+        let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
             node: Rc::clone(&self.node),
@@ -834,7 +834,7 @@ where
     }
 
     /// Detach a previously attached peer connection from this node.
-    pub fn detach_connection(&self, connection: &Rc<RefCell<PeerConnection<S>>>) -> bool {
+    pub fn detach_connection(&self, connection: &Rc<LocalMutex<PeerConnection<S>>>) -> bool {
         let connection_ref = connection.borrow();
         let (authority, upstream_epoch) = match &connection_ref.link {
             ConnectionLink::Upstream {
@@ -967,7 +967,7 @@ where
     }
 
     /// Service every accepted subscriber connection once.
-    pub fn tick(&self) -> Result<DbTickStats, Error> {
+    pub async fn tick(&self) -> Result<DbTickStats, Error> {
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
         let mut remote_sync_applied = false;
@@ -977,8 +977,9 @@ where
         // websocket hosts are event-driven and need not provide unrelated
         // follow-up traffic just to flush a freshly accepted row.
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
-        for connection in self.connections.borrow().iter() {
-            let next = connection.borrow_mut().tick()?;
+        let connections = self.connections.borrow().clone();
+        for connection in &connections {
+            let next = connection.lock().await.tick().await?;
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
             remote_sync_applied |= next.remote_sync_applied > 0;
@@ -986,13 +987,13 @@ where
         let subscriber_state_changed =
             self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before;
         if remote_sync_applied || subscriber_state_changed {
-            for connection in self.connections.borrow().iter() {
+            for connection in &connections {
                 let should_tick = {
-                    let mut connection = connection.borrow_mut();
+                    let mut connection = connection.lock().await;
                     connection.mark_subscriber_dirty() || subscriber_state_changed
                 };
                 if should_tick {
-                    let next = connection.borrow_mut().tick()?;
+                    let next = connection.lock().await.tick().await?;
                     stats.subscription_events += next.subscription_events;
                     stats.remote_sync_applied += next.remote_sync_applied;
                 }
@@ -1000,8 +1001,8 @@ where
         }
         if let Some(budget) = self.edge_cache_budget.get() {
             let mut pins = crate::peer::PeerEvictionPins::default();
-            for connection in self.connections.borrow().iter() {
-                pins.extend(connection.borrow().eviction_pins());
+            for connection in &connections {
+                pins.extend(connection.lock().await.eviction_pins());
             }
             self.node
                 .borrow_mut()

@@ -9,15 +9,19 @@ where
     S: OrderedKvStorage,
 {
     /// Apply one sync message and return any outgoing sync messages.
-    pub fn apply_sync_message(&mut self, message: SyncMessage) -> Result<Vec<SyncMessage>, Error>
+    pub async fn apply_sync_message(
+        &mut self,
+        message: SyncMessage,
+    ) -> Result<Vec<SyncMessage>, Error>
     where
         S: ReopenableStorage,
     {
         self.apply_sync_message_with_ingest_context(message, None)
+            .await
     }
 
     /// Apply a catalogue mutation from the trusted local administrative lane.
-    pub fn apply_trusted_catalogue_message(
+    pub async fn apply_trusted_catalogue_message(
         &mut self,
         message: SyncMessage,
     ) -> Result<Vec<SyncMessage>, Error>
@@ -32,10 +36,11 @@ where
                 edge_authority: false,
             }),
         )
+        .await
     }
 
     /// Apply one sync message from a connection-authenticated upload path.
-    pub fn apply_sync_message_with_ingest_context(
+    pub async fn apply_sync_message_with_ingest_context(
         &mut self,
         message: SyncMessage,
         ingest_context: Option<CommitUnitIngestContext>,
@@ -153,22 +158,27 @@ where
             }
             SyncMessage::PublishSchema { author, schema } => {
                 self.apply_publish_schema(author, ingest_context, *schema)
+                    .await
             }
             SyncMessage::PublishSchemaWithLens {
                 author,
                 catalogue_seq,
                 publication,
-            } => self.apply_publish_schema_with_lens(
-                author,
-                ingest_context,
-                catalogue_seq,
-                *publication,
-            ),
+            } => {
+                self.apply_publish_schema_with_lens(
+                    author,
+                    ingest_context,
+                    catalogue_seq,
+                    *publication,
+                )
+                .await
+            }
             SyncMessage::PublishLens { author, lens } => {
-                self.apply_publish_lens(author, ingest_context, lens)
+                self.apply_publish_lens(author, ingest_context, lens).await
             }
             SyncMessage::SetCurrentWriteSchema { author, pointer } => {
                 self.apply_set_current_write_schema(author, ingest_context, pointer)
+                    .await
             }
             SyncMessage::CatalogueAck(_) => Ok(Vec::new()),
             SyncMessage::PermissionAdviceRequest { .. }
@@ -185,7 +195,7 @@ where
         }
     }
 
-    fn apply_publish_schema(
+    async fn apply_publish_schema(
         &mut self,
         author: AuthorId,
         ingest_context: Option<CommitUnitIngestContext>,
@@ -220,10 +230,10 @@ where
         if schema.id == self.catalogue.current_schema_version_id {
             self.catalogue.schema = schema.schema.clone();
         }
-        self.persist_catalogue_schema(&schema)?;
-        self.ensure_provisional_physical_mapping(schema.id)?;
-        self.ensure_schema_version_alias(schema.id)?;
-        self.synchronize_physical_version_tables()?;
+        self.persist_catalogue_schema(&schema).await?;
+        self.ensure_provisional_physical_mapping(schema.id).await?;
+        self.ensure_schema_version_alias(schema.id).await?;
+        self.synchronize_physical_version_tables().await?;
         if active_schema_changed {
             // Policy declarations are intentionally outside the schema version
             // identity. Invalidate maintained handles when that same-version
@@ -573,7 +583,7 @@ where
         self.query.policy_authorization_graph_cache.clear();
     }
 
-    fn apply_publish_lens(
+    async fn apply_publish_lens(
         &mut self,
         author: AuthorId,
         ingest_context: Option<CommitUnitIngestContext>,
@@ -606,7 +616,8 @@ where
                 ));
             }
         }
-        self.persist_catalogue_lens_with_physical_metadata(&lens, None)?;
+        self.persist_catalogue_lens_with_physical_metadata(&lens, None)
+            .await?;
         if installed {
             self.catalogue
                 .catalogue_lenses

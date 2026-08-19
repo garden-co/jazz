@@ -219,10 +219,10 @@ where
     /// write schema. The returned handle shares the owner's node, open batches,
     /// connections, row-id source, and logical clock while validating typed
     /// operations against this exact schema view.
-    pub fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
+    pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
         let schema_version_id = schema.version_id();
         let schema_view_id = SchemaViewId::for_schema(&schema);
-        self.admit_local_schema_view_if_needed(&schema)?;
+        self.admit_local_schema_view_if_needed(&schema).await?;
         {
             let node = self.node.node.borrow();
             let admitted = node
@@ -267,7 +267,7 @@ where
     }
 
     /// Attach an already-registered typed schema view to this owner.
-    pub fn schema_view(&self, schema_view_id: SchemaViewId) -> Result<Self, Error> {
+    pub async fn schema_view(&self, schema_view_id: SchemaViewId) -> Result<Self, Error> {
         let schema = self
             .schema_views
             .borrow()
@@ -279,7 +279,7 @@ where
                     format!("schema view {schema_view_id:?} is not registered"),
                 )
             })?;
-        self.register_schema_view(schema)
+        self.register_schema_view(schema).await
     }
 
     /// Canonical id of this handle's typed schema view.
@@ -291,7 +291,7 @@ where
     /// with the empty schema. This is the local-first bootstrap equivalent of
     /// having opened the runtime with that schema originally; later schemas
     /// still arrive through ordinary catalogue lineage publication.
-    fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
+    async fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
         let empty_schema = JazzSchema::new([]);
         let empty_id = empty_schema.version_id();
         let target_id = schema.version_id();
@@ -319,12 +319,13 @@ where
             new_tables,
             dropped_tables,
         );
-        let mut node = self.node.node.borrow_mut();
+        let mut node = self.node.node.lock().await;
         node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq,
             publication: Box::new(publication),
-        })?;
+        })
+        .await?;
         if bootstrap_current {
             node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
                 author: AuthorId::SYSTEM,
@@ -332,7 +333,8 @@ where
                     revision: 1,
                     schema: target_id,
                 },
-            })?;
+            })
+            .await?;
         }
         Ok(())
     }
@@ -575,7 +577,7 @@ where
     pub fn connect_upstream(
         &self,
         transport: Box<dyn Transport>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.connect_upstream(transport)
     }
 
@@ -624,7 +626,7 @@ where
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorId,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.accept_subscriber(transport, identity)
     }
 
@@ -634,7 +636,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_subscriber_with_claims(transport, identity, claims)
     }
@@ -646,7 +648,7 @@ where
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_subscriber_with_claims_and_trust(transport, identity, claims, trust)
     }
@@ -657,7 +659,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_edge_subscriber_with_claims(transport, identity, claims)
     }
@@ -668,7 +670,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_edge_authority_subscriber_with_claims(transport, identity, claims)
     }
@@ -679,25 +681,25 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         cursor: ResumeCursor,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_subscriber_with_resume(transport, identity, cursor)
     }
 
     /// Detach a previously attached peer connection from this database.
-    pub fn detach_connection(&self, connection: &Rc<RefCell<PeerConnection<S>>>) -> bool {
+    pub fn detach_connection(&self, connection: &Rc<LocalMutex<PeerConnection<S>>>) -> bool {
         self.node.detach_connection(connection)
     }
 
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
-    pub fn tick(&self) -> Result<(), Error> {
-        self.node.tick().map(|_| ())
+    pub async fn tick(&self) -> Result<(), Error> {
+        self.node.tick().await.map(|_| ())
     }
 
     /// Service every connection once and return binding-observable wake counts.
-    pub fn tick_stats(&self) -> Result<DbTickStats, Error> {
-        self.node.tick()
+    pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
+        self.node.tick().await
     }
 
     pub(super) fn refresh_subscriptions(&self) -> Result<usize, Error> {
