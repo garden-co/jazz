@@ -720,20 +720,22 @@ where
     }
 
     #[cfg(test)]
-    fn recomputed_merge_heads_from_history_for_test(
+    async fn recomputed_merge_heads_from_history_for_test(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
         let table_id = self.physical_table_id_for_authored_test_table(table)?;
-        let versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
+        let versions = self
+            .query_physical_content_row_versions(table_id, table, row_uuid)
+            .await?;
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             if version.layer() != VersionLayer::Content {
                 continue;
             }
             let tx_id = self.version_tx_id(version)?;
-            let Some(tx) = self.query_transaction(tx_id)? else {
+            let Some(tx) = self.query_transaction(tx_id).await? else {
                 continue;
             };
             if matches!(tx.fate, Fate::Pending | Fate::Accepted) {
@@ -749,31 +751,36 @@ where
     }
 
     #[cfg(test)]
-    pub(super) fn rebuild_merge_heads_from_history_for_test(
+    pub(super) async fn rebuild_merge_heads_from_history_for_test(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
-        let heads = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
+        let heads = self
+            .recomputed_merge_heads_from_history_for_test(table, row_uuid)
+            .await?;
         let table_id = self.physical_table_id_for_authored_test_table(table)?;
         let mut batch = self.database.open_batch();
         Self::write_merge_heads(&mut batch, table_id, row_uuid, &heads)?;
-        self.database.commit_batch(batch)?;
+        self.database.commit_batch(batch).await?;
         Ok(())
     }
 
     #[cfg(test)]
-    pub(super) fn assert_merge_heads_match_history_for_test(
+    pub(super) async fn assert_merge_heads_match_history_for_test(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
-        let expected = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
+        let expected = self
+            .recomputed_merge_heads_from_history_for_test(table, row_uuid)
+            .await?;
         let table_id = self.physical_table_id_for_authored_test_table(table)?;
-        let actual = self.require_merge_heads(table_id, row_uuid)?;
+        let actual = self.require_merge_heads(table_id, row_uuid).await?;
         if actual != expected {
             let versions = self
-                .query_row_versions(table, row_uuid)?
+                .query_row_versions(table, row_uuid)
+                .await?
                 .into_iter()
                 .map(|version| {
                     let tx_id = self.version_tx_id(&version)?;
@@ -796,18 +803,19 @@ where
     }
 
     #[cfg(test)]
-    fn assert_merge_head_rows_match_history_for_test(
+    async fn assert_merge_head_rows_match_history_for_test(
         &mut self,
         rows: &BTreeSet<(String, RowUuid)>,
     ) -> Result<(), Error> {
         for (table, row_uuid) in rows {
-            self.assert_merge_heads_match_history_for_test(table, *row_uuid)?;
+            self.assert_merge_heads_match_history_for_test(table, *row_uuid)
+                .await?;
         }
         Ok(())
     }
 
     #[cfg(test)]
-    fn recomputed_global_layer_winner_from_history_for_test(
+    async fn recomputed_global_layer_winner_from_history_for_test(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -815,18 +823,19 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         let mut winner = None::<(VersionRow, TxId, TxTime)>;
         for version in self
-            .query_row_versions(table, row_uuid)?
+            .query_row_versions(table, row_uuid)
+            .await?
             .into_iter()
             .filter(|version| version.layer() == layer)
         {
             let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id)? else {
+            let Some(tx) = self.query_transaction(tx_id).await? else {
                 continue;
             };
             if !matches!(tx.fate, Fate::Accepted) || tx.global_seq.is_none() {
                 continue;
             }
-            let made_at = self.version_made_at(&version)?;
+            let made_at = self.version_made_at(&version).await?;
             let previous = winner
                 .as_ref()
                 .map(|(version, tx_id, made_at)| (version, *tx_id, *made_at));
@@ -838,7 +847,7 @@ where
     }
 
     #[cfg(test)]
-    fn assert_global_current_updates_match_history_for_test(
+    async fn assert_global_current_updates_match_history_for_test(
         &mut self,
         updates: &[(VersionRow, GlobalSeq)],
     ) -> Result<(), Error> {
@@ -847,7 +856,8 @@ where
                 version.table(),
                 version.row_uuid(),
                 version.layer(),
-            )?
+            )
+            .await?
             else {
                 panic!(
                     "global-current update has no accepted history winner for {}/ {:?} {:?}",
@@ -868,14 +878,16 @@ where
                     actual_tx
                 );
             }
-            self.assert_global_current_row_matches_version_for_test(version, *global_seq)?;
-            self.assert_global_change_row_matches_version_for_test(version, *global_seq)?;
+            self.assert_global_current_row_matches_version_for_test(version, *global_seq)
+                .await?;
+            self.assert_global_change_row_matches_version_for_test(version, *global_seq)
+                .await?;
         }
         Ok(())
     }
 
     #[cfg(test)]
-    fn assert_global_current_row_matches_version_for_test(
+    async fn assert_global_current_row_matches_version_for_test(
         &mut self,
         version: &VersionRow,
         global_seq: GlobalSeq,
@@ -911,7 +923,8 @@ where
         };
         let rows = self
             .database
-            .primary_key_scan_raw(current_table.as_ref(), &[Value::Uuid(version.row_uuid().0)])?;
+            .primary_key_scan_raw(current_table.as_ref(), &[Value::Uuid(version.row_uuid().0)])
+            .await?;
         let actual = rows.first().map(|row| row.record().raw().to_vec());
         let expected = owned_record_from_storage_values(current_schema, expected_values)?
             .raw()
@@ -930,7 +943,7 @@ where
     }
 
     #[cfg(test)]
-    fn assert_global_change_row_matches_version_for_test(
+    async fn assert_global_change_row_matches_version_for_test(
         &mut self,
         version: &VersionRow,
         global_seq: GlobalSeq,
@@ -947,7 +960,8 @@ where
                 Value::Bytes(version_layer_string(version.layer()).into_bytes()),
                 Value::U64(global_seq.0),
             ],
-        )?;
+        )
+        .await?;
         let Some(row) = rows.first() else {
             panic!(
                 "missing global-change row for {}/{:?} {:?} at {:?}",

@@ -194,7 +194,7 @@ where
 
     /// Evaluate an insert for a test-only serving-path probe without writing.
     #[cfg(test)]
-    pub(crate) fn authorize_insert_for_identity(
+    pub(crate) async fn authorize_insert_for_identity(
         &self,
         table: &str,
         cells: RowCells,
@@ -211,6 +211,7 @@ where
                     .permission_subject(identity)
                     .cells(cells),
             )
+            .await
             .map(|allowed| {
                 if allowed {
                     PermissionAdvice::Allowed
@@ -754,7 +755,7 @@ where
 
     /// Evaluate a delete for a test-only serving-path probe without writing.
     #[cfg(test)]
-    pub(crate) fn authorize_delete_for_identity(
+    pub(crate) async fn authorize_delete_for_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -765,6 +766,7 @@ where
             .node
             .borrow_mut()
             .dry_run_delete_current_allows(table, row, author)
+            .await
             .map(|allowed| {
                 if allowed {
                     PermissionAdvice::Allowed

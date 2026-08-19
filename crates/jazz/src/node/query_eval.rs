@@ -2269,7 +2269,7 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn query_relation_branch_discriminators_for_test(
+    pub(crate) async fn query_relation_branch_discriminators_for_test(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2277,18 +2277,21 @@ where
         identity: AuthorId,
         read_view: &ReadViewSpec,
     ) -> Result<Vec<(Option<uuid::Uuid>, Option<uuid::Uuid>)>, Error> {
-        let program = self.compile_current_query_program_for_read_view_in_authorization_mode(
-            shape,
-            binding,
-            tier,
-            identity,
-            CurrentQueryProgramOutput::RelationSnapshot,
-            read_view,
-            QueryAuthorizationMode::ClientLocal,
-        )?;
+        let program = self
+            .compile_current_query_program_for_read_view_in_authorization_mode(
+                shape,
+                binding,
+                tier,
+                identity,
+                CurrentQueryProgramOutput::RelationSnapshot,
+                read_view,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .await?;
         let snapshots = self
             .database
             .query_graphs(lowered_program_sinks(&program))
+            .await
             .map_err(Error::Groove)?;
         let Some(edges) = snapshots.get("maintained.relation_edges") else {
             return Ok(Vec::new());

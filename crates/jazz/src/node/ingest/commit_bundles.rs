@@ -1191,10 +1191,12 @@ where
         #[cfg(test)]
         {
             if std::env::var_os("JAZZ_SKIP_BULK_INGEST_ASSERTS").is_none() {
-                self.assert_merge_head_rows_match_history_for_test(&content_rows)?;
+                self.assert_merge_head_rows_match_history_for_test(&content_rows)
+                    .await?;
                 self.assert_global_current_updates_match_history_for_test(
                     &current_update_versions,
-                )?;
+                )
+                .await?;
             }
         }
         for tx_id in &loaded_tx_ids {

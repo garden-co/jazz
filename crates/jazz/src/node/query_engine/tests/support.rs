@@ -584,7 +584,7 @@ pub(super) struct FakeSourceResolver {
 }
 
 impl SourceResolver for FakeSourceResolver {
-    fn resolve_source(
+    async fn resolve_source(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError> {
@@ -688,7 +688,7 @@ impl InlineCollectorResolver {
 }
 
 impl SourceResolver for InlineCollectorResolver {
-    fn resolve_source(
+    async fn resolve_source(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError> {

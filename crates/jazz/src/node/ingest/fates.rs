@@ -154,10 +154,12 @@ where
                     .iter()
                     .map(|version| (version.table().to_owned(), version.row_uuid()))
                     .collect::<BTreeSet<_>>();
-                self.assert_merge_head_rows_match_history_for_test(&rows)?;
+                self.assert_merge_head_rows_match_history_for_test(&rows)
+                    .await?;
                 self.assert_global_current_updates_match_history_for_test(
                     &global_current_update_versions,
-                )?;
+                )
+                .await?;
             }
         }
         if let Some(rejected_payload) = rejected_payload {
@@ -755,11 +757,12 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
+    pub(crate) async fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
         let mut tx_ids = Vec::new();
         for raw in self
             .database
-            .primary_key_scan_raw("jazz_transactions", &[])?
+            .primary_key_scan_raw("jazz_transactions", &[])
+            .await?
         {
             let record = raw.record();
             let time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);

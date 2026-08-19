@@ -1207,12 +1207,12 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn evaluate_branch_metadata_write_policy_for_test(
+    pub(crate) async fn evaluate_branch_metadata_write_policy_for_test(
         &mut self,
         branch_id: BranchId,
         identity: AuthorId,
     ) -> Result<bool, Error> {
-        self.branch_write_policy_allows(branch_id, identity)
+        self.branch_write_policy_allows(branch_id, identity).await
     }
 
     pub(super) async fn branch_current_rows_for_schema(
@@ -1287,6 +1287,7 @@ where
         branch: &BranchRecord,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.branch_current_rows_for_schema(table, branch, self.catalogue.current_schema_version_id)
+            .await
     }
 
     pub(super) fn branch_metadata_current_rows(&self) -> Result<Vec<CurrentRow>, Error> {
