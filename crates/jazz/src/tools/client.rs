@@ -1838,9 +1838,10 @@ fn aggregate_public_values(
             Some(table_schema.columns.columns[idx].column_type.clone()),
         ));
     }
-    let mut outputs = aggregate.aggregates.iter().collect::<Vec<_>>();
-    outputs.sort_by_key(|output| crate::query::canonical_aggregate_key(output));
-    for output in outputs {
+    // Core stores aggregate fields in canonical order so equivalent queries
+    // can share one shape. Public results retain the caller's declaration
+    // order by resolving each requested alias against that physical record.
+    for output in &aggregate.aggregates {
         let public_name = output.alias.clone();
         columns.push((
             public_name.clone(),
@@ -2246,9 +2247,12 @@ impl PublicQueryDecoder {
             .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
         if let Some(aggregate) = &query.aggregate {
             let mut names = aggregate.group_by.iter().cloned().collect::<Vec<_>>();
-            let mut outputs = aggregate.aggregates.iter().collect::<Vec<_>>();
-            outputs.sort_by_key(|output| crate::query::canonical_aggregate_key(output));
-            names.extend(outputs.into_iter().map(|output| output.alias.clone()));
+            names.extend(
+                aggregate
+                    .aggregates
+                    .iter()
+                    .map(|output| output.alias.clone()),
+            );
             return Ok(names);
         }
         if let Some(flat_join) = &query.flat_join {

@@ -148,27 +148,34 @@ the core predicate vocabulary without re-implementing match rules.
 
 Supported matrix:
 
-| Column type                          | `in`                                                                                                      | `contains`                                                                                                                                   |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Text/String                          | Membership in a list of text values. UUID literals may be coerced to their string form for compatibility. | Substring containment with a text needle.                                                                                                    |
-| Integer / BigInt / Float / Timestamp | Membership in a list of same-type scalar values.                                                          | Rejected.                                                                                                                                    |
-| Boolean                              | Membership in a list of boolean values.                                                                   | Rejected.                                                                                                                                    |
-| UUID/reference                       | Membership in a list of UUID values. String UUID literals may be coerced to UUIDs at lowering boundaries. | Rejected.                                                                                                                                    |
-| Enum                                 | Membership in a list of enum-compatible values. String literals may be coerced to discriminants.          | Rejected.                                                                                                                                    |
-| Bytea                                | Membership in a list of whole byte-array values.                                                          | Rejected.                                                                                                                                    |
-| Json                                 | Whole-value equality membership only where the binding layer can represent the literal.                   | Rejected.                                                                                                                                    |
-| Array<T>                             | Membership in a list of whole-array values.                                                               | Element membership with a needle of type `T`; this includes arrays of numbers, booleans, UUID/reference values, enums, timestamps, and text. |
+| Column type       | `in`                                                                                                      | `contains`                                                                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Text/String       | Membership in a list of text values. UUID literals may be coerced to their string form for compatibility. | Substring containment with a text needle.                                                                                                    |
+| Integer / BigInt  | Membership in a list of same-type scalar values after the checked literal normalization below.            | Rejected.                                                                                                                                    |
+| Float / Timestamp | Membership in a list of same-type scalar values.                                                          | Rejected.                                                                                                                                    |
+| Boolean           | Membership in a list of boolean values.                                                                   | Rejected.                                                                                                                                    |
+| UUID/reference    | Membership in a list of UUID values. String UUID literals may be coerced to UUIDs at lowering boundaries. | Rejected.                                                                                                                                    |
+| Enum              | Membership in a list of enum-compatible values. String literals may be coerced to discriminants.          | Rejected.                                                                                                                                    |
+| Bytea             | Membership in a list of whole byte-array values.                                                          | Rejected.                                                                                                                                    |
+| Json              | Whole-value equality membership only where the binding layer can represent the literal.                   | Rejected.                                                                                                                                    |
+| Array<T>          | Membership in a list of whole-array values.                                                               | Element membership with a needle of type `T`; this includes arrays of numbers, booleans, UUID/reference values, enums, timestamps, and text. |
 
 Invalid operator/type combinations must be rejected before execution with a
 clear type error. In particular, `contains` on a scalar non-text column is never
 interpreted as stringification, and `in` candidates (including parameters) must
 match the column's whole-value type except for the narrow compatibility
-coercions listed above. Thus an `Array<T>` `in` candidate must itself be an
-array; a scalar `T` is rejected rather than being rewritten as a singleton array
-or a `contains` predicate. Compatibility coercions may recurse into an
-array-valued literal only when they preserve that array shape. The broader
-literal-vs-column coercion policy remains intentionally unspecified; new
-coercions need an explicit spec decision before implementation.
+coercions listed above. Integer literals are the one scalar compatibility rule:
+for equality, ordering, and `in`, an Integer (`I32`) literal is widened when
+compared with a BigInt (`I64`) column, and a BigInt literal is narrowed for an
+Integer column only when its value is representable as `I32`. This normalization
+happens before shape identity is derived, so equivalent width spellings share a
+shape. It applies only to literals, never to mismatched column-vs-column types;
+other numeric coercions remain unsupported. Thus an `Array<T>` `in` candidate
+must itself be an array; a scalar `T` is rejected rather than being rewritten as
+a singleton array or a `contains` predicate. Compatibility coercions may recurse
+into an array-valued literal only when they preserve that array shape. Any
+broader literal-vs-column coercion needs an explicit spec decision before
+implementation.
 
 🔶 **Open question: a subset/superset predicate over array columns.** Rejecting
 a scalar `in` candidate for `Array<T>` is correct, but it is worth naming why

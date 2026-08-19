@@ -59,6 +59,65 @@ mod tests {
     }
 
     #[test]
+    fn integer_literals_normalize_to_comparison_column_width() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "metrics",
+            [
+                ColumnSchema::new("narrow", ColumnType::I32),
+                ColumnSchema::new("wide", ColumnType::I64),
+            ],
+        )]);
+
+        let widened = Query::from("metrics")
+            .filter(gt(col("wide"), lit(9)))
+            .validate(&schema)
+            .expect("i32 literal widens for an i64 column");
+        let explicitly_wide = Query::from("metrics")
+            .filter(gt(col("wide"), lit(9_i64)))
+            .validate(&schema)
+            .unwrap();
+        assert_eq!(
+            widened.query().filters,
+            vec![gt(col("wide"), lit(9_i64))]
+        );
+        assert_eq!(widened.shape_id(), explicitly_wide.shape_id());
+
+        let narrowed = Query::from("metrics")
+            .filter(eq(col("narrow"), lit(9_i64)))
+            .validate(&schema)
+            .expect("in-range i64 literal narrows for an i32 column");
+        assert_eq!(
+            narrowed.query().filters,
+            vec![eq(col("narrow"), lit(9))]
+        );
+
+        let inferred_in = Query::from("metrics")
+            .filter(in_list(col("wide"), [lit(9), lit(10_i64)]))
+            .validate(&schema)
+            .expect("IN candidates normalize to the column width");
+        let explicit_in = Query::from("metrics")
+            .filter(in_list(col("wide"), [lit(9_i64), lit(10_i64)]))
+            .validate(&schema)
+            .unwrap();
+        assert_eq!(inferred_in.shape_id(), explicit_in.shape_id());
+
+        let out_of_range = Query::from("metrics")
+            .filter(eq(
+                col("narrow"),
+                lit(i64::from(i32::MAX) + 1),
+            ))
+            .validate(&schema)
+            .unwrap_err();
+        assert_eq!(out_of_range, QueryError::OperandTypeMismatch);
+
+        let column_width_mismatch = Query::from("metrics")
+            .filter(eq(col("narrow"), col("wide")))
+            .validate(&schema)
+            .unwrap_err();
+        assert_eq!(column_width_mismatch, QueryError::OperandTypeMismatch);
+    }
+
+    #[test]
     fn relation_predicate_or_true_is_always_true() {
         let predicate = RelationPredicate::Or(vec![
             RelationPredicate::True,
