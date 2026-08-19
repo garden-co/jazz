@@ -21,7 +21,7 @@ async fn query_documents_as_alice(client: &JazzClient) -> HashSet<ObjectId> {
 /// Verifies that SELECT policies comparing a nullable column to a NULL literal
 /// include NULL rows and filter out non-null rows.
 #[tokio::test]
-#[ignore = "`deleted_at = NULL` SELECT policy is rejected during schema conversion with `OperandTypeMismatch`"]
+#[ignore = "`deleted_at = NULL` now converts to `IS NULL`, but local SELECT-policy enforcement still includes rows whose `deleted_at` value is non-null"]
 async fn rebac_select_policy_with_null_literal_filters_query_results() {
     let documents_policies = permissions(|p| {
         p.allow_read().where_(pe::eq("deleted_at", pe::null()));
