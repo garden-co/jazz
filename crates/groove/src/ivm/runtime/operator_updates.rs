@@ -20,6 +20,54 @@ pub(super) struct NodeRuntimeMeta {
 pub(super) struct NodeState;
 
 impl NodeState {
+    pub(super) fn table_source_request(
+        input: &TableSourceOp,
+    ) -> Result<Option<super::evaluation_session::StorageRequestKey>, IvmRuntimeError> {
+        Ok(match input.scan.as_ref().map(scan_bounds).transpose()? {
+            None => Some(super::evaluation_session::StorageRequestKey::ScanPrefix {
+                family: input.table.clone(),
+                prefix: Vec::new(),
+            }),
+            Some(StaticScanBounds::Prefix(prefix)) => {
+                Some(super::evaluation_session::StorageRequestKey::ScanPrefix {
+                    family: input.table.clone(),
+                    prefix,
+                })
+            }
+            Some(StaticScanBounds::Range { start, end }) if start < end => {
+                Some(super::evaluation_session::StorageRequestKey::ScanRange {
+                    family: input.table.clone(),
+                    start,
+                    end,
+                })
+            }
+            Some(StaticScanBounds::Range { .. }) => None,
+        })
+    }
+
+    pub(super) fn index_source_request(
+        input: &IndexSourceOp,
+    ) -> Result<Option<super::evaluation_session::StorageRequestKey>, IvmRuntimeError> {
+        Ok(
+            match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())? {
+                StaticScanBounds::Prefix(prefix) => {
+                    Some(super::evaluation_session::StorageRequestKey::ScanPrefix {
+                        family: "indices".to_owned(),
+                        prefix,
+                    })
+                }
+                StaticScanBounds::Range { start, end } if start < end => {
+                    Some(super::evaluation_session::StorageRequestKey::ScanRange {
+                        family: "indices".to_owned(),
+                        start,
+                        end,
+                    })
+                }
+                StaticScanBounds::Range { .. } => None,
+            },
+        )
+    }
+
     pub(super) fn update_table_source_from_inputs(
         input: &TableSourceOp,
         schema: &DatabaseSchema,
@@ -27,27 +75,8 @@ impl NodeState {
         output_desc: &RecordDescriptor,
         inputs: &mut super::evaluation_session::EvaluationInputs,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let request = match input.scan.as_ref().map(scan_bounds).transpose()? {
-            None => super::evaluation_session::StorageRequestKey::ScanPrefix {
-                family: input.table.clone(),
-                prefix: Vec::new(),
-            },
-            Some(StaticScanBounds::Prefix(prefix)) => {
-                super::evaluation_session::StorageRequestKey::ScanPrefix {
-                    family: input.table.clone(),
-                    prefix,
-                }
-            }
-            Some(StaticScanBounds::Range { start, end }) => {
-                if start >= end {
-                    return Ok(RecordDeltas::empty(*output_desc));
-                }
-                super::evaluation_session::StorageRequestKey::ScanRange {
-                    family: input.table.clone(),
-                    start,
-                    end,
-                }
-            }
+        let Some(request) = Self::table_source_request(input)? else {
+            return Ok(RecordDeltas::empty(*output_desc));
         };
         let table_schema = schema
             .table(&input.table)
@@ -92,25 +121,9 @@ impl NodeState {
         output_desc: &RecordDescriptor,
         inputs: &mut super::evaluation_session::EvaluationInputs,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let request =
-            match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())? {
-                StaticScanBounds::Prefix(prefix) => {
-                    super::evaluation_session::StorageRequestKey::ScanPrefix {
-                        family: "indices".to_owned(),
-                        prefix,
-                    }
-                }
-                StaticScanBounds::Range { start, end } => {
-                    if start >= end {
-                        return Ok(RecordDeltas::empty(*output_desc));
-                    }
-                    super::evaluation_session::StorageRequestKey::ScanRange {
-                        family: "indices".to_owned(),
-                        start,
-                        end,
-                    }
-                }
-            };
+        let Some(request) = Self::index_source_request(input)? else {
+            return Ok(RecordDeltas::empty(*output_desc));
+        };
         let deltas = inputs
             .rows(request)?
             .iter()
