@@ -512,7 +512,7 @@ pub(super) fn record_store_for_table<'a, S>(
     descriptor: &'a RecordDescriptor,
 ) -> RecordStore<'a, S>
 where
-    S: OrderedKvStorage,
+    S: OrderedKvStorage + ?Sized,
 {
     RecordStore::new(storage, &table.name, descriptor)
 }

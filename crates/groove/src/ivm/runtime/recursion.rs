@@ -123,18 +123,15 @@ impl RecursiveState {
     }
 }
 
-pub(super) async fn recursive_delta<S>(
+pub(super) async fn recursive_delta(
     recursive_state: &mut RecursiveState,
-    mut runtime: GraphRuntimeView<'_, S>,
+    mut runtime: GraphRuntimeView<'_>,
     node: NodeId,
     recursive: &RecursiveOp,
     output_desc: RecordDescriptor,
     seed: NodeId,
     step: NodeId,
-) -> Result<Vec<RecordDelta>, IvmRuntimeError>
-where
-    S: OrderedKvStorage,
-{
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
     let has_recompute_table_delta = has_recompute_table_delta_for_recursion(&runtime, seed, step)?;
     let has_table_delta = has_table_delta_for_cached_tables(&runtime, recursive);
     let has_recompute_binding_delta =
@@ -278,27 +275,21 @@ where
     Ok(consolidate_deltas(emitted))
 }
 
-fn has_table_delta_for_cached_tables<S>(
-    runtime: &GraphRuntimeView<'_, S>,
+fn has_table_delta_for_cached_tables(
+    runtime: &GraphRuntimeView<'_>,
     recursive: &RecursiveOp,
-) -> bool
-where
-    S: OrderedKvStorage,
-{
+) -> bool {
     runtime
         .table_deltas
         .iter()
         .any(|table_delta| recursive.read_tables.contains(&table_delta.table))
 }
 
-fn has_recompute_table_delta_for_recursion<S>(
-    runtime: &GraphRuntimeView<'_, S>,
+fn has_recompute_table_delta_for_recursion(
+    runtime: &GraphRuntimeView<'_>,
     seed: NodeId,
     step: NodeId,
-) -> Result<bool, IvmRuntimeError>
-where
-    S: OrderedKvStorage,
-{
+) -> Result<bool, IvmRuntimeError> {
     let mut tables = HashMap::<String, RecordDescriptor>::default();
     collect_table_source_names(runtime.graph, seed, &mut tables)?;
     collect_table_source_names(runtime.graph, step, &mut tables)?;
@@ -315,14 +306,11 @@ where
         }))
 }
 
-fn has_recompute_binding_delta_for_recursion<S>(
-    runtime: &GraphRuntimeView<'_, S>,
+fn has_recompute_binding_delta_for_recursion(
+    runtime: &GraphRuntimeView<'_>,
     seed: NodeId,
     step: NodeId,
-) -> Result<bool, IvmRuntimeError>
-where
-    S: OrderedKvStorage,
-{
+) -> Result<bool, IvmRuntimeError> {
     let mut shapes = HashMap::<String, RecordDescriptor>::default();
     collect_binding_sources(runtime.graph, seed, &mut shapes)?;
     collect_binding_sources(runtime.graph, step, &mut shapes)?;
@@ -333,15 +321,12 @@ where
         .any(|binding_delta| binding_delta.deltas.iter().any(|delta| delta.weight <= 0)))
 }
 
-pub(super) async fn hydrate_recursive_arrangements<S>(
-    runtime: &mut GraphRuntimeView<'_, S>,
+pub(super) async fn hydrate_recursive_arrangements(
+    runtime: &mut GraphRuntimeView<'_>,
     recursive: &RecursiveOp,
     step: NodeId,
     accumulated: RecordDeltas,
-) -> Result<(), IvmRuntimeError>
-where
-    S: OrderedKvStorage,
-{
+) -> Result<(), IvmRuntimeError> {
     // Evaluate the step once against snapshot table deltas and the full
     // accumulated relation. The result is discarded; the purpose is to prepare
     // shared arrangements so later positive ticks can probe old state.
@@ -383,7 +368,7 @@ where
 pub(super) async fn snapshot_table_deltas(
     schema: &crate::schema::DatabaseSchema,
     graph: &IvmGraph,
-    storage: &impl OrderedKvStorage,
+    storage: &dyn OrderedKvStorage,
     root: NodeId,
 ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
     let mut tables = std::collections::HashSet::<TableSnapshotSource>::new();
@@ -556,7 +541,7 @@ pub(super) async fn recompute_recursive(
     recursive: &RecursiveOp,
     output_desc: RecordDescriptor,
     step: NodeId,
-    storage: &impl OrderedKvStorage,
+    storage: &dyn OrderedKvStorage,
     binding_snapshots: &HashMap<String, RecordDeltas>,
     _current_tick: u64,
     scope: ScopeId,
@@ -648,21 +633,18 @@ fn reject_non_positive_frontier_deltas(deltas: &[RecordDelta]) -> Result<(), Ivm
 }
 
 /// Full-snapshot evaluator used by recursive recompute fallback.
-struct HydrationEvaluator<'a, S> {
+struct HydrationEvaluator<'a> {
     schema: &'a crate::schema::DatabaseSchema,
     graph: &'a IvmGraph,
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     table_deltas: Option<&'a [TableDelta]>,
     evaluation_inputs: Option<&'a mut EvaluationInputs>,
-    storage: &'a S,
+    storage: &'a dyn OrderedKvStorage,
     binding_snapshots: &'a HashMap<String, RecordDeltas>,
     context: EvalContext,
 }
 
-impl<S> HydrationEvaluator<'_, S>
-where
-    S: OrderedKvStorage,
-{
+impl HydrationEvaluator<'_> {
     fn eval_node(
         &mut self,
         node: NodeId,
