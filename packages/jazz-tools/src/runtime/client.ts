@@ -49,6 +49,30 @@ function encodeBranchDimensionValue(value: Value): Uint8Array {
   return writer.finish();
 }
 
+type WireBranchSelector = { dimensions: Record<string, number[]> };
+type WireBranchViewBase =
+  | { Current: WireBranchSelector }
+  | { Snapshot: { branch: WireBranchSelector; snapshot: unknown } };
+
+function encodeBranchSelector(value: BranchSelector): WireBranchSelector {
+  return {
+    dimensions: Object.fromEntries(
+      Object.entries(value.dimensions).map(([name, dimension]) => [
+        name,
+        Array.from(encodeBranchDimensionValue(dimension)),
+      ]),
+    ),
+  };
+}
+
+function encodeBranchViewBase(base: BranchViewBase | undefined): WireBranchViewBase | undefined {
+  return base?.kind === "current"
+    ? { Current: encodeBranchSelector(base.branch) }
+    : base?.kind === "snapshot"
+      ? { Snapshot: { branch: encodeBranchSelector(base.branch), snapshot: base.snapshot } }
+      : undefined;
+}
+
 /**
  * Minimal request shape supported by backend request helpers.
  *
@@ -336,13 +360,20 @@ export interface MutationErrorEvent {
 
 export interface InsertOptions extends TimestampOverrideOptions {
   id?: string;
+  branch?: BranchSelector;
 }
 
-export interface UpdateOptions extends TimestampOverrideOptions {}
+export interface UpdateOptions extends TimestampOverrideOptions {
+  branch?: BranchView;
+}
 
-export interface DeleteOptions extends TimestampOverrideOptions {}
+export interface DeleteOptions extends TimestampOverrideOptions {
+  branch?: BranchView;
+}
 
-export interface RestoreOptions extends TimestampOverrideOptions {}
+export interface RestoreOptions extends TimestampOverrideOptions {
+  branch?: BranchSelector;
+}
 
 /**
  * Query row result.
@@ -365,6 +396,7 @@ interface WriteContextPayload {
   updated_at?: number;
   batch_id?: string;
   target_branch_name?: string;
+  branch_view?: { head: WireBranchSelector; base?: WireBranchViewBase };
 }
 
 /**
@@ -429,7 +461,6 @@ function getScheduler(): (task: () => void) => void {
 }
 
 function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): string | undefined {
-  type WireBranchSelector = { dimensions: Record<string, number[]> };
   const payload: {
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
@@ -458,24 +489,11 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   }
   if (options.branch) {
     const base = options.branch.base;
-    const selector = (value: BranchSelector): WireBranchSelector => ({
-      dimensions: Object.fromEntries(
-        Object.entries(value.dimensions).map(([name, dimension]) => [
-          name,
-          Array.from(encodeBranchDimensionValue(dimension)),
-        ]),
-      ),
-    });
     payload.read_view = {
       source: {
         BranchView: {
-          head: selector(options.branch.head),
-          base:
-            base?.kind === "current"
-              ? { Current: selector(base.branch) }
-              : base?.kind === "snapshot"
-                ? { Snapshot: { branch: selector(base.branch), snapshot: base.snapshot } }
-                : undefined,
+          head: encodeBranchSelector(options.branch.head),
+          base: encodeBranchViewBase(base),
         },
       },
       schema: "Current",
@@ -787,11 +805,24 @@ export class JazzClient {
     attribution?: string,
     openBatchId?: OpenBatchId,
     updatedAt?: number,
+    branch?: BranchView,
   ): string | undefined {
-    if (!session && attribution === undefined && !openBatchId && updatedAt === undefined) {
+    if (
+      !session &&
+      attribution === undefined &&
+      !openBatchId &&
+      updatedAt === undefined &&
+      !branch
+    ) {
       return undefined;
     }
-    if (attribution === undefined && session && !openBatchId && updatedAt === undefined) {
+    if (
+      attribution === undefined &&
+      session &&
+      !openBatchId &&
+      updatedAt === undefined &&
+      !branch
+    ) {
       return JSON.stringify(session);
     }
 
@@ -807,6 +838,12 @@ export class JazzClient {
     }
     if (openBatchId) {
       payload.batch_id = openBatchId;
+    }
+    if (branch) {
+      payload.branch_view = {
+        head: encodeBranchSelector(branch.head),
+        base: encodeBranchViewBase(branch.base),
+      };
     }
     return JSON.stringify(payload);
   }
@@ -852,6 +889,7 @@ export class JazzClient {
       attribution,
       openBatchId,
       options?.updatedAt,
+      options?.branch ? { head: options.branch } : undefined,
     );
     const row = this.runtime.insert(table, values, writeContext, options?.id);
     return {
@@ -893,6 +931,7 @@ export class JazzClient {
       attribution,
       openBatchId,
       options?.updatedAt,
+      options?.branch ? { head: options.branch } : undefined,
     );
     const row = this.runtime.restore(table, objectId, values, writeContext);
     return {
@@ -908,7 +947,7 @@ export class JazzClient {
     table: string,
     objectId: string,
     values: InsertValues,
-    options?: UpdateOptions,
+    options?: TimestampOverrideOptions,
     session?: Session,
     attribution?: string,
   ): MutationResult<void> {
@@ -923,7 +962,7 @@ export class JazzClient {
     table: string,
     objectId: string,
     values: InsertValues,
-    options?: UpdateOptions,
+    options?: TimestampOverrideOptions,
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
@@ -984,6 +1023,7 @@ export class JazzClient {
       session,
       attribution,
       undefined,
+      options?.branch,
     );
     return new MutationResult(undefined, committedBatchId(result), this, "mergeable");
   }
@@ -999,6 +1039,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
+    branch?: BranchView,
   ): MutationReceipt {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -1006,6 +1047,7 @@ export class JazzClient {
       attribution,
       openBatchId,
       updatedAt,
+      branch,
     );
     return this.runtime.update(table, objectId, updates, writeContext);
   }
@@ -1020,7 +1062,15 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
   ): MutationResult<void> {
-    const result = this.deleteInternal(table, objectId, options?.updatedAt, session, attribution);
+    const result = this.deleteInternal(
+      table,
+      objectId,
+      options?.updatedAt,
+      session,
+      attribution,
+      undefined,
+      options?.branch,
+    );
     return new MutationResult(undefined, committedBatchId(result), this, "mergeable");
   }
 
@@ -1142,6 +1192,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
+    branch?: BranchView,
   ): MutationReceipt {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -1149,6 +1200,7 @@ export class JazzClient {
       attribution,
       openBatchId,
       updatedAt,
+      branch,
     );
     return this.runtime.delete(table, objectId, writeContext);
   }

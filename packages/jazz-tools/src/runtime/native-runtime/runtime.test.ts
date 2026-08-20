@@ -624,6 +624,53 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
   });
 
+  it("routes exact and head-over-base mutation targets to branch-aware bindings", () => {
+    const calls: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertWithIdEncodedInBranch: (...args: unknown[]) => {
+              calls.push(["insert", ...args]);
+              return fakeWrite();
+            },
+            updateEncodedInBranchView: (...args: unknown[]) => {
+              calls.push(["update", ...args]);
+              return fakeWrite();
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const head = { dimensions: { workspace: [14, 14] } };
+    const base = { Current: { dimensions: { workspace: [14, 2] } } };
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "branch" } },
+      JSON.stringify({ branch_view: { head } }),
+      "00000000-0000-0000-0000-000000000001",
+    );
+    runtime.update(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      { title: { type: "Text", value: "updated" } },
+      JSON.stringify({ branch_view: { head, base } }),
+    );
+
+    expect(calls[0]?.[0]).toBe("insert");
+    expect(calls[0]?.at(-1)).toEqual(head);
+    expect(calls[1]?.[0]).toBe("update");
+    expect(calls[1]?.slice(-2)).toEqual([head, base]);
+  });
+
   it("runs scheduled core ticks before post-wait edge reads", async () => {
     let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
     let ticked = false;

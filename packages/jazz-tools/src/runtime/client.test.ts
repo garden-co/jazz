@@ -291,6 +291,33 @@ describe("JazzClient schema access", () => {
 });
 
 describe("JazzClient transaction query plumbing", () => {
+  it("encodes exact and head-over-base branch mutation targets", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const head = { dimensions: { workspace: { type: "Integer", value: 7 } as const } };
+    const base = { dimensions: { workspace: { type: "Integer", value: 1 } as const } };
+
+    client.insert("todos", {}, { branch: head });
+    client.update(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      {},
+      {
+        branch: { head, base: { kind: "current", branch: base } },
+      },
+    );
+
+    expect(JSON.parse(runtime.insert.mock.calls[0][2] as string)).toMatchObject({
+      branch_view: { head: { dimensions: { workspace: [14, 14] } } },
+    });
+    expect(JSON.parse(runtime.update.mock.calls[0][3] as string)).toMatchObject({
+      branch_view: {
+        head: { dimensions: { workspace: [14, 14] } },
+        base: { Current: { dimensions: { workspace: [14, 2] } } },
+      },
+    });
+  });
+
   it("encodes ergonomic branch selectors into the native read view", async () => {
     const runtime = makeFakeRuntime();
     runtime.query.mockResolvedValue([]);
