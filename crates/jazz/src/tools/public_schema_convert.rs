@@ -931,7 +931,7 @@ fn convert_policy_with_native_select_inherits(
 ) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::And(exprs) => {
-            if !exprs.iter().any(is_core_policy_clause) {
+            if !exprs.iter().any(policy_requires_branch) {
                 return query_with_predicate_filters(
                     table.as_str(),
                     predicate_filters_for_expr(table, path, expr)?,
@@ -939,15 +939,15 @@ fn convert_policy_with_native_select_inherits(
             }
             let mut query = Query::from(table.as_str());
             for (index, expr) in exprs.iter().enumerate() {
-                query = append_policy_clause(
+                let clause = convert_policy_with_native_select_inherits(
                     schema,
                     table_schema,
                     table,
                     &format!("{path}.And[{index}]"),
-                    query,
                     expr,
                     native_select_inherits,
                 )?;
+                query = conjoin_policy_queries(table.as_str(), query, clause);
             }
             Ok(query)
         }
@@ -1018,16 +1018,6 @@ fn convert_policy_with_native_select_inherits(
     }
 }
 
-fn is_core_policy_clause(expr: &PolicyExpr) -> bool {
-    matches!(
-        expr,
-        PolicyExpr::Inherits { max_depth: _, .. }
-            | PolicyExpr::InheritsReferencing { .. }
-            | PolicyExpr::Exists { .. }
-            | PolicyExpr::ExistsRel { .. }
-    )
-}
-
 fn policy_requires_branch(expr: &PolicyExpr) -> bool {
     match expr {
         PolicyExpr::Inherits { max_depth: _, .. }
@@ -1040,55 +1030,43 @@ fn policy_requires_branch(expr: &PolicyExpr) -> bool {
     }
 }
 
-fn append_policy_clause(
-    schema: &Schema,
-    table_schema: &TableSchema,
-    table: &TableName,
-    path: &str,
-    query: Query,
-    expr: &PolicyExpr,
-    native_select_inherits: bool,
-) -> Result<Query, SchemaConversionError> {
-    match expr {
-        PolicyExpr::Inherits {
-            operation,
-            via_column,
-            max_depth,
-        } => append_inherited_policy(
-            schema,
-            table_schema,
-            table,
-            path,
-            query,
-            *operation,
-            via_column,
-            *max_depth,
-            native_select_inherits,
-        ),
-        PolicyExpr::InheritsReferencing {
-            operation,
-            source_table,
-            via_column,
-            max_depth: _,
-        } => append_inherited_referencing_policy(
-            schema,
-            table,
-            path,
-            query,
-            *operation,
-            source_table,
-            via_column,
-        ),
-        PolicyExpr::Exists {
-            table: exists_table,
-            condition,
-        } => append_exists_policy_clause(schema, table, path, query, exists_table, condition),
-        PolicyExpr::ExistsRel { rel } => append_exists_rel_policy_clause(table, path, query, rel),
-        _ => Ok(append_predicate_filters(
-            query,
-            predicate_filters_for_expr(table, path, expr)?,
-        )),
+fn conjoin_policy_queries(table: &str, left: Query, right: Query) -> Query {
+    let left = PolicyBranch::alternatives_from_query(left);
+    let right = PolicyBranch::alternatives_from_query(right);
+    let mut alternatives = Vec::with_capacity(left.len().saturating_mul(right.len()));
+
+    for left in left {
+        for right in &right {
+            let mut combined = left.clone();
+            combined.filters.extend(right.filters.iter().cloned());
+            combined.joins.extend(right.joins.iter().cloned());
+            combined.exists.extend(right.exists.iter().cloned());
+            combined.reachable.extend(right.reachable.iter().cloned());
+            combined.inherits.extend(right.inherits.iter().cloned());
+            alternatives.push(combined);
+        }
     }
+
+    policy_query_from_alternatives(table, alternatives)
+}
+
+fn policy_query_from_alternatives(table: &str, mut alternatives: Vec<PolicyBranch>) -> Query {
+    if alternatives.len() == 1 {
+        let branch = alternatives.pop().expect("length checked above");
+        let mut query = Query::from(table);
+        query.filters = branch.filters;
+        query.joins = branch.joins;
+        query.exists = branch.exists;
+        query.reachable = branch.reachable;
+        query.inherits = branch.inherits;
+        return query;
+    }
+
+    let mut query = Query::from(table).filter(Predicate::Any(Vec::new()));
+    for branch in alternatives {
+        query = query.policy_branch(branch);
+    }
+    query
 }
 
 fn query_with_predicate_filters(

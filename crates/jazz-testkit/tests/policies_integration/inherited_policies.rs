@@ -902,7 +902,6 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
 /// alice ──insert owner=alice, folder=shared─────────► server ──► accepted
 /// ```
 #[tokio::test]
-#[ignore = "inherited write policies resolves on wrong branch"]
 async fn inherited_folder_insert_requires_folder_owner_when_fk_present() {
     tokio::task::LocalSet::new()
         .run_until(inherited_folder_insert_requires_folder_owner_when_fk_present_inner())
@@ -917,6 +916,9 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
             permissions(|p| {
                 p.allow_insert().always();
                 p.allow_read().where_(folder_owner_policy());
+                p.allow_update()
+                    .where_old(folder_owner_policy())
+                    .where_new(pe::always());
             }),
         ))
         .table(make_folder_documents_schema(
@@ -926,7 +928,7 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
                     owner_policy.clone(),
                     pe::any_of([
                         pe::is_null("folder_id"),
-                        inherited_non_null_policy(Operation::Select, "folder_id"),
+                        inherited_non_null_policy(Operation::Update, "folder_id"),
                     ]),
                 ]));
                 p.allow_read().where_(pe::any_of([
@@ -949,23 +951,7 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
         .ready_on("documents", READY_TIMEOUT)
         .connect()
         .await;
-    let alice_reader = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id(super::ALICE_ID)
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
     let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id(super::BOB_ID)
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let bob_reader = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id(super::BOB_ID)
@@ -975,27 +961,22 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
         .await;
     let charlie = TestingClient::builder()
         .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id(super::CHARLIE_ID)
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let charlie_reader = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
+        .with_schema(schema)
         .with_user_id(super::CHARLIE_ID)
         .as_user()
         .ready_on("documents", READY_TIMEOUT)
         .connect()
         .await;
 
-    let folder_id = create_folder(
+    let (folder_id, _, folder_tx) = alice
+        .insert(
+            "folders",
+            folder_input("Shared", &[super::ALICE_ID, super::BOB_ID], false),
+        )
+        .expect("create shared folder");
+    wait_for_edge_txs(
         &alice,
-        "folders",
-        "Shared",
-        &[super::ALICE_ID, super::BOB_ID],
-        false,
+        &[folder_tx.expect("folder insert should commit immediately")],
     )
     .await;
     let folders_query = Query::from("folders");
@@ -1007,56 +988,69 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
     )
     .await;
 
-    let _charlie_rejected = create_folder_document(
+    let (_, _, charlie_rejected_tx) = charlie
+        .insert(
+            "documents",
+            folder_document_input(
+                super::CHARLIE_ID,
+                "Charlie Shared Attempt",
+                false,
+                Some(folder_id),
+            ),
+        )
+        .expect("charlie folder-backed insert is accepted optimistically");
+    let (charlie_ok, _, charlie_ok_tx) = charlie
+        .insert(
+            "documents",
+            folder_document_input(super::CHARLIE_ID, "Charlie Standalone", false, None),
+        )
+        .expect("charlie creates a standalone document");
+    wait_for_edge_tx_rejection(
         &charlie,
-        "documents",
-        super::CHARLIE_ID,
-        "Charlie Shared Attempt",
-        false,
-        Some(folder_id),
+        charlie_rejected_tx.expect("charlie folder insert should commit locally"),
     )
     .await;
-    let charlie_ok = create_folder_document(
+    wait_for_edge_txs(
         &charlie,
-        "documents",
-        super::CHARLIE_ID,
-        "Charlie Standalone",
-        false,
-        None,
+        &[charlie_ok_tx.expect("charlie standalone insert should commit immediately")],
     )
     .await;
 
-    let _alice_rejected = create_folder_document(
+    let (_, _, alice_rejected_tx) = alice
+        .insert(
+            "documents",
+            folder_document_input(super::BOB_ID, "Forged For Bob", false, Some(folder_id)),
+        )
+        .expect("forged owner insert is accepted optimistically");
+    let (alice_standalone, _, alice_standalone_tx) = alice
+        .insert(
+            "documents",
+            folder_document_input(super::ALICE_ID, "Alice Standalone", false, None),
+        )
+        .expect("alice creates a standalone document");
+    let (alice_shared, _, alice_shared_tx) = alice
+        .insert(
+            "documents",
+            folder_document_input(super::ALICE_ID, "Alice Shared", false, Some(folder_id)),
+        )
+        .expect("alice creates a folder-backed document");
+    wait_for_edge_tx_rejection(
         &alice,
-        "documents",
-        super::BOB_ID,
-        "Forged For Bob",
-        false,
-        Some(folder_id),
+        alice_rejected_tx.expect("forged owner insert should commit locally"),
     )
     .await;
-    let alice_standalone = create_folder_document(
+    wait_for_edge_txs(
         &alice,
-        "documents",
-        super::ALICE_ID,
-        "Alice Standalone",
-        false,
-        None,
-    )
-    .await;
-    let alice_shared = create_folder_document(
-        &alice,
-        "documents",
-        super::ALICE_ID,
-        "Alice Shared",
-        false,
-        Some(folder_id),
+        &[
+            alice_standalone_tx.expect("alice standalone insert should commit immediately"),
+            alice_shared_tx.expect("alice shared insert should commit immediately"),
+        ],
     )
     .await;
     let query = Query::from("documents");
 
     let charlie_rows = wait_for_rows(
-        &charlie_reader,
+        &charlie,
         query.clone(),
         "charlie only sees standalone doc after rejected folder insert",
         |rows| rows.iter().any(|(id, _)| *id == charlie_ok).then_some(rows),
@@ -1073,7 +1067,7 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
     );
 
     let alice_rows = wait_for_rows(
-        &alice_reader,
+        &alice,
         query.clone(),
         "alice sees accepted standalone and shared docs only",
         |rows| {
@@ -1099,7 +1093,7 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
     }));
 
     let bob_rows = wait_for_rows(
-        &bob_reader,
+        &bob,
         query,
         "bob only sees alice shared doc through folder ownership",
         |rows| {
@@ -1120,17 +1114,8 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
     );
 
     alice.shutdown().await.expect("shutdown alice");
-    alice_reader
-        .shutdown()
-        .await
-        .expect("shutdown alice_reader");
     bob.shutdown().await.expect("shutdown bob");
-    bob_reader.shutdown().await.expect("shutdown bob_reader");
     charlie.shutdown().await.expect("shutdown charlie");
-    charlie_reader
-        .shutdown()
-        .await
-        .expect("shutdown charlie_reader");
     server.shutdown().await;
 }
 
