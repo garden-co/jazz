@@ -56,6 +56,7 @@ where
             ]);
         }
         Ok(vec![
+            Value::Bytes(version.branch_key().canonical_bytes()),
             Value::Uuid(version.row_uuid().0),
             Value::U64(version.tx_time().0),
             Value::U64(version.tx_node_alias().0),

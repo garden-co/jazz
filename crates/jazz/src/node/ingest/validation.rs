@@ -164,6 +164,7 @@ where
                     let previous_global_current = self.query_global_layer_winner_in_batch(
                         batch,
                         &table_schema.name,
+                        stored.branch_key(),
                         stored.row_uuid(),
                         stored.layer(),
                     )?;

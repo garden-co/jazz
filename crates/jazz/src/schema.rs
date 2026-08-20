@@ -103,6 +103,19 @@ impl JazzSchema {
     pub(crate) fn into_runtime(self) -> RuntimeSchema {
         self.runtime
     }
+
+    /// Construct a compiled schema for internal engine tests whose tables
+    /// already carry branch-dimension bindings.
+    #[cfg(test)]
+    pub(crate) fn new_with_branch_dimensions(
+        branch_dimensions: impl IntoIterator<Item = BranchDimensionSchema>,
+        tables: impl IntoIterator<Item = TableSchema>,
+    ) -> Self {
+        Self::from_runtime(
+            PublicSchema::new(),
+            RuntimeSchema::new_with_branch_dimensions(branch_dimensions, tables),
+        )
+    }
 }
 
 impl Deref for JazzSchema {
@@ -133,8 +146,20 @@ impl RuntimeSchema {
     /// Construct a compiled schema from already-lowered application tables.
     #[cfg(test)]
     pub(crate) fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
+        Self::new_with_branch_dimensions([], tables)
+    }
+
+    /// Construct a schema with its globally named dimensions and tables atomically.
+    ///
+    /// This is the primary constructor for schemas whose tables already bind
+    /// branch dimensions: validation observes the complete declaration rather
+    /// than an invalid intermediate builder state.
+    pub(crate) fn new_with_branch_dimensions(
+        branch_dimensions: impl IntoIterator<Item = BranchDimensionSchema>,
+        tables: impl IntoIterator<Item = TableSchema>,
+    ) -> Self {
         Self {
-            branch_dimensions: Vec::new(),
+            branch_dimensions: branch_dimensions.into_iter().collect(),
             tables: tables.into_iter().collect(),
         }
         .validated()
@@ -1146,12 +1171,14 @@ fn merge_heads_table() -> GrooveTableSchema {
         MERGE_HEADS_TABLE,
         [
             column("physical_table_id", GrooveColumnType::U64),
+            column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("heads", GrooveColumnType::Bytes),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::bytes("branch_key"),
         PrimaryKeyColumn::uuid("row_uuid"),
     ]))
 }

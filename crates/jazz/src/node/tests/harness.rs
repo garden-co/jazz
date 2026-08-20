@@ -38,6 +38,7 @@ include!("support.rs");
 include!("catalogue_lenses/mod.rs");
 include!("lens_projected_maintained.rs");
 include!("time_travel.rs");
+include!("branch_views.rs");
 include!("queries.rs");
 include!("exclusive_transactions.rs");
 include!("mergeable_open_transactions.rs");

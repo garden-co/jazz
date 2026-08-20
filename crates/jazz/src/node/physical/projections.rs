@@ -82,9 +82,10 @@ where
             logical_table,
             class,
         )?;
-        Ok(GraphBuilder::variant_source(
+        Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             physical_current_projection_target(alias, logical_table),
+            shared_branch_scan(None),
         ))
     }
 
@@ -102,9 +103,10 @@ where
             logical_table,
             class,
         )?;
-        Ok(GraphBuilder::variant_source(
+        Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             projection_target,
+            shared_branch_scan(None),
         ))
     }
 
@@ -133,7 +135,7 @@ where
         Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             physical_current_projection_target(alias, logical_table),
-            scan,
+            shared_branch_scan(Some(scan)),
         ))
     }
 
@@ -155,7 +157,7 @@ where
         Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             projection_target,
-            scan,
+            shared_branch_scan(Some(scan)),
         ))
     }
 
@@ -1500,5 +1502,24 @@ where
                 }),
         );
         Ok(Some(fields))
+    }
+}
+
+fn shared_branch_scan(scan: Option<groove::ivm::StaticScanSpec>) -> groove::ivm::StaticScanSpec {
+    use groove::ivm::{LiteralValue, StaticScanSpec};
+
+    let branch = LiteralValue::from(Value::Bytes(BranchKey::default().canonical_bytes()));
+    let prepend = |mut values: Vec<LiteralValue>| {
+        values.insert(0, branch.clone());
+        values
+    };
+    match scan {
+        None => StaticScanSpec::Prefix(vec![branch]),
+        Some(StaticScanSpec::Point(values)) => StaticScanSpec::Point(prepend(values)),
+        Some(StaticScanSpec::Prefix(values)) => StaticScanSpec::Prefix(prepend(values)),
+        Some(StaticScanSpec::Range { start, end }) => StaticScanSpec::Range {
+            start: prepend(start),
+            end: prepend(end),
+        },
     }
 }
