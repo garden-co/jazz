@@ -355,9 +355,15 @@ where
                     .metadata
                     .contains(&SourceMetadataRequirement::VersionPayloads)
                     .then(|| ContentVersionSource {
-                        graph: content
-                            .clone()
-                            .project(maintained_view_history_storage_field_names(&table)),
+                        graph: content.clone().project_fields(
+                            maintained_view_history_storage_field_names(&table)
+                                .into_iter()
+                                .map(ProjectField::named)
+                                .chain(std::iter::once(ProjectField::renamed(
+                                    "branch_key",
+                                    "supplying_branch_key",
+                                ))),
+                        ),
                         row_uuid_field: "row_uuid".to_owned(),
                     });
                 let deletion_register = request
@@ -365,7 +371,15 @@ where
                     .metadata
                     .contains(&SourceMetadataRequirement::DeletionMarkers)
                     .then(|| DeletionRegisterSource {
-                        graph: deletions.clone().project(register_storage_field_names()),
+                        graph: deletions.clone().project_fields(
+                            register_storage_field_names()
+                                .into_iter()
+                                .map(ProjectField::named)
+                                .chain(std::iter::once(ProjectField::renamed(
+                                    "branch_key",
+                                    "supplying_branch_key",
+                                ))),
+                        ),
                         row_uuid_field: "row_uuid".to_owned(),
                     });
                 let deleted = deletions
@@ -384,6 +398,7 @@ where
                     &authorization,
                     self.read_view.policy_schema,
                     Some(&self.read_view),
+                    Some("supplying_branch_key"),
                     Some(selected_base),
                 )
                 .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
@@ -602,6 +617,7 @@ where
                     &authorization,
                     self.read_view.policy_schema,
                     None,
+                    None,
                     Some(source.graph),
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
@@ -774,6 +790,7 @@ where
                 &request.requirements,
                 &authorization,
                 self.read_view.policy_schema,
+                None,
                 None,
                 selected_base,
             )
@@ -1792,6 +1809,7 @@ fn resolved_current_source_graph<S>(
     authorization: &SourceAuthorizationRequest,
     policy_schema: SchemaVersionId,
     policy_read_view: Option<&ReadView<RequestedSourceStage>>,
+    branch_witness_field: Option<&str>,
     selected_base: Option<GraphBuilder>,
 ) -> Result<
     (
@@ -1833,13 +1851,16 @@ where
             ProjectField::renamed("$updatedBy", "updated_by"),
             ProjectField::renamed("$updatedAt", "updated_at"),
         ]);
+        if let Some(branch_witness_field) = branch_witness_field {
+            fields.push(ProjectField::named(branch_witness_field));
+        }
         metadata.insert(
             SourceMetadataRequirement::VersionWitnesses,
             SourceMetadataFields::VersionWitnesses {
                 schema_version_field: "schema_version".to_owned(),
                 tx_time_field: "tx_time".to_owned(),
                 tx_node_field: "tx_node_id".to_owned(),
-                branch_or_prefix_field: None,
+                branch_or_prefix_field: branch_witness_field.map(str::to_owned),
             },
         );
     }
@@ -1886,11 +1907,15 @@ where
     let (base, routing_fields) = match authorization {
         SourceAuthorizationRequest::System => {
             let graph = if let Some(selected_base) = selected_base.clone() {
-                selected_base.project_fields(storage_to_canonical_current_source_fields(
+                let mut selected_fields = storage_to_canonical_current_source_fields(
                     table,
                     needs_version_witnesses,
                     needs_settle_position,
-                ))
+                );
+                if let Some(branch_witness_field) = branch_witness_field {
+                    selected_fields.push(ProjectField::named(branch_witness_field));
+                }
+                selected_base.project_fields(selected_fields)
             } else if needs_version_witnesses {
                 node.maintained_view_content_current_with_version(table, tier)?
                     .project_fields(storage_to_canonical_current_source_fields(
@@ -1944,11 +1969,14 @@ where
                 }
                 request
             });
-            let output_fields = global_current_storage_fields(
+            let mut output_fields = global_current_storage_fields(
                 table,
                 needs_version_witnesses,
                 needs_settle_position,
             );
+            if let Some(branch_witness_field) = branch_witness_field {
+                output_fields.push(branch_witness_field.to_owned());
+            }
             let base = match selected_base {
                 Some(selected_base) => selected_base,
                 None => node.maintained_view_content_current_with_version(table, tier)?,
@@ -1963,6 +1991,9 @@ where
                 needs_version_witnesses,
                 needs_settle_position,
             );
+            if let Some(branch_witness_field) = branch_witness_field {
+                canonical_fields.push(ProjectField::named(branch_witness_field));
+            }
             canonical_fields.extend(
                 storage_graph
                     .route_fields
@@ -2067,6 +2098,7 @@ fn branch_view_storage_source_fields(
 ) -> Result<Vec<ProjectField>, Error> {
     let head_values = head.dimensions.iter().cloned().collect::<BTreeMap<_, _>>();
     let mut fields = vec![
+        ProjectField::renamed("branch_key", "supplying_branch_key"),
         ProjectField::named("row_uuid"),
         ProjectField::named("schema_version"),
         ProjectField::named("parents"),
@@ -2138,10 +2170,7 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
             ..
         }) = metadata.get(&SourceMetadataRequirement::VersionWitnesses)
         {
-            fields.push((
-                field.clone(),
-                ValueType::Nullable(Box::new(ValueType::Uuid)),
-            ));
+            fields.push((field.clone(), ValueType::Bytes));
         }
     }
     if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
