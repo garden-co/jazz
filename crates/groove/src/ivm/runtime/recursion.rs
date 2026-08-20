@@ -611,11 +611,11 @@ fn collect_table_source_names(
     if let OpType::TableSource(table) = &graph_node.descriptor.operator {
         tables
             .entry(table.table.clone())
-            .or_insert_with(|| graph_node.descriptor.output);
+            .or_insert_with(|| graph_node.descriptor.output.records());
     } else if let OpType::IndexSource(index) = &graph_node.descriptor.operator {
         tables
             .entry(index.table.clone())
-            .or_insert_with(|| graph_node.descriptor.output);
+            .or_insert_with(|| graph_node.descriptor.output.records());
     }
     for input in &graph_node.descriptor.inputs {
         collect_table_source_names(graph, *input, tables)?;
@@ -634,7 +634,7 @@ fn collect_binding_sources(
     if let OpType::BindingSource(binding) = &graph_node.descriptor.operator {
         shapes
             .entry(binding.shape.clone())
-            .or_insert_with(|| graph_node.descriptor.output);
+            .or_insert_with(|| graph_node.descriptor.output.records());
     }
     for input in &graph_node.descriptor.inputs {
         collect_binding_sources(graph, *input, shapes)?;
@@ -788,7 +788,7 @@ impl HydrationEvaluator<'_> {
                 .graph
                 .node(node)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-            let output_desc = graph_node.descriptor.output;
+            let output_desc = graph_node.descriptor.output.records();
             match &graph_node.descriptor.operator {
                 OpType::TableSource(table) => match self.evaluation_inputs.as_deref_mut() {
                     Some(inputs) => NodeState::update_table_source_from_inputs(
@@ -862,6 +862,7 @@ impl HydrationEvaluator<'_> {
                         .unwrap_or_else(|| RecordDeltas::empty(output_desc));
                     project_binding_source_deltas(&deltas, &output_desc)
                 }
+                OpType::Arrange(_) => self.eval_unary_input(graph_node, node).await,
                 OpType::Filter(filter) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     NodeState::update_filter(filter, output_desc, &input)

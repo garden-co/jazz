@@ -578,8 +578,12 @@ impl TickEvaluator<'_> {
                 .descriptor
                 .output;
             let group_fields = self.aggregate_group_fields(node, &aggregate);
-            let arrangement_key =
-                self.arrangement_key(*input, input_desc, group_fields, ValueComparison::Exact)?;
+            let arrangement_key = self.arrangement_key(
+                *input,
+                input_desc.records(),
+                &group_fields,
+                ValueComparison::Exact,
+            )?;
             if self
                 .arrangement_states
                 .get(&arrangement_key)
@@ -631,7 +635,7 @@ impl TickEvaluator<'_> {
                 self.metrics.hydration_memo_computed_nodes.insert(node);
             }
 
-            let output_desc = graph_node.descriptor.output;
+            let output_desc = graph_node.descriptor.output.records();
             if self.context.sub_tick > 1 && !self.depends_on_context(node)? {
                 let result = Arc::new(RecordDeltas::empty(output_desc));
                 *self.memo_use_clock += 1;
@@ -719,8 +723,14 @@ impl TickEvaluator<'_> {
                     self.binding_snapshots,
                     self.context.arrangement_update_mode,
                 ),
+                OpType::Arrange(_) => {
+                    let [input] = graph_node.descriptor.inputs.as_slice() else {
+                        return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                    };
+                    Ok(self.update_node(*input).await?.as_ref().clone())
+                }
                 OpType::FrontierSource(frontier_source) => {
-                    self.frontier_source(frontier_source, &graph_node.descriptor.output)
+                    self.frontier_source(frontier_source, &output_desc)
                 }
                 OpType::Filter(filter) => {
                     let input = self.update_unary_input(graph_node, node).await?;
@@ -1169,11 +1179,11 @@ impl TickEvaluator<'_> {
             output_desc,
         )?;
         let left_key =
-            self.arrangement_key(left_input, join.left_descriptor, left_on, join.comparison)?;
+            self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
         let right_key = self.arrangement_key(
             right_input,
             join.right_descriptor,
-            right_on,
+            &right_on,
             join.comparison,
         )?;
         let mut left_arrangement = self
@@ -1185,13 +1195,13 @@ impl TickEvaluator<'_> {
         let shared_arrangement_keys = if left_key == right_key {
             let mut keys = touched_join_keys(
                 &join.left_descriptor,
-                &left_key.fields,
+                left_on.as_ref(),
                 left_delta,
                 join.comparison,
             )?;
             keys.extend(touched_join_keys(
                 &join.right_descriptor,
-                &right_key.fields,
+                right_on.as_ref(),
                 right_delta,
                 join.comparison,
             )?);
@@ -1220,8 +1230,8 @@ impl TickEvaluator<'_> {
             &join.right_descriptor,
             &output_desc,
             &output_mapping,
-            &left_key.fields,
-            &right_key.fields,
+            left_on.as_ref(),
+            right_on.as_ref(),
             join.comparison,
             left_delta,
             right_delta,
@@ -1273,11 +1283,11 @@ impl TickEvaluator<'_> {
         let join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
         let left_key =
-            self.arrangement_key(left_input, join.left_descriptor, left_on, join.comparison)?;
+            self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
         let right_key = self.arrangement_key(
             right_input,
             join.right_descriptor,
-            right_on,
+            &right_on,
             join.comparison,
         )?;
         let mut left_arrangement = self
@@ -1297,8 +1307,8 @@ impl TickEvaluator<'_> {
             &join.left_descriptor,
             &join.right_descriptor,
             &output_desc,
-            &left_key.fields,
-            &right_key.fields,
+            left_on.as_ref(),
+            right_on.as_ref(),
             join.comparison,
             left_delta,
             right_delta,
@@ -1348,11 +1358,11 @@ impl TickEvaluator<'_> {
         let join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
         let left_key =
-            self.arrangement_key(left_input, join.left_descriptor, left_on, join.comparison)?;
+            self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
         let right_key = self.arrangement_key(
             right_input,
             join.right_descriptor,
-            right_on,
+            &right_on,
             join.comparison,
         )?;
         let mut left_arrangement = self
@@ -1372,8 +1382,8 @@ impl TickEvaluator<'_> {
             join.left_descriptor,
             join.right_descriptor,
             &output_desc,
-            &left_key.fields,
-            &right_key.fields,
+            left_on.as_ref(),
+            right_on.as_ref(),
             join.comparison,
             left_delta,
             right_delta,
@@ -1424,7 +1434,7 @@ impl TickEvaluator<'_> {
         let arrangement_key = self.arrangement_key(
             *input_node,
             output_desc,
-            Arc::from(spec.group_fields.to_vec()),
+            spec.group_fields,
             ValueComparison::Exact,
         )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
@@ -1530,7 +1540,7 @@ impl TickEvaluator<'_> {
         let arrangement_key = self.arrangement_key(
             *input_node,
             output_desc,
-            Arc::from(top_by.group_fields.clone()),
+            &top_by.group_fields,
             ValueComparison::Exact,
         )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
@@ -1663,7 +1673,7 @@ impl TickEvaluator<'_> {
         let arrangement_key = self.arrangement_key(
             *input_node,
             input_desc,
-            Arc::from(collect_by.group_fields.clone()),
+            &collect_by.group_fields,
             ValueComparison::Exact,
         )?;
         // Structural validation permits only terminal filter/projection
@@ -1856,7 +1866,7 @@ impl TickEvaluator<'_> {
                 let arrangement_key = self.arrangement_key(
                     *input_node,
                     input_desc,
-                    group_fields.clone(),
+                    &group_fields,
                     ValueComparison::Exact,
                 )?;
                 let mut arrangement = AsOf::<ArrangementState, SubTick>::default();
@@ -1885,7 +1895,7 @@ impl TickEvaluator<'_> {
         let arrangement_key = self.arrangement_key(
             *input_node,
             input_desc,
-            group_fields.clone(),
+            &group_fields,
             ValueComparison::Exact,
         )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
@@ -2012,15 +2022,25 @@ impl TickEvaluator<'_> {
         &mut self,
         input: NodeId,
         descriptor: RecordDescriptor,
-        fields: Arc<[String]>,
+        fields: &[String],
         comparison: ValueComparison,
     ) -> Result<ArrangementKey, IvmRuntimeError> {
+        let arrangement = self
+            .graph
+            .node(input)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(input))?;
+        let OpType::Arrange(spec) = &arrangement.descriptor.operator else {
+            return Err(IvmRuntimeError::UnsupportedOperator);
+        };
+        if arrangement.descriptor.output.records() != descriptor
+            || spec.fields.as_slice() != fields
+            || spec.comparison != comparison
+        {
+            return Err(IvmRuntimeError::GraphOutputMismatch);
+        }
         Ok(ArrangementKey {
             scope: self.operator_scope(input)?,
             input,
-            fields,
-            descriptor,
-            comparison,
         })
     }
 
