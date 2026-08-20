@@ -169,7 +169,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": "not-the-admin-secret",
         },
-        body: JSON.stringify({ schema }),
+        body: JSON.stringify({ schema: { tables: schema } }),
       });
       expect(wrongSecretResponse.status).toBe(401);
 

@@ -170,10 +170,9 @@ describe("dev catalogue push behavior", () => {
     expect(result.warnings).toContain(
       'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
     );
-    expect(schemaPublishBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
-      "title",
-      "ownerId",
-    ]);
+    expect(schemaPublishBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual(
+      ["title", "ownerId"],
+    );
     expect(permissionsPublishBody.schemaHash).toBe(SCHEMA_HASH);
     expect(permissionsPublishBody.expectedParentBundleObjectId).toBeNull();
     expect(Object.keys(permissionsPublishBody.permissions)).toContain("todos");
@@ -548,7 +547,7 @@ export default s.defineMigration({
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
     });
-    expect(publishBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+    expect(publishBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
       "title",
       "ownerId",
     ]);
@@ -655,7 +654,7 @@ export default s.defineMigration({
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
     });
-    expect(schemaBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+    expect(schemaBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
       "title",
       "ownerId",
     ]);
@@ -742,7 +741,7 @@ export default s.defineMigration({
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
     });
-    expect(schemaBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+    expect(schemaBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
       "title",
       "ownerId",
     ]);

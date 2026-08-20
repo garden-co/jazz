@@ -122,7 +122,7 @@ fn publish_empty_schema_and_wait_for_live_core(bound_port_file: &Path, data_dir:
         .expect("read bound port")
         .parse::<u16>()
         .expect("bound port is numeric");
-    let body = r#"{"schema":{}}"#;
+    let body = r#"{"schema":{"tables":{}}}"#;
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect admin schema API");
     write!(
         stream,
@@ -492,11 +492,13 @@ impl RunningServer {
 fn publish_schema_to_data_dir(app_id: &str, data_dir: &Path) {
     std::fs::create_dir_all(data_dir).expect("create durable data dir");
     let schema = json!({
-        "todos": {
+        "tables": {
+          "todos": {
             "columns": [
-                { "name": "title", "column_type": "Text" },
-                { "name": "done", "column_type": "Boolean" }
+                { "name": "title", "column_type": { "type": "Text" }, "nullable": false },
+                { "name": "done", "column_type": { "type": "Boolean" }, "nullable": false }
             ]
+          }
         }
     });
     let store = json!({

@@ -30,7 +30,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::loopback::admin_schema_convert::convert_admin_schema;
 use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, MetricsSnapshot, ShellError};
 
 /// Result type returned by loopback HTTP helpers.
@@ -59,9 +58,15 @@ pub fn load_latest_admin_schema_for_app(
             ),
         ));
     }
-    convert_admin_schema(&schema.schema)
+    compile_canonical_admin_schema(&schema.schema)
         .map(Some)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn compile_canonical_admin_schema(schema: &Value) -> Result<JazzSchema, String> {
+    let source = serde_json::from_value::<Schema>(schema.clone())
+        .map_err(|error| format!("invalid canonical public schema: {error}"))?;
+    JazzSchema::new(&source).map_err(|error| format!("public schema compilation failed: {error}"))
 }
 
 /// Running loopback listener and shutdown handle.
@@ -488,7 +493,7 @@ fn handle_admin_publish_schema(
         );
     }
 
-    let local_schema = match convert_admin_schema(&publish.schema) {
+    let local_schema = match compile_canonical_admin_schema(&publish.schema) {
         Ok(schema) => schema,
         Err(error) => {
             return json_response(
@@ -496,8 +501,7 @@ fn handle_admin_publish_schema(
                 "Bad Request",
                 json!({
                     "error": "unsupported_admin_schema",
-                    "path": error.path(),
-                    "message": error.to_string()
+                    "message": error
                 }),
             );
         }
@@ -639,7 +643,7 @@ fn reload_admin_schema_catalogue(
     schemas: &HashMap<String, Vec<StoredAdminSchema>>,
 ) -> LoopbackHttpResult<()> {
     for schema in schemas.values().flat_map(|schemas| schemas.iter()) {
-        let local_schema = convert_admin_schema(&schema.schema).map_err(|error| {
+        let local_schema = compile_canonical_admin_schema(&schema.schema).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -832,23 +836,29 @@ fn response(status: u16, reason: &str, content_type: &str, body: Vec<u8>) -> Vec
 mod tests {
     use super::*;
 
+    fn canonical_test_schema(table: &str, column: &str) -> Value {
+        json!({
+            "tables": {
+                (table): {
+                    "columns": [{
+                        "name": column,
+                        "column_type": { "type": "Text" },
+                        "nullable": false
+                    }]
+                }
+            }
+        })
+    }
+
     #[test]
     fn admin_publish_schema_stores_draft_without_runtime_activation_and_keeps_raw_get_response() {
         let mut headers = HashMap::new();
         headers.insert("x-jazz-admin-secret".to_owned(), "secret".to_owned());
-        let body = json!({
-            "schema": {
-                "tables": [
-                    {
-                        "name": "todos",
-                        "columns": [
-                            { "name": "title", "type": "string" }
-                        ]
-                    }
-                ]
-            }
-        });
-        let local_schema_id = convert_admin_schema(&body["schema"])
+        let mut schema = canonical_test_schema("todos", "title");
+        schema["branch_read_policy"] = json!({ "type": "True" });
+        schema["branch_write_policy"] = json!({ "type": "False" });
+        let body = json!({ "schema": schema });
+        let local_schema_id = compile_canonical_admin_schema(&body["schema"])
             .expect("test schema converts")
             .version_id();
         let mut state = LoopbackState {
@@ -893,18 +903,39 @@ mod tests {
     }
 
     #[test]
+    fn admin_publish_schema_rejects_obsolete_bare_table_map() {
+        let mut state = LoopbackState {
+            shell: InMemoryServerShell::start(default_config()).expect("start shell"),
+            sessions: HashMap::new(),
+            next_session_id: 1,
+            admin_secret: Some("secret".to_owned()),
+            schema_store_path: None,
+            schemas: HashMap::new(),
+        };
+        let canonical = canonical_test_schema("todos", "title");
+        let request = HttpRequest {
+            method: "POST".to_owned(),
+            path: "/apps/app-a/admin/schemas".to_owned(),
+            headers: HashMap::from([("x-jazz-admin-secret".to_owned(), "secret".to_owned())]),
+            body: serde_json::to_vec(&json!({ "schema": canonical["tables"] }))
+                .expect("request json"),
+        };
+
+        let response = handle_admin_publish_schema(&request.path, &request, &mut state);
+
+        assert_eq!(response_status(&response), 400);
+        assert!(state.schemas.is_empty());
+        assert_eq!(
+            response_json(&response)["error"],
+            "unsupported_admin_schema"
+        );
+    }
+
+    #[test]
     fn admin_draft_does_not_replace_explicitly_bootstrapped_runtime_schema() {
-        let active_json = json!({
-            "tables": [
-                {
-                    "name": "todos",
-                    "columns": [
-                        { "name": "title", "type": "string" }
-                    ]
-                }
-            ]
-        });
-        let active_schema = convert_admin_schema(&active_json).expect("active schema converts");
+        let active_json = canonical_test_schema("todos", "title");
+        let active_schema =
+            compile_canonical_admin_schema(&active_json).expect("active schema converts");
         let active_schema_id = active_schema.version_id();
         let config = InMemoryServerShellConfig::new(
             active_schema,
@@ -932,16 +963,7 @@ mod tests {
             path: "/apps/app-a/admin/schemas".to_owned(),
             headers: HashMap::from([("x-jazz-admin-secret".to_owned(), "secret".to_owned())]),
             body: serde_json::to_vec(&json!({
-                "schema": {
-                    "tables": [
-                        {
-                            "name": "notes",
-                            "columns": [
-                                { "name": "body", "type": "string" }
-                            ]
-                        }
-                    ]
-                }
+                "schema": canonical_test_schema("notes", "body")
             }))
             .expect("request json"),
         };
@@ -964,16 +986,7 @@ mod tests {
                     hash: "hash-a".to_owned(),
                     object_id: "schema:app-a:hash-a".to_owned(),
                     published_at: 1,
-                    schema: json!({
-                        "tables": [
-                            {
-                                "name": "todos",
-                                "columns": [
-                                    { "name": "title", "type": "string" }
-                                ]
-                            }
-                        ]
-                    }),
+                    schema: canonical_test_schema("todos", "title"),
                     permissions: None,
                     local_schema_id: None,
                 },
@@ -981,16 +994,7 @@ mod tests {
                     hash: "hash-b".to_owned(),
                     object_id: "schema:app-a:hash-b".to_owned(),
                     published_at: 2,
-                    schema: json!({
-                        "tables": [
-                            {
-                                "name": "notes",
-                                "columns": [
-                                    { "name": "body", "type": "string" }
-                                ]
-                            }
-                        ]
-                    }),
+                    schema: canonical_test_schema("notes", "body"),
                     permissions: None,
                     local_schema_id: None,
                 },

@@ -591,6 +591,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_schema_rejects_obsolete_bare_table_map() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+        let legacy_tables = schema
+            .iter()
+            .map(|(name, table)| (*name, table.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let app = make_test_router(make_state_with_schema(schema).await);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/admin/schemas"))
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "schema": legacy_tables }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("publish obsolete schema shape");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
     async fn edge_upstream_forwarding_proxies_schema_and_permissions_requests() {
         use std::sync::{Arc, Mutex};
 

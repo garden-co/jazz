@@ -2220,7 +2220,7 @@ describe("cli deploy", () => {
       }),
     );
 
-    expect(schemaPublishBody.schema.projects.columns[0].name).toBe("name");
+    expect(schemaPublishBody.schema.tables.projects.columns[0].name).toBe("name");
     expect(logs).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
     expect(logs).toContain(`Published the current schema as ${schemaHash.slice(0, 12)}.`);
     expect(logs).toContain("No permissions.ts found; skipping permissions publish.");
@@ -2282,7 +2282,7 @@ describe("cli deploy", () => {
       migrationsDir: join(root, "migrations"),
     });
 
-    expect(schemaPublishBody.schema.projects.columns[0].name).toBe("name");
+    expect(schemaPublishBody.schema.tables.projects.columns[0].name).toBe("name");
     expect(schemaPublishBody.permissions).toBeUndefined();
     expect(permissionsPublishBody.schemaHash).toBe(schemaHash);
     expect(permissionsPublishBody.expectedParentBundleObjectId).toBeNull();
@@ -2412,7 +2412,7 @@ describe("cli deploy", () => {
       migrationsDir: join(root, "migrations"),
     });
 
-    expect(schemaPublishBody.schema.todos.indexed_columns).toEqual(["ownerId"]);
+    expect(schemaPublishBody.schema.tables.todos.indexed_columns).toEqual(["ownerId"]);
   });
 
   it("fails when retargeting permissions to a schema with no local migration path from the previous head", async () => {

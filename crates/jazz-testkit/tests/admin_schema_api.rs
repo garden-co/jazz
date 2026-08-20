@@ -32,7 +32,7 @@ fn admin_schema_api_requires_secret_and_rejects_permissions() {
     let addr = server.local_addr();
 
     let body = json!({
-        "schema": { "tables": [] },
+        "schema": { "tables": {} },
         "permissions": null
     })
     .to_string();
@@ -53,7 +53,7 @@ fn admin_schema_api_requires_secret_and_rejects_permissions() {
     );
 
     let unsupported = json!({
-        "schema": { "tables": [] },
+        "schema": { "tables": {} },
         "permissions": { "read": "everyone" }
     })
     .to_string();
@@ -82,14 +82,17 @@ fn admin_schema_api_publishes_lists_and_gets_schema_json() {
 
     let publish_body = json!({
         "schema": {
-            "tables": [
-                {
-                    "name": "todos",
-                    "columns": [
-                        { "name": "title", "type": "string" }
-                    ]
+            "tables": {
+                "todos": {
+                    "columns": [{
+                        "name": "title",
+                        "column_type": { "type": "Text" },
+                        "nullable": false
+                    }]
                 }
-            ]
+            },
+            "branch_read_policy": { "type": "True" },
+            "branch_write_policy": { "type": "False" }
         },
         "permissions": null
     })
@@ -141,7 +144,7 @@ fn admin_schema_api_publishes_lists_and_gets_schema_json() {
     assert_eq!(fetched.status, 200);
     let fetched_json = fetched.json();
     assert!(fetched_json["publishedAt"].as_u64().expect("publishedAt") > 0);
-    assert_eq!(fetched_json["schema"]["tables"][0]["name"], "todos");
+    assert!(fetched_json["schema"]["tables"]["todos"].is_object());
 
     let missing = request(
         addr,
@@ -157,7 +160,7 @@ fn admin_schema_api_publishes_lists_and_gets_schema_json() {
 }
 
 #[test]
-fn admin_schema_api_accepts_bare_upstream_table_map_and_preserves_raw_json() {
+fn admin_schema_api_rejects_bare_upstream_table_map() {
     let server = LoopbackHttpServer::start_with_admin_secret(
         SocketAddr::from(([127, 0, 0, 1], 0)),
         server_config(),
@@ -166,7 +169,7 @@ fn admin_schema_api_accepts_bare_upstream_table_map_and_preserves_raw_json() {
     .expect("start loopback HTTP listener");
     let addr = server.local_addr();
 
-    let raw_schema = json!({
+    let obsolete_schema = json!({
         "todos": {
             "columns": [
                 { "name": "title", "column_type": "Text" },
@@ -179,7 +182,7 @@ fn admin_schema_api_accepts_bare_upstream_table_map_and_preserves_raw_json() {
             "indexed_columns": ["title"]
         }
     });
-    let publish_body = json!({ "schema": raw_schema }).to_string();
+    let publish_body = json!({ "schema": obsolete_schema }).to_string();
     let published = request(
         addr,
         "POST",
@@ -187,22 +190,8 @@ fn admin_schema_api_accepts_bare_upstream_table_map_and_preserves_raw_json() {
         &[("X-Jazz-Admin-Secret", "secret")],
         &publish_body,
     );
-    assert_eq!(published.status, 201);
-    let hash = published.json()["hash"]
-        .as_str()
-        .expect("schema hash")
-        .to_owned();
-
-    let fetched = request(
-        addr,
-        "GET",
-        &format!("/apps/app-a/schema/{hash}"),
-        &[("X-Jazz-Admin-Secret", "secret")],
-        "",
-    );
-    assert_eq!(fetched.status, 200);
-    assert_eq!(fetched.json()["schema"], raw_schema);
-    assert!(fetched.json().get("localSchemaId").is_none());
+    assert_eq!(published.status, 400);
+    assert_eq!(published.json()["error"], "unsupported_admin_schema");
 
     server.shutdown();
 }
@@ -219,10 +208,14 @@ fn admin_schema_api_rejects_unsupported_schema_type() {
 
     let publish_body = json!({
         "schema": {
-            "todos": {
-                "columns": [
-                    { "name": "metadata", "column_type": "Row" }
-                ]
+            "tables": {
+                "todos": {
+                    "columns": [{
+                        "name": "metadata",
+                        "column_type": { "type": "Removed" },
+                        "nullable": false
+                    }]
+                }
             }
         }
     })
@@ -240,7 +233,7 @@ fn admin_schema_api_rejects_unsupported_schema_type() {
         rejected.json()["message"]
             .as_str()
             .expect("message")
-            .contains("Row")
+            .contains("unknown variant")
     );
 
     server.shutdown();
@@ -257,15 +250,13 @@ fn admin_schema_api_accepts_benchmark_schema_tables_wrapper() {
     let addr = server.local_addr();
 
     let raw_schema = json!({
-        "schema": {
-            "tables": {
-                "events": {
-                    "columns": [
-                        { "name": "id", "column_type": { "type": "Uuid" } },
-                        { "name": "seenAt", "column_type": { "type": "Timestamp" } },
-                        { "name": "score", "column_type": { "type": "Double" } }
-                    ]
-                }
+        "tables": {
+            "events": {
+                "columns": [
+                    { "name": "id", "column_type": { "type": "Uuid" }, "nullable": false },
+                    { "name": "seenAt", "column_type": { "type": "Timestamp" }, "nullable": false },
+                    { "name": "score", "column_type": { "type": "Double" }, "nullable": false }
+                ]
             }
         }
     });
@@ -299,14 +290,17 @@ fn admin_schema_api_persists_catalogue_to_schema_store_file() {
 
     let publish_body = json!({
         "schema": {
-            "tables": [
-                {
-                    "name": "notes",
-                    "columns": [
-                        { "name": "body", "type": "string" }
-                    ]
+            "tables": {
+                "notes": {
+                    "columns": [{
+                        "name": "body",
+                        "column_type": { "type": "Text" },
+                        "nullable": false
+                    }]
                 }
-            ]
+            },
+            "branch_read_policy": { "type": "True" },
+            "branch_write_policy": { "type": "False" }
         }
     })
     .to_string();
@@ -351,7 +345,15 @@ fn admin_schema_api_persists_catalogue_to_schema_store_file() {
         "",
     );
     assert_eq!(fetched.status, 200);
-    assert_eq!(fetched.json()["schema"]["tables"][0]["name"], "notes");
+    assert!(fetched.json()["schema"]["tables"]["notes"].is_object());
+    assert_eq!(
+        fetched.json()["schema"]["branch_read_policy"],
+        json!({ "type": "True" })
+    );
+    assert_eq!(
+        fetched.json()["schema"]["branch_write_policy"],
+        json!({ "type": "False" })
+    );
     assert!(fetched.json().get("localSchemaId").is_none());
 
     let store_json: Value =
