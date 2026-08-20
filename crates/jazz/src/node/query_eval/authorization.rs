@@ -439,6 +439,26 @@ where
         insert_candidate: bool,
         branch_id: Option<BranchId>,
     ) -> Result<bool, Error> {
+        let candidate = current_row_from_cells(table, row_uuid, cells)?;
+        self.write_policy_query_allows_row_for_schema(
+            policy_schema_version,
+            policy,
+            candidate,
+            identity,
+            insert_candidate,
+            branch_id,
+        )
+    }
+
+    pub(in crate::node) fn write_policy_query_allows_row_for_schema(
+        &mut self,
+        policy_schema_version: SchemaVersionId,
+        policy: &crate::query::Query,
+        candidate: CurrentRow,
+        identity: AuthorId,
+        insert_candidate: bool,
+        branch_id: Option<BranchId>,
+    ) -> Result<bool, Error> {
         let mut policy = policy.clone();
         if insert_candidate {
             for inherits in &mut policy.inherits {
@@ -530,7 +550,6 @@ where
                 policy_shape.query(),
             ),
         };
-        let candidate = current_row_from_cells(table, row_uuid, cells)?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
         let access_paths = if branch_id.is_some() {
             BTreeMap::new()

@@ -144,7 +144,6 @@ async fn created_by_policies_scope_reads_to_creators_inner() {
 /// alice client ──update alice row────────► edge server ──accept──► title changes
 /// ```
 #[tokio::test]
-#[ignore = "a non-creator `$createdBy` UPDATE remains pending instead of receiving an edge-server authorization rejection"]
 async fn created_by_update_policy_allows_creator_and_rejects_other_users_at_edge() {
     tokio::task::LocalSet::new()
         .run_until(created_by_update_policy_allows_creator_and_rejects_other_users_at_edge_inner())

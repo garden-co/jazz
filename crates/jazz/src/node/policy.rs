@@ -107,23 +107,23 @@ where
             let current =
                 match self.policy_delete_subject_row(policy_schema_version, &table, version)? {
                     Some(current) => current,
-                    None => current_row_from_cells(&table, version.row_uuid(), &cells)?,
+                    None => current_row_from_cells_with_explicit_provenance(
+                        &table,
+                        version.row_uuid(),
+                        &cells,
+                        RowProvenance {
+                            created_by: version.created_by(),
+                            created_at: version.created_at(),
+                            updated_by: version.updated_by(),
+                            updated_at: version.updated_at(),
+                        },
+                        None,
+                    )?,
                 };
-            let current_cells = table
-                .columns
-                .iter()
-                .filter_map(|column| {
-                    current
-                        .cell(&table, &column.name)
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect();
-            return self.write_policy_query_allows_candidate_for_schema(
+            return self.write_policy_query_allows_row_for_schema(
                 policy_schema_version,
-                &table,
                 &policy,
-                current.row_uuid(),
-                &current_cells,
+                current,
                 author,
                 false,
                 None,
@@ -148,12 +148,10 @@ where
                 })
                 .collect::<BTreeMap<_, _>>();
             if let Some(policy) = table.write_policies.update_using.clone() {
-                if !self.write_policy_query_allows_candidate_for_schema(
+                if !self.write_policy_query_allows_row_for_schema(
                     policy_schema_version,
-                    &table,
                     &policy,
-                    previous.row_uuid(),
-                    &previous_cells,
+                    previous,
                     author,
                     false,
                     None,
@@ -166,12 +164,22 @@ where
             };
             let mut effective_cells = previous_cells;
             effective_cells.extend(cells.clone());
-            return self.write_policy_query_allows_candidate_for_schema(
-                policy_schema_version,
+            let candidate = current_row_from_cells_with_explicit_provenance(
                 &table,
-                &policy,
                 version.row_uuid(),
                 &effective_cells,
+                RowProvenance {
+                    created_by: version.created_by(),
+                    created_at: version.created_at(),
+                    updated_by: version.updated_by(),
+                    updated_at: version.updated_at(),
+                },
+                None,
+            )?;
+            return self.write_policy_query_allows_row_for_schema(
+                policy_schema_version,
+                &policy,
+                candidate,
                 author,
                 false,
                 None,
@@ -180,12 +188,22 @@ where
         let Some(policy) = table.write_policies.insert_check.clone() else {
             return Ok(true);
         };
-        self.write_policy_query_allows_candidate_for_schema(
-            policy_schema_version,
+        let candidate = current_row_from_cells_with_explicit_provenance(
             &table,
-            &policy,
             version.row_uuid(),
             &cells,
+            RowProvenance {
+                created_by: version.created_by(),
+                created_at: version.created_at(),
+                updated_by: version.updated_by(),
+                updated_at: version.updated_at(),
+            },
+            None,
+        )?;
+        self.write_policy_query_allows_row_for_schema(
+            policy_schema_version,
+            &policy,
+            candidate,
             author,
             true,
             None,
@@ -564,7 +582,13 @@ where
                 if projected_table.name != table.name {
                     continue;
                 }
-                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+                return current_row_from_materialized_cells_with_provenance(
+                    table,
+                    &parent_version,
+                    &parent_version,
+                    &cells,
+                )
+                .map(Some);
             }
         }
 
@@ -574,7 +598,13 @@ where
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
-                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+                return current_row_from_materialized_cells_with_provenance(
+                    table,
+                    &current_version,
+                    &current_version,
+                    &cells,
+                )
+                .map(Some);
             }
         }
 
