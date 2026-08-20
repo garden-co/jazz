@@ -115,9 +115,9 @@ pub(crate) enum FieldRequirement {
 ///
 /// This is not the Groove runtime source resolver. New code must keep this
 /// trait on the preparation side of `lower_resolved_query_program`.
-pub(crate) trait AsyncSourcePreparer {
+pub(crate) trait SourceGraphPreparer {
     /// Prepare one source request into a concrete Groove graph and row shape.
-    async fn prepare_source(
+    async fn prepare_source_graph(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError>;

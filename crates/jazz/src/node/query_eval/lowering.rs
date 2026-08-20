@@ -435,7 +435,7 @@ where
         Box::pin(self.prepare_query_program_policy_dependencies(&request)).await?;
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
-        let mut resolver = CurrentQuerySourcePreparer {
+        let mut resolver = JazzSourceGraphPreparer {
             node: self,
             read_view: &read_view,
             inline_sources,
@@ -464,7 +464,7 @@ where
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
         let read_view = request.reads.primary.clone();
         let dependencies = {
-            let mut preparer = CurrentQuerySourcePreparer {
+            let mut preparer = JazzSourceGraphPreparer {
                 node: self,
                 read_view: &read_view,
                 prepare_branch_subscription_sources: false,
