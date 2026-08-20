@@ -159,7 +159,13 @@ where
         {
             let rows = content_versions
                 .iter()
-                .map(|version| (version.table().to_owned(), version.row_uuid()))
+                .map(|version| {
+                    (
+                        version.table().to_owned(),
+                        version.branch_key().clone(),
+                        version.row_uuid(),
+                    )
+                })
                 .collect::<BTreeSet<_>>();
             self.assert_merge_head_rows_match_history_for_test(&rows)?;
             self.assert_global_current_updates_match_history_for_test(
@@ -759,6 +765,7 @@ where
                 Ok((
                     self.physical_table_id_for_version(version)?,
                     version.table().to_owned(),
+                    version.branch_key().clone(),
                     version.row_uuid(),
                 ))
             })
@@ -822,8 +829,15 @@ where
                 self.version_storage_primary_key(version)?,
             );
         }
-        for (table_id, table, row_uuid) in affected_content_rows {
-            self.rewrite_merge_heads_excluding_tx(batch, table_id, &table, row_uuid, tx_id)?;
+        for (table_id, table, branch_key, row_uuid) in affected_content_rows {
+            self.rewrite_merge_heads_excluding_tx(
+                batch,
+                table_id,
+                &table,
+                &branch_key,
+                row_uuid,
+                tx_id,
+            )?;
         }
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;

@@ -17,6 +17,15 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Vec<VersionRow>, Error> {
+        self.query_row_versions_in_branch(table, &BranchKey::default(), row_uuid)
+    }
+
+    pub(super) fn query_row_versions_in_branch(
+        &mut self,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<VersionRow>, Error> {
         let mut versions = Vec::new();
         for storage_table in self.version_storage_sources_for_layer(table, VersionLayer::Content)? {
             let raws = self
@@ -24,7 +33,7 @@ where
                 .primary_key_scan_raw(
                     &storage_table,
                     &[
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                        Value::Bytes(branch_key.canonical_bytes()),
                         Value::Uuid(row_uuid.0),
                     ],
                 )?
@@ -42,7 +51,7 @@ where
                 .database
                 .primary_key_scan_raw(
                     &storage_table,
-                    &self.deletion_storage_prefix(table, Some(row_uuid))?,
+                    &self.deletion_storage_prefix_in_branch(table, branch_key, Some(row_uuid))?,
                 )?
                 .into_iter()
                 .map(|raw| raw.owned_record())
@@ -461,9 +470,10 @@ where
             .collect()
     }
 
-    pub(super) fn deletion_storage_prefix(
+    pub(super) fn deletion_storage_prefix_in_branch(
         &self,
         table: &str,
+        branch_key: &BranchKey,
         row_uuid: Option<RowUuid>,
     ) -> Result<Vec<Value>, Error> {
         let schema_version = if self
@@ -476,20 +486,6 @@ where
         };
         self.deletion_storage_prefix_in_schema_and_branch(
             schema_version,
-            table,
-            &BranchKey::default(),
-            row_uuid,
-        )
-    }
-
-    pub(super) fn deletion_storage_prefix_in_branch(
-        &self,
-        table: &str,
-        branch_key: &BranchKey,
-        row_uuid: Option<RowUuid>,
-    ) -> Result<Vec<Value>, Error> {
-        self.deletion_storage_prefix_in_schema_and_branch(
-            self.catalogue.current_write_schema.schema,
             table,
             branch_key,
             row_uuid,

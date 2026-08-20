@@ -13,7 +13,8 @@ use jazz::ids::{AuthorId, BranchDimensionId, NodeUuid, RowUuid};
 use jazz::protocol::{
     BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
 };
-use jazz::schema::{BranchDimensionSchema, JazzSchema, TableSchema};
+use jazz::query::{Query, claim, col, eq};
+use jazz::schema::{BranchDimensionSchema, JazzSchema, Policy, TableSchema};
 use jazz::time::GlobalSeq;
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -48,7 +49,8 @@ fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
                 ColumnSchema::new("title", ColumnType::String),
             ],
         )
-        .with_branch_dimension("branch_id", dimension)],
+        .with_branch_dimension("branch_id", dimension)
+        .with_indexed_column("title")],
     );
     let families = schema.column_families();
     let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>());
@@ -65,6 +67,190 @@ fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
     ))
     .unwrap();
     (db, schema)
+}
+
+#[test]
+fn indexed_branch_view_masks_base_before_applying_the_predicate() {
+    let (db, _schema) = open_db();
+    let base = selector(0x7d);
+    let head = selector(0x7e);
+    let overridden = RowUuid::from_bytes([0x7f; 16]);
+    let inherited = RowUuid::from_bytes([0x80; 16]);
+    for row in [overridden, inherited] {
+        db.insert_with_id_in_branch(
+            "todos",
+            base.clone(),
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("needle".to_owned()))]),
+        )
+        .unwrap();
+    }
+    db.update_in_branch_view(
+        "todos",
+        head.clone(),
+        Some(BranchViewBase::Current(base.clone())),
+        overridden,
+        BTreeMap::from([("title".to_owned(), Value::String("hidden".to_owned()))]),
+    )
+    .unwrap();
+
+    let query = db
+        .prepare_query(&Query::from("todos").filter(eq(
+            col("title"),
+            jazz::query::lit(Value::String("needle".to_owned())),
+        )))
+        .unwrap();
+    let base_rows =
+        block_on(db.all(&query, ReadOpts::default().branch_view(base.clone(), None))).unwrap();
+    assert_eq!(base_rows.len(), 2);
+
+    let rows = block_on(db.all(
+        &query,
+        ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base))),
+    ))
+    .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![inherited],
+        "the non-matching head incarnation must still mask the base index hit"
+    );
+}
+
+fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
+    let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x74; 16]));
+    let branch_policy = Policy::shape(Query::from("todos").join_via_row_id(
+        "branches",
+        "branch_id",
+        [eq(col("owner"), claim("sub"))],
+    ));
+    let schema = JazzSchema::new_with_branch_dimensions(
+        [BranchDimensionSchema::new(
+            dimension,
+            "branch",
+            ColumnType::Uuid,
+            Value::Uuid(uuid::Uuid::nil()),
+        )],
+        [
+            TableSchema::new(
+                "branches",
+                [
+                    ColumnSchema::new("name", ColumnType::String),
+                    ColumnSchema::new("owner", ColumnType::Uuid),
+                ],
+            )
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+            TableSchema::new(
+                "todos",
+                [
+                    ColumnSchema::new("branch_id", ColumnType::Uuid),
+                    ColumnSchema::new("title", ColumnType::String),
+                ],
+            )
+            .with_reference("branch_id", "branches")
+            .with_branch_dimension("branch_id", dimension)
+            .with_read_policy(branch_policy.clone())
+            .with_write_policy(branch_policy),
+        ],
+    );
+    let families = schema.column_families();
+    let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>());
+    let db = block_on(Db::open(
+        DbConfig::new(
+            schema.clone(),
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x75; 16]),
+                author: AuthorId::SYSTEM,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(2)),
+    ))
+    .unwrap();
+    (db, schema)
+}
+
+#[test]
+fn branch_dimension_reference_policy_controls_effective_reads() {
+    let (db, _schema) = open_policy_db();
+    let owner = AuthorId::from_bytes([0x76; 16]);
+    let outsider = AuthorId::from_bytes([0x77; 16]);
+    let branch = RowUuid::from_bytes([0x78; 16]);
+    let selector = BranchSelector::new([("branch", Value::Uuid(branch.0))]);
+    db.insert_with_id(
+        "branches",
+        branch,
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("draft".to_owned())),
+            ("owner".to_owned(), Value::Uuid(owner.0)),
+        ]),
+    )
+    .unwrap();
+    let branches = db.prepare_query(&db.table("branches")).unwrap();
+    assert_eq!(
+        block_on(db.all_for_identity(&branches, ReadOpts::default(), owner))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        block_on(db.all_for_identity(&branches, ReadOpts::default(), outsider))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let todo = RowUuid::from_bytes([0x79; 16]);
+    db.insert_with_id_in_branch_for_identity(
+        owner,
+        "todos",
+        selector.clone(),
+        todo,
+        BTreeMap::from([("title".to_owned(), Value::String("allowed".to_owned()))]),
+    )
+    .expect("the ordinary referenced branch row authorizes its owner");
+    let joined = db
+        .prepare_query(&Query::from("todos").join_via_row_id(
+            "branches",
+            "branch_id",
+            [eq(col("owner"), jazz::query::lit(owner.0))],
+        ))
+        .unwrap();
+    assert_eq!(
+        block_on(db.all(
+            &joined,
+            ReadOpts::default().branch_view(selector.clone(), None),
+        ))
+        .unwrap()
+        .len(),
+        1,
+        "ordinary reference traversal must see shared policy evidence from a branch view"
+    );
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let opts = ReadOpts::default().branch_view(selector, None);
+    assert_eq!(
+        block_on(db.all_for_identity(&prepared, opts.clone(), owner))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        block_on(db.all_for_identity(&prepared, opts, outsider))
+            .unwrap()
+            .is_empty()
+    );
+
+    let missing = BranchSelector::new([("branch", Value::Uuid(RowUuid::from_bytes([0x7b; 16]).0))]);
+    assert!(
+        block_on(db.all_for_identity(
+            &prepared,
+            ReadOpts::default().branch_view(missing, None),
+            owner,
+        ))
+        .unwrap()
+        .is_empty(),
+        "a forged branch coordinate has no ordinary policy evidence"
+    );
 }
 
 #[test]

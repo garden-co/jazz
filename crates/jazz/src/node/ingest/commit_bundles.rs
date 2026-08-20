@@ -1071,11 +1071,13 @@ where
             .map(|bundle| bundle.versions.len())
             .sum::<usize>();
         batch.reserve(eligible.len() + version_count.saturating_mul(2));
-        let mut current_updates =
-            BTreeMap::<(String, RowUuid, VersionLayer), (VersionRow, GlobalTime)>::new();
+        let mut current_updates = BTreeMap::<
+            (String, BranchKey, RowUuid, VersionLayer),
+            (VersionRow, GlobalTime),
+        >::new();
         let mut content_versions = Vec::new();
         #[cfg(test)]
-        let mut content_rows = BTreeSet::<(String, RowUuid)>::new();
+        let mut content_rows = BTreeSet::<(String, BranchKey, RowUuid)>::new();
         let mut applied_global_times = Vec::with_capacity(eligible.len());
 
         for tx_bundles in eligible {
@@ -1135,10 +1137,19 @@ where
                 if stored.layer() == VersionLayer::Content {
                     content_versions.push(stored.clone());
                     #[cfg(test)]
-                    content_rows.insert((stored.table().to_owned(), stored.row_uuid()));
+                    content_rows.insert((
+                        stored.table().to_owned(),
+                        stored.branch_key().clone(),
+                        stored.row_uuid(),
+                    ));
                 }
 
-                let key = (stored.table().to_owned(), stored.row_uuid(), stored.layer());
+                let key = (
+                    stored.table().to_owned(),
+                    stored.branch_key().clone(),
+                    stored.row_uuid(),
+                    stored.layer(),
+                );
                 let existing_winner = current_updates.get(&key).map(|(previous, _)| {
                     (
                         previous,

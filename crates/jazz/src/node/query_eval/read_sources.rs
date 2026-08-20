@@ -2195,7 +2195,25 @@ where
             );
             let policy_request = policy_request.map(|mut request| {
                 if let Some(read_view) = policy_read_view {
-                    request.reads.primary = read_view.clone();
+                    let mut policy_view = read_view.clone();
+                    // The outer normalized query and the independently
+                    // normalized policy proof use different source aliases
+                    // for the same logical dependency. Preserve the policy
+                    // request's complete source set while projecting every
+                    // alias through the enclosing branch view by table.
+                    for policy_source in request.reads.primary.sources.keys() {
+                        if policy_view.sources.contains_key(policy_source) {
+                            continue;
+                        }
+                        if let Some(source) =
+                            read_view.sources.iter().find_map(|(source_id, source)| {
+                                (source_id.table == policy_source.table).then(|| source.clone())
+                            })
+                        {
+                            policy_view.sources.insert(policy_source.clone(), source);
+                        }
+                    }
+                    request.reads.primary = policy_view;
                 }
                 request
             });

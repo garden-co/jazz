@@ -359,33 +359,30 @@ where
         Ok(versions)
     }
 
-    fn query_physical_content_layer_winner(
+    fn recompute_merge_heads_from_persisted_history(
         &mut self,
         table_id: PhysicalTableId,
-        requested_table: &str,
+        table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
-    ) -> Result<Option<VersionRow>, Error> {
-        let mut winner = None;
-        for version in
-            self.query_physical_content_row_versions(
-                table_id,
-                requested_table,
-                branch_key,
-                row_uuid,
-            )?
-        {
-            let candidate_tx = self.version_tx_id(&version)?;
-            let replaces_winner = winner.as_ref().is_none_or(|existing: &VersionRow| {
-                let existing_tx = self.version_tx_id(existing).expect("valid version tx id");
-                candidate_tx.time.sort_key(candidate_tx.node)
-                    > existing_tx.time.sort_key(existing_tx.node)
-            });
-            if replaces_winner {
-                winner = Some(version);
+    ) -> Result<BTreeSet<TxId>, Error> {
+        let versions =
+            self.query_physical_content_row_versions(table_id, table, branch_key, row_uuid)?;
+        let mut candidate_indices = Vec::new();
+        for (idx, version) in versions.iter().enumerate() {
+            let tx_id = self.version_tx_id(version)?;
+            let Some(tx) = self.query_transaction(tx_id)? else {
+                continue;
+            };
+            if matches!(tx.fate, Fate::Pending | Fate::Accepted) {
+                candidate_indices.push(idx);
             }
         }
-        Ok(winner)
+        let head_indices = content_head_indices(&versions, &candidate_indices, &self.node_aliases);
+        head_indices
+            .into_iter()
+            .map(|idx| self.version_tx_id(&versions[idx]))
+            .collect()
     }
 
     pub(super) fn update_merge_heads_for_content_version(
@@ -404,22 +401,16 @@ where
             version.row_uuid(),
         )? {
             Some(existing) => existing,
-            None => {
-                if let Some(previous) = self.query_physical_content_layer_winner(
-                    table_id,
-                    version.table(),
-                    version.branch_key(),
-                    version.row_uuid(),
-                )? {
-                    let previous_tx = self.version_tx_id(&previous)?;
-                    if previous_tx != new_tx {
-                        return Err(Error::InvalidStoredValue(
-                            "merge head set missing for existing content row",
-                        ));
-                    }
-                }
-                BTreeSet::new()
-            }
+            // A redacted exclusive view fragment intentionally persists
+            // history without current indexes. If a later visible mergeable
+            // version reaches this replica, bootstrap the derived head index
+            // from every locally known eligible version before advancing it.
+            None => self.recompute_merge_heads_from_persisted_history(
+                table_id,
+                version.table(),
+                version.branch_key(),
+                version.row_uuid(),
+            )?,
         };
         for parent in version.parents() {
             heads.remove(&parent);
@@ -470,22 +461,14 @@ where
             version.row_uuid(),
         )? {
             Some(existing) => existing,
-            None => {
-                if let Some(previous) = self.query_physical_content_layer_winner(
-                    table_id,
-                    version.table(),
-                    version.branch_key(),
-                    version.row_uuid(),
-                )? {
-                    let previous_tx = self.version_tx_id(&previous)?;
-                    if previous_tx != new_tx {
-                        return Err(Error::InvalidStoredValue(
-                            "merge head set missing for existing content row",
-                        ));
-                    }
-                }
-                BTreeSet::new()
-            }
+            // See the non-batched path above: missing derived state is valid
+            // after partial view-scoped history ingress.
+            None => self.recompute_merge_heads_from_persisted_history(
+                table_id,
+                version.table(),
+                version.branch_key(),
+                version.row_uuid(),
+            )?,
         };
         for parent in version.parents() {
             heads.remove(&parent);
@@ -779,13 +762,14 @@ where
         batch: &mut DatabaseBatch,
         table_id: PhysicalTableId,
         table: &str,
+        branch_key: &BranchKey,
         row_uuid: RowUuid,
         excluded_tx: TxId,
     ) -> Result<(), Error> {
         let versions = self.query_physical_content_row_versions(
             table_id,
             table,
-            &BranchKey::default(),
+            branch_key,
             row_uuid,
         )?;
         let candidate_indices = versions
@@ -802,7 +786,7 @@ where
         for idx in head_indices {
             heads.insert(self.version_tx_id(&versions[idx])?);
         }
-        Self::write_merge_heads(batch, table_id, &BranchKey::default(), row_uuid, &heads)
+        Self::write_merge_heads(batch, table_id, branch_key, row_uuid, &heads)
     }
 
     fn merge_head_tx_ids(
@@ -838,13 +822,14 @@ where
     fn recomputed_merge_heads_from_history_for_test(
         &mut self,
         table: &str,
+        branch_key: &BranchKey,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
         let table_id = self.physical_table_id_for_authored_test_table(table)?;
         let versions = self.query_physical_content_row_versions(
             table_id,
             table,
-            &BranchKey::default(),
+            branch_key,
             row_uuid,
         )?;
         let mut candidate_indices = Vec::new();
@@ -874,13 +859,15 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
-        let heads = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
+        let branch_key = BranchKey::default();
+        let heads =
+            self.recomputed_merge_heads_from_history_for_test(table, &branch_key, row_uuid)?;
         let table_id = self.physical_table_id_for_authored_test_table(table)?;
         let mut batch = self.database.open_batch();
         Self::write_merge_heads(
             &mut batch,
             table_id,
-            &BranchKey::default(),
+            &branch_key,
             row_uuid,
             &heads,
         )?;
@@ -894,12 +881,27 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
-        let expected = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
+        self.assert_merge_heads_match_history_in_branch_for_test(
+            table,
+            &BranchKey::default(),
+            row_uuid,
+        )
+    }
+
+    #[cfg(test)]
+    fn assert_merge_heads_match_history_in_branch_for_test(
+        &mut self,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+    ) -> Result<(), Error> {
+        let expected =
+            self.recomputed_merge_heads_from_history_for_test(table, branch_key, row_uuid)?;
         let table_id = self.physical_table_id_for_authored_test_table(table)?;
-        let actual = self.require_merge_heads(table_id, &BranchKey::default(), row_uuid)?;
+        let actual = self.require_merge_heads(table_id, branch_key, row_uuid)?;
         if actual != expected {
             let versions = self
-                .query_row_versions(table, row_uuid)?
+                .query_physical_content_row_versions(table_id, table, branch_key, row_uuid)?
                 .into_iter()
                 .map(|version| {
                     let tx_id = self.version_tx_id(&version)?;
@@ -915,7 +917,7 @@ where
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             panic!(
-                "stored merge heads diverged from history for {table}/{row_uuid:?}: expected {expected:?}, actual {actual:?}, versions={versions:?}"
+                "stored merge heads diverged from history for {table}/{branch_key:?}/{row_uuid:?}: expected {expected:?}, actual {actual:?}, versions={versions:?}"
             );
         }
         Ok(())
@@ -924,10 +926,14 @@ where
     #[cfg(test)]
     fn assert_merge_head_rows_match_history_for_test(
         &mut self,
-        rows: &BTreeSet<(String, RowUuid)>,
+        rows: &BTreeSet<(String, BranchKey, RowUuid)>,
     ) -> Result<(), Error> {
-        for (table, row_uuid) in rows {
-            self.assert_merge_heads_match_history_for_test(table, *row_uuid)?;
+        for (table, branch_key, row_uuid) in rows {
+            self.assert_merge_heads_match_history_in_branch_for_test(
+                table,
+                branch_key,
+                *row_uuid,
+            )?;
         }
         Ok(())
     }
@@ -936,12 +942,13 @@ where
     fn recomputed_global_layer_winner_from_history_for_test(
         &mut self,
         table: &str,
+        branch_key: &BranchKey,
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
         let mut winner = None::<(VersionRow, TxId, TxTime)>;
         for version in self
-            .query_row_versions(table, row_uuid)?
+            .query_row_versions_in_branch(table, branch_key, row_uuid)?
             .into_iter()
             .filter(|version| version.layer() == layer)
         {
@@ -971,6 +978,7 @@ where
         for (version, global_time) in updates {
             let Some(expected) = self.recomputed_global_layer_winner_from_history_for_test(
                 version.table(),
+                version.branch_key(),
                 version.row_uuid(),
                 version.layer(),
             )?
