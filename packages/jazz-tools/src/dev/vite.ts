@@ -81,10 +81,20 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   return {
     name: "jazz",
 
-    config(config: {
-      ssr?: { external?: true | string[] };
-      optimizeDeps?: { exclude?: string[] };
-    }) {
+    config(
+      config: {
+        root?: string;
+        ssr?: { external?: true | string[] };
+        optimizeDeps?: { exclude?: string[] };
+      },
+      env?: { command?: string },
+    ) {
+      if (env?.command === "serve" && options.server !== false) {
+        runtime.prepareEnv({
+          ...options,
+          schemaDir: options.schemaDir ?? config.root ?? process.cwd(),
+        });
+      }
       const existingSsr = config.ssr?.external;
       const existingExclude = config.optimizeDeps?.exclude ?? [];
       const jazzWasmEntry = resolveJazzWasmEntry();
