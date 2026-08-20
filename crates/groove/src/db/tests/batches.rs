@@ -3,6 +3,26 @@
 use super::*;
 
 #[futures_test::test]
+async fn durable_commit_releases_subscription_delta_only_after_storage_succeeds() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    control.fail_next(TestStorageOperation::WriteMany);
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    assert!(database.commit_batch_durable(batch).await.is_err());
+    assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[futures_test::test]
 async fn commits_insert_update_and_delete_batches() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =

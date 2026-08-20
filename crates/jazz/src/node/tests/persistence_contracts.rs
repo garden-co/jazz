@@ -118,11 +118,11 @@ fn assert_poisoned_node_exposes_nothing(core: &mut NodeState<FailWriteManyMemory
     ));
 }
 
-/// INV-TX-25: one commit unit is one durable publication boundary. If the
-/// storage batch that contains a multi-row local write fails, neither a subset
-/// of the transaction nor a derived history subscription delta may escape.
+/// A multi-row local commit is one immediate resident publication even when
+/// its later atomic storage batch fails. Durable reopen still observes none of
+/// the transaction; the live database is poisoned instead of retracting rows.
 #[test]
-fn failed_multi_row_local_commit_is_not_partially_durable_or_published() {
+fn failed_multi_row_local_commit_is_fully_resident_but_not_partially_durable() {
     let (mut writer, storage) = fail_write_many_node();
     let history = writer.subscribe_history("todos").unwrap();
     assert!(
@@ -141,10 +141,12 @@ fn failed_multi_row_local_commit_is_not_partially_durable_or_published() {
         matches!(error, Error::Groove(groove::db::Error::Storage(_))),
         "unexpected durable-commit error: {error:?}"
     );
-    assert!(
-        matches!(history.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
-        "a failed durable commit must not publish a history/IVM delta"
+    assert_eq!(
+        history.try_recv().unwrap().to_values().unwrap().len(),
+        2,
+        "the complete resident commit unit must remain synchronously visible"
     );
+    assert_poisoned_node_exposes_nothing(&mut writer);
 
     drop(writer);
     let mut reopened = NodeState::new(node(0xd1), schema(), storage).unwrap();
@@ -195,112 +197,10 @@ fn authority_storage_failure_returns_no_fate_ack_or_partial_transaction() {
     assert!(reopened.query_table_versions("todos").unwrap().is_empty());
 }
 
-/// The synchronous implementation currently has a deliberate recovery window
-/// between durable ingest and cleanup/consistency-marker finalization. A
-/// failure in that second boundary may return no acknowledgement, but reopening
-/// must recover one coherent accepted unit before any later view can serve it.
+/// Authority finalization stores canonical state and cleanup atomically, then
+/// releases exactly one subscription tick and its fate acknowledgement.
 #[test]
-fn restart_after_finalization_boundary_failure_recovers_one_coherent_transaction() {
-    let (mut writer, _) = fail_write_many_node();
-    let (tx_id, unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row(0xd4), 10).cells(title_cells("recovered")),
-        )
-        .unwrap();
-
-    let (mut core, storage) = fail_write_many_node();
-    let history = core.subscribe_history("todos").unwrap();
-    assert!(history.recv().unwrap().is_empty());
-    // Ingest writes canonical transaction/history/current first, then removes
-    // obsolete ahead-current rows in a second batch. Interrupt that latter
-    // write to exercise the exact crash-recovery seam.
-    storage.fail_nth_following_write_many(2);
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("local write must produce a commit unit")
-    };
-    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .expect_err("interrupted finalization must not acknowledge the unit");
-    assert!(
-        matches!(history.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
-        "durable ingest must not publish before cleanup/finalization succeeds"
-    );
-    assert_poisoned_node_exposes_nothing(&mut core);
-
-    drop(core);
-    let mut reopened = NodeState::new(node(0xd1), schema(), storage).unwrap();
-    let stored = reopened
-        .transaction_record(tx_id)
-        .expect("restart must recover the canonical transaction");
-    assert_eq!(stored.fate, Fate::Accepted);
-    assert_eq!(stored.global_seq, Some(GlobalSeq(1)));
-    assert_eq!(stored.durability, DurabilityTier::Global);
-    assert_eq!(
-        reopened
-            .current_rows("todos", DurabilityTier::Global)
-            .unwrap()
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row(0xd4), title_cells("recovered"))]),
-        "recovery must expose either the whole accepted transaction or none of it"
-    );
-    assert_currency_tables_match_storage(&mut reopened, "todos");
-}
-
-/// The consistency marker is part of the same publication boundary as both
-/// database batches. If only the marker write fails, fate/IVM output still must
-/// remain private until reopen proves the stored unit coherent.
-#[test]
-fn marker_failure_publishes_no_history_or_fate_and_reopens_coherently() {
-    let (mut writer, _) = fail_write_many_node();
-    let (tx_id, unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row(0xd6), 10).cells(title_cells("marker recovery")),
-        )
-        .unwrap();
-
-    let (mut core, storage) = fail_write_many_node();
-    let history = core.subscribe_history("todos").unwrap();
-    assert!(history.recv().unwrap().is_empty());
-    storage.fail_nth_following_write_many(3);
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("local write must produce a commit unit")
-    };
-    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .expect_err("failed consistency marker must not acknowledge the unit");
-    assert!(
-        matches!(
-            history.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ),
-        "marker failure must discard canonical and cleanup tick notifications"
-    );
-    assert_poisoned_node_exposes_nothing(&mut core);
-
-    drop(core);
-    let mut reopened = NodeState::new(node(0xd1), schema(), storage).unwrap();
-    let stored = reopened
-        .transaction_record(tx_id)
-        .expect("restart must recover the accepted transaction before serving it");
-    assert_eq!(stored.fate, Fate::Accepted);
-    assert_eq!(stored.global_seq, Some(GlobalSeq(1)));
-    assert_eq!(stored.durability, DurabilityTier::Global);
-    assert_eq!(
-        reopened
-            .current_rows("todos", DurabilityTier::Global)
-            .unwrap()
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row(0xd6), title_cells("marker recovery"))])
-    );
-    assert_currency_tables_match_storage(&mut reopened, "todos");
-}
-
-/// The successful control proves the same multi-batch authority path releases
-/// exactly one subscription tick, and only after both storage commits complete.
-#[test]
-fn successful_authority_finalization_publishes_after_every_storage_batch() {
+fn successful_authority_finalization_uses_one_atomic_storage_batch() {
     let (mut writer, _) = fail_write_many_node();
     let (_tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -321,8 +221,8 @@ fn successful_authority_finalization_publishes_after_every_storage_batch() {
 
     assert_eq!(
         storage.write_many_call_count() - writes_before,
-        3,
-        "authority ingest must finish canonical persistence, cleanup, and its marker before returning fate"
+        1,
+        "authority ingest must persist canonical state and cleanup in one atomic batch"
     );
     assert!(matches!(
         updates.as_slice(),
@@ -346,11 +246,10 @@ fn successful_authority_finalization_publishes_after_every_storage_batch() {
     ));
 }
 
-/// Resident subscription output is visible synchronously even when the later
-/// persistence boundary fails. The database is poisoned rather than trying to
-/// retract an observation that local callers may already have consumed.
+/// Authority ingress holds subscription output until its one durable batch
+/// succeeds; a failed batch emits neither resident deltas nor fate output.
 #[test]
-fn persistence_failure_does_not_hide_resident_subscription_output() {
+fn authority_persistence_failure_publishes_no_resident_subscription_output() {
     let (mut writer, _) = fail_write_many_node();
     let (_tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -361,17 +260,17 @@ fn persistence_failure_does_not_hide_resident_subscription_output() {
     let (mut core, storage) = fail_write_many_node();
     let history = core.subscribe_history("todos").unwrap();
     assert!(history.recv().unwrap().is_empty());
-    storage.fail_nth_following_write_many(2);
+    storage.fail_nth_following_write_many(1);
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("local write must produce a commit unit")
     };
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .expect_err("persistence failure must fail the commit unit");
-    assert_eq!(history.try_recv().unwrap().to_values().unwrap().len(), 1);
     assert!(matches!(
         history.try_recv(),
         Err(std::sync::mpsc::TryRecvError::Empty)
     ));
+    assert_poisoned_node_exposes_nothing(&mut core);
 }
 
 /// A complete commit unit is one Groove publication and its resident delta is

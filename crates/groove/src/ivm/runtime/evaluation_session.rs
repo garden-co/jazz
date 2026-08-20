@@ -208,14 +208,14 @@ impl<'a> StorageRequests<'a> {
         &mut self,
     ) -> Result<
         BTreeMap<StorageRequestKey, StorageRequestOutput>,
-        (StorageRequestKey, super::IvmRuntimeError),
+        Box<(StorageRequestKey, super::IvmRuntimeError)>,
     > {
         let ready = std::mem::take(&mut self.ready);
         ready
             .into_iter()
             .map(|(key, value)| match value {
                 Ok(value) => Ok((key, value)),
-                Err(error) => Err((key, error)),
+                Err(error) => Err(Box::new((key, error))),
             })
             .collect()
     }

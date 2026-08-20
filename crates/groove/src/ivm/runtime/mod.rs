@@ -165,6 +165,9 @@ pub struct IvmRuntime {
     /// Binding retractions discovered while routing notifications cannot tick
     /// recursively; the next public tick drains them before user deltas run.
     pending_binding_retractions: Vec<BindingDelta>,
+    deferred_notifications: HashMap<PublicationId, Vec<(SubscriptionId, QueuedMultisinkDeltas)>>,
+    durable_notification_publications: HashSet<PublicationId>,
+    completed_deferred_publications: HashSet<PublicationId>,
     /// Persistent operator state keyed by scope and node. This survives ticks;
     /// see [`EvalMemoKey`] for per-evaluation caching.
     operator_states: HashMap<OperatorStateKey, OperatorState>,
@@ -233,6 +236,9 @@ impl IvmRuntime {
             auto_direct_families: HashMap::default(),
             binding_sources: HashMap::default(),
             pending_binding_retractions: Vec::new(),
+            deferred_notifications: HashMap::default(),
+            durable_notification_publications: HashSet::default(),
+            completed_deferred_publications: HashSet::default(),
         };
         runtime.define_schema_index_variant_projections()?;
         runtime.add_dedup_schema_indices()?;

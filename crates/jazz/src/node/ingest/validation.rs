@@ -63,7 +63,6 @@ where
         update_current_indexes: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
-        let needs_consistency_marker = matches!(fate, Fate::Rejected(_)) || global_seq.is_some();
         let mut batch = self.database.open_batch();
         let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
             &mut batch,
@@ -84,12 +83,8 @@ where
             &staged_versions,
         )
         .await?;
-        self.database.commit_batch(batch).await?;
+        self.database.commit_batch_durable(batch).await?;
         self.invalidate_tx_version_table_names_cache(tx_id);
-        if needs_consistency_marker {
-            self.persist_storage_consistency_marker_through(tx_id.time)
-                .await?;
-        }
         Ok(())
     }
 
