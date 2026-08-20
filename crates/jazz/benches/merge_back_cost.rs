@@ -3,6 +3,8 @@ use std::time::Instant;
 
 mod support;
 
+use support::BenchFutureExt as _;
+
 use jazz::block_on;
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};

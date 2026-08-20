@@ -233,3 +233,6 @@ criterion_group! {
     targets = guarded_benches
 }
 criterion_main!(benches);
+mod support;
+
+use support::BenchFutureExt as _;

@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 
 mod support;
 
+use support::BenchFutureExt as _;
+
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -110,13 +112,9 @@ impl SyncBench {
             relay_ingest(&mut self.worker, &unit);
             relay_ingest(&mut self.edge, &unit);
             let fate = core_ingest(&mut self.core, &unit, now_ms);
-            self.edge
-                .apply_sync_message(fate.clone())
-                .expect("edge fate");
-            self.worker
-                .apply_sync_message(fate.clone())
-                .expect("worker fate");
-            self.ui.apply_sync_message(fate.clone()).expect("ui fate");
+            support::apply_and_settle(&mut self.edge, fate.clone());
+            support::apply_and_settle(&mut self.worker, fate.clone());
+            support::apply_and_settle(&mut self.ui, fate.clone());
             self.metrics.record_fate_rtt(start.elapsed());
 
             match &fate {
@@ -146,7 +144,7 @@ impl SyncBench {
     }
 
     fn seed_policy_hidden_row(&mut self) {
-        let (tx_id, unit) = self
+        let (publication, unit) = self
             .ui
             .commit_mergeable_unit(
                 MergeableCommit::new(TABLE, row(250), 1)
@@ -154,6 +152,7 @@ impl SyncBench {
                     .cells(cells("other-owner", self.other_owner)),
             )
             .expect("hidden row");
+        let tx_id = support::settle_transaction(&mut self.ui, publication);
         let fate = self.pipeline_without_timing(&unit, u64::MAX - SKEW_TOLERANCE_MS);
         assert!(matches!(
             fate,
@@ -169,13 +168,9 @@ impl SyncBench {
         relay_ingest(&mut self.worker, unit);
         relay_ingest(&mut self.edge, unit);
         let fate = core_ingest(&mut self.core, unit, now_ms);
-        self.edge
-            .apply_sync_message(fate.clone())
-            .expect("edge fate");
-        self.worker
-            .apply_sync_message(fate.clone())
-            .expect("worker fate");
-        self.ui.apply_sync_message(fate.clone()).expect("ui fate");
+        support::apply_and_settle(&mut self.edge, fate.clone());
+        support::apply_and_settle(&mut self.worker, fate.clone());
+        support::apply_and_settle(&mut self.ui, fate.clone());
         fate
     }
 
@@ -205,16 +200,17 @@ impl SyncBench {
         if let Some(parent) = self.parents.get(&row_uuid).copied() {
             commit = commit.parents(vec![parent]);
         }
-        let (tx_id, unit) = self
+        let (publication, unit) = self
             .ui
             .commit_mergeable_unit(commit.cells(cells(format!("merge-{step}"), self.ui_owner)))
             .expect("mergeable commit");
+        let tx_id = support::settle_transaction(&mut self.ui, publication);
         (tx_id, unit, u64::MAX - SKEW_TOLERANCE_MS)
     }
 
     fn next_skewed_mergeable(&mut self, step: usize) -> (TxId, SyncMessage, u64) {
         let row_uuid = row(90 + (step % 8) as u8);
-        let (tx_id, unit) = self
+        let (publication, unit) = self
             .ui
             .commit_mergeable_unit(
                 MergeableCommit::new(TABLE, row_uuid, 1_000_000 + step as u64)
@@ -222,12 +218,13 @@ impl SyncBench {
                     .cells(cells(format!("skew-{step}"), self.ui_owner)),
             )
             .expect("skewed commit");
+        let tx_id = support::settle_transaction(&mut self.ui, publication);
         (tx_id, unit, 0)
     }
 
     fn next_deletion_content(&mut self, step: usize) -> (TxId, SyncMessage, u64) {
         let row_uuid = row(70 + (step / 80) as u8);
-        let (tx_id, unit) = self
+        let (publication, unit) = self
             .ui
             .commit_mergeable_unit(
                 MergeableCommit::new(TABLE, row_uuid, 2_000 + step as u64)
@@ -235,6 +232,7 @@ impl SyncBench {
                     .cells(cells(format!("delete-base-{step}"), self.ui_owner)),
             )
             .expect("delete base");
+        let tx_id = support::settle_transaction(&mut self.ui, publication);
         (tx_id, unit, u64::MAX - SKEW_TOLERANCE_MS)
     }
 
@@ -244,7 +242,7 @@ impl SyncBench {
         event: DeletionEvent,
     ) -> (TxId, SyncMessage, u64) {
         let row_uuid = row(70 + ((step - 1) / 80) as u8);
-        let (tx_id, unit) = self
+        let (publication, unit) = self
             .ui
             .commit_mergeable_unit(
                 MergeableCommit::new(TABLE, row_uuid, 2_000 + step as u64)
@@ -252,6 +250,7 @@ impl SyncBench {
                     .deletion(event),
             )
             .expect("deletion event");
+        let tx_id = support::settle_transaction(&mut self.ui, publication);
         (tx_id, unit, u64::MAX - SKEW_TOLERANCE_MS)
     }
 
@@ -269,10 +268,11 @@ impl SyncBench {
                 None,
             )
             .expect("write");
-        let (tx_id, unit) = self
+        let (publication, unit) = self
             .ui
             .commit_exclusive(tx_id, self.ui_author, 3_000 + step as u64)
             .expect("exclusive");
+        let tx_id = support::settle_transaction(&mut self.ui, publication);
         (tx_id, unit, u64::MAX - SKEW_TOLERANCE_MS)
     }
 
@@ -425,9 +425,10 @@ fn core_ingest(
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
-    let [fate] = core
+    let outcome = core
         .ingest_commit_unit(tx.clone(), versions.clone(), now_ms)
-        .expect("core ingest")
+        .expect("core ingest");
+    let [fate] = support::settle_outcome(core, outcome)
         .try_into()
         .expect("one fate update");
     fate
@@ -441,7 +442,7 @@ fn refresh(
     let update = peer
         .current_rows_update(upstream, TABLE)
         .expect("view update");
-    downstream.apply_sync_message(update).expect("apply view");
+    support::apply_and_settle(downstream, update);
 }
 
 fn content_unit_row(unit: &SyncMessage) -> Option<RowUuid> {

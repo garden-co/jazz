@@ -6,6 +6,10 @@
 //! core has no public server sync-scope API, so these cases exercise the same
 //! owner-filtered query and initial subscription path through `Db`.
 
+mod support;
+
+use support::BenchFutureExt as _;
+
 use std::collections::BTreeMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};

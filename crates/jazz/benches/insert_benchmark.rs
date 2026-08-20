@@ -341,3 +341,6 @@ fn guarded_benches(c: &mut Criterion) {
 
 criterion_group!(benches, guarded_benches);
 criterion_main!(benches);
+mod support;
+
+use support::BenchFutureExt as _;

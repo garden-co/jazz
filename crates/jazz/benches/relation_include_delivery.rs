@@ -92,6 +92,7 @@ struct DeliveryShape {
     added: usize,
     updated: usize,
     removed: usize,
+    terminal_operations: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -164,6 +165,10 @@ fn emit_rung(scale: usize, samples: usize, summary: RungSummary, all: &[Measurem
     fields.insert(
         "delivered_removed".to_owned(),
         json!(summary.delivery.removed),
+    );
+    fields.insert(
+        "delivered_terminal_operations".to_owned(),
+        json!(summary.delivery.terminal_operations),
     );
     emit_json_line("relation_include_delivery", fields);
 }
@@ -384,24 +389,33 @@ fn expect_single_child_delta(event: SubscriptionEvent, parent: RowUuid) -> Deliv
             added,
             updated,
             removed,
+            terminal_operations,
             ..
         } => {
             assert!(!reset, "structured child changes must remain incremental");
             assert!(added.is_empty(), "an existing terminal root is not added");
-            assert_eq!(updated.len(), 1, "exactly one terminal root is updated");
             assert!(
                 removed.is_empty(),
                 "an existing terminal root is not removed"
             );
-            assert!(
-                added.iter().any(|row| row.row_uuid() == parent)
-                    || updated.iter().any(|row| row.row_uuid() == parent),
-                "one child insert did not deliver a terminal root"
+            let parent_root_key = [10]
+                .into_iter()
+                .chain(parent.0.as_bytes().iter().copied())
+                .collect::<Vec<_>>();
+            let parent_terminal_operations = terminal_operations
+                .iter()
+                .filter(|operation| operation.root_key == parent_root_key)
+                .count();
+            assert_eq!(
+                updated.len() + parent_terminal_operations,
+                1,
+                "exactly one terminal-root change is delivered"
             );
             DeliveryShape {
                 added: added.len(),
                 updated: updated.len(),
                 removed: removed.len(),
+                terminal_operations: terminal_operations.len(),
             }
         }
         other => panic!("expected measured relation delta, got {other:?}"),

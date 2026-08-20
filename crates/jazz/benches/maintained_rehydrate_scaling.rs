@@ -3,6 +3,8 @@ use std::time::Instant;
 
 mod support;
 
+use support::BenchFutureExt as _;
+
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{NodeUuid, RowUuid};
@@ -234,10 +236,11 @@ impl Fixture {
     }
 
     fn commit(&mut self, commit: MergeableCommit) -> TxId {
-        let (tx_id, unit) = self
+        let (publication, unit) = self
             .writer
             .commit_mergeable_unit(commit)
             .expect("create fixture commit");
+        let tx_id = support::settle_transaction(&mut self.writer, publication);
         let fate = core_ingest(&mut self.core, &unit, u64::MAX - SKEW_TOLERANCE_MS);
         assert!(matches!(
             fate,
@@ -258,9 +261,10 @@ fn core_ingest(
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
-    let [fate] = core
+    let outcome = core
         .ingest_commit_unit(tx.clone(), versions.clone(), now_ms)
-        .expect("core ingest")
+        .expect("core ingest");
+    let [fate] = support::settle_outcome(core, outcome)
         .try_into()
         .expect("one fate update");
     fate
