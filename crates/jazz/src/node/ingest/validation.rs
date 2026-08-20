@@ -78,50 +78,30 @@ where
         view_scoped_cardinality: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
-        let publication_scope = self.database.begin_durable_publication_scope()?;
-        let result = async {
-            let mut batch = self.database.open_batch();
-            self.stage_transaction_and_versions_with_current_indexes(
-                &mut batch,
-                tx,
-                versions,
-                fate.clone(),
-                global_time,
-                durability,
-                update_current_indexes,
-                view_scoped_cardinality,
-                None,
-            )
-            .await?;
-            self.database.commit_batch(batch).await?;
-            let mut staged_global_times = Vec::new();
-            let mut cleanup_batch = self.database.open_batch();
-            self.finalize_staged_transaction_ingest(
-                &mut cleanup_batch,
-                tx_id,
-                fate,
-                global_time,
-                &mut staged_global_times,
-            )
-            .await?;
-            if !cleanup_batch.is_empty() {
-                self.database.commit_batch(cleanup_batch).await?;
-                self.persist_storage_consistency_marker_through(tx_id.time)
-                    .await?;
-            }
-            Ok(())
-        }
-        .await;
-        match result {
-            Ok(()) => {
-                publication_scope.finish(&mut self.database);
-                Ok(())
-            }
-            Err(error) => {
-                publication_scope.abort(&mut self.database);
-                Err(error)
-            }
-        }
+        let mut batch = self.database.open_batch();
+        let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
+            &mut batch,
+            tx,
+            versions,
+            fate.clone(),
+            global_time,
+            durability,
+            update_current_indexes,
+            view_scoped_cardinality,
+            None,
+        )
+        .await?;
+        let mut staged_global_times = Vec::new();
+        self.finalize_staged_transaction_ingest(
+            &mut batch,
+            fate,
+            global_time,
+            &mut staged_global_times,
+            &staged_versions,
+        )
+        .await?;
+        self.database.commit_batch_durable(batch).await?;
+        self.invalidate_tx_version_table_names_cache(tx_id);
         Ok(())
     }
 
@@ -136,7 +116,7 @@ where
         update_current_indexes: bool,
         view_scoped_cardinality: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<VersionRow>, Error> {
         self.merge_tx_time(tx.tx_id.time);
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         let stored_tx = self.query_transaction(tx.tx_id).await?;

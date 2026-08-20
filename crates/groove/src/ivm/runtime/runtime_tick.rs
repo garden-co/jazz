@@ -50,6 +50,7 @@ pub(super) struct IncrementalEvaluation<'a> {
     terminal_deltas: HashMap<NodeId, TerminalDeltas>,
     root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
     notification_publication: Option<PublicationId>,
+    defer_notifications_until_durable: bool,
 }
 
 struct EvaluationFailure {
@@ -400,10 +401,9 @@ impl IncrementalEvaluation<'_> {
         self.storage_requests.poll(cx);
         let ready = match self.storage_requests.drain_ready() {
             Ok(ready) => ready,
-            Err((request, error)) => {
-                return Poll::Ready(Err(self
-                    .work_queue
-                    .failure_for_request(&request, error.into())));
+            Err(error) => {
+                let (request, error) = *error;
+                return Poll::Ready(Err(self.work_queue.failure_for_request(&request, error)));
             }
         };
         self.work_queue.storage_ready(ready.keys().cloned());
@@ -551,8 +551,22 @@ impl IncrementalEvaluation<'_> {
             }
             let mut queued = QueuedMultisinkDeltas::new(records);
             queued.publication = self.notification_publication;
-            if !queued.deltas.is_empty() && subscription.sender.send(queued).is_err() {
-                dropped_subscriptions.push(*subscription_id);
+            if !queued.deltas.is_empty() {
+                if self.defer_notifications_until_durable
+                    && self.notification_publication.is_some_and(|publication| {
+                        !runtime
+                            .durable_notification_publications
+                            .contains(&publication)
+                    })
+                {
+                    runtime
+                        .deferred_notifications
+                        .entry(self.notification_publication.expect("checked publication"))
+                        .or_default()
+                        .push((*subscription_id, queued));
+                } else if subscription.sender.send(queued).is_err() {
+                    dropped_subscriptions.push(*subscription_id);
+                }
             }
             self.published_subscriptions.insert(*subscription_id);
         }
@@ -574,6 +588,14 @@ impl IncrementalEvaluation<'_> {
             runtime.affected_recursive_nodes_are_current(&self.affected_nodes, self.current_tick)
         );
         runtime.evict_eval_memo();
+        if self.defer_notifications_until_durable
+            && let Some(publication) = self.notification_publication
+            && !runtime
+                .durable_notification_publications
+                .remove(&publication)
+        {
+            runtime.completed_deferred_publications.insert(publication);
+        }
         self.metrics.runtime_stats = if runtime.collect_tick_runtime_stats {
             runtime.stats()
         } else {
@@ -675,7 +697,7 @@ impl<'a> EvaluationSession<'a> {
         self.storage_requests.poll(cx);
         let ready = match self.storage_requests.drain_ready() {
             Ok(ready) => ready,
-            Err((_, error)) => return Poll::Ready(Err(error.into())),
+            Err(error) => return Poll::Ready(Err(error.1)),
         };
         self.work_queue.storage_ready(ready.keys().cloned());
         self.evaluation_inputs.install(ready);
@@ -862,6 +884,7 @@ impl IvmRuntime {
         table_deltas: Vec<TableDelta>,
         storage: OwnedStorage<'static>,
         publication: PublicationId,
+        defer_notifications_until_durable: bool,
     ) -> Result<TickMetrics, IvmRuntimeError> {
         let temporal_blockers = {
             let pending = self.pending_incremental.0.borrow();
@@ -872,7 +895,13 @@ impl IvmRuntime {
                 .collect()
         };
         let mut evaluation = self
-            .begin_tick_with_params(table_deltas, Vec::new(), storage, Some(publication))
+            .begin_tick_with_params_and_notification_policy(
+                table_deltas,
+                Vec::new(),
+                storage,
+                Some(publication),
+                defer_notifications_until_durable,
+            )
             .await?;
         evaluation
             .work_queue
@@ -913,6 +942,45 @@ impl IvmRuntime {
                 Ok(metrics)
             }
         }
+    }
+
+    pub(crate) fn settle_deferred_notifications(&mut self, publication: PublicationId) {
+        if self.completed_deferred_publications.remove(&publication) {
+            if let Some(notifications) = self.deferred_notifications.remove(&publication) {
+                self.send_deferred_notifications(notifications);
+            }
+            return;
+        }
+        self.durable_notification_publications.insert(publication);
+        let Some(notifications) = self.deferred_notifications.remove(&publication) else {
+            return;
+        };
+        self.send_deferred_notifications(notifications);
+    }
+
+    fn send_deferred_notifications(
+        &mut self,
+        notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
+    ) {
+        let mut dropped = Vec::new();
+        for (subscription_id, queued) in notifications {
+            if self
+                .multisink_subscriptions
+                .get(&subscription_id)
+                .is_some_and(|subscription| subscription.sender.send(queued).is_err())
+            {
+                dropped.push(subscription_id);
+            }
+        }
+        for subscription_id in dropped {
+            self.unsubscribe(subscription_id);
+        }
+    }
+
+    pub(crate) fn discard_deferred_notifications(&mut self, publication: PublicationId) {
+        self.deferred_notifications.remove(&publication);
+        self.completed_deferred_publications.remove(&publication);
+        self.durable_notification_publications.remove(&publication);
     }
 
     pub(crate) fn poll_pending_incremental(
@@ -1019,9 +1087,27 @@ impl IvmRuntime {
     async fn begin_tick_with_params<'a>(
         &mut self,
         table_deltas: Vec<TableDelta>,
+        binding_deltas: Vec<BindingDelta>,
+        storage: OwnedStorage<'a>,
+        notification_publication: Option<PublicationId>,
+    ) -> Result<IncrementalEvaluation<'a>, IvmRuntimeError> {
+        self.begin_tick_with_params_and_notification_policy(
+            table_deltas,
+            binding_deltas,
+            storage,
+            notification_publication,
+            false,
+        )
+        .await
+    }
+
+    async fn begin_tick_with_params_and_notification_policy<'a>(
+        &mut self,
+        table_deltas: Vec<TableDelta>,
         mut binding_deltas: Vec<BindingDelta>,
         storage: OwnedStorage<'a>,
         notification_publication: Option<PublicationId>,
+        defer_notifications_until_durable: bool,
     ) -> Result<IncrementalEvaluation<'a>, IvmRuntimeError> {
         if !self.pending_binding_retractions.is_empty() {
             let mut pending = std::mem::take(&mut self.pending_binding_retractions);
@@ -1133,6 +1219,7 @@ impl IvmRuntime {
             terminal_deltas: HashMap::default(),
             root_ordering_windows: HashMap::default(),
             notification_publication,
+            defer_notifications_until_durable,
         })
     }
 

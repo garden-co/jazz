@@ -71,6 +71,7 @@ pub struct PublishedBatch {
     ivm_tick_time: Duration,
     storage_writes: StorageWriteMetrics,
     tick: TickMetrics,
+    notifications_deferred: bool,
 }
 
 impl PublishedBatch {
@@ -104,6 +105,7 @@ impl PublishedBatch {
         PublicationPersistence {
             publication: self.publication,
             result,
+            notifications_deferred: self.notifications_deferred,
             metrics: CommitMetrics {
                 storage_write_time,
                 ivm_tick_time: self.ivm_tick_time,
@@ -126,6 +128,7 @@ struct PublicationPersistenceOrder {
 pub struct PublicationPersistence {
     publication: PublicationId,
     result: Result<(), crate::storage::Error>,
+    notifications_deferred: bool,
     metrics: CommitMetrics,
 }
 

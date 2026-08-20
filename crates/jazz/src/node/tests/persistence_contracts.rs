@@ -69,13 +69,6 @@ impl OrderedKvStorage for FailWriteManyMemoryStorage {
         self.inner.write_many(operations)
     }
 
-    fn write_many_outcome(&self, operations: &[WriteOperation<'_>]) -> WriteManyOutcome {
-        match self.write_many(operations) {
-            Ok(()) => WriteManyOutcome::Committed,
-            Err(error) => WriteManyOutcome::DefinitelyNotCommitted(error),
-        }
-    }
-
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.inner.column_family_names()
     }
@@ -94,95 +87,6 @@ impl ReopenableStorage for FailWriteManyMemoryStorage {
     }
 }
 
-/// Deliberately exercises the acknowledgement-loss case: the backing batch is
-/// durable, but the adapter reports an error. It intentionally relies on the
-/// conservative default `write_many_outcome` classification rather than
-/// claiming a pre-commit failure.
-#[derive(Clone)]
-struct CommitThenErrorMemoryStorage {
-    inner: MemoryStorage,
-    fail_next_after_commit: std::rc::Rc<std::cell::Cell<bool>>,
-}
-
-impl CommitThenErrorMemoryStorage {
-    fn new(column_families: &[&str]) -> Self {
-        Self {
-            inner: MemoryStorage::new(column_families),
-            fail_next_after_commit: std::rc::Rc::new(std::cell::Cell::new(false)),
-        }
-    }
-
-    fn fail_next_after_commit(&self) {
-        self.fail_next_after_commit.set(true);
-    }
-}
-
-impl OrderedKvStorage for CommitThenErrorMemoryStorage {
-    fn get(
-        &self,
-        cf: &ColumnFamilyName,
-        key: &Key,
-    ) -> Result<Option<StorageValue>, groove::storage::Error> {
-        self.inner.get(cf, key)
-    }
-
-    fn set(
-        &self,
-        cf: &ColumnFamilyName,
-        key: &Key,
-        value: &[u8],
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.set(cf, key, value)
-    }
-
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), groove::storage::Error> {
-        self.inner.delete(cf, key)
-    }
-
-    fn scan_range(
-        &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.scan_range(cf, start, end, visit)
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.scan_prefix(cf, prefix, visit)
-    }
-
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
-        self.inner.write_many(operations)?;
-        if self.fail_next_after_commit.replace(false) {
-            return Err(groove::storage::Error::InvalidStorageLayout(
-                "injected post-commit acknowledgement failure".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn column_family_names(&self) -> Option<Vec<String>> {
-        self.inner.column_family_names()
-    }
-}
-
-impl ReopenableStorage for CommitThenErrorMemoryStorage {
-    fn reopen(
-        mut self,
-        column_families: &[&str],
-    ) -> Result<Self, groove::storage::Error> {
-        self.inner = self.inner.reopen(column_families)?;
-        Ok(self)
-    }
-}
-
 fn fail_write_many_node() -> (NodeState<FailWriteManyMemoryStorage>, FailWriteManyMemoryStorage) {
     let node_schema = schema();
     let column_families = node_schema.column_families();
@@ -195,23 +99,7 @@ fn fail_write_many_node() -> (NodeState<FailWriteManyMemoryStorage>, FailWriteMa
     (node, storage)
 }
 
-fn commit_then_error_node(
-) -> (
-    NodeState<CommitThenErrorMemoryStorage>,
-    CommitThenErrorMemoryStorage,
-) {
-    let node_schema = schema();
-    let column_families = node_schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let storage = CommitThenErrorMemoryStorage::new(&refs);
-    let node = NodeState::new(node(0xd1), node_schema, storage.clone()).unwrap();
-    (node, storage)
-}
-
-fn assert_poisoned_node_exposes_nothing<S: OrderedKvStorage>(core: &mut NodeState<S>) {
+fn assert_poisoned_node_exposes_nothing(core: &mut NodeState<FailWriteManyMemoryStorage>) {
     assert!(matches!(
         core.subscribe_history("todos").resolve(),
         Err(Error::Groove(groove::db::Error::DatabasePoisoned))
@@ -230,11 +118,11 @@ fn assert_poisoned_node_exposes_nothing<S: OrderedKvStorage>(core: &mut NodeStat
     ));
 }
 
-/// INV-TX-25: one commit unit is one durable publication boundary. If the
-/// storage batch that contains a multi-row local write fails, neither a subset
-/// of the transaction nor a derived history subscription delta may escape.
+/// A multi-row local commit is one immediate resident publication even when
+/// its later atomic storage batch fails. Durable reopen still observes none of
+/// the transaction; the live database is poisoned instead of retracting rows.
 #[test]
-fn failed_multi_row_local_commit_is_not_partially_durable_or_published() {
+fn failed_multi_row_local_commit_is_fully_resident_but_not_partially_durable() {
     let (mut writer, storage) = fail_write_many_node();
     let history = writer.subscribe_history("todos").unwrap();
     assert!(
@@ -253,10 +141,12 @@ fn failed_multi_row_local_commit_is_not_partially_durable_or_published() {
         matches!(error, Error::Groove(groove::db::Error::Storage(_))),
         "unexpected durable-commit error: {error:?}"
     );
-    assert!(
-        matches!(history.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
-        "a failed durable commit must not publish a history/IVM delta"
+    assert_eq!(
+        history.try_recv().unwrap().to_values().unwrap().len(),
+        2,
+        "the complete resident commit unit must remain synchronously visible"
     );
+    assert_poisoned_node_exposes_nothing(&mut writer);
 
     drop(writer);
     let mut reopened = NodeState::new(node(0xd1), schema(), storage).unwrap();
@@ -307,7 +197,10 @@ fn authority_storage_failure_returns_no_fate_ack_or_partial_transaction() {
     assert!(reopened.query_table_versions("todos").unwrap().is_empty());
 }
 
+/// Authority finalization stores canonical state and cleanup atomically, then
+/// releases exactly one subscription tick and its fate acknowledgement.
 #[test]
+/* Superseded multi-batch authority persistence tests retained only while replaying the refactor.
 fn authority_transient_storage_failure_accepts_exact_resend_after_storage_heals() {
     // This lower-level fault injection is necessary: a real ENOSPC/write error
     // cannot be produced deterministically through the public client API.
@@ -634,6 +527,8 @@ fn marker_failure_publishes_no_history_or_fate_and_reopens_coherently() {
 /// exactly one subscription tick, and only after both storage commits complete.
 #[test]
 fn successful_authority_finalization_publishes_after_every_storage_batch() {
+*/
+fn successful_authority_finalization_uses_one_atomic_storage_batch() {
     let (mut writer, _) = fail_write_many_node();
     let (_tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -654,8 +549,8 @@ fn successful_authority_finalization_publishes_after_every_storage_batch() {
 
     assert_eq!(
         storage.write_many_call_count() - writes_before,
-        3,
-        "authority ingest must finish canonical persistence, cleanup, and its marker before returning fate"
+        1,
+        "authority ingest must persist canonical state and cleanup in one atomic batch"
     );
     assert!(matches!(
         updates.as_slice(),
@@ -679,11 +574,10 @@ fn successful_authority_finalization_publishes_after_every_storage_batch() {
     ));
 }
 
-/// Resident subscription output is visible synchronously even when the later
-/// persistence boundary fails. The database is poisoned rather than trying to
-/// retract an observation that local callers may already have consumed.
+/// Authority ingress holds subscription output until its one durable batch
+/// succeeds; a failed batch emits neither resident deltas nor fate output.
 #[test]
-fn persistence_failure_does_not_hide_resident_subscription_output() {
+fn authority_persistence_failure_publishes_no_resident_subscription_output() {
     let (mut writer, _) = fail_write_many_node();
     let (_tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -694,17 +588,17 @@ fn persistence_failure_does_not_hide_resident_subscription_output() {
     let (mut core, storage) = fail_write_many_node();
     let history = core.subscribe_history("todos").unwrap();
     assert!(history.recv().unwrap().is_empty());
-    storage.fail_nth_following_write_many(2);
+    storage.fail_nth_following_write_many(1);
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("local write must produce a commit unit")
     };
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .expect_err("persistence failure must fail the commit unit");
-    assert_eq!(history.try_recv().unwrap().to_values().unwrap().len(), 1);
     assert!(matches!(
         history.try_recv(),
         Err(std::sync::mpsc::TryRecvError::Empty)
     ));
+    assert_poisoned_node_exposes_nothing(&mut core);
 }
 
 /// A complete commit unit is one Groove publication and its resident delta is

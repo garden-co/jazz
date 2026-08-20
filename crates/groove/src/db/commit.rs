@@ -101,10 +101,34 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically persist a batch before releasing its subscription deltas.
+    ///
+    /// Resident evaluation still builds the complete storage batch in one
+    /// pass, but notifications are held until that batch is durable. This is
+    /// intended for authority/receiver ingress, where an acknowledgement or
+    /// observed delta must never escape a failed durable commit.
+    pub async fn commit_batch_durable(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
+        let publication = self
+            .publish_batch_with_notification_policy(batch, true)
+            .await?;
+        let persistence = publication.persist().await;
+        self.settle_publication(persistence)?;
+        Ok(())
+    }
+
     /// Publish resident rows and unblocked terminal deltas before ordered
     /// persistence. The returned handle owns persistence and no longer borrows
     /// this database, so resident queries may continue while storage suspends.
     pub async fn publish_batch(&mut self, batch: DatabaseBatch) -> Result<PublishedBatch, Error> {
+        self.publish_batch_with_notification_policy(batch, false)
+            .await
+    }
+
+    async fn publish_batch_with_notification_policy(
+        &mut self,
+        batch: DatabaseBatch,
+        defer_notifications_until_durable: bool,
+    ) -> Result<PublishedBatch, Error> {
         self.ensure_not_poisoned()?;
         let pending_writes = self.pending_writes_from_batch(batch)?;
         let descriptors = pending_writes
@@ -153,7 +177,12 @@ impl Database {
         let tick_start = Instant::now();
         let tick = match self
             .ivm_runtime
-            .tick_resident_staged(table_deltas, OwnedStorage::new(storage), publication)
+            .tick_resident_staged(
+                table_deltas,
+                OwnedStorage::new(storage),
+                publication,
+                defer_notifications_until_durable,
+            )
             .await
         {
             Ok(tick) => tick,
@@ -183,6 +212,7 @@ impl Database {
             ivm_tick_time,
             storage_writes,
             tick,
+            notifications_deferred: defer_notifications_until_durable,
         })
     }
 
@@ -195,6 +225,10 @@ impl Database {
         self.last_tick_metrics = Some(persistence.metrics.tick.clone());
         self.last_commit_metrics = Some(persistence.metrics.clone());
         if let Err(error) = persistence.result {
+            if persistence.notifications_deferred {
+                self.ivm_runtime
+                    .discard_deferred_notifications(persistence.publication);
+            }
             self.poisoned = true;
             return Err(Error::from(error));
         }
@@ -218,6 +252,10 @@ impl Database {
             resident_writes.extend(operations.iter().cloned());
         }
         *self.resident_writes.borrow_mut() = resident_writes;
+        if persistence.notifications_deferred {
+            self.ivm_runtime
+                .settle_deferred_notifications(persistence.publication);
+        }
         Ok(persistence.publication)
     }
 
