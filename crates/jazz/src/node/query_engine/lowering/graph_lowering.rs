@@ -1226,7 +1226,22 @@ fn lower_linear_plan_steps_with_cache(
                                 occurrence_fields.insert(output.clone());
                             }
                         }
-                        if let Some(right_source_id) = right.root_source() {
+                        if let Some((arm_field, row_field)) =
+                            &lowered_right.union_occurrence_carrier
+                        {
+                            let arm_output = format!("__root_join_arm_{step_index}");
+                            let row_output = format!("__root_join_row_{step_index}");
+                            projection.push(ProjectField::renamed(
+                                right_field(arm_field),
+                                arm_output.clone(),
+                            ));
+                            projection.push(ProjectField::renamed(
+                                right_field(row_field),
+                                row_output.clone(),
+                            ));
+                            occurrence_fields.insert(arm_output);
+                            occurrence_fields.insert(row_output);
+                        } else if let Some(right_source_id) = right.root_source() {
                             let right_source = resolved_sources.get(right_source_id).ok_or_else(|| {
                                 UnsupportedReason::Operator(format!(
                                     "inner join occurrence source {right_source_id:?} was not resolved"
@@ -1249,21 +1264,6 @@ fn lower_linear_plan_steps_with_cache(
                                 ));
                                 occurrence_fields.insert(output);
                             }
-                        } else if let Some((arm_field, row_field)) =
-                            &lowered_right.union_occurrence_carrier
-                        {
-                            let arm_output = format!("__root_join_arm_{step_index}");
-                            let row_output = format!("__root_join_row_{step_index}");
-                            projection.push(ProjectField::renamed(
-                                right_field(arm_field),
-                                arm_output.clone(),
-                            ));
-                            projection.push(ProjectField::renamed(
-                                right_field(row_field),
-                                row_output.clone(),
-                            ));
-                            occurrence_fields.insert(arm_output);
-                            occurrence_fields.insert(row_output);
                         }
                     }
                     graph = graph.project_fields(projection);

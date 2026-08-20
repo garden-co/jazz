@@ -202,6 +202,7 @@ pub(super) fn fact_public_fields(
                     .filter(|field| **field != schema.row_field)
                     .cloned(),
             );
+            fields.extend(schema.occurrence_union_arm_fields.values().cloned());
             fields.extend(schema.branch_or_prefix_field.clone());
             fields.extend(result_membership_version_fields(&schema.version));
             fields.extend(schema.settle_position_field.clone());

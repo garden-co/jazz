@@ -70,7 +70,11 @@ pub(super) fn lowered_terminals(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or(root_route_fields);
-    let visible_root_with_routes = if root_route_fields.is_empty() {
+    let visible_root_carrier_fields = root_route_fields
+        .union(&root_occurrence_fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let visible_root_with_routes = if visible_root_carrier_fields.is_empty() {
         closure.visible_root.clone()
     } else {
         closure
@@ -78,7 +82,7 @@ pub(super) fn lowered_terminals(
             .clone()
             .project_fields(project_source_fields_with_routes(
                 source,
-                &root_route_fields,
+                &visible_root_carrier_fields,
             ))
     };
     // Correlated path lowering can carry a route field while reporting a
