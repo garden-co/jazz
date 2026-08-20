@@ -897,9 +897,10 @@ where
     #[cfg(feature = "testing")]
     /// Test/bench-only history-class byte estimate. The underlying contract is
     /// cheap whole-class sizing, not logical-prefix accounting.
-    pub fn history_class_bytes_for_test(&self) -> Result<Option<u64>, Error> {
+    pub async fn history_class_bytes_for_test(&self) -> Result<Option<u64>, Error> {
         self.database
             .approximate_class_bytes("__groove_class_history")
+            .await
             .map_err(Error::Groove)
     }
 
@@ -907,7 +908,7 @@ where
     /// Test/bench-only estimate of all Jazz physical-class bytes. This is the
     /// cheap class-CF meter used for memory-amplification receipts; it is not a
     /// logical table-prefix scan.
-    pub fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
+    pub async fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
         let mut total = 0_u64;
         for class_cf in [
             "__groove_class_history",
@@ -922,6 +923,7 @@ where
             total += self
                 .database
                 .approximate_class_bytes(class_cf)
+                .await
                 .map_err(Error::Groove)?
                 .unwrap_or_default();
         }

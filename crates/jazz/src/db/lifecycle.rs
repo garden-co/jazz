@@ -751,22 +751,34 @@ where
     #[cfg(feature = "testing")]
     /// Test/bench-only history-class byte estimate. This is intentionally the
     /// cheap physical-class counter, not a logical table-prefix scan.
-    pub fn history_class_bytes_for_test(&self) -> Result<Option<u64>, Error> {
-        Ok(self.node.node.borrow().history_class_bytes_for_test()?)
+    pub async fn history_class_bytes_for_test(&self) -> Result<Option<u64>, Error> {
+        Ok(self
+            .node
+            .node
+            .lock()
+            .await
+            .history_class_bytes_for_test()
+            .await?)
     }
 
     #[cfg(feature = "testing")]
     /// Test/bench-only encoded storage byte estimate across Jazz physical
     /// classes.
-    pub fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
-        Ok(self.node.node.borrow().encoded_storage_bytes_for_test()?)
+    pub async fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
+        Ok(self
+            .node
+            .node
+            .lock()
+            .await
+            .encoded_storage_bytes_for_test()
+            .await?)
     }
 
     #[cfg(feature = "testing")]
     /// Test/bench-only durability boundary for harnesses that reopen the same
     /// storage path immediately after a synthetic lifecycle transition.
-    pub fn flush_for_test(&self) -> Result<(), Error> {
-        Ok(self.node.node.borrow_mut().flush_query_runtime()?)
+    pub async fn flush_for_test(&self) -> Result<(), Error> {
+        Ok(self.node.node.lock().await.flush_query_runtime().await?)
     }
 
     #[cfg(feature = "testing")]
