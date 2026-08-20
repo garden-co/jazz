@@ -5,6 +5,7 @@ use std::time::Duration;
 
 mod common;
 
+use jazz::block_on;
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
@@ -74,13 +75,17 @@ struct LinkSummary {
 }
 
 struct ThreadResult {
-    node: NodeState<RocksDbStorage>,
+    global_rows: BTreeMap<RowUuid, BTreeMap<String, Value>>,
+    local_rows: BTreeMap<RowUuid, BTreeMap<String, Value>>,
+    subscription_rows: BTreeMap<RowUuid, BTreeMap<String, Value>>,
+    transaction_states: BTreeMap<TxId, (Fate, Option<jazz::time::GlobalSeq>, DurabilityTier)>,
+    sync_metrics: jazz::node::SyncMetrics,
     downstream_peer: Option<LinkSummary>,
 }
 
 struct UiResult {
-    node: NodeState<RocksDbStorage>,
     tx_ids: Vec<TxId>,
+    receipt: ThreadResult,
 }
 
 fn node(byte: u8) -> NodeUuid {
@@ -114,7 +119,7 @@ fn open_node(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).unwrap();
+    let node = block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
     (temp_dir, node)
 }
 
@@ -132,8 +137,29 @@ fn peer_summary(peer: &PeerState) -> LinkSummary {
     }
 }
 
+fn apply_message(node: &mut NodeState<RocksDbStorage>, message: SyncMessage) -> Vec<SyncMessage> {
+    block_on(async {
+        let outcome = node.apply_sync_message(message).await.unwrap();
+        node.persist_and_settle_outcome(outcome).await.unwrap()
+    })
+}
+
+fn commit_unit(
+    node: &mut NodeState<RocksDbStorage>,
+    commit: MergeableCommit,
+) -> (TxId, SyncMessage) {
+    block_on(async {
+        let (published, unit) = node.commit_mergeable_unit(commit).await.unwrap();
+        let tx_id = node
+            .persist_and_settle_transaction(published)
+            .await
+            .unwrap();
+        (tx_id, unit)
+    })
+}
+
 fn send_view(node: &mut NodeState<RocksDbStorage>, peer: &mut PeerState, tx: &Sender<Wire>) {
-    let update = peer.current_rows_update(node, TABLE).unwrap();
+    let update = block_on(peer.current_rows_update(node, TABLE)).unwrap();
     send_sync(tx, update);
 }
 
@@ -141,8 +167,7 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
-    node.ingest_relay_commit_unit(tx.clone(), versions.clone())
-        .unwrap();
+    block_on(node.ingest_relay_commit_unit(tx.clone(), versions.clone())).unwrap();
 }
 
 fn process_downstream(
@@ -156,7 +181,7 @@ fn process_downstream(
             let sync = message.into_sync().unwrap();
             let forward_fate =
                 matches!(&*sync, SyncMessage::FateUpdate { .. }).then(|| sync.clone());
-            node.apply_sync_message(*sync).unwrap();
+            apply_message(node, *sync);
             if let Some(fate) = forward_fate {
                 send_sync(downstream_tx, *fate);
             }
@@ -171,13 +196,34 @@ fn process_downstream(
     }
 }
 
+fn finish_node(
+    node: &mut NodeState<RocksDbStorage>,
+    tx_ids: impl IntoIterator<Item = TxId>,
+    downstream_peer: Option<LinkSummary>,
+) -> ThreadResult {
+    let transaction_states = tx_ids
+        .into_iter()
+        .map(|tx_id| (tx_id, block_on(node.transaction_state(tx_id)).unwrap()))
+        .collect();
+    ThreadResult {
+        global_rows: global_rows(node),
+        local_rows: local_rows(node),
+        subscription_rows: subscription_rows(node),
+        transaction_states,
+        sync_metrics: node.sync_metrics().clone(),
+        downstream_peer,
+    }
+}
+
 fn core_thread(
-    mut core: NodeState<RocksDbStorage>,
+    schema: JazzSchema,
     from_edge: Receiver<Wire>,
     to_edge: Sender<Wire>,
 ) -> ThreadResult {
+    let (_dir, mut core) = open_node(node(4), schema);
     let mut peer = PeerState::new();
     let mut ingests = 0_usize;
+    let mut tx_ids = Vec::new();
     loop {
         match from_edge.recv().unwrap() {
             message @ (Wire::Sync(_) | Wire::Frame(_)) => {
@@ -185,9 +231,14 @@ fn core_thread(
                 let SyncMessage::CommitUnit { tx, versions } = *sync else {
                     panic!("core expected commit unit");
                 };
-                let updates = core
-                    .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-                    .unwrap();
+                tx_ids.push(tx.tx_id);
+                let updates = block_on(async {
+                    let outcome = core
+                        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+                        .await
+                        .unwrap();
+                    core.persist_and_settle_outcome(outcome).await.unwrap()
+                });
                 for update in updates {
                     send_sync(&to_edge, update);
                 }
@@ -203,39 +254,33 @@ fn core_thread(
             }
         }
     }
-    ThreadResult {
-        node: core,
-        downstream_peer: Some(peer_summary(&peer)),
-    }
+    finish_node(&mut core, tx_ids, Some(peer_summary(&peer)))
 }
 
 fn relay_thread(
-    mut node: NodeState<RocksDbStorage>,
+    node_byte: u8,
+    schema: JazzSchema,
     upstream_rx: Receiver<Wire>,
     upstream_tx: Sender<Wire>,
     downstream_rx: Receiver<Wire>,
     downstream_tx: Sender<Wire>,
     mut downstream_peer: PeerState,
 ) -> ThreadResult {
+    let (_dir, mut node) = open_node(node(node_byte), schema);
     let mut forwarded = 0_usize;
+    let mut tx_ids = Vec::new();
     let mut upstream_stopped = false;
     loop {
         while let Ok(message) = downstream_rx.try_recv() {
             if process_downstream(&mut node, message, &downstream_tx, &mut downstream_peer) {
-                return ThreadResult {
-                    node,
-                    downstream_peer: Some(peer_summary(&downstream_peer)),
-                };
+                return finish_node(&mut node, tx_ids, Some(peer_summary(&downstream_peer)));
             }
         }
 
         if upstream_stopped {
             let message = downstream_rx.recv().unwrap();
             if process_downstream(&mut node, message, &downstream_tx, &mut downstream_peer) {
-                return ThreadResult {
-                    node,
-                    downstream_peer: Some(peer_summary(&downstream_peer)),
-                };
+                return finish_node(&mut node, tx_ids, Some(peer_summary(&downstream_peer)));
             }
             continue;
         }
@@ -243,6 +288,9 @@ fn relay_thread(
         match upstream_rx.recv_timeout(Duration::from_millis(1)) {
             Ok(message @ (Wire::Sync(_) | Wire::Frame(_))) => {
                 let sync = message.into_sync().unwrap();
+                if let SyncMessage::CommitUnit { tx, .. } = &*sync {
+                    tx_ids.push(tx.tx_id);
+                }
                 relay_ingest(&mut node, &sync);
                 send_sync(&upstream_tx, *sync);
                 forwarded += 1;
@@ -265,7 +313,7 @@ fn drain_ui_downstream(node: &mut NodeState<RocksDbStorage>, rx: &Receiver<Wire>
         match message {
             Wire::Sync(_) | Wire::Frame(_) => {
                 let sync = message.into_sync().unwrap();
-                node.apply_sync_message(*sync).unwrap();
+                apply_message(node, *sync);
             }
             Wire::Stop => panic!("ui received early stop"),
         }
@@ -273,12 +321,13 @@ fn drain_ui_downstream(node: &mut NodeState<RocksDbStorage>, rx: &Receiver<Wire>
 }
 
 fn ui_thread(
-    mut ui: NodeState<RocksDbStorage>,
+    schema: JazzSchema,
     to_worker: Sender<Wire>,
     from_worker: Receiver<Wire>,
     ui_author: AuthorId,
     ui_owner: AuthorId,
 ) -> UiResult {
+    let (_dir, mut ui) = open_node(node(1), schema);
     let mut tx_ids = Vec::new();
     let mut parents = BTreeMap::<RowUuid, TxId>::new();
 
@@ -290,43 +339,38 @@ fn ui_thread(
             commit = commit.parents(vec![parent]);
         }
         let title = format!("merge-{idx}");
-        let (tx_id, unit) = ui
-            .commit_mergeable_unit(commit.cells(cells(title, ui_owner)))
-            .unwrap();
+        let (tx_id, unit) = commit_unit(&mut ui, commit.cells(cells(title, ui_owner)));
         parents.insert(row_uuid, tx_id);
         tx_ids.push(tx_id);
         send_sync(&to_worker, unit);
 
         if idx == 20 || idx == 70 {
             let deleted = row(30 + (idx / 50) as u8);
-            let (base_tx, base_unit) = ui
-                .commit_mergeable_unit(
-                    MergeableCommit::new(TABLE, deleted, 500 + idx)
-                        .made_by(ui_author)
-                        .cells(cells(format!("delete-base-{idx}"), ui_owner)),
-                )
-                .unwrap();
+            let (base_tx, base_unit) = commit_unit(
+                &mut ui,
+                MergeableCommit::new(TABLE, deleted, 500 + idx)
+                    .made_by(ui_author)
+                    .cells(cells(format!("delete-base-{idx}"), ui_owner)),
+            );
             parents.insert(deleted, base_tx);
             tx_ids.push(base_tx);
             send_sync(&to_worker, base_unit);
 
-            let (delete_tx, delete_unit) = ui
-                .commit_mergeable_unit(
-                    MergeableCommit::new(TABLE, deleted, 501 + idx)
-                        .made_by(ui_author)
-                        .deletion(DeletionEvent::Deleted),
-                )
-                .unwrap();
+            let (delete_tx, delete_unit) = commit_unit(
+                &mut ui,
+                MergeableCommit::new(TABLE, deleted, 501 + idx)
+                    .made_by(ui_author)
+                    .deletion(DeletionEvent::Deleted),
+            );
             tx_ids.push(delete_tx);
             send_sync(&to_worker, delete_unit);
 
-            let (restore_tx, restore_unit) = ui
-                .commit_mergeable_unit(
-                    MergeableCommit::new(TABLE, deleted, 502 + idx)
-                        .made_by(ui_author)
-                        .deletion(DeletionEvent::Restored),
-                )
-                .unwrap();
+            let (restore_tx, restore_unit) = commit_unit(
+                &mut ui,
+                MergeableCommit::new(TABLE, deleted, 502 + idx)
+                    .made_by(ui_author)
+                    .deletion(DeletionEvent::Restored),
+            );
             tx_ids.push(restore_tx);
             send_sync(&to_worker, restore_unit);
         }
@@ -335,12 +379,18 @@ fn ui_thread(
             drain_ui_downstream(&mut ui, &from_worker);
             let row_uuid = row(40 + ((idx / 18) % 8) as u8);
             let tx_id = OpenTransactionId::new();
-            ui.open_exclusive(tx_id).unwrap();
-            let _ = ui.tx_read(tx_id, TABLE, row_uuid).unwrap();
+            block_on(ui.open_exclusive(tx_id)).unwrap();
+            let _ = block_on(ui.tx_read(tx_id, TABLE, row_uuid)).unwrap();
             let title = format!("exclusive-{idx}");
-            ui.tx_write(tx_id, TABLE, row_uuid, cells(title, ui_owner), None)
-                .unwrap();
-            let (tx_id, unit) = ui.commit_exclusive(tx_id, ui_author, 1_000 + idx).unwrap();
+            block_on(ui.tx_write(tx_id, TABLE, row_uuid, cells(title, ui_owner), None)).unwrap();
+            let (tx_id, unit) = block_on(async {
+                let (published, unit) = ui
+                    .commit_exclusive(tx_id, ui_author, 1_000 + idx)
+                    .await
+                    .unwrap();
+                let tx_id = ui.persist_and_settle_transaction(published).await.unwrap();
+                (tx_id, unit)
+            });
             tx_ids.push(tx_id);
             send_sync(&to_worker, unit);
         }
@@ -348,16 +398,17 @@ fn ui_thread(
 
     to_worker.send(Wire::Stop).unwrap();
     while let Some(sync) = from_worker.recv().unwrap().into_sync() {
-        ui.apply_sync_message(*sync).unwrap();
+        apply_message(&mut ui, *sync);
     }
 
-    UiResult { node: ui, tx_ids }
+    let receipt = finish_node(&mut ui, tx_ids.iter().copied(), None);
+    UiResult { tx_ids, receipt }
 }
 
 fn global_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
-    node.current_rows(TABLE, DurabilityTier::Global)
+    block_on(node.current_rows(TABLE, DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .map(|row| (row.row_uuid(), row_cells(&row, table)))
@@ -367,7 +418,7 @@ fn global_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeM
 fn local_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
-    node.current_rows(TABLE, DurabilityTier::Local)
+    block_on(node.current_rows(TABLE, DurabilityTier::Local))
         .unwrap()
         .into_iter()
         .map(|row| (row.row_uuid(), row_cells(&row, table)))
@@ -379,7 +430,7 @@ fn subscription_rows(
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
-    node.subscription_current_rows(TABLE, DurabilityTier::Global)
+    block_on(node.subscription_current_rows(TABLE, DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .map(|row| (row.row_uuid(), row_cells(&row, table)))
@@ -410,11 +461,6 @@ fn threaded_four_tier_converges_with_fifo_links() {
     let ui_author = AuthorId::from_bytes([7; 16]);
     let ui_owner = ui_author;
 
-    let (_ui_dir, ui) = open_node(node(1), schema.clone());
-    let (_worker_dir, worker) = open_node(node(2), schema.clone());
-    let (_edge_dir, edge) = open_node(node(3), schema.clone());
-    let (_core_dir, core) = open_node(node(4), schema);
-
     let (ui_to_worker_tx, ui_to_worker_rx) = mpsc::channel::<Wire>();
     let (worker_to_ui_tx, worker_to_ui_rx) = mpsc::channel::<Wire>();
     let (worker_to_edge_tx, worker_to_edge_rx) = mpsc::channel::<Wire>();
@@ -422,10 +468,14 @@ fn threaded_four_tier_converges_with_fifo_links() {
     let (edge_to_core_tx, edge_to_core_rx) = mpsc::channel::<Wire>();
     let (core_to_edge_tx, core_to_edge_rx) = mpsc::channel::<Wire>();
 
-    let core_handle = thread::spawn(move || core_thread(core, edge_to_core_rx, core_to_edge_tx));
+    let core_schema = schema.clone();
+    let core_handle =
+        thread::spawn(move || core_thread(core_schema, edge_to_core_rx, core_to_edge_tx));
+    let edge_schema = schema.clone();
     let edge_handle = thread::spawn(move || {
         relay_thread(
-            edge,
+            3,
+            edge_schema,
             worker_to_edge_rx,
             edge_to_core_tx,
             core_to_edge_rx,
@@ -433,9 +483,11 @@ fn threaded_four_tier_converges_with_fifo_links() {
             PeerState::new(),
         )
     });
+    let worker_schema = schema.clone();
     let worker_handle = thread::spawn(move || {
         relay_thread(
-            worker,
+            2,
+            worker_schema,
             ui_to_worker_rx,
             worker_to_edge_tx,
             edge_to_worker_rx,
@@ -443,28 +495,35 @@ fn threaded_four_tier_converges_with_fifo_links() {
             PeerState::client_link(ui_author),
         )
     });
-    let ui_handle =
-        thread::spawn(move || ui_thread(ui, ui_to_worker_tx, worker_to_ui_rx, ui_author, ui_owner));
+    let ui_handle = thread::spawn(move || {
+        ui_thread(
+            schema,
+            ui_to_worker_tx,
+            worker_to_ui_rx,
+            ui_author,
+            ui_owner,
+        )
+    });
 
-    let mut ui_result = ui_handle.join().unwrap();
-    let mut worker_result = worker_handle.join().unwrap();
-    let mut edge_result = edge_handle.join().unwrap();
-    let mut core_result = core_handle.join().unwrap();
+    let ui_result = ui_handle.join().unwrap();
+    let worker_result = worker_handle.join().unwrap();
+    let edge_result = edge_handle.join().unwrap();
+    let core_result = core_handle.join().unwrap();
 
-    let core_global = global_rows(&mut core_result.node);
-    let edge_global = global_rows(&mut edge_result.node);
-    let worker_global = global_rows(&mut worker_result.node);
-    let ui_global = global_rows(&mut ui_result.node);
+    let core_global = &core_result.global_rows;
+    let edge_global = &edge_result.global_rows;
+    let worker_global = &worker_result.global_rows;
+    let ui_global = &ui_result.receipt.global_rows;
     assert_eq!(edge_global, core_global);
     assert_eq!(worker_global, core_global);
     assert_eq!(ui_global, core_global);
 
-    assert_eq!(local_rows(&mut core_result.node), core_global);
-    assert_eq!(local_rows(&mut edge_result.node), core_global);
-    assert_eq!(local_rows(&mut worker_result.node), core_global);
-    assert_eq!(local_rows(&mut ui_result.node), core_global);
+    assert_eq!(&core_result.local_rows, core_global);
+    assert_eq!(&edge_result.local_rows, core_global);
+    assert_eq!(&worker_result.local_rows, core_global);
+    assert_eq!(&ui_result.receipt.local_rows, core_global);
 
-    let ui_policy_rows = subscription_rows(&mut ui_result.node);
+    let ui_policy_rows = &ui_result.receipt.subscription_rows;
     assert!(!ui_policy_rows.is_empty());
     assert!(
         ui_policy_rows
@@ -473,16 +532,19 @@ fn threaded_four_tier_converges_with_fifo_links() {
     );
 
     for tx_id in ui_result.tx_ids {
-        let core_fact = core_result.node.transaction_state(tx_id).unwrap();
+        let core_fact = core_result.transaction_states.get(&tx_id).unwrap();
         assert_eq!(
-            edge_result.node.transaction_state(tx_id).unwrap(),
+            edge_result.transaction_states.get(&tx_id).unwrap(),
             core_fact
         );
         assert_eq!(
-            worker_result.node.transaction_state(tx_id).unwrap(),
+            worker_result.transaction_states.get(&tx_id).unwrap(),
             core_fact
         );
-        assert_eq!(ui_result.node.transaction_state(tx_id).unwrap(), core_fact);
+        assert_eq!(
+            ui_result.receipt.transaction_states.get(&tx_id).unwrap(),
+            core_fact
+        );
         assert!(!matches!(core_fact.0, Fate::Pending));
     }
 
@@ -491,11 +553,11 @@ fn threaded_four_tier_converges_with_fifo_links() {
     assert_link_dedup(worker_result.downstream_peer.unwrap());
 
     assert_eq!(
-        edge_result.node.sync_metrics().parked_orphans,
-        edge_result.node.sync_metrics().parked_orphans_resolved
+        edge_result.sync_metrics.parked_orphans,
+        edge_result.sync_metrics.parked_orphans_resolved
     );
     assert_eq!(
-        worker_result.node.sync_metrics().parked_orphans,
-        worker_result.node.sync_metrics().parked_orphans_resolved
+        worker_result.sync_metrics.parked_orphans,
+        worker_result.sync_metrics.parked_orphans_resolved
     );
 }
