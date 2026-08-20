@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+import { JazzProvider } from "jazz-tools/vue";
 import TodoList from "./TodoList.vue";
 
-const client = createJazzClient({
+const config = {
   appId: "<your-app-id>",
-});
+};
 </script>
 
 <template>
-  <JazzProvider :client="client">
+  <JazzProvider :config="config">
     <h1>Todos</h1>
     <TodoList />
 

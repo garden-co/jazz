@@ -74,6 +74,7 @@ pub struct DurablePublicationScope {
 struct DurablePublicationState {
     depth: usize,
     aborted: bool,
+    successful_commits: usize,
 }
 
 impl DurablePublicationScope {

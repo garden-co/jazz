@@ -72,14 +72,10 @@ not exist, or update it if it does. Like `insert`, `update`, and `delete`, it ap
 and returns a write handle that can be awaited for durability.
 
 ```ts
-const write = db.upsert(
-  app.todos,
-  {
-    title: "Imported task",
-    done: false,
-  },
-  { id: importedTodoId },
-);
+const write = db.upsert(app.todos, importedTodoId, {
+  title: "Imported task",
+  done: false,
+});
 
 await write.wait({ tier: "edge" });
 ```

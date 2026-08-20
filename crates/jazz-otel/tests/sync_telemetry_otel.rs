@@ -3,9 +3,7 @@ use jazz_testkit as support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz::tools::{
-    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_otel as otel;
 use jazz_server::JazzServer;
 use support::{TestingClient, has_row, wait_for_query};
@@ -69,7 +67,7 @@ async fn sync_layers_emit_otel_spans() {
                 .insert("todos", todo_values("trace sync telemetry", false))
                 .expect("alice creates persisted todo");
             alice
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -78,7 +76,7 @@ async fn sync_layers_emit_otel_spans() {
 
             wait_for_query(
                 &bob,
-                QueryBuilder::new("todos").build(),
+                jazz::query::Query::from("todos"),
                 Some(DurabilityTier::EdgeServer),
                 QUERY_TIMEOUT,
                 "bob sees alice's todo through sync",

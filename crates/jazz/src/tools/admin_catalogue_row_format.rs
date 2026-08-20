@@ -341,8 +341,8 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
         ColumnType::Boolean => matches!(value, Value::Boolean(_)),
         ColumnType::Timestamp => matches!(value, Value::Timestamp(_)),
         ColumnType::Uuid => matches!(value, Value::Uuid(_)),
-        ColumnType::BatchId => {
-            matches!(value, Value::BatchId(_))
+        ColumnType::TransactionId => {
+            matches!(value, Value::TransactionId(_))
                 || matches!(value, Value::Bytea(bytes) if bytes.len() == 16)
         }
         ColumnType::Text => matches!(value, Value::Text(_)),
@@ -411,7 +411,7 @@ fn validate_value_size(
     column: &str,
 ) -> Result<(), EncodingError> {
     match (value, column_type) {
-        (Value::BatchId(_), ColumnType::BatchId) => Ok(()),
+        (Value::TransactionId(_), ColumnType::TransactionId) => Ok(()),
         (Value::Bytea(bytes), ColumnType::Bytea) => validate_bytea_size(column, bytes),
         (
             Value::Array(values),
@@ -490,9 +490,13 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
         Value::Boolean(b) => buf.push(if *b { 1 } else { 0 }),
         Value::Timestamp(t) => buf.extend_from_slice(&t.to_le_bytes()),
         Value::Uuid(id) => buf.extend_from_slice(id.uuid().as_bytes()),
-        Value::BatchId(bytes) => buf.extend_from_slice(bytes),
-        Value::Bytea(bytes) if matches!(col.column_type, ColumnType::BatchId) => {
-            debug_assert_eq!(bytes.len(), 16, "validated batch ids must be 16 bytes");
+        Value::TransactionId(bytes) => buf.extend_from_slice(bytes),
+        Value::Bytea(bytes) if matches!(col.column_type, ColumnType::TransactionId) => {
+            debug_assert_eq!(
+                bytes.len(),
+                16,
+                "validated transaction ids must be 16 bytes"
+            );
             buf.extend_from_slice(bytes);
         }
         Value::Null => {
@@ -699,13 +703,13 @@ cfg_decode! {
                     })?;
                 Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
             }
-            ColumnType::BatchId => {
+            ColumnType::TransactionId => {
                 if data.len() < 16 {
                     return Err(EncodingError::MalformedData {
                         message: context.too_short_message("batch_id"),
                     });
                 }
-                Ok(Value::BatchId(data[..16].try_into().unwrap()))
+                Ok(Value::TransactionId(data[..16].try_into().unwrap()))
             }
             ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
             ColumnType::Text | ColumnType::Json { schema: _ } => decode_text_value(data, None),
@@ -958,7 +962,7 @@ fn encode_value(value: &Value) -> Vec<u8> {
         Value::Boolean(b) => vec![if *b { 1 } else { 0 }],
         Value::Timestamp(t) => t.to_le_bytes().to_vec(),
         Value::Uuid(id) => id.uuid().as_bytes().to_vec(),
-        Value::BatchId(bytes) => bytes.to_vec(),
+        Value::TransactionId(bytes) => bytes.to_vec(),
         Value::Text(s) => s.as_bytes().to_vec(),
         Value::Bytea(bytes) => bytes.clone(),
         Value::Array(elements) => encode_array_simple(elements),
@@ -1108,7 +1112,7 @@ fn encode_value_with_type_into(buf: &mut Vec<u8>, value: &Value, col_type: &Colu
         (Value::Boolean(b), _) => buf.push(if *b { 1 } else { 0 }),
         (Value::Timestamp(t), _) => buf.extend_from_slice(&t.to_le_bytes()),
         (Value::Uuid(id), _) => buf.extend_from_slice(id.uuid().as_bytes()),
-        (Value::BatchId(bytes), _) => buf.extend_from_slice(bytes),
+        (Value::TransactionId(bytes), _) => buf.extend_from_slice(bytes),
         _ => buf.extend(encode_value_with_type(value, col_type)),
     }
 }
@@ -1269,9 +1273,11 @@ mod tests {
 
     #[test]
     fn encode_decode_fixed_batch_id_column() {
-        let descriptor =
-            RowDescriptor::new(vec![ColumnDescriptor::new("batch_id", ColumnType::BatchId)]);
-        let values = vec![Value::BatchId([0xAB; 16])];
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "batch_id",
+            ColumnType::TransactionId,
+        )]);
+        let values = vec![Value::TransactionId([0xAB; 16])];
 
         let encoded = encode_row(&descriptor, &values).unwrap();
         assert_eq!(encoded.len(), 16);
@@ -1282,8 +1288,10 @@ mod tests {
 
     #[test]
     fn encode_fixed_batch_id_column_accepts_legacy_bytea_value() {
-        let descriptor =
-            RowDescriptor::new(vec![ColumnDescriptor::new("batch_id", ColumnType::BatchId)]);
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "batch_id",
+            ColumnType::TransactionId,
+        )]);
         let values = vec![Value::Bytea(vec![0xCD; 16])];
 
         let encoded = encode_row(&descriptor, &values).unwrap();

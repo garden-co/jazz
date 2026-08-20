@@ -1,7 +1,6 @@
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-    WriteContext,
+    ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value, WriteContext,
 };
 use uuid::Uuid;
 
@@ -24,10 +23,15 @@ fn nullable_schema() -> Schema {
         .build()
 }
 
-fn profiles_query() -> jazz::tools::Query {
-    QueryBuilder::new("profiles")
-        .select(&["name", "age", "visits", "active", "manager_id", "tags"])
-        .build()
+fn profiles_query() -> jazz::query::Query {
+    jazz::query::Query::from("profiles").select([
+        "name",
+        "age",
+        "visits",
+        "active",
+        "manager_id",
+        "tags",
+    ])
 }
 
 async fn profile_values(client: &JazzClient, row_id: ObjectId) -> Vec<Value> {
@@ -175,11 +179,11 @@ async fn update_reads_back_non_null_values_in_nullable_columns() {
 #[tokio::test]
 async fn staged_insert_and_update_read_back_non_null_values_in_nullable_columns_after_commit() {
     let client = JazzClient::test_client(nullable_schema()).await;
-    let batch_id = client
+    let transaction_id = client
         .begin_transaction()
         .expect("begin transaction")
-        .open_batch_id();
-    let tx = client.with_write_context(WriteContext::default().with_batch_id(batch_id));
+        .transaction_id();
+    let tx = client.with_write_context(WriteContext::default().with_transaction_id(transaction_id));
     let manager_id = ObjectId::new();
     let expected = full_values(manager_id, "staged updated", 46);
 
@@ -208,7 +212,7 @@ async fn staged_insert_and_update_read_back_non_null_values_in_nullable_columns_
     .expect("stage update non-null values into nullable columns");
 
     client
-        .commit_transaction(batch_id)
+        .commit_transaction(transaction_id)
         .expect("commit staged nullable writes");
     assert_eq!(profile_values(&client, row_id).await, expected);
 }
@@ -216,11 +220,11 @@ async fn staged_insert_and_update_read_back_non_null_values_in_nullable_columns_
 #[tokio::test]
 async fn staged_upsert_reads_back_non_null_values_in_nullable_columns_after_commit() {
     let client = JazzClient::test_client(nullable_schema()).await;
-    let batch_id = client
+    let transaction_id = client
         .begin_transaction()
         .expect("begin transaction")
-        .open_batch_id();
-    let tx = client.with_write_context(WriteContext::default().with_batch_id(batch_id));
+        .transaction_id();
+    let tx = client.with_write_context(WriteContext::default().with_transaction_id(transaction_id));
     let row_uuid = Uuid::now_v7();
     let row_id = ObjectId::from_uuid(row_uuid);
     let manager_id = ObjectId::new();
@@ -241,7 +245,7 @@ async fn staged_upsert_reads_back_non_null_values_in_nullable_columns_after_comm
     .expect("stage upsert non-null values into nullable columns");
 
     client
-        .commit_transaction(batch_id)
+        .commit_transaction(transaction_id)
         .expect("commit staged nullable upsert");
     assert_eq!(profile_values(&client, row_id).await, expected);
 }

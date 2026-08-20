@@ -37,6 +37,12 @@ interface BrokerPromotionState {
   cancelled: boolean;
 }
 
+interface ReconnectWaiter {
+  resolve(): void;
+  reject(error: Error): void;
+  cancel(): void;
+}
+
 /**
  * Manages the connection of a browser DB. The connection depends on the tab's role
  * (see {@link BrowserConnectionRole}):
@@ -53,6 +59,8 @@ export class BrowserConnectionManager extends ConnectionManager {
   private resolveFollowerReady: (() => void) | null = null;
   private rejectFollowerReady: ((error: Error) => void) | null = null;
   private followerReadyResolved = false;
+  private isDisconnected = false;
+  private reconnectWaiters = new Set<ReconnectWaiter>();
   private durablePathError: Error | null = null;
   private brokerSchemaFingerprint: string | null = null;
   private brokerResetSchema: WasmSchema | null = null;
@@ -145,8 +153,14 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.activeRoleBridge?.onClientCreated(input);
   }
 
-  async ensureReady(tier?: DurabilityTier): Promise<void> {
+  async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
     await this.ensureBridgeReady();
+    if (this.host.isShuttingDown) {
+      throw new Error("Db shutdown");
+    }
+    if (this.isDisconnected && tier !== "local") {
+      await this.waitForReconnect(signal);
+    }
     await this.activeRoleBridge?.ensureReady(tier);
   }
 
@@ -161,6 +175,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       throw new Error("Db.disconnect() requires an active browser connection.");
     }
     await roleBridge.disconnect();
+    this.isDisconnected = true;
   }
 
   async reconnect(): Promise<void> {
@@ -173,6 +188,8 @@ export class BrowserConnectionManager extends ConnectionManager {
       throw new Error("Db.reconnect() requires an active browser connection.");
     }
     await roleBridge.reconnect();
+    this.isDisconnected = false;
+    this.resolveReconnectWaiters();
     this.brokerClient?.replayAuthRefresh();
   }
 
@@ -208,6 +225,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   async shutdown(): Promise<void> {
+    this.rejectReconnectWaiters(new Error("Db shutdown"));
     this.rejectDurablePathReady(new Error("Db shutdown"));
     this.detachLifecycleHooks();
 
@@ -245,6 +263,48 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (shutdownError) {
       throw shutdownError;
     }
+  }
+
+  private waitForReconnect(signal?: AbortSignal): Promise<void> {
+    if (this.host.isShuttingDown) {
+      return Promise.reject(new Error("Db shutdown"));
+    }
+    if (signal?.aborted) {
+      return Promise.reject(new Error("Subscription cancelled before reconnect"));
+    }
+    return new Promise<void>((resolve, reject) => {
+      let waiter!: ReconnectWaiter;
+      const cancel = () => {
+        if (!this.reconnectWaiters.delete(waiter)) return;
+        signal?.removeEventListener("abort", cancel);
+        reject(new Error("Subscription cancelled before reconnect"));
+      };
+      waiter = {
+        resolve: () => {
+          signal?.removeEventListener("abort", cancel);
+          resolve();
+        },
+        reject: (error) => {
+          signal?.removeEventListener("abort", cancel);
+          reject(error);
+        },
+        cancel,
+      };
+      this.reconnectWaiters.add(waiter);
+      signal?.addEventListener("abort", cancel, { once: true });
+    });
+  }
+
+  private resolveReconnectWaiters(): void {
+    const waiters = [...this.reconnectWaiters];
+    this.reconnectWaiters.clear();
+    for (const waiter of waiters) waiter.resolve();
+  }
+
+  private rejectReconnectWaiters(error: Error): void {
+    const waiters = [...this.reconnectWaiters];
+    this.reconnectWaiters.clear();
+    for (const waiter of waiters) waiter.reject(error);
   }
 
   private async ensureBridgeReady(): Promise<void> {

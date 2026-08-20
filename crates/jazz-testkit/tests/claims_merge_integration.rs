@@ -28,9 +28,7 @@ use std::time::Duration;
 
 use jazz::tools::public_schema::PolicyExpr;
 use jazz::tools::public_schema::TablePolicies;
-use jazz::tools::{
-    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{TestingClient, wait_for_query};
@@ -92,7 +90,7 @@ async fn ephemeral_claims_merged_into_session_impl() {
         )
         .expect("admin creates room");
 
-    let query = QueryBuilder::new("rooms").build();
+    let query = jazz::query::Query::from("rooms");
 
     // Alice: correct join_code claim → should see the room
     let alice = TestingClient::builder()

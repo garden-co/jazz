@@ -5,7 +5,7 @@ use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, col, eq, gt, lit};
 use jazz::schema::{ColumnSchema, JazzSchema, MergeStrategy, Policy, TableSchema};
-use jazz::tools::OpenBatchId;
+use jazz::tools::OpenTransactionId;
 
 fn schema(default: &str) -> JazzSchema {
     JazzSchema::new([TableSchema::new(
@@ -94,7 +94,7 @@ fn registered_schema_views_share_one_open_batch() {
     let new_view = owner.register_schema_view(new_schema).unwrap();
     assert_ne!(old_view.schema_view_id(), new_view.schema_view_id());
 
-    let batch = OpenBatchId::new();
+    let batch = OpenTransactionId::new();
     owner.begin_mergeable(batch).unwrap();
     old_view
         .mergeable_tx_ref(batch)
@@ -184,7 +184,7 @@ fn automatic_schema_view_admission_rejects_non_lens_metadata_changes() {
 #[test]
 fn empty_owner_accepts_first_typed_schema_view() {
     let owner = open_owner(JazzSchema::new([]));
-    let batch = OpenBatchId::new();
+    let batch = OpenTransactionId::new();
     owner.begin_mergeable(batch).unwrap();
     let view = owner.register_schema_view(schema("first")).unwrap();
     view.mergeable_tx_ref(batch)
@@ -205,7 +205,7 @@ fn empty_owner_accepts_first_typed_schema_view() {
 #[test]
 fn one_batch_accepts_writes_from_structurally_distinct_views() {
     let owner = open_owner(JazzSchema::new([]));
-    let batch = OpenBatchId::new();
+    let batch = OpenTransactionId::new();
     owner.begin_mergeable(batch).unwrap();
     let first = owner.register_schema_view(schema("same")).unwrap();
     first
@@ -237,14 +237,14 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
     let view = owner.register_schema_view(schema("initial")).unwrap();
     let row = RowUuid::from_bytes([6; 16]);
 
-    let seed = OpenBatchId::new();
+    let seed = OpenTransactionId::new();
     owner.begin_mergeable(seed).unwrap();
     view.mergeable_tx_ref(seed)
         .insert_with_id("items", row, Default::default())
         .unwrap();
     owner.commit_mergeable_handle(seed).unwrap();
 
-    let batch = OpenBatchId::new();
+    let batch = OpenTransactionId::new();
     owner.begin_mergeable(batch).unwrap();
     let tx = view.mergeable_tx_ref(batch);
     assert_eq!(
@@ -285,7 +285,7 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
 #[test]
 fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
     let owner = open_owner(JazzSchema::new([]));
-    let batch = OpenBatchId::new();
+    let batch = OpenTransactionId::new();
     owner.begin_exclusive(batch).unwrap();
     let view = owner.register_schema_view(schema("direct")).unwrap();
     let row = RowUuid::from_bytes([7; 16]);
@@ -313,7 +313,7 @@ fn exclusive_view_commit_rejects_concurrent_local_row_change() {
     view.insert_with_id("items", row, Default::default())
         .unwrap();
 
-    let batch = OpenBatchId::new();
+    let batch = OpenTransactionId::new();
     owner.begin_exclusive(batch).unwrap();
     let tx = view.exclusive_tx_ref(batch);
     assert!(tx.read("items", row).unwrap().is_some());

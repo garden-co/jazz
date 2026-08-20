@@ -13,18 +13,18 @@ import { useJazzClient } from "./provider.js";
 /**
  * Reactive result of {@link useAll}. `data` is the matching rows (or `undefined`
  * while loading or on error), `error` is the last subscription error (or
- * `null`), and `loading` is `true` until the first result or error.
+ * `null`), and `isLoading` is `true` until the first result or error.
  */
 export interface UseAllResult<T extends { id: string }> {
   data: Ref<T[] | undefined>;
   error: Ref<Error | null>;
-  loading: Ref<boolean>;
+  isLoading: Ref<boolean>;
 }
 
 /**
  * Result of {@link useAllSuspense}. Like {@link UseAllResult} but without
- * `loading`: the suspense variant only returns once the first result (or error)
- * has resolved, so a `loading` flag would carry no information at the point of
+ * `isLoading`: the suspense variant only returns once the first result (or error)
+ * has resolved, so an `isLoading` flag would carry no information at the point of
  * use.
  */
 export interface UseAllSuspenseResult<T extends { id: string }> {
@@ -40,16 +40,16 @@ function applyEntryState<T extends { id: string }>(
   state: UseAllState<T>,
   data: Ref<T[] | undefined>,
   error: Ref<Error | null>,
-  loading: Ref<boolean>,
+  isLoading: Ref<boolean>,
 ): void {
   if (state.status === "fulfilled") {
     data.value = state.data;
     error.value = null;
-    loading.value = false;
+    isLoading.value = false;
   } else if (state.status === "rejected") {
     data.value = undefined;
     error.value = toError(state.error);
-    loading.value = false;
+    isLoading.value = false;
   } else {
     data.value = undefined;
   }
@@ -59,15 +59,15 @@ function subscribeToEntry<T extends { id: string }>(
   entry: CacheEntryHandle<T>,
   data: Ref<T[] | undefined>,
   error: Ref<Error | null>,
-  loading: Ref<boolean>,
+  isLoading: Ref<boolean>,
 ): () => void {
-  applyEntryState(entry.state, data, error, loading);
+  applyEntryState(entry.state, data, error, isLoading);
 
   return entry.subscribe({
     onfulfilled: (nextData) => {
       data.value = nextData;
       error.value = null;
-      loading.value = false;
+      isLoading.value = false;
     },
     onDelta: (delta: SubscriptionDelta<T>) => {
       if (data.value) {
@@ -78,17 +78,17 @@ function subscribeToEntry<T extends { id: string }>(
         data.value = [];
         applyDelta(data.value, delta);
       }
-      loading.value = false;
+      isLoading.value = false;
     },
     onError: (err) => {
       error.value = toError(err);
       data.value = undefined;
-      loading.value = false;
+      isLoading.value = false;
     },
     onReset: () => {
       data.value = undefined;
       error.value = null;
-      loading.value = true;
+      isLoading.value = true;
     },
   });
 }
@@ -99,7 +99,7 @@ function subscribeToEntry<T extends { id: string }>(
  * @param query - the database query (e.g. `app.todos.where({ done: false })`)
  * @param options - optional query execution options
  *
- * @returns reactive `{ data, error, loading }`. `data` is `undefined` until the
+ * @returns reactive `{ data, isLoading, error }`. `data` is `undefined` until the
  *   query resolves; `error` is set if the subscription fails.
  */
 export function useAll<T extends { id: string }>(
@@ -109,31 +109,31 @@ export function useAll<T extends { id: string }>(
   const store = getSubscriptionStore(useJazzClient());
   const data = ref<T[] | undefined>(undefined) as Ref<T[] | undefined>;
   const error = ref<Error | null>(null);
-  const loading = ref(true);
+  const isLoading = ref(true);
 
   watchEffect((onCleanup) => {
     const resolvedQuery = toValue(query);
     if (!resolvedQuery) {
       data.value = undefined;
       error.value = null;
-      loading.value = false;
+      isLoading.value = false;
       return;
     }
     const resolvedOptions = toValue(options);
 
-    loading.value = true;
+    isLoading.value = true;
     error.value = null;
 
     const key = store.makeQueryKey(resolvedQuery, resolvedOptions);
     const entry = store.getCacheEntry<T>(key);
-    const unsubscribe = subscribeToEntry(entry, data, error, loading);
+    const unsubscribe = subscribeToEntry(entry, data, error, isLoading);
 
     onCleanup(() => {
       unsubscribe();
     });
   });
 
-  return { data, error, loading };
+  return { data, isLoading, error };
 }
 
 /**
@@ -145,7 +145,7 @@ export function useAll<T extends { id: string }>(
  * @param options - optional query execution options
  *
  * @returns reactive `{ data, error }`. Unlike {@link useAll}, there is no
- *   `loading` flag: the promise only resolves once the first result is
+ *   `isLoading` flag: the promise only resolves once the first result is
  *   available, so the query is never loading at the point of use.
  */
 export async function useAllSuspense<T extends { id: string }>(

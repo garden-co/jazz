@@ -71,10 +71,14 @@ function todoTable() {
 
 function makeLocalTransactionRecord(transactionId: string): LocalTransactionRecord {
   return {
-    batchId: transactionId as BatchId,
+    transactionId: transactionId as BatchId,
     kind: "mergeable",
     sealed: true,
-    latestSettlement: null,
+    latestSettlement: {
+      kind: "accepted",
+      transactionId: transactionId as BatchId,
+      confirmedTier: "local",
+    },
   };
 }
 
@@ -293,12 +297,12 @@ describe("Db mutation error handling", () => {
       code: "permission_denied",
       reason: "write rejected by policy",
       transaction: {
-        batchId,
+        transactionId: batchId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          batchId,
+          transactionId: batchId,
           code: "permission_denied",
           reason: "write rejected by policy",
         },

@@ -513,11 +513,37 @@ pub(super) fn bind_query_params_with_mode(
 ) -> Result<ValidatedQuery, Error> {
     let mut query = shape.query().clone();
     let root_source = root_source_id(&query.table);
-    query.filters = query
-        .filters
-        .into_iter()
-        .map(|predicate| bind_query_predicate(predicate, binding, schema, &root_source, mode))
-        .collect::<Result<Vec<_>, _>>()?;
+    query.filters = if let Some(flat_join) = &query.flat_join {
+        let root_scope = flat_join
+            .root_alias
+            .clone()
+            .unwrap_or_else(|| query.table.clone());
+        let mut source_tables = BTreeMap::from([(root_scope.clone(), query.table.clone())]);
+        source_tables.extend(flat_join.sources.iter().map(|source| {
+            (
+                source.alias.clone().unwrap_or_else(|| source.table.clone()),
+                source.table.clone(),
+            )
+        }));
+        std::mem::take(&mut query.filters)
+            .into_iter()
+            .map(|predicate| {
+                bind_flat_join_predicate(
+                    predicate,
+                    binding,
+                    schema,
+                    mode,
+                    &root_scope,
+                    &source_tables,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        std::mem::take(&mut query.filters)
+            .into_iter()
+            .map(|predicate| bind_query_predicate(predicate, binding, schema, &root_source, mode))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     query.joins = query
         .joins
         .into_iter()
@@ -626,6 +652,55 @@ pub(super) fn bind_query_params_with_mode(
         return Err(Error::InvalidStoredValue("bound query schema changed"));
     }
     Ok(rebound)
+}
+
+fn bind_flat_join_predicate(
+    predicate: Predicate,
+    binding: &Binding,
+    schema: &JazzSchema,
+    mode: ParamBindingMode,
+    root_scope: &str,
+    source_tables: &BTreeMap<String, String>,
+) -> Result<Predicate, Error> {
+    if let Predicate::All(predicates) = predicate {
+        return predicates
+            .into_iter()
+            .map(|predicate| {
+                bind_flat_join_predicate(
+                    predicate,
+                    binding,
+                    schema,
+                    mode,
+                    root_scope,
+                    source_tables,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Predicate::All);
+    }
+
+    let sources = crate::query::flat_join_predicate_sources(&predicate)?;
+    let scope = sources
+        .iter()
+        .next()
+        .map(String::as_str)
+        .unwrap_or(root_scope);
+    let table = source_tables.get(scope).ok_or_else(|| {
+        Error::QueryLowering(format!(
+            "flat join filter references unknown source {scope}"
+        ))
+    })?;
+    let predicate = crate::query::unqualify_flat_join_predicate(&predicate, scope)?;
+    let predicate = bind_query_predicate(
+        predicate,
+        binding,
+        schema,
+        &bind_source_for_table(table),
+        mode,
+    )?;
+    Ok(crate::query::qualify_flat_join_source_predicate(
+        predicate, scope,
+    )?)
 }
 
 fn bind_array_subquery_filter_literals(

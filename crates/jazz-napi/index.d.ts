@@ -23,11 +23,11 @@ export declare class NapiDb {
   attachMergeableTx(openBatchId: string): Tx
   /** Attach a schema view to an existing owner-wide exclusive batch. */
   attachExclusiveTx(openBatchId: string): Tx
-  /** Begin one owner-wide batch without creating an owning per-schema Tx. */
+  /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
   beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null): void
-  /** Commit an owner-wide batch by id and optional kind. */
+  /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openBatchId: string, kind?: string | undefined | null): Write
-  /** Roll back an owner-wide open batch by id. */
+  /** Roll back an owner-wide open transaction by id. */
   rollbackTransaction(openBatchId: string): void
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void

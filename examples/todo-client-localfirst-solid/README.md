@@ -9,7 +9,7 @@ Local-first todo app on Solid + Vite, anonymous auth via `useLocalFirstAuth`, OP
 - `useDb` synchronous local writes (`db.insert`, `db.update`, `db.delete`).
 - Row-level permissions — `owner_id` enforced by `definePermissions`; invalid mutations surface as toast errors via `solid-sonner`.
 - OPFS-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
-- `JazzProvider` + `createSolidJazzClient` wired up via the Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`).
+- `JazzProvider` wired up via the Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`).
 
 ## Schema
 

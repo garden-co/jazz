@@ -7,7 +7,7 @@ use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
-use jazz::tools::OpenBatchId;
+use jazz::tools::OpenTransactionId;
 
 fn author(byte: u8) -> AuthorId {
     AuthorId::from_bytes([byte; 16])
@@ -144,7 +144,7 @@ fn empty_batched_update_still_validates_handle_and_target() {
     let db = open_db(author(0xa1));
     let row = RowUuid::from_bytes([0x55; 16]);
 
-    let abandoned = OpenBatchId::new();
+    let abandoned = OpenTransactionId::new();
     db.begin_mergeable(abandoned).expect("open batch");
     db.abandon_transaction_handle(abandoned)
         .expect("abandon batch");
@@ -154,7 +154,7 @@ fn empty_batched_update_still_validates_handle_and_target() {
         .expect_err("stale batch handle must be rejected");
     assert!(stale_error.message.contains("open transaction"));
 
-    let open = OpenBatchId::new();
+    let open = OpenTransactionId::new();
     db.begin_mergeable(open).expect("open batch");
     let absent_error = db
         .mergeable_tx_ref(open)

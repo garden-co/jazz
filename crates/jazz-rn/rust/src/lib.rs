@@ -783,7 +783,7 @@ impl RnRuntime {
                 let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                     message: "lock poisoned".into(),
                 })?;
-                core.wait_for_batch(transaction_id, tier)
+                core.wait_for_transaction(transaction_id, tier)
                     .map_err(runtime_err)?
             };
 

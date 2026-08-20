@@ -119,7 +119,7 @@ fn exclusive_join_shape_uses_shared_snapshot_lowering() {
         .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
         .unwrap();
 
-    let open = OpenBatchId::new();
+    let open = OpenTransactionId::new();
     client.open_exclusive(open).unwrap();
     let rows = client
         .tx_query(open, &shape, &binding)

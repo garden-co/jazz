@@ -7,7 +7,7 @@ import type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 
 export type UseLocalFirstAuthOptions = Pick<
   BrowserAuthSecretStoreOptions,
-  "key" | "authSecretStorageKey" | "appId" | "userId" | "sessionId"
+  "key" | "appId" | "userId" | "sessionId"
 > & {
   store?: AuthSecretStore;
 };

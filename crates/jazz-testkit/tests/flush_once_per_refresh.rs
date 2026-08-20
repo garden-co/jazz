@@ -1,9 +1,10 @@
 use std::time::{Duration, Instant};
 
+use jazz::query::{col, eq, lit};
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, QueryBuilder, Schema, SchemaBuilder,
-    SubscriptionStream, TableSchema, Value,
+    ColumnType, DurabilityTier, JazzClient, Schema, SchemaBuilder, SubscriptionStream, TableSchema,
+    Value,
 };
 
 fn route_schema() -> Schema {
@@ -23,9 +24,7 @@ async fn measure_unrelated_route_refresh(route_count: usize) -> Duration {
         subscriptions.push(
             client
                 .subscribe(
-                    QueryBuilder::new("items")
-                        .filter_eq("route", Value::Integer(route as i32))
-                        .build(),
+                    jazz::query::Query::from("items").filter(eq(col("route"), lit(route as i32))),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("subscribe route {route}: {error}")),
@@ -43,7 +42,7 @@ async fn measure_unrelated_route_refresh(route_count: usize) -> Duration {
         )
         .expect("write unrelated row");
     client
-        .wait_for_batch(
+        .wait_for_transaction(
             batch.expect("ordinary mutation commits immediately"),
             DurabilityTier::Local,
         )

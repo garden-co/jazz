@@ -153,7 +153,7 @@ describe("db exclusive transaction reads browser integration", () => {
 
     await tx.commit();
 
-    const coreError = `open batch ${openBatchId} is already committed`;
+    const coreError = `open transaction ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -180,7 +180,7 @@ describe("db exclusive transaction reads browser integration", () => {
 
     await tx.rollback();
 
-    const coreError = `open batch ${openBatchId} has already been completed or was never opened`;
+    const coreError = `open transaction ${openBatchId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -207,8 +207,8 @@ describe("db exclusive transaction reads browser integration", () => {
     );
 
     const createdByUpsertId = "00000000-0000-0000-0000-000000000124";
-    tx.upsert(todos, { title: "Bob wrote release notes", done: false }, { id: createdByUpsertId });
-    tx.upsert(todos, { title: "Bob drafted release notes", done: true }, { id: existingTodo.id });
+    tx.upsert(todos, createdByUpsertId, { title: "Bob wrote release notes", done: false });
+    tx.upsert(todos, existingTodo.id, { title: "Bob drafted release notes", done: true });
 
     expect(insertedTodo).toEqual({
       id: customId,
@@ -241,9 +241,9 @@ describe("db exclusive transaction reads browser integration", () => {
   it("rejects partial upserts for missing rows inside transactions", async () => {
     const tx = db.beginExclusiveTransaction();
 
-    expect(() =>
-      tx.upsert(todos, { done: true }, { id: "00000000-0000-0000-0000-000000000125" }),
-    ).toThrow("missing required field `title`");
+    expect(() => tx.upsert(todos, "00000000-0000-0000-0000-000000000125", { done: true })).toThrow(
+      "missing required field `title`",
+    );
   });
 
   describe("db.exclusiveTransaction(cb)", () => {
@@ -371,7 +371,7 @@ describe("db mergeable transaction reads browser integration", () => {
 
     await tx.commit();
 
-    const coreError = `open batch ${openBatchId} is already committed`;
+    const coreError = `open transaction ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -389,7 +389,7 @@ describe("db mergeable transaction reads browser integration", () => {
 
     await tx.rollback();
 
-    const coreError = `open batch ${openBatchId} has already been completed or was never opened`;
+    const coreError = `open transaction ${openBatchId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -416,8 +416,8 @@ describe("db mergeable transaction reads browser integration", () => {
     );
 
     const createdByUpsertId = "00000000-0000-0000-0000-000000000224";
-    tx.upsert(todos, { title: "Bob checked the docs", done: false }, { id: createdByUpsertId });
-    tx.upsert(todos, { title: "Bob queued docs review", done: true }, { id: existingTodo.id });
+    tx.upsert(todos, createdByUpsertId, { title: "Bob checked the docs", done: false });
+    tx.upsert(todos, existingTodo.id, { title: "Bob queued docs review", done: true });
 
     expect(insertedTodo).toEqual({
       id: customId,
@@ -450,9 +450,9 @@ describe("db mergeable transaction reads browser integration", () => {
   it("rejects partial upserts for missing rows inside mergeable transactions", async () => {
     const tx = db.beginTransaction();
 
-    expect(() =>
-      tx.upsert(todos, { done: true }, { id: "00000000-0000-0000-0000-000000000225" }),
-    ).toThrow("missing required field `title`");
+    expect(() => tx.upsert(todos, "00000000-0000-0000-0000-000000000225", { done: true })).toThrow(
+      "missing required field `title`",
+    );
   });
 
   describe("db.transaction(cb)", () => {
@@ -468,7 +468,7 @@ describe("db mergeable transaction reads browser integration", () => {
           expect(rows).toEqual([existingTodo]);
           return "no writes needed";
         }),
-      ).rejects.toThrow("empty mergeable batch has no committed unit; roll it back instead");
+      ).rejects.toThrow("empty mergeable transaction has no committed unit; roll it back instead");
     });
 
     it("rolls back cleanly when an async mergeable transaction reads then throws before writing", async () => {

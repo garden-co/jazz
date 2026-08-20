@@ -369,24 +369,28 @@ describe("JazzClient runtime transaction waits", () => {
 
     rejectWait({
       kind: "rejected",
-      batchId,
+      transactionId: batchId,
       code: "permission_denied",
       reason: "write rejected by policy",
     });
 
-    await expect(waitPromise).rejects.toBeInstanceOf(PersistedWriteRejectedError);
+    await expect(waitPromise).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      transactionId: batchId,
+      message: `Persisted transaction ${batchId} was rejected (permission_denied): write rejected by policy`,
+    });
   });
 });
 
 describe("JazzClient mutation error handling", () => {
-  function makeRejectedTransactionRecord(batchId: BatchId) {
+  function makeRejectedTransactionRecord(transactionId: BatchId) {
     return {
-      batchId,
+      transactionId,
       kind: "mergeable" as const,
       sealed: true,
       latestSettlement: {
         kind: "rejected" as const,
-        batchId,
+        transactionId,
         code: "permission_denied",
         reason: "write rejected by policy",
       },

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { SendIcon } from "lucide-react";
 import { useDb, useSession } from "jazz-tools/react";
+import { ActionMenu } from "@/components/composer/ActionMenu";
 import { Editor, type EditorHandle } from "@/components/editor/Editor";
 import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
@@ -61,6 +62,8 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
       data-testid="message-composer"
       data-pending-sends={pendingSends}
     >
+      <ActionMenu chatId={chatId} disabled={!composerReady} />
+
       <Editor ref={editorRef} onSend={handleSend} disabled={!composerReady} />
 
       <Button

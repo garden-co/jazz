@@ -238,7 +238,7 @@ fn canonical_reachable_key_for_schema(
         .as_ref()
         .and_then(|seed| seed.user_column.as_ref().map(|column| (seed, column)))
         .map(|(seed, column)| {
-            table(schema, &seed.table)
+            schema_table(schema, &seed.table)
                 .and_then(|table| planner_column_type(&table, column).cloned())
         })
         .transpose()?;

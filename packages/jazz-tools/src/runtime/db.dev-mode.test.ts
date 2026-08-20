@@ -97,7 +97,7 @@ describe("Db devMode active query tracing", () => {
     const db = await makeDb(true);
     const unsubscribe = db.subscribeAll(makeQuery(), () => undefined, {
       tier: "edge",
-      propagate: false,
+      propagation: "local-only",
     });
 
     expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("edge");

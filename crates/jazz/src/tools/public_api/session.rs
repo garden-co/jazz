@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::tools::metadata::SYSTEM_PRINCIPAL_ID;
-use crate::tools::transaction::OpenBatchId;
+use crate::tools::transaction::OpenTransactionId;
 
 /// Auth mode derived from the JWT's `iss` claim.
 ///
@@ -176,8 +176,8 @@ pub struct WriteContext {
     pub attribution: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batch_id: Option<OpenBatchId>,
+    #[serde(rename = "batch_id", default, skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<OpenTransactionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch_name: Option<String>,
 }
@@ -188,7 +188,7 @@ impl WriteContext {
             session: Some(session),
             attribution: None,
             updated_at: None,
-            batch_id: None,
+            transaction_id: None,
             target_branch_name: None,
         }
     }
@@ -198,8 +198,8 @@ impl WriteContext {
         self
     }
 
-    pub fn with_batch_id(mut self, batch_id: OpenBatchId) -> Self {
-        self.batch_id = Some(batch_id);
+    pub fn with_transaction_id(mut self, transaction_id: OpenTransactionId) -> Self {
+        self.transaction_id = Some(transaction_id);
         self
     }
 
@@ -212,8 +212,8 @@ impl WriteContext {
         self.session.as_ref()
     }
 
-    pub fn batch_id(&self) -> Option<OpenBatchId> {
-        self.batch_id
+    pub fn transaction_id(&self) -> Option<OpenTransactionId> {
+        self.transaction_id
     }
 
     pub fn target_branch_name(&self) -> Option<&str> {
@@ -305,7 +305,7 @@ mod tests {
             session: Some(Session::new("session-user")),
             attribution: Some("attributed-user".into()),
             updated_at: None,
-            batch_id: None,
+            transaction_id: None,
             target_branch_name: None,
         };
 
@@ -323,11 +323,11 @@ mod tests {
 
     #[test]
     fn test_write_context_batch_id_override() {
-        let batch_id = OpenBatchId::new();
-        let context =
-            WriteContext::from_session(Session::new("session-user")).with_batch_id(batch_id);
+        let transaction_id = OpenTransactionId::new();
+        let context = WriteContext::from_session(Session::new("session-user"))
+            .with_transaction_id(transaction_id);
 
-        assert_eq!(context.batch_id(), Some(batch_id));
+        assert_eq!(context.transaction_id(), Some(transaction_id));
     }
 
     #[test]

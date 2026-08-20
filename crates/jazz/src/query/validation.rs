@@ -225,12 +225,10 @@ fn validate_query_canonical_parts(
     query: &Query,
     schema: &JazzSchema,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
-    let root = table(schema, &query.table)?;
+    let root = schema_table(schema, &query.table)?;
+    let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
-    for predicate in &query.filters {
-        validate_predicate(&root, predicate, &mut params)?;
-    }
-    for join in &query.joins {
+    for join in &mut resolved_query.joins {
         validate_join(schema, &root, &query.table, join, &mut params)?;
     }
     if let Some(flat_join) = &query.flat_join {
@@ -256,21 +254,34 @@ fn validate_query_canonical_parts(
             });
         }
         validate_flat_join(schema, &query.table, flat_join)?;
+        let sources = flat_join_source_tables(schema, &query.table, flat_join)?;
+        for predicate in &mut resolved_query.filters {
+            qualify_flat_join_predicate(predicate, &sources)?;
+            validate_flat_join_filter_routing(predicate)?;
+        }
+        let filter_schema = flat_join_filter_schema(&sources)?;
+        for predicate in &mut resolved_query.filters {
+            validate_predicate(&filter_schema, predicate, &mut params)?;
+        }
+    } else {
+        for predicate in &mut resolved_query.filters {
+            validate_predicate(&root, predicate, &mut params)?;
+        }
     }
-    for reachable in &query.reachable {
+    for reachable in &mut resolved_query.reachable {
         validate_reachable(schema, &root, reachable, &mut params)?;
     }
     for inherits in &query.inherits {
         validate_inherits(&root, inherits)?;
     }
-    for branch in &query.policy_branches {
-        for predicate in &branch.filters {
+    for branch in &mut resolved_query.policy_branches {
+        for predicate in &mut branch.filters {
             validate_predicate(&root, predicate, &mut params)?;
         }
-        for join in &branch.joins {
+        for join in &mut branch.joins {
             validate_join(schema, &root, &query.table, join, &mut params)?;
         }
-        for reachable in &branch.reachable {
+        for reachable in &mut branch.reachable {
             validate_reachable(schema, &root, reachable, &mut params)?;
         }
         for inherits in &branch.inherits {
@@ -280,7 +291,12 @@ fn validate_query_canonical_parts(
     for include in &query.includes {
         validate_include(schema, &root, &include.path)?;
     }
-    validate_array_subqueries(schema, &root, &query.array_subqueries, &mut params)?;
+    validate_array_subqueries(
+        schema,
+        &root,
+        &mut resolved_query.array_subqueries,
+        &mut params,
+    )?;
     if let Some(select) = &query.select {
         for column in select {
             validate_select_column(&root, column)?;
@@ -294,9 +310,207 @@ fn validate_query_canonical_parts(
             planner_column_type(&root, &order.column)?;
         }
     }
-    let normalized = normalize_query(query);
+    let normalized = normalize_query(&resolved_query);
     let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
     Ok((normalized, params, canonical))
+}
+
+fn flat_join_source_tables(
+    schema: &JazzSchema,
+    root_table: &str,
+    flat_join: &FlatJoin,
+) -> Result<BTreeMap<String, TableSchema>, QueryError> {
+    let root_name = flat_join_source_name(root_table, &flat_join.root_alias);
+    let mut sources = BTreeMap::from([(root_name, schema_table(schema, root_table)?)]);
+    for source in &flat_join.sources {
+        let name = flat_join_source_name(&source.table, &source.alias);
+        if sources
+            .insert(name.clone(), schema_table(schema, &source.table)?)
+            .is_some()
+        {
+            return Err(QueryError::UnknownColumn {
+                table: "flat join duplicate source".to_owned(),
+                column: name,
+            });
+        }
+    }
+    Ok(sources)
+}
+
+fn flat_join_filter_schema(
+    sources: &BTreeMap<String, TableSchema>,
+) -> Result<TableSchema, QueryError> {
+    let mut columns = Vec::new();
+    for (scope, table) in sources {
+        // `id` retains its normal effective-column semantics: a declared
+        // field wins, and only legacy tables expose their physical row UUID
+        // through that spelling. `_id` is the explicit physical-row alias.
+        columns.push(JazzColumnSchema::new(
+            format!("{scope}._id"),
+            ColumnType::Uuid,
+        ));
+        if !has_declared_id(table) {
+            columns.push(JazzColumnSchema::new(
+                format!("{scope}.id"),
+                ColumnType::Uuid,
+            ));
+        }
+        for magic in ["$createdBy", "$updatedBy", "$createdAt", "$updatedAt"] {
+            columns.push(JazzColumnSchema::new(
+                format!("{scope}.{magic}"),
+                executable_magic_column_type(magic)?
+                    .expect("listed flat-join magic columns are executable")
+                    .clone(),
+            ));
+        }
+        columns.extend(
+            table
+                .columns
+                .iter()
+                .map(|column| {
+                    JazzColumnSchema::new(
+                        format!("{scope}.{}", column.name),
+                        column.column_type.clone(),
+                    )
+                }),
+        );
+    }
+    Ok(TableSchema::new("flat join", columns))
+}
+
+fn qualify_flat_join_predicate(
+    predicate: &mut Predicate,
+    sources: &BTreeMap<String, TableSchema>,
+) -> Result<(), QueryError> {
+    rewrite_flat_join_predicate_columns(predicate, &mut |column| {
+        qualify_flat_join_column(column, sources)
+    })
+}
+
+fn rewrite_flat_join_predicate_columns(
+    predicate: &mut Predicate,
+    rewrite: &mut impl FnMut(&str) -> Result<String, QueryError>,
+) -> Result<(), QueryError> {
+    let mut rewrite_operand = |operand: &mut Operand| -> Result<(), QueryError> {
+        let Operand::Column(column) = operand else {
+            return Ok(());
+        };
+        *column = rewrite(column)?;
+        Ok(())
+    };
+    match predicate {
+        Predicate::All(predicates) | Predicate::Any(predicates) => predicates
+            .iter_mut()
+            .try_for_each(|predicate| rewrite_flat_join_predicate_columns(predicate, rewrite)),
+        Predicate::Not(predicate) => rewrite_flat_join_predicate_columns(predicate, rewrite),
+        Predicate::Eq(left, right)
+        | Predicate::Ne(left, right)
+        | Predicate::Gt(left, right)
+        | Predicate::Gte(left, right)
+        | Predicate::Lt(left, right)
+        | Predicate::Lte(left, right)
+        | Predicate::Contains(left, right) => {
+            rewrite_operand(left)?;
+            rewrite_operand(right)
+        }
+        Predicate::In(value, options) => {
+            rewrite_operand(value)?;
+            options.iter_mut().try_for_each(rewrite_operand)
+        }
+        Predicate::EnumMatch { column, .. } => {
+            *column = rewrite(column)?;
+            Ok(())
+        }
+        Predicate::IsNull(operand) => rewrite_operand(operand),
+    }
+}
+
+pub(crate) fn flat_join_predicate_sources(
+    predicate: &Predicate,
+) -> Result<BTreeSet<String>, QueryError> {
+    let mut predicate = predicate.clone();
+    let mut sources = BTreeSet::new();
+    rewrite_flat_join_predicate_columns(&mut predicate, &mut |column| {
+        let (scope, _) = flat_join_qualified_field(column)?;
+        sources.insert(scope.to_owned());
+        Ok(column.to_owned())
+    })?;
+    Ok(sources)
+}
+
+pub(crate) fn unqualify_flat_join_predicate(
+    predicate: &Predicate,
+    expected_scope: &str,
+) -> Result<Predicate, QueryError> {
+    let mut predicate = predicate.clone();
+    rewrite_flat_join_predicate_columns(&mut predicate, &mut |column| {
+        let (scope, field) = flat_join_qualified_field(column)?;
+        if scope != expected_scope {
+            return Err(QueryError::UnsupportedFlatJoinCombination {
+                feature: "filters spanning multiple sources".to_owned(),
+            });
+        }
+        Ok(field.to_owned())
+    })?;
+    Ok(predicate)
+}
+
+pub(crate) fn qualify_flat_join_source_predicate(
+    mut predicate: Predicate,
+    scope: &str,
+) -> Result<Predicate, QueryError> {
+    rewrite_flat_join_predicate_columns(&mut predicate, &mut |column| {
+        Ok(format!("{scope}.{column}"))
+    })?;
+    Ok(predicate)
+}
+
+fn validate_flat_join_filter_routing(predicate: &Predicate) -> Result<(), QueryError> {
+    if let Predicate::All(predicates) = predicate {
+        return predicates
+            .iter()
+            .try_for_each(validate_flat_join_filter_routing);
+    }
+    if flat_join_predicate_sources(predicate)?.len() > 1 {
+        return Err(QueryError::UnsupportedFlatJoinCombination {
+            feature: "filters spanning multiple sources".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn qualify_flat_join_column(
+    column: &str,
+    sources: &BTreeMap<String, TableSchema>,
+) -> Result<String, QueryError> {
+    if let Ok((scope, field)) = flat_join_qualified_field(column) {
+        let table = sources
+            .get(scope)
+            .ok_or_else(|| QueryError::UnknownColumn {
+                table: "flat join source".to_owned(),
+                column: scope.to_owned(),
+            })?;
+        flat_join_column_type(table, field)?;
+        return Ok(column.to_owned());
+    }
+
+    let mut matches = sources
+        .iter()
+        .filter(|(_, table)| flat_join_column_type(table, column).is_ok())
+        .map(|(scope, _)| scope.clone());
+    let Some(scope) = matches.next() else {
+        return Err(QueryError::UnknownColumn {
+            table: "flat join".to_owned(),
+            column: column.to_owned(),
+        });
+    };
+    if matches.next().is_some() {
+        return Err(QueryError::UnknownColumn {
+            table: "ambiguous flat join column; qualify its source".to_owned(),
+            column: column.to_owned(),
+        });
+    }
+    Ok(format!("{scope}.{column}"))
 }
 
 fn flat_join_source_name(table: &str, alias: &Option<String>) -> String {
@@ -310,6 +524,17 @@ fn flat_join_qualified_field(field: &str) -> Result<(&str, &str), QueryError> {
             table: "flat join qualified source".to_owned(),
             column: field.to_owned(),
         })
+}
+
+fn flat_join_column_type<'a>(
+    table: &'a TableSchema,
+    column: &str,
+) -> Result<&'a ColumnType, QueryError> {
+    if column == "_id" {
+        Ok(&ColumnType::Uuid)
+    } else {
+        planner_column_type(table, column)
+    }
 }
 
 fn validate_flat_join(
@@ -329,7 +554,7 @@ fn validate_flat_join(
                 column: name,
             });
         }
-        table(schema, &source.table)?;
+        schema_table(schema, &source.table)?;
         let (left_source, left_column) = flat_join_qualified_field(&source.on.left)?;
         let (right_source, right_column) = flat_join_qualified_field(&source.on.right)?;
         let left_table = sources
@@ -344,11 +569,12 @@ fn validate_flat_join(
                 column: right_source.to_owned(),
             });
         }
-        let left_schema = table(schema, left_table)?;
-        let right_schema = table(schema, &source.table)?;
-        if planner_column_type(&left_schema, left_column)?
-            != planner_column_type(&right_schema, right_column)?
-        {
+        let left_schema = schema_table(schema, left_table)?;
+        let right_schema = schema_table(schema, &source.table)?;
+        if !flat_join_key_types_compatible(
+            flat_join_column_type(&left_schema, left_column)?,
+            flat_join_column_type(&right_schema, right_column)?,
+        ) {
             return Err(QueryError::OperandTypeMismatch);
         }
         sources.insert(name, source.table.clone());
@@ -360,10 +586,10 @@ fn validate_join(
     schema: &JazzSchema,
     root: &TableSchema,
     root_table: &str,
-    join: &JoinVia,
+    join: &mut JoinVia,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
-    let join_table = table(schema, &join.table)?;
+    let join_table = schema_table(schema, &join.table)?;
     match join.target {
         JoinTarget::Column => {
             planner_column_type(&join_table, &join.on_column)?;
@@ -379,7 +605,7 @@ fn validate_join(
     }
     let target_table = if let Some(lookup) = &join.source_lookup {
         planner_column_type(root, &lookup.row_id_source_column)?;
-        let lookup_table = table(schema, &lookup.table)?;
+        let lookup_table = schema_table(schema, &lookup.table)?;
         match root.references.get(&lookup.row_id_source_column) {
             Some(target) if target == &lookup.table => {}
             _ => {
@@ -390,8 +616,13 @@ fn validate_join(
                 });
             }
         }
-        if lookup.value_column != "id" {
-            planner_column_type(&lookup_table, &lookup.value_column)?;
+        planner_column_type(&lookup_table, &lookup.value_column)?;
+        if lookup.value_column == "id"
+            && has_declared_id(&lookup_table)
+            && planner_column_type(&lookup_table, &lookup.value_column)?
+                != planner_column_type(&join_table, &join.on_column)?
+        {
+            return Err(QueryError::OperandTypeMismatch);
         }
         if join.source_column.as_deref() != Some(lookup.value_column.as_str()) {
             return Err(QueryError::JoinNotRefCompatible {
@@ -415,6 +646,12 @@ fn validate_join(
         }
     } else if let Some(source_column) = &join.source_column {
         if source_column == "id" {
+            if has_declared_id(root)
+                && planner_column_type(root, source_column)?
+                    != planner_column_type(&join_table, &join.on_column)?
+            {
+                return Err(QueryError::OperandTypeMismatch);
+            }
             root_table.to_owned()
         } else {
             planner_column_type(root, source_column)?;
@@ -458,10 +695,10 @@ fn validate_join(
             }
         }
     }
-    for predicate in &join.filters {
+    for predicate in &mut join.filters {
         validate_predicate(&join_table, predicate, params)?;
     }
-    for nested in &join.nested_joins {
+    for nested in &mut join.nested_joins {
         validate_join(schema, &join_table, &join.table, nested, params)?;
     }
     Ok(())
@@ -535,7 +772,7 @@ fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), Query
     }
 }
 
-fn table(schema: &JazzSchema, name: &str) -> Result<TableSchema, QueryError> {
+fn schema_table(schema: &JazzSchema, name: &str) -> Result<TableSchema, QueryError> {
     if name == "jazz_branches" {
         return Ok(branch_metadata_table_schema());
     }
@@ -569,6 +806,9 @@ fn planner_column_type<'a>(
     table: &'a TableSchema,
     column: &str,
 ) -> Result<&'a ColumnType, QueryError> {
+    if let Ok(column_schema) = column_schema(table, column) {
+        return Ok(&column_schema.column_type);
+    }
     if column == "id" {
         return Ok(&ColumnType::Uuid);
     }
@@ -576,6 +816,10 @@ fn planner_column_type<'a>(
         return Ok(column_type);
     }
     Ok(&column_schema(table, column)?.column_type)
+}
+
+fn has_declared_id(table: &TableSchema) -> bool {
+    table.columns.iter().any(|column| column.name == "id")
 }
 
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
@@ -604,7 +848,7 @@ fn validate_include(schema: &JazzSchema, root: &TableSchema, path: &str) -> Resu
                 path: path.to_owned(),
             });
         };
-        current = table(schema, target)?;
+        current = schema_table(schema, target)?;
     }
     Ok(())
 }
@@ -612,19 +856,20 @@ fn validate_include(schema: &JazzSchema, root: &TableSchema, path: &str) -> Resu
 fn validate_array_subqueries(
     schema: &JazzSchema,
     parent: &TableSchema,
-    subqueries: &[ArraySubquery],
+    subqueries: &mut [ArraySubquery],
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
     let mut names = std::collections::BTreeSet::new();
-    for subquery in subqueries {
-        if subquery.column_name.is_empty() || !names.insert(subquery.column_name.as_str()) {
+    for subquery in subqueries.iter() {
+        if subquery.column_name.is_empty() || !names.insert(subquery.column_name.clone()) {
             return Err(QueryError::BadIncludePath {
                 path: subquery.column_name.clone(),
             });
         }
     }
     for subquery in subqueries {
-        validate_array_subquery(schema, parent, subquery, params, &subquery.column_name)?;
+        let relation_path = subquery.column_name.clone();
+        validate_array_subquery(schema, parent, subquery, params, &relation_path)?;
     }
     Ok(())
 }
@@ -632,17 +877,17 @@ fn validate_array_subqueries(
 fn validate_array_subquery(
     schema: &JazzSchema,
     parent: &TableSchema,
-    subquery: &ArraySubquery,
+    subquery: &mut ArraySubquery,
     params: &mut BTreeMap<String, ColumnType>,
     relation_path: &str,
 ) -> Result<(), QueryError> {
-    let child = table(schema, &subquery.table)?;
+    let child = schema_table(schema, &subquery.table)?;
     let parent_type = planner_column_type(parent, &subquery.outer_column)?;
     let child_type = planner_column_type(&child, &subquery.inner_column)?;
     if !array_correlation_types_compatible(parent_type, child_type) {
         return Err(QueryError::OperandTypeMismatch);
     }
-    for predicate in &subquery.filters {
+    for predicate in &mut subquery.filters {
         validate_predicate(&child, predicate, params)?;
     }
     if let Some(select) = &subquery.select {
@@ -654,8 +899,8 @@ fn validate_array_subquery(
         planner_column_type(&child, &order.column)?;
     }
     let mut names = std::collections::BTreeSet::new();
-    for nested in &subquery.nested_arrays {
-        if nested.column_name.is_empty() || !names.insert(nested.column_name.as_str()) {
+    for nested in &mut subquery.nested_arrays {
+        if nested.column_name.is_empty() || !names.insert(nested.column_name.clone()) {
             return Err(QueryError::BadIncludePath {
                 path: nested.column_name.clone(),
             });
@@ -669,13 +914,18 @@ fn validate_array_subquery(
 fn validate_reachable(
     schema: &JazzSchema,
     root: &TableSchema,
-    reachable: &ReachableVia,
+    reachable: &mut ReachableVia,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
-    let access = table(schema, &reachable.access_table)?;
+    let access = schema_table(schema, &reachable.access_table)?;
     planner_column_type(&access, &reachable.access_row_column)?;
     planner_column_type(&access, &reachable.access_team_column)?;
-    if reachable.access_row_column == "id" {
+    let root_key_type = if has_declared_id(root) {
+        planner_column_type(root, "id")?
+    } else {
+        &ColumnType::Uuid
+    };
+    if reachable.access_row_column == "id" && !has_declared_id(&access) {
         if access.name != root.name {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: reachable.access_table.clone(),
@@ -685,8 +935,7 @@ fn validate_reachable(
         }
     } else if access.name == root.name {
         let access_column_type = planner_column_type(&access, &reachable.access_row_column)?;
-        let root_column_type = planner_column_type(root, &reachable.access_row_column)?;
-        if !column_types_comparable(access_column_type, root_column_type) {
+        if !column_types_comparable(access_column_type, root_key_type) {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: reachable.access_table.clone(),
                 column: reachable.access_row_column.clone(),
@@ -703,6 +952,12 @@ fn validate_reachable(
                     target_table: root.name.clone(),
                 });
             }
+        }
+        if !column_types_comparable(
+            planner_column_type(&access, &reachable.access_row_column)?,
+            root_key_type,
+        ) {
+            return Err(QueryError::OperandTypeMismatch);
         }
     }
     let team_table = match reachable.access_team_target {
@@ -725,10 +980,10 @@ fn validate_reachable(
             &access.name
         }
     };
-    let edge = table(schema, &reachable.edge_table)?;
+    let edge = schema_table(schema, &reachable.edge_table)?;
     for column in [&reachable.edge_member_column, &reachable.edge_parent_column] {
         planner_column_type(&edge, column)?;
-        if *column == "id" && edge.name == *team_table {
+        if *column == "id" && !has_declared_id(&edge) && edge.name == *team_table {
             continue;
         }
         match edge.references.get(column) {
@@ -742,9 +997,11 @@ fn validate_reachable(
             }
         }
     }
-    if let Some(seed) = &reachable.seed {
-        let seed_table = table(schema, &seed.table)?;
-        planner_column_type(&seed_table, &seed.team_column)?;
+    if let Some(seed) = &mut reachable.seed {
+        let seed_table = schema_table(schema, &seed.table)?;
+        if planner_column_type(&seed_table, &seed.team_column)? != &ColumnType::Uuid {
+            return Err(QueryError::OperandTypeMismatch);
+        }
         if let Some(user_column) = &seed.user_column {
             planner_column_type(&seed_table, user_column)?;
         }
@@ -763,7 +1020,7 @@ fn validate_reachable(
                 target_table: team_table.clone(),
             });
         }
-        for predicate in &seed.filters {
+        for predicate in &mut seed.filters {
             validate_predicate(&seed_table, predicate, params)?;
         }
     } else {
@@ -773,10 +1030,10 @@ fn validate_reachable(
             Some(_) => return Err(QueryError::OperandTypeMismatch),
         }
     }
-    for predicate in &reachable.access_filters {
+    for predicate in &mut reachable.access_filters {
         validate_predicate(&access, predicate, params)?;
     }
-    for predicate in &reachable.edge_filters {
+    for predicate in &mut reachable.edge_filters {
         validate_predicate(&edge, predicate, params)?;
     }
     Ok(())
@@ -796,12 +1053,12 @@ fn validate_inherits(root: &TableSchema, inherits: &InheritsVia) -> Result<(), Q
 
 fn validate_predicate(
     table: &TableSchema,
-    predicate: &Predicate,
+    predicate: &mut Predicate,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
     match predicate {
         Predicate::All(predicates) | Predicate::Any(predicates) => predicates
-            .iter()
+            .iter_mut()
             .try_for_each(|predicate| validate_predicate(table, predicate, params)),
         Predicate::Not(predicate) => validate_predicate(table, predicate, params),
         Predicate::Eq(left, right) | Predicate::Ne(left, right) => {
@@ -810,7 +1067,14 @@ fn validate_predicate(
         Predicate::In(left, values) => {
             let left_type = operand_type(table, left, params)?;
             for value in values {
-                let value_type = operand_type(table, value, params)?;
+                let mut value_type = operand_type(table, value, params)?;
+                if let (Some(left_type), Some(candidate_type)) = (&left_type, &value_type)
+                    && !in_operand_types_compatible(left_type, candidate_type)
+                    && !matches!(&*left, Operand::Literal(_))
+                    && coerce_integer_literal_for_type(value, left_type)
+                {
+                    value_type = operand_type(table, value, params)?;
+                }
                 match (left_type.clone(), value_type) {
                     (Some(left_type), Some(value_type))
                         if !in_operand_types_compatible(&left_type, &value_type)
@@ -898,12 +1162,31 @@ fn validate_predicate(
 
 fn validate_comparable_operands(
     table: &TableSchema,
-    left: &Operand,
-    right: &Operand,
+    left: &mut Operand,
+    right: &mut Operand,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<ColumnType, QueryError> {
-    let left_type = operand_type(table, left, params)?;
-    let right_type = operand_type(table, right, params)?;
+    let mut left_type = operand_type(table, left, params)?;
+    let mut right_type = operand_type(table, right, params)?;
+    if let (Some(left_known), Some(right_known)) = (&left_type, &right_type)
+        && !column_types_comparable(left_known, right_known)
+    {
+        let coerced = if matches!(&*left, Operand::Literal(_))
+            && !matches!(&*right, Operand::Literal(_))
+        {
+            coerce_integer_literal_for_type(left, right_known)
+        } else if matches!(&*right, Operand::Literal(_))
+            && !matches!(&*left, Operand::Literal(_))
+        {
+            coerce_integer_literal_for_type(right, left_known)
+        } else {
+            false
+        };
+        if coerced {
+            left_type = operand_type(table, left, params)?;
+            right_type = operand_type(table, right, params)?;
+        }
+    }
     match (left_type, right_type) {
         (Some(left_type), Some(right_type))
             if !column_types_comparable(&left_type, &right_type) =>
@@ -968,6 +1251,22 @@ fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
         )
 }
 
+fn flat_join_key_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
+    column_types_comparable(left, right)
+        || array_element_type_compatible(left, right)
+        || array_element_type_compatible(right, left)
+}
+
+fn array_element_type_compatible(array: &ColumnType, scalar: &ColumnType) -> bool {
+    match non_null_column_type(array) {
+        ColumnType::Array(member) => {
+            !matches!(non_null_column_type(scalar), ColumnType::Array(_))
+                && column_types_comparable(&member, scalar)
+        }
+        _ => false,
+    }
+}
+
 fn in_operand_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
     if column_types_comparable(left, right) {
         return true;
@@ -1022,6 +1321,24 @@ fn in_candidate_type_mismatch_error(
         },
         _ => QueryError::OperandTypeMismatch,
     }
+}
+
+fn coerce_integer_literal_for_type(operand: &mut Operand, target: &ColumnType) -> bool {
+    let target = non_null_column_type(target);
+    let coerced = match (&*operand, target) {
+        (Operand::Literal(Value::I32(value)), ColumnType::I64) => {
+            Some(Value::I64(i64::from(*value)))
+        }
+        (Operand::Literal(Value::I64(value)), ColumnType::I32) => {
+            i32::try_from(*value).ok().map(Value::I32)
+        }
+        _ => None,
+    };
+    let Some(value) = coerced else {
+        return false;
+    };
+    *operand = Operand::Literal(value);
+    true
 }
 
 fn non_null_column_type(column_type: &ColumnType) -> ColumnType {

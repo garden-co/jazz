@@ -343,12 +343,7 @@ where
         row_uuid: RowUuid,
         identity: AuthorId,
     ) -> Result<bool, Error> {
-        let mut query = policy.clone();
-        query.filters.push(crate::query::eq(
-            crate::query::col("id"),
-            crate::query::lit(Value::Uuid(row_uuid.0)),
-        ));
-        let policy_shape = query.validate(&self.catalogue.schema)?;
+        let policy_shape = policy.validate(&self.catalogue.schema)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
@@ -357,12 +352,19 @@ where
             ParamBindingMode::InlineAllReachableSeeds,
         )?;
         let binding = policy_shape.bind(BTreeMap::new())?;
-        let program = self.compile_current_query_program_with_selected_access_paths(
+        // A primary-key access path addresses the physical row UUID without
+        // overloading public `id`, which may be a declared user column.
+        let access_paths = BTreeMap::from([(
+            root_source_id(&policy.table),
+            CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
+        )]);
+        let program = self.compile_current_query_program_with_access_paths(
             &policy_shape,
             &binding,
             DurabilityTier::Local,
             identity,
             CurrentQueryProgramOutput::AppRows,
+            access_paths,
         )?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
     }

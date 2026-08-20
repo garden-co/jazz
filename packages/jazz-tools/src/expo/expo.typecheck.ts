@@ -18,7 +18,6 @@ const secureStore: ExpoSecureStoreLike = {
 
 const options: ExpoAuthSecretStoreOptions = {
   key: "expo-auth-key",
-  authSecretStorageKey: "expo-auth-key-legacy",
   appId: "expo-app",
   userId: "user-1",
   sessionId: "session-1",
@@ -27,7 +26,6 @@ const options: ExpoAuthSecretStoreOptions = {
 
 const hookOptions: UseLocalFirstAuthOptions = {
   key: "expo-hook-auth-key",
-  authSecretStorageKey: "expo-hook-auth-key-legacy",
   appId: "expo-hook-app",
 };
 

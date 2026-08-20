@@ -154,8 +154,6 @@ export interface PublishStoredSchemaOptions {
   appId: string;
   adminSecret: string;
   schema: WasmSchema;
-  /** @deprecated Use `publishStoredPermissions` instead. */
-  permissions?: CompiledPermissionsMap;
 }
 
 export async function publishStoredSchema(
@@ -168,12 +166,7 @@ export async function publishStoredSchema(
       "Content-Type": "application/json",
       "X-Jazz-Admin-Secret": options.adminSecret,
     },
-    body: JSON.stringify({
-      schema: options.schema,
-      permissions: options.permissions
-        ? normalizePermissionsForWasm(options.permissions)
-        : undefined,
-    }),
+    body: JSON.stringify({ schema: options.schema }),
   });
 
   if (!response.ok) {

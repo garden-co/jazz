@@ -19,8 +19,9 @@ pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) binding_view_key: BindingViewKey,
     pub(super) result_select: Option<Vec<String>>,
     pub(super) result_set: BTreeSet<ResultMemberEntry>,
-    pub(super) authoritative_result_set: BTreeSet<ResultMemberEntry>,
     pub(super) authoritative_result_generation: u64,
+    pub(super) authoritative_reconciliation_deferred: bool,
+    pub(super) deferred_authoritative_row_keys: BTreeSet<(String, RowUuid)>,
     pub(super) result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     pub(super) program_facts: BTreeSet<ProgramFactEntry>,
     pub(super) root_occurrence_ids: Vec<OutputOccurrenceId>,
@@ -89,16 +90,6 @@ impl LocalMaintainedViewSubscription {
             })
             .sum::<usize>()
             + self.result_set.len() * 64;
-        let authoritative_result_set_bytes = self
-            .authoritative_result_set
-            .iter()
-            .map(|member| {
-                postcard::to_allocvec(member)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(0)
-            })
-            .sum::<usize>()
-            + self.authoritative_result_set.len() * 64;
         let result_payloads_bytes = self
             .result_payloads
             .iter()
@@ -122,6 +113,12 @@ impl LocalMaintainedViewSubscription {
             })
             .sum::<usize>()
             + self.program_facts.len() * 64;
+        let deferred_authoritative_row_keys_bytes = self
+            .deferred_authoritative_row_keys
+            .iter()
+            .map(|(table, _)| table.len() + std::mem::size_of::<RowUuid>())
+            .sum::<usize>()
+            + self.deferred_authoritative_row_keys.len() * 64;
         let control_state_bytes = terminal_schemas.terminal_schemas_bytes
             + tables_bytes
             + self.result_table.len()
@@ -131,9 +128,9 @@ impl LocalMaintainedViewSubscription {
                 .map(|columns| columns.iter().map(String::len).sum::<usize>())
                 .unwrap_or_default()
             + result_set_bytes
-            + authoritative_result_set_bytes
             + result_payloads_bytes
-            + program_facts_bytes;
+            + program_facts_bytes
+            + deferred_authoritative_row_keys_bytes;
         LocalMaintainedViewSubscriptionFootprint {
             maintained,
             terminal_schemas,
@@ -155,6 +152,22 @@ pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
     pub(crate) removed_edges: Vec<RelationEdge>,
     pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
     pub(crate) terminal_layout: Option<crate::db::TerminalRootLayout>,
+}
+
+fn result_member_matches_row_keys(
+    member: &ResultMemberEntry,
+    row_keys: &BTreeSet<(String, RowUuid)>,
+) -> bool {
+    result_member_matching_row_key(member, row_keys).is_some()
+}
+
+fn result_member_matching_row_key(
+    member: &ResultMemberEntry,
+    row_keys: &BTreeSet<(String, RowUuid)>,
+) -> Option<(String, RowUuid)> {
+    let row = member.as_real_row()?;
+    let row_key = (row.table.to_string(), row.row_uuid);
+    row_keys.contains(&row_key).then_some(row_key)
 }
 
 impl<S> NodeState<S>
@@ -218,8 +231,9 @@ where
             }),
             result_select: shape.query().select.clone(),
             result_set: BTreeSet::new(),
-            authoritative_result_set: BTreeSet::new(),
             authoritative_result_generation: 0,
+            authoritative_reconciliation_deferred: false,
+            deferred_authoritative_row_keys: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
             root_occurrence_ids: Vec::new(),
@@ -237,15 +251,31 @@ where
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
     ) -> Result<Option<LocalMaintainedViewSubscriptionUpdate>, Error> {
-        let Some(transitions) = self.drain_local_maintained_view_subscription_transitions(
+        self.drain_local_maintained_view_subscription_preserving_rows(
             local,
             authoritative_binding_view,
-        )?
-        else {
-            return Ok(None);
+            &BTreeSet::new(),
+        )
+        .map(|(update, _)| update)
+    }
+
+    pub(crate) fn drain_local_maintained_view_subscription_preserving_rows(
+        &mut self,
+        local: &mut LocalMaintainedViewSubscription,
+        authoritative_binding_view: Option<BindingViewKey>,
+        preserved_row_keys: &BTreeSet<(String, RowUuid)>,
+    ) -> Result<(Option<LocalMaintainedViewSubscriptionUpdate>, bool), Error> {
+        let (transitions, suppressed_authoritative_change) = self
+            .drain_local_maintained_view_subscription_transitions(
+                local,
+                authoritative_binding_view,
+                preserved_row_keys,
+            )?;
+        let Some(transitions) = transitions else {
+            return Ok((None, suppressed_authoritative_change));
         };
         let update = self.apply_local_maintained_view_transitions(local, transitions)?;
-        Ok(Some(update))
+        Ok((Some(update), suppressed_authoritative_change))
     }
 
     pub(crate) fn drain_local_maintained_view_subscription_state(
@@ -253,9 +283,10 @@ where
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
     ) -> Result<bool, Error> {
-        let Some(transitions) = self.drain_local_maintained_view_subscription_transitions(
+        let (Some(transitions), _) = self.drain_local_maintained_view_subscription_transitions(
             local,
             authoritative_binding_view,
+            &BTreeSet::new(),
         )?
         else {
             return Ok(false);
@@ -290,9 +321,10 @@ where
                     .collect()
             })
             .unwrap_or_default();
-        local.authoritative_result_set = local.result_set.clone();
         local.authoritative_result_generation =
             self.applied_view_update_generation(binding_view_key);
+        local.authoritative_reconciliation_deferred = false;
+        local.deferred_authoritative_row_keys.clear();
         local.program_facts = self
             .query
             .settled_program_facts
@@ -331,26 +363,62 @@ where
         Ok(())
     }
 
-    pub(crate) fn seed_local_maintained_authoritative_result_membership(
+    pub(crate) fn seed_local_maintained_authoritative_generation(
         &self,
         local: &mut LocalMaintainedViewSubscription,
         binding_view_key: BindingViewKey,
     ) {
-        local.authoritative_result_set = self
+        local.authoritative_result_generation =
+            self.applied_view_update_generation(binding_view_key);
+    }
+
+    pub(crate) fn defer_local_maintained_authority_reconciliation(
+        &self,
+        local: &mut LocalMaintainedViewSubscription,
+    ) {
+        local.authoritative_reconciliation_deferred = true;
+    }
+
+    pub(crate) fn local_maintained_authority_reconciliation_conflicts(
+        &self,
+        local: &LocalMaintainedViewSubscription,
+        binding_view_key: BindingViewKey,
+        preserved_row_keys: &BTreeSet<(String, RowUuid)>,
+    ) -> bool {
+        let remote_members = self
             .query
             .settled_result_sets
             .get(&binding_view_key)
             .cloned()
             .unwrap_or_default();
-        local.authoritative_result_generation =
-            self.applied_view_update_generation(binding_view_key);
+        local
+            .result_set
+            .symmetric_difference(&remote_members)
+            .any(|member| result_member_matches_row_keys(member, preserved_row_keys))
+    }
+
+    pub(crate) fn local_maintained_authority_reconciliation_due(
+        &self,
+        local: &LocalMaintainedViewSubscription,
+        binding_view_key: BindingViewKey,
+    ) -> bool {
+        local.authoritative_reconciliation_deferred
+            || self.applied_view_update_generation(binding_view_key)
+                != local.authoritative_result_generation
     }
 
     fn drain_local_maintained_view_subscription_transitions(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
-    ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
+        preserved_row_keys: &BTreeSet<(String, RowUuid)>,
+    ) -> Result<
+        (
+            Option<super::maintained_subscription_view::ResultTransitions>,
+            bool,
+        ),
+        Error,
+    > {
         if local.result_query.aggregate.is_some()
             && let Some(remote_members) =
                 self.query.settled_result_sets.get(&local.binding_view_key)
@@ -422,7 +490,7 @@ where
                         _ => None,
                     })
                     .collect();
-                return Ok(Some(transitions));
+                return Ok((Some(transitions), false));
             }
         }
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
@@ -438,12 +506,21 @@ where
         let mut terminal_operations = Vec::new();
         let mut authoritative_membership_changed = false;
         let mut authoritative_member_adds = BTreeSet::new();
+        let mut suppressed_authoritative_change = false;
+        let mut suppressed_authoritative_row_keys = BTreeSet::new();
         if let Some(binding_view) = authoritative_binding_view {
             let authoritative_generation = self.applied_view_update_generation(binding_view);
             // Local optimistic changes can advance the maintained graph
             // without any newer serving-peer membership decision. Keep them
             // visible until an authoritative generation advances.
-            if authoritative_generation != local.authoritative_result_generation {
+            if authoritative_generation != local.authoritative_result_generation
+                || local.authoritative_reconciliation_deferred
+            {
+                let mut protected_row_keys = preserved_row_keys.clone();
+                if authoritative_generation == local.authoritative_result_generation {
+                    protected_row_keys
+                        .extend(local.deferred_authoritative_row_keys.iter().cloned());
+                }
                 let remote_members = self
                     .query
                     .settled_result_sets
@@ -470,7 +547,14 @@ where
                 // decision for that frontier.  Import members newly admitted
                 // there so a row promoted across a TopBy boundary is delivered
                 // even though none of its locally-visible source facts changed.
-                for entry in remote_members.difference(&local.authoritative_result_set) {
+                for entry in remote_members.difference(&local.result_set) {
+                    if let Some(row_key) =
+                        result_member_matching_row_key(entry, &protected_row_keys)
+                    {
+                        suppressed_authoritative_change = true;
+                        suppressed_authoritative_row_keys.insert(row_key);
+                        continue;
+                    }
                     if !local.result_set.contains(entry) {
                         let materializable = if remote_payloads.contains_key(entry) {
                             true
@@ -508,7 +592,14 @@ where
                         }
                     }
                 }
-                for entry in local.authoritative_result_set.difference(&remote_members) {
+                for entry in local.result_set.difference(&remote_members) {
+                    if let Some(row_key) =
+                        result_member_matching_row_key(entry, &protected_row_keys)
+                    {
+                        suppressed_authoritative_change = true;
+                        suppressed_authoritative_row_keys.insert(row_key);
+                        continue;
+                    }
                     // Replace the exact prior member even when its output
                     // occurrence remains visible through a new content
                     // version. The snapshot reducer coalesces the matching
@@ -524,8 +615,13 @@ where
                         }
                     }
                 }
-                local.authoritative_result_set = remote_members;
                 local.authoritative_result_generation = authoritative_generation;
+                local.authoritative_reconciliation_deferred = suppressed_authoritative_change;
+                if suppressed_authoritative_change {
+                    local.deferred_authoritative_row_keys = suppressed_authoritative_row_keys;
+                } else {
+                    local.deferred_authoritative_row_keys.clear();
+                }
             }
         }
         loop {
@@ -594,7 +690,7 @@ where
             && structured_app_row_changes.is_empty()
             && terminal_operations.is_empty()
         {
-            return Ok(None);
+            return Ok((None, suppressed_authoritative_change));
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions {
             authoritative_membership_changed,
@@ -652,7 +748,7 @@ where
                 })
                 .collect();
         }
-        Ok(Some(transitions))
+        Ok((Some(transitions), suppressed_authoritative_change))
     }
 
     fn apply_local_maintained_view_transitions(

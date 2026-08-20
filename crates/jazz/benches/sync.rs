@@ -12,7 +12,7 @@ use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
-use jazz::tools::OpenBatchId;
+use jazz::tools::OpenTransactionId;
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_counters};
@@ -257,7 +257,7 @@ impl SyncBench {
 
     fn next_exclusive(&mut self, step: usize) -> (TxId, SyncMessage, u64) {
         let row_uuid = row(120 + (step % 12) as u8);
-        let tx_id = OpenBatchId::new();
+        let tx_id = OpenTransactionId::new();
         self.ui.open_exclusive(tx_id).expect("open exclusive");
         let _ = self.ui.tx_read(tx_id, TABLE, row_uuid).expect("read");
         self.ui

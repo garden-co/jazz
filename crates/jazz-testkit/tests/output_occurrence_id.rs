@@ -3,9 +3,10 @@ use jazz_testkit as support;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use jazz::query::{Query, col, eq, lit, table};
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, QueryBuilder, QueryResult, ResultKey, Schema, SchemaBuilder,
+    ColumnType, DurabilityTier, QueryResult, ResultKey, Schema, SchemaBuilder,
     SubscriptionStreamItem, TableSchema, Value,
 };
 use jazz_server::JazzServer;
@@ -78,6 +79,13 @@ fn key_for_joined_title(results: &[QueryResult], title: &str) -> ResultKey {
         .clone()
 }
 
+fn joined_todos(sources: &[(&str, &str, &str)]) -> Query {
+    sources.iter().fold(
+        Query::from(table("todos").alias("root")).filter(eq(col("root.done"), lit(false))),
+        |query, (alias, left, right)| query.flat_join(table("todos").alias(*alias), *left, *right),
+    )
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_replacements() {
     tokio::task::LocalSet::new()
@@ -91,27 +99,15 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .ready_on("todos", Duration::from_secs(30))
                 .connect()
                 .await;
-            let (root, _, batch) = client
+            let (root, _, tx) = client
                 .insert(
                     "todos",
                     row_input!("title" => "draft", "bucket" => "shared", "done" => false),
                 )
                 .expect("insert todo");
-            client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("todo settles locally");
+            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
 
-            let joined_query = QueryBuilder::new("todos")
-                .alias("root")
-                .filter_eq("done", Value::Boolean(false))
-                .join("todos")
-                .alias("joined")
-                .on("root.bucket", "joined.bucket")
-                .build();
+            let joined_query = joined_todos(&[("joined", "root.bucket", "joined.bucket")]);
             let mut joined_stream = client
                 .subscribe(joined_query.clone())
                 .await
@@ -161,15 +157,15 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
             );
             tx.rollback().expect("roll back staged joined-side insert");
 
-            let (first, _, batch) = client
+            let (first, _, tx) = client
                 .insert(
                     "todos",
                     row_input!("title" => "first", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert first matching joined row");
             client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    tx.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
                 .await
@@ -190,19 +186,13 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 "the first joined row is addressed beneath its root: {first_added:?}"
             );
 
-            let (second, _, batch) = client
+            let (second, _, tx) = client
                 .insert(
                     "todos",
                     row_input!("title" => "second", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert second matching join row");
-            client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("second todo settles");
+            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let fan_out = next_delta_with_added(&mut joined_stream).await;
             let current_results = client
                 .query_results(joined_query.clone(), Some(DurabilityTier::Local))
@@ -217,16 +207,10 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                     .any(|row| row.id == second_key),
                 "a second matching source produces a distinct occurrence under the same root: {fan_out:?}"
             );
-            let two_hop_query = QueryBuilder::new("todos")
-                .alias("root")
-                .filter_eq("done", Value::Boolean(false))
-                .join("todos")
-                .alias("first_hop")
-                .on("root.bucket", "first_hop.bucket")
-                .join("todos")
-                .alias("second_hop")
-                .on("first_hop.bucket", "second_hop.bucket")
-                .build();
+            let two_hop_query = joined_todos(&[
+                ("first_hop", "root.bucket", "first_hop.bucket"),
+                ("second_hop", "first_hop.bucket", "second_hop.bucket"),
+            ]);
             let two_hop_results = client
                 .query_results(two_hop_query.clone(), Some(DurabilityTier::Local))
                 .await
@@ -274,19 +258,13 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                     .collect(),
                 "one-shot and maintained two-hop keys are identical"
             );
-            let batch = client
+            let tx = client
                 .update(
                     root,
                     vec![("title".to_owned(), Value::Text("revised".to_owned()))],
                 )
                 .expect("replace root source content");
-            client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("replacement settles");
+            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let replacement = next_delta_with_updated(&mut joined_stream).await;
             let two_hop_root_replacement = next_delta_with_updated(&mut two_hop_stream).await;
             assert!(
@@ -304,19 +282,13 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 "root replacement retains the three-component result key"
             );
 
-            let batch = client
+            let tx = client
                 .update(
                     second,
                     vec![("title".to_owned(), Value::Text("second revised".to_owned()))],
                 )
                 .expect("replace joined source content");
-            client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("joined-side replacement settles");
+            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let joined_replacement = next_delta_with_updated(&mut joined_stream).await;
             let two_hop_joined_replacement = next_delta_with_updated(&mut two_hop_stream).await;
             assert!(
@@ -344,14 +316,8 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 Some(Value::Text("second revised".to_owned()))
             );
 
-            let batch = client.delete(first).expect("remove first joined row");
-            client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("joined-row removal settles");
+            let tx = client.delete(first).expect("remove first joined row");
+            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let removal = next_delta_with_removed(&mut joined_stream).await;
             let two_hop_removal = next_delta_with_removed(&mut two_hop_stream).await;
             assert!(
@@ -386,13 +352,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .await;
             let mut rehydrated_stream = rehydrated
                 .subscribe(
-                    QueryBuilder::new("todos")
-                        .alias("root")
-                        .filter_eq("done", Value::Boolean(false))
-                        .join("todos")
-                        .alias("joined")
-                        .on("root.bucket", "joined.bucket")
-                        .build(),
+                    joined_todos(&[("joined", "root.bucket", "joined.bucket")]),
                 )
                 .await
                 .expect("rehydrated joined maintained output is supported");
@@ -413,7 +373,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batch() {
+async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todos_schema();
@@ -425,27 +385,19 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 .ready_on("todos", Duration::from_secs(30))
                 .connect()
                 .await;
-            let (_root, _, batch) = client
+            let (_root, _, tx) = client
                 .insert(
                     "todos",
                     row_input!("title" => "root", "bucket" => "shared", "done" => false),
                 )
                 .expect("insert root");
-            client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("root settles");
+            support::wait_for_edge_txs(
+                &client,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
-            let joined_query = QueryBuilder::new("todos")
-                .alias("root")
-                .filter_eq("done", Value::Boolean(false))
-                .join("todos")
-                .alias("joined")
-                .on("root.bucket", "joined.bucket")
-                .build();
+            let joined_query = joined_todos(&[("joined", "root.bucket", "joined.bucket")]);
             let mut stream = client
                 .subscribe(joined_query)
                 .await
@@ -461,35 +413,26 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 .expect("stage matching joined row");
             tx.delete(transient)
                 .expect("stage removal of that same joined occurrence");
-            let batch = tx.commit().expect("commit add-then-remove batch");
-            client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
-                .await
-                .expect("add-then-remove batch settles");
+            let net_tx = tx.commit().expect("commit add-then-remove tx");
 
-            let (_durable, _, batch) = client
+            let (_durable, _, durable_tx) = client
                 .insert(
                     "todos",
                     row_input!("title" => "durable", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert durable matching joined row");
-            client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("durable joined row settles");
+            support::wait_for_edge_txs(
+                &client,
+                &[
+                    net_tx,
+                    durable_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
             let delta = next_delta_with_added(&mut stream).await;
             let results = client
                 .query_results(
-                    QueryBuilder::new("todos")
-                        .alias("root")
-                        .filter_eq("done", Value::Boolean(false))
-                        .join("todos")
-                        .alias("joined")
-                        .on("root.bucket", "joined.bucket")
-                        .build(),
+                    joined_todos(&[("joined", "root.bucket", "joined.bucket")]),
                     Some(DurabilityTier::Local),
                 )
                 .await

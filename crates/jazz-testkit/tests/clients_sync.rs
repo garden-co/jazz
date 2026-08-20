@@ -5,9 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz::row_input;
-use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{ColumnType, DurabilityTier, JazzClient, SchemaBuilder, TableSchema, Value};
 use jazz::tools::{ObjectId, SubscriptionStream, SubscriptionStreamItem};
 use jazz_server::JazzServer;
 use support::{publish_allow_all_permissions, wait_for_query};
@@ -24,7 +22,7 @@ fn test_schema() -> jazz::tools::Schema {
 }
 
 async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     wait_for_query(
         client,
         query,
@@ -39,7 +37,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
 async fn wait_for_subscription_driven_query<F>(
     client: &JazzClient,
     stream: &mut SubscriptionStream,
-    query: jazz::tools::Query,
+    query: jazz::query::Query,
     timeout: Duration,
     description: &str,
     mut predicate: F,
@@ -131,7 +129,7 @@ async fn fresh_client_resolves_object_with_deep_update_history_impl() {
 
     let writer_rows = wait_for_query(
         &writer,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         format!("writer sees final title {final_title}"),
@@ -154,7 +152,7 @@ async fn fresh_client_resolves_object_with_deep_update_history_impl() {
 
     let fresh_rows = wait_for_query(
         &fresh_client,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         format!("fresh client sees final title {final_title}"),
@@ -195,7 +193,7 @@ async fn jazz_tools_cli_two_clients_sync_values() {
             .await
             .expect("connect client b");
 
-            let query = QueryBuilder::new("todos").build();
+            let query = jazz::query::Query::from("todos");
             let mut stream_a = client_a
                 .subscribe(query.clone())
                 .await
@@ -335,7 +333,7 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_
         )
         .expect("create todo from client a");
 
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     wait_for_query(
         &client_b,
         query.clone(),
@@ -346,19 +344,17 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_
     )
     .await;
 
-    let batch_id = client_a
+    let transaction_id = client_a
         .update(
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
         .expect("update todo from client a");
-    client_a
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("update reaches edge");
+    support::wait_for_edge_txs(
+        &client_a,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let expected_values = vec![
         Value::Text("update-through-server".to_string()),
@@ -416,7 +412,7 @@ async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
         )
         .expect("create todo from client a");
 
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     wait_for_query(
         &client_b,
         query.clone(),
@@ -427,14 +423,12 @@ async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
     )
     .await;
 
-    let batch_id = client_a.delete(todo_id).expect("delete todo from client a");
-    client_a
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("delete reaches edge");
+    let transaction_id = client_a.delete(todo_id).expect("delete todo from client a");
+    support::wait_for_edge_txs(
+        &client_a,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let rows_after_delete = wait_for_query(
         &client_b,
@@ -497,7 +491,7 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
 
             let rows = wait_for_query(
                 &client,
-                QueryBuilder::new("todos").build(),
+                jazz::query::Query::from("todos"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(25),
                 "query returns row created with external id",
@@ -517,20 +511,20 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn wait_for_batch_reaches_edge_and_global_tiers() {
+async fn wait_for_transaction_reaches_edge_and_global_tiers() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = test_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
             let alice = jazz_testkit::connect(
-                server.make_client_context_for_user(schema, "alice-direct-wait-for-batch"),
+                server.make_client_context_for_user(schema, "alice-direct-wait-for-tx"),
             )
             .await
             .expect("connect alice");
 
             wait_for_edge_query_ready(&alice, Duration::from_secs(30)).await;
 
-            let (_, _, batch_id) = alice
+            let (_, _, transaction_id) = alice
                 .insert(
                     "todos",
                     row_input!("title" => "scheduler confirmation", "completed" => false),
@@ -538,19 +532,19 @@ async fn wait_for_batch_reaches_edge_and_global_tiers() {
                 .expect("insert todo");
 
             alice
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
                 .await
-                .expect("edge wait_for_batch should resolve from scheduled core progress");
+                .expect("edge wait_for_transaction should resolve from scheduled core progress");
             alice
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::GlobalServer,
                 )
                 .await
-                .expect("global wait_for_batch should resolve from scheduled core progress");
+                .expect("global wait_for_transaction should resolve from scheduled core progress");
 
             alice.shutdown().await.expect("shutdown alice");
             server.shutdown().await;
@@ -597,9 +591,7 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata_impl() {
         )
         .expect("insert row through upsert");
 
-    let provenance_query = QueryBuilder::new("todos")
-        .select(&["$createdAt", "$updatedAt"])
-        .build();
+    let provenance_query = jazz::query::Query::from("todos").select(["$createdAt", "$updatedAt"]);
 
     client
         .upsert(
@@ -691,7 +683,7 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row_impl() {
 
     let rows = wait_for_query(
         &client,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "query returns updated row from upsert",
@@ -759,7 +751,7 @@ async fn jazz_tools_cli_two_different_users_sync_values_impl() {
 
     let rows_on_bob = wait_for_query(
         &client_bob,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "todos count 1",
@@ -777,7 +769,7 @@ async fn jazz_tools_cli_two_different_users_sync_values_impl() {
 
     let _ = wait_for_query(
         &client_alice,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "todo completed=true",
@@ -809,7 +801,7 @@ async fn jazz_tools_cli_two_different_users_sync_values_impl() {
         .collect::<BTreeSet<_>>();
     let rows_on_alice = wait_for_query(
         &client_alice,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         format!("titles {:?}", expected_titles),

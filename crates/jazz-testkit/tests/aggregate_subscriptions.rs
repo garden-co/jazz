@@ -3,12 +3,12 @@ use jazz_testkit as support;
 use std::time::{Duration, Instant};
 
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
+use jazz::query::{Aggregate, AggregateFunction, OrderDirection};
 use jazz::row_input;
-use jazz::tools::public_schema::AggregateFunction;
 use jazz::tools::{
-    ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, QueryBuilder, Row,
-    RowDescriptor, Schema, SchemaBuilder, SubscriptionStream, SubscriptionStreamItem, TableName,
-    TablePolicies, TableSchema, Value,
+    ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, Row, RowDescriptor,
+    Schema, SchemaBuilder, SubscriptionStream, SubscriptionStreamItem, TableName, TablePolicies,
+    TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{TestingClient, wait_for_query};
@@ -139,7 +139,7 @@ fn policy_metrics_schema() -> Schema {
 
 async fn wait_for_values(
     client: &JazzClient,
-    query: jazz::tools::Query,
+    query: jazz::query::Query,
     expected: Vec<Vec<Value>>,
     label: &str,
 ) {
@@ -184,7 +184,7 @@ struct ObservedSubscription {
 impl ObservedSubscription {
     fn new(
         stream: SubscriptionStream,
-        query: &jazz::tools::Query,
+        query: &jazz::query::Query,
         descriptor: RecordDescriptor,
     ) -> Self {
         let aggregate = query
@@ -194,7 +194,24 @@ impl ObservedSubscription {
         // Decode with the same key that core query normalization uses, rather
         // than reconstructing a function ordering in this observer. The key
         // includes function, input column, and generated alias.
-        let output_functions = query.canonical_aggregate_functions();
+        let mut outputs = aggregate.aggregates.clone();
+        outputs.sort_by(|left, right| {
+            let rank = |function| match function {
+                AggregateFunction::Avg => b'a',
+                AggregateFunction::Count => b'c',
+                AggregateFunction::Min => b'n',
+                AggregateFunction::Sum => b's',
+                AggregateFunction::Max => b'x',
+            };
+            rank(left.function)
+                .cmp(&rank(right.function))
+                .then_with(|| left.column.cmp(&right.column))
+                .then_with(|| left.alias.cmp(&right.alias))
+        });
+        let output_functions = outputs
+            .into_iter()
+            .map(|aggregate| aggregate.function)
+            .collect();
         Self {
             stream,
             descriptor,
@@ -400,7 +417,7 @@ fn aggregate_descriptor(
 
 async fn wait_for_one_shot_values(
     client: &JazzClient,
-    query: jazz::tools::Query,
+    query: jazz::query::Query,
     expected: Vec<Vec<Value>>,
     label: &str,
 ) {
@@ -425,7 +442,7 @@ async fn wait_for_one_shot_values(
 async fn wait_for_subscription_driven_values(
     client: &JazzClient,
     stream: &mut jazz::tools::SubscriptionStream,
-    query: jazz::tools::Query,
+    query: jazz::query::Query,
     expected: Vec<Vec<Value>>,
     label: &str,
 ) {
@@ -456,12 +473,12 @@ async fn wait_for_subscription_driven_values(
 }
 
 async fn insert_metric(client: &JazzClient, bucket: &str, score: i32) {
-    let (_, _, batch) = client
+    let (_, _, tx) = client
         .insert("metrics", row_input!("bucket" => bucket, "score" => score))
         .expect("insert integer metric");
     client
-        .wait_for_batch(
-            batch.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            tx.expect("ordinary mutation commits immediately"),
             DurabilityTier::Local,
         )
         .await
@@ -474,11 +491,11 @@ async fn insert_metric_at_tier(
     score: i32,
     tier: DurabilityTier,
 ) {
-    let (_, _, batch) = client
+    let (_, _, tx) = client
         .insert("metrics", row_input!("bucket" => bucket, "score" => score))
         .expect("insert integer metric");
     client
-        .wait_for_batch(batch.expect("ordinary mutation commits immediately"), tier)
+        .wait_for_transaction(tx.expect("ordinary mutation commits immediately"), tier)
         .await
         .expect("integer metric settles");
 }
@@ -493,14 +510,14 @@ async fn insert_bigint_metric_at_tier(
     score: i64,
     tier: DurabilityTier,
 ) {
-    let (_, _, batch) = client
+    let (_, _, tx) = client
         .insert(
             "metrics",
             row_input!("bucket" => bucket, "score" => Value::BigInt(score)),
         )
         .expect("insert bigint metric");
     client
-        .wait_for_batch(batch.expect("ordinary mutation commits immediately"), tier)
+        .wait_for_transaction(tx.expect("ordinary mutation commits immediately"), tier)
         .await
         .expect("bigint metric settles");
 }
@@ -511,32 +528,34 @@ async fn insert_double_metric_at_tier(
     score: f64,
     tier: DurabilityTier,
 ) {
-    let (_, _, batch) = client
+    let (_, _, tx) = client
         .insert(
             "metrics",
             row_input!("bucket" => bucket, "score" => Value::Double(score)),
         )
         .expect("insert double metric");
     client
-        .wait_for_batch(batch.expect("ordinary mutation commits immediately"), tier)
+        .wait_for_transaction(tx.expect("ordinary mutation commits immediately"), tier)
         .await
         .expect("double metric settles");
 }
 
 fn aggregate_query(
     outputs: impl IntoIterator<Item = (AggregateFunction, &'static str)>,
-) -> jazz::tools::Query {
-    let mut builder = QueryBuilder::new("metrics");
-    for (function, column) in outputs {
-        builder = match function {
-            AggregateFunction::Count => builder.count(),
-            AggregateFunction::Sum => builder.sum(column),
-            AggregateFunction::Avg => builder.avg(column),
-            AggregateFunction::Min => builder.min(column),
-            AggregateFunction::Max => builder.max(column),
-        };
-    }
-    builder.group_by("bucket").build()
+) -> jazz::query::Query {
+    jazz::query::Query::from("metrics")
+        .aggregate(
+            outputs
+                .into_iter()
+                .map(|(function, column)| match function {
+                    AggregateFunction::Count => Aggregate::count(),
+                    AggregateFunction::Sum => Aggregate::sum(column),
+                    AggregateFunction::Avg => Aggregate::avg(column),
+                    AggregateFunction::Min => Aggregate::min(column),
+                    AggregateFunction::Max => Aggregate::max(column),
+                }),
+        )
+        .group_by("bucket")
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -556,11 +575,10 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             )
             .await
             .expect("connect client");
-            let count_query = QueryBuilder::new("metrics").count().build();
-            let grouped_sum_query = QueryBuilder::new("metrics")
+            let count_query = jazz::query::Query::from("metrics").count();
+            let grouped_sum_query = jazz::query::Query::from("metrics")
                 .sum("score")
-                .group_by("bucket")
-                .build();
+                .group_by("bucket");
             let mut count_stream = ObservedSubscription::new(
                 client
                     .subscribe(count_query.clone())
@@ -592,16 +610,14 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             )
             .await;
 
-            let (a1, _, batch) = writer
+            let (a1, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "a", "score" => 10))
                 .expect("insert a1");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("a1 settles");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             count_stream
                 .wait_for_values(vec![vec![Value::Timestamp(1)]], "count after a1")
                 .await;
@@ -612,16 +628,14 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 )
                 .await;
 
-            let (b1, _, batch) = writer
+            let (b1, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "b", "score" => 7))
                 .expect("insert b1");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("b1 settles");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             count_stream
                 .wait_for_values(vec![vec![Value::Timestamp(2)]], "count after b1")
                 .await;
@@ -635,24 +649,20 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 )
                 .await;
 
-            let batch = writer.delete(b1).expect("delete b1 and empty b");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("delete b1 settles");
-            let (_b2, _, batch) = writer
+            let delete_tx = writer.delete(b1).expect("delete b1 and empty b");
+            support::wait_for_edge_txs(
+                &writer,
+                &[delete_tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            let (_b2, _, insert_tx) = writer
                 .insert("metrics", row_input!("bucket" => "b", "score" => 5))
                 .expect("repopulate b");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("repopulate b settles");
+            support::wait_for_edge_txs(
+                &writer,
+                &[insert_tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             sum_stream
                 .wait_for_values(
                     vec![
@@ -663,14 +673,12 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 )
                 .await;
 
-            let batch = writer.delete(a1).expect("delete a1");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("delete settles");
+            let tx = writer.delete(a1).expect("delete a1");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             count_stream
                 .wait_for_values(vec![vec![Value::Timestamp(1)]], "count after delete a1")
                 .await;
@@ -705,10 +713,9 @@ async fn aggregate_subscription_group_field_named_count_uses_structural_wire_slo
             )
             .await
             .expect("connect subscriber");
-            let query = QueryBuilder::new("metrics")
+            let query = jazz::query::Query::from("metrics")
                 .sum("score")
-                .group_by("count")
-                .build();
+                .group_by("count");
             let mut stream = ObservedSubscription::new(
                 subscriber
                     .subscribe(query.clone())
@@ -721,16 +728,14 @@ async fn aggregate_subscription_group_field_named_count_uses_structural_wire_slo
                 .wait_for_values(Vec::new(), "initial grouped sum is empty")
                 .await;
 
-            let (_, _, batch) = writer
+            let (_, _, tx) = writer
                 .insert("metrics", row_input!("count" => "group", "score" => 1))
                 .expect("insert grouped sum metric");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("grouped sum insert settles");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             stream
                 .wait_for_values(
                     vec![vec![Value::Text("group".to_owned()), Value::Integer(1)]],
@@ -762,13 +767,14 @@ async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
             )
             .await
             .expect("connect subscriber");
-            let query = QueryBuilder::new("metrics")
-                .count()
-                .sum("high")
-                .sum("score")
-                .avg("score")
-                .group_by("bucket")
-                .build();
+            let query = jazz::query::Query::from("metrics")
+                .aggregate([
+                    Aggregate::count(),
+                    Aggregate::sum("high"),
+                    Aggregate::sum("score"),
+                    Aggregate::avg("score"),
+                ])
+                .group_by("bucket");
             let mut stream = ObservedSubscription::new(
                 subscriber
                     .subscribe(query.clone())
@@ -789,8 +795,9 @@ async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
                 .wait_for_values(Vec::new(), "initial mixed aggregate is empty")
                 .await;
 
+            let mut txs = Vec::new();
             for (score, high) in [(3, 10_i64), (1, 5_i64)] {
-                let (_, _, batch) = writer
+                let (_, _, tx) = writer
                     .insert(
                         "metrics",
                         row_input!(
@@ -800,14 +807,9 @@ async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
                         ),
                     )
                     .expect("insert mixed aggregate metric");
-                writer
-                    .wait_for_batch(
-                        batch.expect("ordinary mutation commits immediately"),
-                        DurabilityTier::EdgeServer,
-                    )
-                    .await
-                    .expect("mixed aggregate insert settles");
+                txs.push(tx.expect("ordinary mutation commits immediately"));
             }
+            support::wait_for_edge_txs(&writer, &txs).await;
             stream
                 .wait_for_values(
                     vec![vec![
@@ -835,7 +837,7 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
             )
             .await
             .expect("connect client");
-            let sum_query = QueryBuilder::new("metrics").sum("score").build();
+            let sum_query = jazz::query::Query::from("metrics").sum("score");
             let mut stream = client
                 .subscribe(sum_query.clone())
                 .await
@@ -857,15 +859,15 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
             )
             .await;
 
-            let (_null_row, _, batch) = client
+            let (_null_row, _, tx) = client
                 .insert(
                     "metrics",
                     row_input!("bucket" => "a", "score" => Value::Null),
                 )
                 .expect("insert null score");
             client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    tx.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
                 .await
@@ -913,11 +915,9 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
             )
             .await
             .expect("connect subscriber");
-            let query = QueryBuilder::new("metrics")
-                .sum("score")
-                .count()
-                .group_by("bucket")
-                .build();
+            let query = jazz::query::Query::from("metrics")
+                .aggregate([Aggregate::sum("score"), Aggregate::count()])
+                .group_by("bucket");
             let mut stream = ObservedSubscription::new(
                 client
                     .subscribe(query.clone())
@@ -935,22 +935,18 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                 .await;
 
             let mut rows = Vec::new();
+            let mut txs = Vec::new();
             for bucket in ["null", "null", "gone", "changed"] {
-                let (row, _, batch) = writer
+                let (row, _, tx) = writer
                     .insert(
                         "metrics",
                         row_input!("bucket" => bucket, "score" => Value::Null),
                     )
                     .expect("insert nullable metric");
-                writer
-                    .wait_for_batch(
-                        batch.expect("ordinary mutation commits immediately"),
-                        DurabilityTier::EdgeServer,
-                    )
-                    .await
-                    .expect("nullable metric settles");
                 rows.push(row);
+                txs.push(tx.expect("ordinary mutation commits immediately"));
             }
+            support::wait_for_edge_txs(&writer, &txs).await;
             stream
                 .wait_for_values(
                     vec![
@@ -974,14 +970,12 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                 )
                 .await;
 
-            let batch = writer.delete(rows[2]).expect("delete gone group");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("gone group delete settles");
+            let tx = writer.delete(rows[2]).expect("delete gone group");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             stream
                 .wait_for_values(
                     vec![
@@ -1000,19 +994,17 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                 )
                 .await;
 
-            let (_, _, batch) = writer
+            let (_, _, tx) = writer
                 .insert(
                     "metrics",
                     row_input!("bucket" => "changed", "score" => Value::Null),
                 )
                 .expect("replace changed aggregate group");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("changed group replacement settles");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             stream
                 .wait_for_values(
                     vec![
@@ -1051,10 +1043,9 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
             )
             .await
             .expect("connect client");
-            let grouped_sum_query = QueryBuilder::new("metrics")
+            let grouped_sum_query = jazz::query::Query::from("metrics")
                 .sum("score")
-                .group_by("bucket")
-                .build();
+                .group_by("bucket");
             let mut sum_stream = ObservedSubscription::new(
                 client
                     .subscribe(grouped_sum_query.clone())
@@ -1067,16 +1058,14 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 ]),
             );
 
-            let (first, _, batch) = writer
+            let (first, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "same", "score" => 10))
                 .expect("insert first metric");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("first metric settles");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             sum_stream
                 .wait_for_values(
                     vec![vec![Value::Text("same".to_owned()), Value::Integer(10)]],
@@ -1084,16 +1073,14 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 )
                 .await;
 
-            let (second, _, batch) = writer
+            let (second, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "same", "score" => 7))
                 .expect("insert second metric");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("second metric settles");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             sum_stream
                 .wait_for_values(
                     vec![vec![Value::Text("same".to_owned()), Value::Integer(17)]],
@@ -1101,14 +1088,12 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 )
                 .await;
 
-            let batch = writer.delete(first).expect("delete first metric");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("first delete settles");
+            let tx = writer.delete(first).expect("delete first metric");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             sum_stream
                 .wait_for_values(
                     vec![vec![Value::Text("same".to_owned()), Value::Integer(7)]],
@@ -1116,14 +1101,12 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 )
                 .await;
 
-            let batch = writer.delete(second).expect("delete second metric");
-            writer
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("second delete settles");
+            let tx = writer.delete(second).expect("delete second metric");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             sum_stream
                 .wait_for_values(Vec::new(), "empty signed aggregate group is retracted")
                 .await;
@@ -1148,10 +1131,9 @@ async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
             )
             .await
             .expect("connect client");
-            let query = QueryBuilder::new("metrics")
+            let query = jazz::query::Query::from("metrics")
                 .sum("score")
-                .group_by("bucket")
-                .build();
+                .group_by("bucket");
 
             insert_bigint_metric_at_tier(&writer, "same", -11, DurabilityTier::EdgeServer).await;
             insert_bigint_metric_at_tier(&writer, "same", 7, DurabilityTier::EdgeServer).await;
@@ -1201,14 +1183,12 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
             )
             .await
             .expect("connect client");
-            let sum_query = QueryBuilder::new("metrics")
+            let sum_query = jazz::query::Query::from("metrics")
                 .sum("score")
-                .group_by("bucket")
-                .build();
-            let avg_query = QueryBuilder::new("metrics")
+                .group_by("bucket");
+            let avg_query = jazz::query::Query::from("metrics")
                 .avg("score")
-                .group_by("bucket")
-                .build();
+                .group_by("bucket");
 
             insert_double_metric_at_tier(&writer, "same", 1.5, DurabilityTier::EdgeServer).await;
             insert_double_metric_at_tier(&writer, "same", -0.25, DurabilityTier::EdgeServer).await;
@@ -1287,14 +1267,12 @@ async fn maintained_min_and_max_replace_multi_row_groups() {
             .expect("connect client");
             insert_metric_at_tier(&writer, "same", 10, DurabilityTier::EdgeServer).await;
             insert_metric_at_tier(&writer, "same", 4, DurabilityTier::EdgeServer).await;
-            let min_query = QueryBuilder::new("metrics")
+            let min_query = jazz::query::Query::from("metrics")
                 .min("score")
-                .group_by("bucket")
-                .build();
-            let max_query = QueryBuilder::new("metrics")
+                .group_by("bucket");
+            let max_query = jazz::query::Query::from("metrics")
                 .max("score")
-                .group_by("bucket")
-                .build();
+                .group_by("bucket");
             let mut min_stream = ObservedSubscription::new(
                 client
                     .subscribe(min_query.clone())
@@ -1367,10 +1345,9 @@ async fn integer_sum_uses_public_signed_values_for_multi_row_groups() {
 
             wait_for_values(
                 &client,
-                QueryBuilder::new("metrics")
+                jazz::query::Query::from("metrics")
                     .sum("score")
-                    .group_by("bucket")
-                    .build(),
+                    .group_by("bucket"),
                 vec![
                     vec![Value::Text("mixed".to_owned()), Value::Integer(3)],
                     vec![Value::Text("negative".to_owned()), Value::Integer(-10)],
@@ -1467,10 +1444,9 @@ async fn integer_min_max_and_order_by_remain_signed() {
 
             wait_for_query(
                 &client,
-                QueryBuilder::new("metrics")
-                    .select(&["bucket", "score"])
-                    .order_by("score")
-                    .build(),
+                jazz::query::Query::from("metrics")
+                    .select(["bucket", "score"])
+                    .order_by("score", OrderDirection::Asc),
                 Some(DurabilityTier::EdgeServer),
                 QUERY_TIMEOUT,
                 "integer order_by stays signed",
@@ -1564,7 +1540,7 @@ async fn aggregate_sum_bigint_survives_public_client_boundary() {
             )
             .await
             .expect("connect client");
-            let sum_query = QueryBuilder::new("metrics").sum("score").build();
+            let sum_query = jazz::query::Query::from("metrics").sum("score");
 
             wait_for_values(
                 &client,
@@ -1574,28 +1550,28 @@ async fn aggregate_sum_bigint_survives_public_client_boundary() {
             )
             .await;
 
-            let (_negative_row, _, batch) = client
+            let (_negative_row, _, tx) = client
                 .insert(
                     "metrics",
                     row_input!("bucket" => "a", "score" => Value::BigInt(-3)),
                 )
                 .expect("insert negative bigint score");
             client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    tx.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
                 .await
                 .expect("negative bigint score settles");
-            let (_positive_row, _, batch) = client
+            let (_positive_row, _, tx) = client
                 .insert(
                     "metrics",
                     row_input!("bucket" => "a", "score" => Value::BigInt(5)),
                 )
                 .expect("insert positive bigint score");
             client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    tx.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
                 .await
@@ -1624,7 +1600,7 @@ async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
             .await
             .expect("connect client");
 
-            let (_, _, batch) = client
+            let (_, _, tx) = client
                 .insert(
                     "metrics",
                     row_input!(
@@ -1634,13 +1610,13 @@ async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
                 )
                 .expect("insert signed aggregate value");
             client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    tx.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
                 .await
                 .expect("signed aggregate value settles");
-            let (_, _, batch) = client
+            let (_, _, tx) = client
                 .insert(
                     "metrics",
                     row_input!(
@@ -1650,17 +1626,16 @@ async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
                 )
                 .expect("insert nullable aggregate value");
             client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    tx.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
                 .await
                 .expect("nullable aggregate value settles");
 
-            let grouped = QueryBuilder::new("metrics")
-                .group_by("sum_score")
+            let grouped = jazz::query::Query::from("metrics")
                 .sum("score")
-                .build();
+                .group_by("sum_score");
             wait_for_values(
                 &client,
                 grouped,
@@ -1670,7 +1645,7 @@ async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
             .await;
             wait_for_values(
                 &client,
-                QueryBuilder::new("metrics").sum("score").build(),
+                jazz::query::Query::from("metrics").sum("score"),
                 vec![vec![Value::BigInt(-3)]],
                 "non-grouped signed nullable aggregate remains public",
             )
@@ -1696,20 +1671,16 @@ async fn integer_counter_columns_merge_signed_public_values() {
             )
             .await
             .expect("connect bob");
-            let query = QueryBuilder::new("counters")
-                .select(&["name", "count"])
-                .build();
+            let query = jazz::query::Query::from("counters").select(["name", "count"]);
 
-            let (counter_id, _, batch) = alice
+            let (counter_id, _, tx) = alice
                 .insert("counters", row_input!("name" => "shared", "count" => 0))
                 .expect("insert counter");
-            alice
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("counter insert settles at edge");
+            support::wait_for_edge_txs(
+                &alice,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             wait_for_query(
                 &bob,
                 query.clone(),
@@ -1728,25 +1699,22 @@ async fn integer_counter_columns_merge_signed_public_values() {
             )
             .await;
 
-            let alice_batch = alice
+            let alice_tx = alice
                 .update(counter_id, vec![("count".to_owned(), Value::Integer(3))])
                 .expect("alice updates counter");
-            let bob_batch = bob
+            let bob_tx = bob
                 .update(counter_id, vec![("count".to_owned(), Value::Integer(5))])
                 .expect("bob updates counter");
-            alice
-                .wait_for_batch(
-                    alice_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("alice counter update reaches edge");
-            bob.wait_for_batch(
-                bob_batch.expect("ordinary mutation commits immediately"),
-                DurabilityTier::EdgeServer,
+            support::wait_for_edge_txs(
+                &alice,
+                &[alice_tx.expect("ordinary mutation commits immediately")],
             )
-            .await
-            .expect("bob counter update reaches edge");
+            .await;
+            support::wait_for_edge_txs(
+                &bob,
+                &[bob_tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
             wait_for_query(
                 &alice,
@@ -1787,7 +1755,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             )
             .await
             .expect("connect spy");
-            let count_query = QueryBuilder::new("metrics").count().build();
+            let count_query = jazz::query::Query::from("metrics").count();
             let mut spy_stream = ObservedSubscription::new(
                 spy.subscribe(count_query.clone())
                     .await
@@ -1807,19 +1775,17 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             )
             .await;
 
-            let (admin_row, _, batch) = admin
+            let (admin_row, _, tx) = admin
                 .insert(
                     "metrics",
                     row_input!("owner_id" => admin_id.clone(), "score" => 10),
                 )
                 .expect("insert admin row");
-            admin
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("admin row settles");
+            support::wait_for_edge_txs(
+                &admin,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             spy_stream
                 .assert_values_remain(
                     Vec::new(),
@@ -1835,14 +1801,12 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             )
             .await;
 
-            let batch = admin.delete(admin_row).expect("delete admin row");
-            admin
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("admin delete settles");
+            let tx = admin.delete(admin_row).expect("delete admin row");
+            support::wait_for_edge_txs(
+                &admin,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             spy_stream
                 .assert_values_remain(
                     Vec::new(),

@@ -27,7 +27,7 @@ You can also combine modes: let local-first users read and experiment, but requi
 
 ## Client setup
 
-Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret in the browser (or equivalent on native) so subsequent loads reuse the same account.
+Load or create a secret before starting your Jazz client. The framework integrations below store it in the browser (or equivalent on native) so subsequent loads reuse the same account.
 
 <Tabs
   groupId="jazz-framework"
@@ -39,7 +39,8 @@ Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret
     <include cwd lang="tsx" meta='title="App.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
     </include>
-    `useLocalFirstAuth()` also exposes `login` and `signOut` for switching or clearing accounts.
+    `auth="local-first"` makes `JazzProvider` load or create an `appId`-scoped secret. Descendants
+    can use `useLocalFirstAuth()` for backup, restore, and sign-out flows using the same identity.
   </Tab>
   <Tab value="Vue">
     <include cwd lang="vue" meta='title="App.vue"'>

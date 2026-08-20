@@ -26,10 +26,9 @@ import {
   type MutationErrorEvent,
   WriteHandle,
   type TransactionKind,
-  type CreateOptions,
+  type InsertOptions,
   type RestoreOptions,
   type UpdateOptions,
-  type UpsertOptions,
   type DurabilityTier,
   type QueryExecutionOptions,
   type QueryPropagation,
@@ -72,7 +71,7 @@ type WriteOperationName = "Insert" | "Update" | "Upsert" | "Restore";
 /**
  * Configuration for creating a Db instance.
  */
-export interface DbConfig {
+export type DbConfig = {
   /** Application identifier (used for isolation) */
   appId: string;
   /** Storage driver mode (defaults to persistent). */
@@ -85,10 +84,6 @@ export interface DbConfig {
   env?: string;
   /** User branch name (default: "main") */
   userBranch?: string;
-  /** JWT token for server authentication */
-  jwtToken?: string;
-  /** Mirrored session for local permission evaluation when sync auth uses cookies. */
-  cookieSession?: Session;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
   /** Backend secret for backend-scoped sync auth with cookieSession. */
@@ -107,9 +102,26 @@ export interface DbConfig {
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
-  /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
-  secret?: string;
-}
+} & (
+  | {
+      /** Local-first auth via a local seed. */
+      secret?: string;
+      jwtToken?: never;
+      cookieSession?: never;
+    }
+  | {
+      secret?: never;
+      /** JWT token for server authentication. */
+      jwtToken?: string;
+      cookieSession?: never;
+    }
+  | {
+      secret?: never;
+      jwtToken?: never;
+      /** Mirrored session for local permission evaluation when sync auth uses cookies. */
+      cookieSession?: Session;
+    }
+);
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
@@ -176,7 +188,7 @@ function nativeDbQueryOptions(options?: QueryOptions): QueryOptions {
   return options ?? {};
 }
 
-function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
+export function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
   return {
     get _table() {
       return query._table;
@@ -697,7 +709,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * The insert is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
     this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -759,7 +771,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * The upsert is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
+  upsert<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): void {
     this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -770,7 +787,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     );
     const client = this.resolveClient(table._schema);
     const { openBatchId, session, attribution } = this.requireBinding("upsert");
-    client.upsertInternal(table._table, values, options, session, attribution, openBatchId);
+    client.upsertInternal(table._table, id, values, options, session, attribution, openBatchId);
   }
 
   /**
@@ -1054,8 +1071,8 @@ export class Db {
     return this.connection.getCurrentClient();
   }
 
-  protected async ensureReady(tier?: DurabilityTier): Promise<void> {
-    await this.connection.ensureReady(tier);
+  protected async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
+    await this.connection.ensureReady(tier, signal);
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
@@ -1216,7 +1233,7 @@ export class Db {
    * @param data Init object with column values
    * @returns Write result containing the inserted row
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): WriteResult<T> {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): WriteResult<T> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -1282,8 +1299,9 @@ export class Db {
    */
   upsert<T, Init>(
     table: TableProxy<T, Init>,
+    id: string,
     data: Partial<Init>,
-    options: UpsertOptions,
+    options?: UpdateOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
@@ -1295,7 +1313,7 @@ export class Db {
     );
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
-      client.upsert(table._table, values, options, context?.session, context?.attribution),
+      client.upsert(table._table, id, values, options, context?.session, context?.attribution),
     );
   }
 
@@ -1596,6 +1614,7 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     let subId: number | null = null;
     let unsubscribed = false;
+    const readyAbort = new AbortController();
     const startNativeSubscription = () => {
       if (unsubscribed || subId !== null) return;
       subId = client.subscribe(
@@ -1622,10 +1641,10 @@ export class Db {
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(queryOptions.tier)
+      void this.ensureReady(queryOptions.tier, readyAbort.signal)
         .then(startNativeSubscription)
         .catch((error: unknown) => {
-          if (unsubscribed) return;
+          if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
           setTimeout(() => {
             throw error;
           }, 0);
@@ -1635,6 +1654,11 @@ export class Db {
     }
     if (
       this.config.serverUrl &&
+      // `edge` and `global` promise that their first callback is the worker's
+      // authority-tier snapshot.  A browser worker cannot establish that
+      // snapshot until its server transport is ready, so never race it with a
+      // main-thread local-storage seed (including after Db.disconnect()).
+      !this.connection.shouldDeferSubscriptionStart(queryOptions.tier) &&
       queryOptions.propagation !== "local-only" &&
       queryOptions.tier !== "global" &&
       !queryUsesRelationTraversal(builtQuery)
@@ -1660,6 +1684,7 @@ export class Db {
     // Return unsubscribe function
     return () => {
       unsubscribed = true;
+      readyAbort.abort();
       this.unregisterActiveQuerySubscriptionTrace(traceId);
       if (subId !== null) {
         client.unsubscribe(subId);
@@ -1832,8 +1857,14 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     throw new Error("DbConfig error: jwtToken and cookieSession are mutually exclusive");
   }
 
-  let resolvedConfig = { ...config };
+  let resolvedConfig: DbConfig = { ...config };
   await runtimeSource.load(config);
+  const {
+    secret: _secret,
+    jwtToken: _jwtToken,
+    cookieSession: _cookieSession,
+    ...configWithoutAuth
+  } = config;
 
   // Local-first auth: resolve seed and mint a JWT
   let localFirstSecret: string | null = null;
@@ -1845,7 +1876,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       const jwtToken = runtimeSource.mintLocalFirstToken(
         createRuntimeTokenOptions(secret, config.appId, 3600),
       );
-      resolvedConfig = { ...resolvedConfig, jwtToken };
+      resolvedConfig = { ...configWithoutAuth, jwtToken };
     }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
@@ -1855,7 +1886,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     const jwtToken = runtimeSource.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
-    resolvedConfig = { ...resolvedConfig, jwtToken };
+    resolvedConfig = { ...configWithoutAuth, jwtToken };
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);

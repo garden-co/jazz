@@ -706,18 +706,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
             "{table} must independently project its v1 row"
         );
     }
-    let mut query = Query::from("posts");
-    query.flat_join = Some(FlatJoin {
-        root_alias: None,
-        sources: vec![FlatJoinSource {
-            table: "people".to_owned(),
-            alias: None,
-            on: FlatJoinOn {
-                left: "posts.author_id".to_owned(),
-                right: "people.id".to_owned(),
-            },
-        }],
-    });
+    let query = Query::from("posts").flat_join("people", "posts.author_id", "people._id");
     let shape = query.validate(&v2.schema).expect("validate v2 flat join");
     let binding = shape.bind(BTreeMap::new()).expect("bind v2 flat join");
     let rows = node
@@ -726,7 +715,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     assert_eq!(
         rows.len(),
         1,
-        "flat joins must use the source row identity for `id`, not an arbitrary stored id cell"
+        "flat joins must use the explicit source row identity alias, not an arbitrary stored id cell"
     );
 
     let opts = RegisterShapeOptions {

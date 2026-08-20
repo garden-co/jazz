@@ -114,7 +114,7 @@ pub(super) fn historical_query_read_set(
 pub(super) fn tx_query_read_set(
     shape: &NormalizedRowSetShape,
     schema_version: SchemaVersionId,
-    tx_id: OpenBatchId,
+    tx_id: OpenTransactionId,
     snapshot: Snapshot,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {

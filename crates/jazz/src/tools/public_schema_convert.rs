@@ -723,9 +723,9 @@ fn convert_column_type(
         ColumnType::Integer => Ok(GrooveColumnType::I32),
         // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
         ColumnType::BigInt => Ok(GrooveColumnType::I64),
-        ColumnType::BatchId => Err(err(
+        ColumnType::TransactionId => Err(err(
             format!("$.{}.{}", table.as_str(), column),
-            "BatchId columns are not supported by core schema conversion yet",
+            "TransactionId columns are not supported by core schema conversion yet",
         )),
         ColumnType::Json { .. } => Ok(GrooveColumnType::String),
         ColumnType::Row { .. } => Err(err(
@@ -2235,6 +2235,17 @@ fn convert_policy_predicate(
         )?))),
         PolicyExpr::Cmp { column, op, value } => {
             let left = Operand::Column(column.clone());
+            if matches!(value, PolicyValue::Literal(Value::Null)) {
+                // Match `session_where`: equality against the public NULL
+                // literal is the ergonomic spelling of a null test.
+                match op {
+                    CmpOp::Eq => return Ok(Predicate::IsNull(left)),
+                    CmpOp::Ne => {
+                        return Ok(Predicate::Not(Box::new(Predicate::IsNull(left))));
+                    }
+                    CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {}
+                }
+            }
             let right = convert_policy_operand(table, path, value)?;
             Ok(match op {
                 CmpOp::Eq => Predicate::Eq(left, right),
