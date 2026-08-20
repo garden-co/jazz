@@ -6,7 +6,7 @@ use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
 /// Verifies that recursive inherited access fails closed when row data forms a
 /// cycle and no reachable ancestor grants the session access.
 #[tokio::test]
-#[ignore = "recursive INHERITS policy cycles currently overflow the Rust evaluator stack"]
+#[ignore = "the update that closes the cycle times out waiting for edge-server durability"]
 async fn rebac_recursive_inherits_cycle_does_not_overgrant() {
     tokio::task::LocalSet::new()
         .run_until(rebac_recursive_inherits_cycle_does_not_overgrant_inner())

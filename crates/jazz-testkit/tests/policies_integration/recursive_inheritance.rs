@@ -38,7 +38,6 @@ async fn query_folder_ids(client: &JazzClient) -> HashSet<ObjectId> {
 /// Verifies unbounded recursive inheritance: ownership of an ancestor folder
 /// grants visibility through the full descendant chain.
 #[tokio::test]
-#[ignore = "unbounded recursive INHERITS overflows the jazz-server-shell stack"]
 async fn rebac_recursive_inherits_allows_ancestor_access() {
     tokio::task::LocalSet::new()
         .run_until(rebac_recursive_inherits_allows_ancestor_access_inner())
