@@ -7,7 +7,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion, TableLens,
@@ -30,7 +30,7 @@ const WRITER: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000
 const USER_A: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000002"));
 const USER_B: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000003"));
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db<TestStorage>;
 
 fn row(tag: u8) -> RowUuid {
     RowUuid::from_bytes([tag; 16])
@@ -234,7 +234,7 @@ fn open_db_with_schema_as(schema: JazzSchema, author: AuthorId) -> BenchDb {
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&family_refs),
+            TestStorage::new(&family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x82; 16]),
                 author,

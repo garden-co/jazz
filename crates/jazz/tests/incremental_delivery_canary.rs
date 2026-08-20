@@ -12,7 +12,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
@@ -143,17 +143,17 @@ fn global_read_opts() -> ReadOpts {
 
 use duplex_transport::duplex;
 
-fn open_db(scale: usize) -> Db<MemoryStorage> {
+fn open_db(scale: usize) -> Db<TestStorage> {
     open_db_with_schema(scale, relation_schema())
 }
 
-fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db<TestStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([scale as u8; 16]),
                 author: AuthorId::from_bytes([0xa1; 16]),
@@ -164,13 +164,13 @@ fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db<MemoryStorage> {
     .expect("open canary db")
 }
 
-fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db<TestStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([(scale as u8).wrapping_add(0x40); 16]),
                 author: AuthorId::SYSTEM,
@@ -217,7 +217,7 @@ fn relation_query() -> Query {
     )
 }
 
-fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
+fn seed_relation_fixture(db: &Db<TestStorage>, child_rows: usize) -> RowUuid {
     let parent = row(1);
     block_on(db.insert_with_id(
         "parents",
@@ -248,7 +248,7 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
     parent
 }
 
-fn seed_reset_batch_fixture(db: &Db<MemoryStorage>, rows: usize) {
+fn seed_reset_batch_fixture(db: &Db<TestStorage>, rows: usize) {
     for index in 0..rows {
         db.seed_settled_mergeable_for_bootstrap(
             "items",
@@ -264,8 +264,8 @@ fn seed_reset_batch_fixture(db: &Db<MemoryStorage>, rows: usize) {
 }
 
 fn drive_until_covered(
-    server: &Db<MemoryStorage>,
-    client: &Db<MemoryStorage>,
+    server: &Db<TestStorage>,
+    client: &Db<TestStorage>,
     attachment: &jazz::db::QueryAttachment,
 ) {
     for _ in 0..100 {
@@ -279,7 +279,7 @@ fn drive_until_covered(
     panic!("timed out waiting for query coverage");
 }
 
-fn drain_until_idle(server: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
+fn drain_until_idle(server: &Db<TestStorage>, client: &Db<TestStorage>) {
     for _ in 0..1_000 {
         let client_before = block_on(client.tick_stats()).expect("drain client");
         let server_stats = block_on(server.tick_stats()).expect("drain server");

@@ -7,7 +7,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, param};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
@@ -25,7 +25,7 @@ fn schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
-fn open_db() -> Db<MemoryStorage> {
+fn open_db() -> Db<TestStorage> {
     let schema = schema();
     let column_families = schema.column_families();
     let column_family_refs = column_families
@@ -35,7 +35,7 @@ fn open_db() -> Db<MemoryStorage> {
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&column_family_refs),
+            TestStorage::new(&column_family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x71; 16]),
                 author: AuthorId::SYSTEM,
@@ -53,7 +53,7 @@ fn row(seed: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
-fn insert_document(db: &Db<MemoryStorage>, document: RowUuid, team: RowUuid, updated_at: u64) {
+fn insert_document(db: &Db<TestStorage>, document: RowUuid, team: RowUuid, updated_at: u64) {
     block_on(db.insert_with_id(
         "documents",
         document,
@@ -153,7 +153,7 @@ fn apply_pending_events(
 }
 
 fn assert_ordered_rows(
-    db: &Db<MemoryStorage>,
+    db: &Db<TestStorage>,
     prepared: &PreparedQuery,
     expected: &[RowUuid],
     label: &str,

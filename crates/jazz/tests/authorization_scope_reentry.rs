@@ -7,7 +7,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, claim, col, eq};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
@@ -59,14 +59,14 @@ fn schema() -> JazzSchema {
     ])
 }
 
-fn open_db() -> Db<MemoryStorage> {
+fn open_db() -> Db<TestStorage> {
     let schema = schema();
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&family_refs),
+            TestStorage::new(&family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x81; 16]),
                 author: WRITER,
@@ -87,7 +87,7 @@ fn opts() -> ReadOpts {
     }
 }
 
-fn insert_document(db: &Db<MemoryStorage>, id: RowUuid, team: RowUuid, rank: u64) {
+fn insert_document(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, rank: u64) {
     block_on(db.insert_with_id(
         DOCUMENTS,
         id,
@@ -99,7 +99,7 @@ fn insert_document(db: &Db<MemoryStorage>, id: RowUuid, team: RowUuid, rank: u64
     .expect("insert document");
 }
 
-fn insert_membership(db: &Db<MemoryStorage>, id: RowUuid, team: RowUuid, user: AuthorId) {
+fn insert_membership(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, user: AuthorId) {
     block_on(db.insert_with_id(
         MEMBERSHIPS,
         id,
@@ -138,7 +138,7 @@ fn upsert_applies_insert_policy_only_to_a_genuinely_absent_target() {
 }
 
 fn ordered_page(
-    db: &Db<MemoryStorage>,
+    db: &Db<TestStorage>,
     identity: AuthorId,
     prepared: &jazz::db::PreparedQuery,
 ) -> Vec<RowUuid> {
@@ -459,7 +459,7 @@ fn client_subscription_skips_policy_only_compile_validation_but_identity_subscri
     let db = block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&family_refs),
+            TestStorage::new(&family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x82; 16]),
                 author: WRITER,

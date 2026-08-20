@@ -37,7 +37,7 @@ pub use opfs::OpfsStorage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
 #[cfg(any(test, feature = "test"))]
-pub use test::{TestStorage, TestStorageControl, TestStorageOperation};
+pub use test::{TestStorage, TestStorageControl, TestStorageOperation, YieldingStorage};
 
 pub type ColumnFamilyName = str;
 pub type Key = [u8];

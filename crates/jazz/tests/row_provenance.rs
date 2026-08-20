@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
@@ -20,11 +20,11 @@ fn schema() -> JazzSchema {
     ])
 }
 
-fn open_db(identity: AuthorId) -> Db<MemoryStorage> {
+fn open_db(identity: AuthorId) -> Db<TestStorage> {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&refs);
+    let storage = TestStorage::new(&refs);
     jazz::db::block_on(Db::open(DbConfig {
         schema,
         storage,

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use jazz::db::{Db, DbConfig, DbIdentity};
 use jazz::groove::records::Value;
 use jazz::groove::schema::ColumnType;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
 
@@ -29,13 +29,13 @@ fn schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
-fn open_db() -> Db<MemoryStorage> {
+fn open_db() -> Db<TestStorage> {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     jazz::db::block_on(Db::open(DbConfig {
         schema,
-        storage: MemoryStorage::new(&refs),
+        storage: TestStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
             author: AuthorId::from_bytes([0xa1; 16]),
@@ -52,7 +52,7 @@ fn cells(values: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<St
         .collect()
 }
 
-fn stored_row(db: &Db<MemoryStorage>, row_id: RowUuid) -> BTreeMap<String, Value> {
+fn stored_row(db: &Db<TestStorage>, row_id: RowUuid) -> BTreeMap<String, Value> {
     let table = schema()
         .tables
         .into_iter()

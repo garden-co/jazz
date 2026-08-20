@@ -2128,6 +2128,24 @@ impl TickEvaluator<'_> {
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let storage = self.storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
         let operator_key = self.operator_key(node)?;
+        if self.context.eval_mode == EvalMode::Tick {
+            let state = match self.operator_states.get(&operator_key) {
+                Some(OperatorState::Recursive(state)) => Some(state.value()),
+                _ => None,
+            };
+            if let Some(root) = snapshot_requirement(
+                self.graph,
+                node,
+                seed,
+                step,
+                self.table_deltas,
+                self.binding_deltas,
+                state,
+            )? && let Some(inputs) = self.evaluation_inputs.as_deref_mut()
+            {
+                require_snapshot_inputs(self.graph, inputs, root)?;
+            }
+        }
         // Recursive child evaluation may touch the same state maps. Remove only
         // this recursive node's state; child operator state stays available.
         let mut operator = self
@@ -2233,7 +2251,14 @@ impl TickEvaluator<'_> {
             seed,
             step,
         )
-        .await?;
+        .await;
+        let deltas = match deltas {
+            Ok(deltas) => deltas,
+            Err(error) => {
+                self.operator_states.insert(operator_key, operator);
+                return Err(error);
+            }
+        };
         recursive_as_of.mark_forward_as_of(Tick(self.current_tick))?;
         self.operator_states.insert(operator_key, operator);
         Ok(RecordDeltas {

@@ -5,7 +5,7 @@ use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
@@ -24,7 +24,7 @@ fn schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
-fn open_client(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_client(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -33,7 +33,7 @@ fn open_client(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed; 16]),
                 author: AuthorId::from_bytes([seed; 16]),
@@ -44,7 +44,7 @@ fn open_client(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
     .expect("open client")
 }
 
-fn open_server(schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_server(schema: JazzSchema) -> Db<TestStorage> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -53,7 +53,7 @@ fn open_server(schema: JazzSchema) -> Db<MemoryStorage> {
     block_on(Db::open_history_complete(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x5e; 16]),
                 author: AuthorId::SYSTEM,
