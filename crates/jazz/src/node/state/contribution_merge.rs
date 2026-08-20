@@ -119,20 +119,53 @@ where
                 if version.row_uuid() != selected.row_uuid {
                     continue;
                 }
-                if version.branch_key() == &source_key {
+                if schema.branch_key_matches(&table, version.branch_key(), &source_key) {
                     source_versions.push(version.clone());
                 }
-                if version.branch_key() == &target_key {
+                if schema.branch_key_matches(&table, version.branch_key(), &target_key) {
                     target_versions.push(version.clone());
                 }
-                if version.branch_key() == &source_key || version.branch_key() == &target_key {
+                if schema.branch_key_matches(&table, version.branch_key(), &source_key)
+                    || schema.branch_key_matches(&table, version.branch_key(), &target_key)
+                {
                     let tx_id = self.version_tx_id(&version)?;
                     if observed_transactions.insert(tx_id)
                         && let Some(tx) = self.query_transaction(tx_id)?
                         && let Some(provenance) = &tx.tx.contribution_merge
                     {
+                        let mut provenance = provenance.clone();
+                        for substitution in &mut provenance.substitutions {
+                            let target_table = schema
+                                .tables
+                                .iter()
+                                .find(|table| table.name == substitution.target.table)
+                                .ok_or(Error::InvalidStoredValue(
+                                    "contribution target table missing from current schema",
+                                ))?;
+                            substitution.target.branch_key = schema
+                                .normalize_branch_key(
+                                    target_table,
+                                    &substitution.target.branch_key,
+                                )
+                                .map_err(Error::InvalidBranchKey)?;
+                            for source in &mut substitution.sources {
+                                let source_table = schema
+                                    .tables
+                                    .iter()
+                                    .find(|table| table.name == source.coordinate.table)
+                                    .ok_or(Error::InvalidStoredValue(
+                                        "contribution source table missing from current schema",
+                                    ))?;
+                                source.coordinate.branch_key = schema
+                                    .normalize_branch_key(
+                                        source_table,
+                                        &source.coordinate.branch_key,
+                                    )
+                                    .map_err(Error::InvalidBranchKey)?;
+                            }
+                        }
                         index
-                            .observe(tx_id, provenance)
+                            .observe(tx_id, &provenance)
                             .map_err(Error::InvalidMergeableCommit)?;
                     }
                 }
@@ -162,7 +195,9 @@ where
                     let dot = ContributionDot {
                         tx_id: node.version_tx_id(version)?,
                         coordinate: ContributionCoordinate {
-                            branch_key: version.branch_key().clone(),
+                            branch_key: schema
+                                .normalize_branch_key(&table, version.branch_key())
+                                .map_err(Error::InvalidBranchKey)?,
                             table: selected.table.clone(),
                             row_uuid: selected.row_uuid,
                             layer: match layer {
@@ -248,7 +283,9 @@ where
                                 dots.push(ContributionDot {
                                     tx_id: self.version_tx_id(version)?,
                                     coordinate: ContributionCoordinate {
-                                        branch_key: version.branch_key().clone(),
+                                        branch_key: schema
+                                            .normalize_branch_key(&table, version.branch_key())
+                                            .map_err(Error::InvalidBranchKey)?,
                                         table: selected.table.clone(),
                                         row_uuid: selected.row_uuid,
                                         layer: MergeAspect::Content,
@@ -320,7 +357,9 @@ where
                                     dots.push(ContributionDot {
                                         tx_id: self.version_tx_id(version)?,
                                         coordinate: ContributionCoordinate {
-                                            branch_key: version.branch_key().clone(),
+                                            branch_key: schema
+                                                .normalize_branch_key(&table, version.branch_key())
+                                                .map_err(Error::InvalidBranchKey)?,
                                             table: selected.table.clone(),
                                             row_uuid: selected.row_uuid,
                                             layer: MergeAspect::Content,
@@ -383,7 +422,11 @@ where
                             let version = all_row_versions
                                 .iter()
                                 .find(|version| {
-                                    version.branch_key() == &root.coordinate.branch_key
+                                    schema.branch_key_matches(
+                                        &table,
+                                        version.branch_key(),
+                                        &root.coordinate.branch_key,
+                                    )
                                         && self.version_tx_id(version).ok() == Some(root.tx_id)
                                         && version.layer() == VersionLayer::Content
                                 })
@@ -391,7 +434,11 @@ where
                             let branch_versions = all_row_versions
                                 .iter()
                                 .filter(|candidate| {
-                                    candidate.branch_key() == version.branch_key()
+                                    schema.branch_key_matches(
+                                        &table,
+                                        candidate.branch_key(),
+                                        &root.coordinate.branch_key,
+                                    )
                                         && candidate.layer() == VersionLayer::Content
                                 })
                                 .map(|candidate| {

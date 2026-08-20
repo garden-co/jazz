@@ -286,6 +286,48 @@ impl RuntimeSchema {
         })
     }
 
+    /// Expand an older table-local key with immutable defaults from the
+    /// current monotone dimension declaration.
+    pub(crate) fn normalize_branch_key(
+        &self,
+        table: &TableSchema,
+        stored: &BranchKey,
+    ) -> Result<BranchKey, String> {
+        if stored.dimensions.iter().any(|(id, _)| {
+            !table
+                .branch_by
+                .iter()
+                .any(|binding| binding.dimension == *id)
+        }) {
+            return Err(format!(
+                "stored branch key has an unknown dimension on {}",
+                table.name
+            ));
+        }
+        let mut dimensions = table
+            .branch_by
+            .iter()
+            .map(|binding| {
+                let dimension = self
+                    .branch_dimensions
+                    .iter()
+                    .find(|dimension| dimension.id == binding.dimension)
+                    .ok_or_else(|| format!("unknown branch dimension on {}", table.name))?;
+                let value = stored
+                    .dimensions
+                    .iter()
+                    .find(|(id, _)| *id == binding.dimension)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_else(|| {
+                        BranchDimensionValue::from(dimension.migration_default.clone())
+                    });
+                Ok((binding.dimension, value))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        dimensions.sort_by_key(|(dimension, _)| *dimension);
+        Ok(BranchKey { dimensions })
+    }
+
     /// Reconstruct the table-local named selector for an exact stored key.
     pub(crate) fn branch_selector_for_key(
         &self,
