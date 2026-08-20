@@ -109,6 +109,23 @@ describe("websocket frame carrier", () => {
     });
   });
 
+  it("uses validated fallback subjects over whitespace raw auth subjects in both handshake shapes", () => {
+    const jwt = `header.${btoa(JSON.stringify({ sub: "jwt-user" }))}.sig`;
+    const cases = [
+      { auth: { sub: " \t ", jwt_token: jwt }, expected: "jwt-user" },
+      {
+        auth: { sub: " \t ", backend_session: { user_id: "backend-user" } },
+        expected: "backend-user",
+      },
+    ];
+
+    for (const { auth, expected } of cases) {
+      const prelude = JSON.parse(encodeWebSocketPrelude(JSON.stringify(auth), Uint8Array.of(1)));
+      expect(prelude.sub).toBe(expected);
+      expect(prelude.auth.sub).toBe(expected);
+    }
+  });
+
   it("encodes the client wire hello as a websocket-negotiation frame", () => {
     const hello = encodeWireClientHello();
     const reader = new PostcardReader(hello);

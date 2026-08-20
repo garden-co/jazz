@@ -1,13 +1,12 @@
 <script lang="ts">
   import {
-    createJazzClient,
     JazzSvelteProvider,
     LocalFirstAuth,
   } from "jazz-tools/svelte";
-  import type { AuthState } from "jazz-tools";
   import type { Snippet } from "svelte";
   import { env } from "$env/dynamic/public";
   import { getToken } from "$lib/auth-client";
+  import JazzTokenRefresh from "$lib/JazzTokenRefresh.svelte";
 
   let {
     authenticated,
@@ -40,7 +39,7 @@
       return;
     }
     let cancelled = false;
-    void getToken().then((token) => {
+    getToken().then((token) => {
       if (!cancelled) jwtToken = token;
     });
     return () => {
@@ -48,40 +47,23 @@
     };
   });
 
-  let client = $derived.by(() => {
+  let config = $derived.by(() => {
     if (!appId || !serverUrl) return null;
     if (authenticated) {
-      return jwtToken ? createJazzClient({ appId, serverUrl, jwtToken }) : null;
+      return jwtToken ? { appId, serverUrl, jwtToken } : null;
     }
     return !auth.isLoading && auth.secret
-      ? createJazzClient({ appId, serverUrl, secret: auth.secret })
+      ? { appId, serverUrl, secret: auth.secret }
       : null;
-  });
-
-  $effect(() => {
-    if (!client || !authenticated) return;
-    const currentClient = client;
-    let cancelled = false;
-    let unsubRefresh: (() => void) | undefined;
-    void (async () => {
-      const resolved = await currentClient;
-      if (cancelled) return;
-      unsubRefresh = resolved.db.onAuthChanged(async (state: AuthState) => {
-        if (state.error !== "expired") return;
-        const fresh = await getToken();
-        if (fresh) resolved.db.updateAuthToken(fresh);
-      });
-    })();
-    return () => {
-      cancelled = true;
-      unsubRefresh?.();
-    };
   });
 </script>
 
-{#if client}
-  <JazzSvelteProvider {client}>
-    {#snippet children()}
+{#if config}
+  <JazzSvelteProvider {config}>
+    {#snippet children({ db })}
+      {#if authenticated}
+        <JazzTokenRefresh {db} />
+      {/if}
       {@render pageChildren?.()}
     {/snippet}
     {#snippet fallback()}

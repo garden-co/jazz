@@ -2008,7 +2008,7 @@ async fn single_client_operations_reach_server_in_causal_order_inner() {
         alice
             .update(doc_id, vec![("title".to_string(), "nope".into())])
             .unwrap_or_else(|error| {
-                panic!("optimistic local update: title change after lockout {i}: {error:?}")
+                panic!("optimistic local update: title change after lockout {i}: {error}")
             });
     }
 

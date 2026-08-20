@@ -5,6 +5,8 @@ use sha2::{Digest, Sha512};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+use crate::ids::AuthorId;
+
 const KEY_NAMESPACE: Uuid = Uuid::from_bytes([
     0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x61, 0x75, 0x74, 0x68, 0x2d, 0x6b, 0x65, 0x79, 0x2d, 0x76, 0x31,
 ]);
@@ -304,6 +306,44 @@ pub fn derive_user_id(seed: &[u8; 32]) -> Uuid {
     user_id_from_public_key(verifying_key.as_bytes())
 }
 
+/// Convert a public session principal into the UUID-shaped core author identity.
+/// Only canonical hyphenated UUIDs and bare UUID hex retain their value. Every
+/// other external subject is mapped from its exact UTF-8 bytes so malformed
+/// UUID-like values cannot collide with a UUID principal.
+pub fn author_id_from_principal(principal: &str) -> AuthorId {
+    let uuid = principal_uuid(principal)
+        .unwrap_or_else(|| Uuid::new_v5(&Uuid::NAMESPACE_URL, principal.as_bytes()));
+    AuthorId::from_bytes(*uuid.as_bytes())
+}
+
+/// Whether a subject is admissible for an authenticated session.
+///
+/// Opaque subjects are deliberately not trimmed or otherwise normalized: a
+/// provider owns their spelling, and mapping must use exactly that spelling.
+///
+/// An admissible subject contains at least one byte other than ASCII space,
+/// horizontal tab, line feed, vertical tab, form feed, or carriage return.
+/// This intentionally does not treat Unicode whitespace as blank.
+pub fn principal_is_nonempty(principal: &str) -> bool {
+    principal
+        .bytes()
+        .any(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+}
+
+fn principal_uuid(principal: &str) -> Option<Uuid> {
+    let bytes = principal.as_bytes();
+    let canonical = bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit());
+    let bare = bytes.len() == 32 && bytes.iter().all(u8::is_ascii_hexdigit);
+    (canonical || bare).then(|| Uuid::parse_str(principal).expect("validated UUID spelling"))
+}
+
 /// Deterministically derive a UUIDv5 user id from Ed25519 public key bytes.
 fn user_id_from_public_key(pub_key_bytes: &[u8; 32]) -> Uuid {
     Uuid::new_v5(&KEY_NAMESPACE, pub_key_bytes)
@@ -345,6 +385,78 @@ mod tests {
     fn user_id_is_uuid_v5() {
         let id = derive_user_id(&alice_seed());
         assert_eq!(id.get_version_num(), 5);
+    }
+
+    // Keep these vectors identical to packages/jazz-tools/src/runtime/author-id.test.ts.
+    // This byte-level test is needed because the public WorkOS flow proves interoperability but
+    // cannot assert the exact cross-language author bytes for opaque subjects.
+    #[test]
+    fn principal_mapping_accepts_only_explicit_uuid_spellings() {
+        let canonical = "123e4567-e89b-12d3-a456-426614174000";
+        let expected_uuid = Uuid::parse_str(canonical).unwrap();
+        for subject in [
+            canonical,
+            "123E4567-E89B-12D3-A456-426614174000",
+            "123e4567e89b12d3a456426614174000",
+            "123E4567E89B12D3A456426614174000",
+        ] {
+            assert_eq!(
+                author_id_from_principal(subject).0,
+                expected_uuid,
+                "{subject}"
+            );
+        }
+
+        // Keep these literal vectors identical to packages/jazz-tools/src/runtime/author-id.test.ts.
+        for (subject, expected) in [
+            (
+                "123e4567e89b12d3-a456426614174000",
+                "bf38a3ac-d534-5b16-8d93-14ddea925c47",
+            ),
+            (
+                "workos_user_01J8Y3K4M5N6P7Q8R9S0T1U2V3",
+                "001ee09d-5506-554f-9581-46bf449082bd",
+            ),
+            ("\u{0085}", "8fec6819-1507-5190-a4e6-d61b73fa4091"),
+            ("\u{feff}", "aef4b8ca-08ab-51a8-adab-bd8c111efbe7"),
+        ] {
+            let mapped = author_id_from_principal(subject);
+            assert_eq!(mapped.0, Uuid::parse_str(expected).unwrap(), "{subject}");
+            assert_ne!(
+                mapped.0, expected_uuid,
+                "{subject} must not collide with UUID"
+            );
+        }
+
+        for subject in [
+            "123e4567-e89b-12d3-a4564-26614174000",  // moved hyphen
+            "123e4567-e89b-12d3-a456426614174000",   // missing hyphen
+            "123e4567--e89b-12d3-a456-426614174000", // arbitrary extra hyphen
+            " 123e4567-e89b-12d3-a456-426614174000 ",
+            "urn:uuid:123e4567-e89b-12d3-a456-426614174000",
+            "{123e4567-e89b-12d3-a456-426614174000}",
+            "WORKOS_USER_01J8Y3K4M5N6P7Q8R9S0T1U2V3",
+        ] {
+            let mapped = author_id_from_principal(subject);
+            assert_eq!(
+                mapped.0,
+                Uuid::new_v5(&Uuid::NAMESPACE_URL, subject.as_bytes())
+            );
+            assert_ne!(
+                mapped.0, expected_uuid,
+                "{subject} must not collide with UUID"
+            );
+        }
+    }
+
+    #[test]
+    fn principal_admission_uses_ascii_whitespace_only() {
+        for subject in ["", " \t\n\x0b\x0c\r "] {
+            assert!(!principal_is_nonempty(subject), "{subject:?}");
+        }
+        for subject in ["\u{0085}", "\u{feff}", " subject "] {
+            assert!(principal_is_nonempty(subject), "{subject:?}");
+        }
     }
 
     #[test]

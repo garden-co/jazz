@@ -25,20 +25,20 @@ function getListeners(store: AuthSecretStore): Set<() => void> {
  *
  * ```svelte
  * <script lang="ts">
- *   import { LocalFirstAuth, createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+ *   import { LocalFirstAuth, JazzSvelteProvider } from 'jazz-tools/svelte';
  *   import TodoList from './TodoList.svelte';
  *
  *   const auth = new LocalFirstAuth();
  *
- *   let client = $derived(
+ *   let config = $derived(
  *     !auth.isLoading && auth.secret
- *       ? createJazzClient({ appId: '<your-app-id>', secret: auth.secret })
+ *       ? { appId: '<your-app-id>', secret: auth.secret }
  *       : null,
  *   );
  * </script>
  *
- * {#if client}
- *   <JazzSvelteProvider {client}>
+ * {#if config}
+ *   <JazzSvelteProvider {config}>
  *     {#snippet children()}
  *       <TodoList />
  *     {/snippet}

@@ -1,3 +1,31 @@
+fn ordinary_flat_row_duplicate_view(
+    shape: &ValidatedQuery,
+    current_members: &BTreeSet<ResultMemberEntry>,
+    removed_members_are_ordinary: bool,
+    canonical_read_view: crate::protocol::ReadViewKey,
+    canonical_program_facts_empty: bool,
+    source_had_program_fact_transitions: bool,
+) -> bool {
+    let query = shape.query();
+    query.flat_join.is_none()
+        && query.includes.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.aggregate.is_none()
+        && canonical_read_view == RegisterShapeOptions::default().read_view_key()
+        && canonical_program_facts_empty
+        && !source_had_program_fact_transitions
+        && removed_members_are_ordinary
+        && current_members.iter().all(ordinary_current_content_member)
+}
+
+fn ordinary_current_content_member(member: &ResultMemberEntry) -> bool {
+    matches!(member, ResultMemberEntry::Row(row) if row.layer == crate::protocol::ResultRowLayer::Content
+        && row.deletion_tx.is_none()
+        && row.source == crate::protocol::ResultRowSource::Current
+        && row.branch_or_prefix.is_none()
+        && row.batch.is_none())
+}
+
 impl PeerState {
     fn fast_cursor_authorization_matches(
         &self,
@@ -1178,8 +1206,7 @@ impl PeerState {
         )
     }
 
-    /// Build a reset-result-set update for a usage-site subscription from an
-    /// already-maintained canonical subscription.
+    /// Build a usage-site update from an already-maintained canonical subscription.
     pub fn rehydrate_query_for_subscription_from_maintained_subscription<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -1213,6 +1240,28 @@ impl PeerState {
             requires_authoritative_membership_reconcile: _,
             terminal_operations: source_terminal_operations,
         } = source_transitions;
+        let known_state = self
+            .subscriptions
+            .get(&target_subscription)
+            .and_then(|state| state.known_state.clone());
+        let known_membership_position = fast_current_membership_position(&known_state);
+        let authorization_matches =
+            self.fast_cursor_authorization_matches(maintained_subscription, &known_state);
+        let removed_members_are_ordinary =
+            source_removes.iter().all(ordinary_current_content_member);
+        let source_had_program_fact_transitions =
+            !source_program_fact_adds.is_empty() || !source_program_fact_removes.is_empty();
+        let client_link = self.role != PeerRole::Relay;
+        let flat_row_removes = (client_link
+            && authorization_matches
+            && removed_members_are_ordinary
+            && maintained_subscription.read_view
+                == RegisterShapeOptions::default().read_view_key()
+            && !source_had_program_fact_transitions
+            && self.subscriptions[&maintained_subscription]
+                .program_fact_set
+                .is_empty())
+        .then(|| source_removes.clone());
         if !source_adds.is_empty()
             || !source_removes.is_empty()
             || !source_terminal_operations.is_empty()
@@ -1233,15 +1282,31 @@ impl PeerState {
                 program_fact_removes: source_program_fact_removes,
             });
         }
-        let mut result_member_adds = self
+        let canonical_state = self
             .subscriptions
             .get(&maintained_subscription)
             .ok_or(Error::InvalidStoredValue(
                 "coverage group subscription is missing peer state",
-            ))?
-            .member_result_set()
-            .into_iter()
-            .collect::<Vec<_>>();
+            ))?;
+        let current_result_member_set = canonical_state.member_result_set();
+        let can_forward_flat_removals = client_link
+            && ordinary_flat_row_duplicate_view(
+                shape,
+                &current_result_member_set,
+                removed_members_are_ordinary,
+                maintained_subscription.read_view,
+                canonical_state.program_fact_set.is_empty(),
+                source_had_program_fact_transitions,
+            );
+        let authorization_mismatch = client_link
+            && known_membership_position.is_some()
+            && !authorization_matches;
+        let target_result_member_removes = if can_forward_flat_removals && authorization_matches {
+            flat_row_removes.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut result_member_adds = current_result_member_set.into_iter().collect::<Vec<_>>();
         let tier = self
             .subscriptions
             .get(&maintained_subscription)
@@ -1251,19 +1316,16 @@ impl PeerState {
                 "coverage group subscription is missing prepared state",
             ))?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
-        let known_state = self
-            .subscriptions
-            .get(&target_subscription)
-            .and_then(|state| state.known_state.clone());
-        let known_membership_position = fast_current_membership_position(&known_state);
         let mut reset_result_set = true;
-        if let Some(position) = known_membership_position
+        if !authorization_mismatch
+            && let Some(position) = known_membership_position
             && node.applied_global_watermark().0 > 0
             && position >= node.applied_global_watermark()
         {
             result_member_adds.clear();
             reset_result_set = false;
-        } else if let Some(position) = known_membership_position
+        } else if !authorization_mismatch
+            && let Some(position) = known_membership_position
             && result_member_adds
                 .iter()
                 .any(|member| member_settle_position(member).is_some())
@@ -1286,13 +1348,15 @@ impl PeerState {
                 crate::node::MaintainedViewBundleInputs {
                     subscription: target_subscription,
                     peer_complete_tx_payloads,
-                    known_state,
+                    known_state: (!authorization_mismatch)
+                        .then_some(known_state)
+                        .flatten(),
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                     previous_result_set: BTreeSet::new(),
                     previous_program_facts: BTreeSet::new(),
                     flat_tuple_source_tables: Vec::new(),
                     result_member_adds,
-                    result_member_removes: Vec::new(),
+                    result_member_removes: target_result_member_removes,
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
                     identity: self.identity(),

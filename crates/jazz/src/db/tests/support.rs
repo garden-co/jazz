@@ -187,6 +187,31 @@ pub(super) fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
     )
 }
 
+pub(super) fn duplex_with_taps() -> (
+    Box<dyn Transport>,
+    Box<dyn Transport>,
+    Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
+    Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
+) {
+    use std::collections::VecDeque;
+    let client_to_server = Rc::new(RefCell::new(VecDeque::new()));
+    let server_to_client = Rc::new(RefCell::new(VecDeque::new()));
+    (
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&client_to_server),
+            inbound: Rc::clone(&server_to_client),
+            session_context: None,
+        }),
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&server_to_client),
+            inbound: Rc::clone(&client_to_server),
+            session_context: None,
+        }),
+        client_to_server,
+        server_to_client,
+    )
+}
+
 /// In-memory transport pair with a read-only tap on server-to-client frames.
 /// The tap lets a Core-serving test inspect the canonical `ViewUpdate` before
 /// the receiving edge applies it.

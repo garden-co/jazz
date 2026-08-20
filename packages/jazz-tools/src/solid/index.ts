@@ -5,11 +5,13 @@ export {
   type SolidJazzClient,
 } from "./create-solid-jazz-client.js";
 export {
+  JazzClientProvider,
   JazzProvider,
   useDb,
   useAuthState,
   useJazzClient,
   useSession,
+  type JazzClientProviderProps,
   type JazzProviderProps,
 } from "./provider.js";
 

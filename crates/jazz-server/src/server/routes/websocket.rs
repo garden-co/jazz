@@ -324,9 +324,7 @@ fn ws_peer_identity(identity: &str) -> Result<AuthorId, String> {
 }
 
 fn ws_validate_session_identity(user_id: &str, peer_identity: AuthorId) -> Result<(), String> {
-    let session_identity = uuid::Uuid::parse_str(user_id.trim())
-        .map(|uuid| AuthorId::from_bytes(*uuid.as_bytes()))
-        .map_err(|_| "websocket session user_id must be a UUID".to_owned())?;
+    let session_identity = jazz::tools::identity::author_id_from_principal(user_id);
     if session_identity != peer_identity {
         return Err("websocket peer_identity must match authenticated session user_id".to_owned());
     }
@@ -1047,10 +1045,15 @@ mod tests {
         let peer = AuthorId::from_bytes([1; 16]);
         let matching = uuid::Uuid::from_bytes([1; 16]).to_string();
         let mismatching = uuid::Uuid::from_bytes([2; 16]).to_string();
+        let external_subject = "better-auth-user";
+        let external_peer = AuthorId::from_bytes(
+            *uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, external_subject.as_bytes()).as_bytes(),
+        );
 
         assert!(ws_validate_session_identity(&matching, peer).is_ok());
         assert!(ws_validate_session_identity(&mismatching, peer).is_err());
-        assert!(ws_validate_session_identity("not-a-uuid", peer).is_err());
+        assert!(ws_validate_session_identity(external_subject, external_peer).is_ok());
+        assert!(ws_validate_session_identity(external_subject, peer).is_err());
     }
 
     #[test]

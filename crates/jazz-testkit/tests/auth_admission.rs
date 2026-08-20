@@ -2,7 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use jazz::serving::auth_admission::{
     AdmissionSource, AuthAdmissionConfig, AuthAdmissionError, AuthHandshake, JwtVerifierConfig,
-    LOCAL_FIRST_JWT_ISSUER, admit_local_first_jwt,
+    LOCAL_FIRST_JWT_ISSUER, admit_local_first_jwt, admit_static_bearer,
+    admit_static_bearer_with_claims,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
@@ -198,6 +199,83 @@ fn local_first_jwt_different_subject_maps_different_author() {
     let second = admit_local_first_jwt(&config, Some(&second)).unwrap();
 
     assert_ne!(first.author, second.author);
+}
+
+#[test]
+fn subject_admission_rejects_blank_but_preserves_opaque_spelling() {
+    let config = local_first_config(true);
+    for subject in ["", " \t\n\x0b\x0c\r "] {
+        let token = local_first_token(
+            subject,
+            expires_in(60),
+            Some(LOCAL_FIRST_JWT_ISSUER),
+            None,
+            None,
+        );
+        assert!(matches!(
+            admit_local_first_jwt(&config, Some(&token)),
+            Err(AuthAdmissionError::InvalidJwt(_))
+        ));
+    }
+
+    let exact = " workos_user_01J8Y3K4M5N6P7Q8R9S0T1U2V3 ";
+    let token = local_first_token(
+        exact,
+        expires_in(60),
+        Some(LOCAL_FIRST_JWT_ISSUER),
+        None,
+        None,
+    );
+    let admitted = admit_local_first_jwt(&config, Some(&token)).unwrap();
+    assert_eq!(admitted.subject, exact);
+    assert_eq!(
+        admitted.author,
+        jazz::serving::auth_admission::author_id_from_subject(exact)
+    );
+
+    let static_admitted = admit_static_bearer(
+        &AuthAdmissionConfig::static_bearer("test-token"),
+        Some("test-token"),
+        exact,
+        AdmissionSource::FirstFrameHandshake,
+    )
+    .unwrap();
+    assert_eq!(static_admitted.subject, exact);
+    assert_eq!(static_admitted.author, admitted.author);
+}
+
+#[test]
+fn static_bearer_claim_admission_rejects_ascii_blank_and_preserves_exact_subject() {
+    let config = AuthAdmissionConfig::static_bearer("test-token");
+    for subject in ["", " \t\n\x0b\x0c\r "] {
+        assert_eq!(
+            admit_static_bearer_with_claims(
+                &config,
+                Some("test-token"),
+                subject,
+                Default::default(),
+                AdmissionSource::FirstFrameHandshake,
+            ),
+            Err(AuthAdmissionError::InvalidHandshake(
+                "sub must be non-empty".to_owned()
+            ))
+        );
+    }
+
+    let exact = " \u{0085}workos_user\u{feff} ";
+    let admitted = admit_static_bearer_with_claims(
+        &config,
+        Some("test-token"),
+        exact,
+        Default::default(),
+        AdmissionSource::FirstFrameHandshake,
+    )
+    .unwrap();
+    assert_eq!(admitted.subject, exact);
+    assert_eq!(
+        admitted.author,
+        jazz::serving::auth_admission::author_id_from_subject(exact)
+    );
 }
 
 fn local_first_config(allow_local_first_auth: bool) -> AuthAdmissionConfig {

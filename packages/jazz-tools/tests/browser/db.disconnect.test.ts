@@ -34,11 +34,11 @@ const allowAllPermissions = s.definePermissions(app, ({ policy }) => [
 
 const PENDING_ASSERTION_MS = 750;
 const LOCAL_OPERATION_TIMEOUT_MS = 2_000;
-// Persistent browser Db creation crosses the OPFS worker boundary. The
-// reconnect test still verifies this is a local-only read, but a CI worker
-// under the full browser suite needs a startup budget distinct from the
-// steady-state local-read responsiveness budget above.
-const WORKER_STARTUP_OPERATION_TIMEOUT_MS = 5_000;
+// Persistent browser operations cross the OPFS worker boundary even when the
+// public operation is local-only. Keep the direct-runtime responsiveness
+// target above as a soft diagnostic, but allow for worker scheduling under the
+// full browser suite before treating the operation as stuck.
+const WORKER_OPERATION_TIMEOUT_MS = 5_000;
 const SYNC_OPERATION_TIMEOUT_MS = 10_000;
 
 type DbFactory = (
@@ -61,97 +61,89 @@ describe("Db disconnect/reconnect", () => {
   });
 
   describe("server-backed subscriptions", () => {
-    it("preserves an unresolved local write while the edge subscription hydrates", async () => {
-      const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
-      const serverTitle = "existing server row";
-      await withTimeout(
-        peer.insert(todos, { title: serverTitle, done: true }).wait({ tier: "edge" }),
-        SYNC_OPERATION_TIMEOUT_MS,
-        "server row did not reach edge",
-      );
-      await waitForTodos(
-        db,
-        (rows) => rows.some((row) => row.title === serverTitle),
-        "db did not receive the existing server row",
-        SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
-      );
-      await db.disconnect();
+    it.each(["edge", "global"] as const)(
+      "keeps a disconnected %s subscription pending, then hydrates its local write",
+      async (tier) => {
+        const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
+        const serverTitle = "existing server row";
+        await withTimeout(
+          peer.insert(todos, { title: serverTitle, done: true }).wait({ tier: "edge" }),
+          SYNC_OPERATION_TIMEOUT_MS,
+          "server row did not reach edge",
+        );
+        await waitForTodos(
+          db,
+          (rows) => rows.some((row) => row.title === serverTitle),
+          "db did not receive the existing server row",
+          SYNC_OPERATION_TIMEOUT_MS,
+          "edge",
+        );
+        await db.disconnect();
 
-      const title = "pending optimistic write";
-      const snapshots: Array<{
-        rows: Todo[];
-        edgeSettled: boolean;
-        afterReconnect: boolean;
-      }> = [];
-      let edgeSettled = false;
-      let reconnectRequested = false;
-      const unsubscribe = ctx.trackSubscription(
-        db.subscribeAll(
-          app.todos,
-          (delta) => {
-            if (delta.all === undefined) return;
-            snapshots.push({
-              rows: [...delta.all],
-              edgeSettled,
-              afterReconnect: reconnectRequested,
-            });
-          },
-          { tier: "edge", localUpdates: "immediate" },
-        ),
-      );
+        const title = "pending optimistic write";
+        const snapshots: Array<{
+          rows: Todo[];
+          edgeSettled: boolean;
+          afterReconnect: boolean;
+        }> = [];
+        let edgeSettled = false;
+        let reconnectRequested = false;
+        const unsubscribe = ctx.trackSubscription(
+          db.subscribeAll(
+            app.todos,
+            (delta) => {
+              if (delta.all === undefined) return;
+              snapshots.push({
+                rows: [...delta.all],
+                edgeSettled,
+                afterReconnect: reconnectRequested,
+              });
+            },
+            { tier, localUpdates: "immediate" },
+          ),
+        );
 
-      const write = db.insert(todos, { title, done: false });
-      const edgeWait = write.wait({ tier: "edge" }).then(() => {
-        edgeSettled = true;
-      });
-      await withTimeout(
-        write.wait({ tier: "local" }),
-        LOCAL_OPERATION_TIMEOUT_MS,
-        "local write did not become visible",
-      );
-      await waitForCondition(
-        async () => snapshots.some(({ rows }) => rows.some((row) => row.title === title)),
-        LOCAL_OPERATION_TIMEOUT_MS,
-        "edge subscription did not publish the immediate local write",
-      );
+        const write = db.insert(todos, { title, done: false });
+        const edgeWait = write.wait({ tier }).then(() => {
+          edgeSettled = true;
+        });
+        await withTimeout(
+          write.wait({ tier: "local" }),
+          LOCAL_OPERATION_TIMEOUT_MS,
+          "local write did not become visible",
+        );
+        await expectStillPending(
+          write.wait({ tier }),
+          PENDING_ASSERTION_MS,
+          `${tier} write settled before the delayed server snapshot was allowed to arrive`,
+        );
+        expect(snapshots).toEqual([]);
+        reconnectRequested = true;
+        await db.reconnect();
+        await waitForCondition(
+          async () =>
+            snapshots.some(
+              ({ rows, afterReconnect }) =>
+                afterReconnect && rows.some((row) => row.title === title),
+            ),
+          SYNC_OPERATION_TIMEOUT_MS,
+          `${tier} subscription did not publish its authoritative snapshot after reconnect`,
+        );
+        const beforeAcceptance = snapshots.at(-1)!.rows;
+        await withTimeout(
+          edgeWait,
+          SYNC_OPERATION_TIMEOUT_MS,
+          `local write did not settle at ${tier} after reconnect`,
+        );
 
-      const firstVisibleSnapshot = snapshots.findIndex(({ rows }) =>
-        rows.some((row) => row.title === title),
-      );
-      await expectStillPending(
-        write.wait({ tier: "edge" }),
-        PENDING_ASSERTION_MS,
-        "write settled before the delayed server snapshot was allowed to arrive",
-      );
-      const snapshotsBeforeReconnect = snapshots.length;
-      reconnectRequested = true;
-      await db.reconnect();
-      await waitForCondition(
-        async () =>
-          snapshots
-            .slice(snapshotsBeforeReconnect)
-            .some(({ afterReconnect, edgeSettled }) => afterReconnect && !edgeSettled),
-        LOCAL_OPERATION_TIMEOUT_MS,
-        "edge hydration did not publish a follow-up subscription result",
-      );
-      const beforeAcceptance = snapshots.at(-1)!.rows;
-      await withTimeout(
-        edgeWait,
-        SYNC_OPERATION_TIMEOUT_MS,
-        "local write did not settle at edge after reconnect",
-      );
+        expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
+        expect(snapshots[0]!.afterReconnect).toBe(true);
+        unsubscribe();
+      },
+      60_000,
+    );
 
-      expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
-      expect(
-        snapshots
-          .slice(firstVisibleSnapshot)
-          .every(({ rows }) => rows.some((row) => row.title === title)),
-      ).toBe(true);
-      unsubscribe();
-    }, 60_000);
-
-    it("preserves an unresolved local update while the edge subscription hydrates", async () => {
+    it("keeps an edge subscription pending while disconnected, then hydrates its local update", async () => {
       const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
       const title = "pending optimistic update";
       const serverRow = await withTimeout(
@@ -199,28 +191,22 @@ describe("Db disconnect/reconnect", () => {
         LOCAL_OPERATION_TIMEOUT_MS,
         "local update did not become visible",
       );
-      await waitForCondition(
-        async () => snapshots.some(({ rows }) => rows.some((row) => row.done)),
-        LOCAL_OPERATION_TIMEOUT_MS,
-        "edge subscription did not publish the immediate local update",
-      );
-
-      const firstUpdatedSnapshot = snapshots.findIndex(({ rows }) => rows.some((row) => row.done));
       await expectStillPending(
         update.wait({ tier: "edge" }),
         PENDING_ASSERTION_MS,
         "update settled before the delayed server snapshot was allowed to arrive",
       );
-      const snapshotsBeforeReconnect = snapshots.length;
+      expect(snapshots).toEqual([]);
       reconnectRequested = true;
       await db.reconnect();
       await waitForCondition(
         async () =>
-          snapshots
-            .slice(snapshotsBeforeReconnect)
-            .some(({ afterReconnect, edgeSettled }) => afterReconnect && !edgeSettled),
-        LOCAL_OPERATION_TIMEOUT_MS,
-        "edge hydration did not publish a follow-up subscription result",
+          snapshots.some(
+            ({ rows, afterReconnect }) =>
+              afterReconnect && rows.some((row) => row.id === serverRow.id && row.done),
+          ),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "edge subscription did not publish its authoritative snapshot after reconnect",
       );
       const beforeAcceptance = snapshots.at(-1)!.rows;
       await withTimeout(
@@ -230,15 +216,11 @@ describe("Db disconnect/reconnect", () => {
       );
 
       expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
-      expect(
-        snapshots
-          .slice(firstUpdatedSnapshot)
-          .every(({ rows }) => rows.some((row) => row.id === serverRow.id && row.done)),
-      ).toBe(true);
+      expect(snapshots[0]!.rows.some((row) => row.id === serverRow.id && row.done)).toBe(true);
       unsubscribe();
     }, 60_000);
 
-    it("preserves an unresolved local delete while the edge subscription hydrates", async () => {
+    it("keeps an edge subscription pending while disconnected, then hydrates its local delete", async () => {
       const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
       const title = "pending optimistic delete";
       const serverRow = await withTimeout(
@@ -296,28 +278,19 @@ describe("Db disconnect/reconnect", () => {
           { tier: "edge", localUpdates: "immediate" },
         ),
       );
-      await waitForCondition(
-        async () => snapshots.some(({ rows }) => rows.length === 0),
-        LOCAL_OPERATION_TIMEOUT_MS,
-        "edge subscription did not publish the immediate local delete",
-      );
-
-      const firstDeletedSnapshot = snapshots.findIndex(({ rows }) => rows.length === 0);
       await expectStillPending(
         deletion.wait({ tier: "edge" }),
         PENDING_ASSERTION_MS,
         "delete settled before the delayed server snapshot was allowed to arrive",
       );
-      const snapshotsBeforeReconnect = snapshots.length;
+      expect(snapshots).toEqual([]);
       reconnectRequested = true;
       await db.reconnect();
       await waitForCondition(
         async () =>
-          snapshots
-            .slice(snapshotsBeforeReconnect)
-            .some(({ afterReconnect, edgeSettled }) => afterReconnect && !edgeSettled),
-        LOCAL_OPERATION_TIMEOUT_MS,
-        "edge hydration did not publish a follow-up subscription result",
+          snapshots.some(({ rows, afterReconnect }) => afterReconnect && rows.length === 0),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "edge subscription did not publish its authoritative snapshot after reconnect",
       );
       const beforeAcceptance = snapshots.at(-1)!.rows;
       await withTimeout(
@@ -327,9 +300,7 @@ describe("Db disconnect/reconnect", () => {
       );
 
       expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
-      expect(snapshots.slice(firstDeletedSnapshot).every(({ rows }) => rows.length === 0)).toBe(
-        true,
-      );
+      expect(snapshots[0]!.rows).toEqual([]);
       unsubscribe();
     }, 60_000);
 
@@ -383,10 +354,9 @@ describe("Db disconnect/reconnect", () => {
         db.all(todoByTitle(offlineTitle), {
           tier: "local",
           localUpdates: "immediate",
-          propagation: "local-only",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
-        "direct server connection: local-only read for disconnected write did not resolve",
+        "direct server connection: local-tier read for disconnected write did not resolve",
       );
       expect(localRowsWhileOffline.some((row) => row.title === offlineTitle)).toBe(true);
 
@@ -428,10 +398,9 @@ describe("Db disconnect/reconnect", () => {
         db.all(todoByTitle(serverOnlyTitle), {
           tier: "local",
           localUpdates: "immediate",
-          propagation: "local-only",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
-        "direct server connection: local-only read while disconnected did not resolve",
+        "direct server connection: local-tier read while disconnected did not resolve",
       );
       expect(localRowsWhileOffline).toEqual([]);
 
@@ -456,24 +425,21 @@ describe("Db disconnect/reconnect", () => {
       const offlineTitle = "offline write";
       db.insert(todos, { title: offlineTitle, done: true });
 
-      const localRows = await withTimeout(
+      const localRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(offlineTitle), {
           tier: "local",
           localUpdates: "immediate",
-          propagation: "local-only",
         }),
-        LOCAL_OPERATION_TIMEOUT_MS,
-        "worker mode: local read for disconnected write did not resolve",
+        "worker mode: local-tier read for disconnected write did not resolve",
       );
       expect(localRows.some((row) => row.title === offlineTitle)).toBe(true);
 
-      const peerRowsBeforeReconnect = await withTimeout(
+      const peerRowsBeforeReconnect = await withWorkerOperationTimeout(
         peer.all(todoByTitle(offlineTitle), {
           tier: "local",
           localUpdates: "immediate",
           propagation: "local-only",
         }),
-        WORKER_STARTUP_OPERATION_TIMEOUT_MS,
         "worker mode: peer local read before reconnect did not resolve",
       );
       expect(peerRowsBeforeReconnect).toEqual([]);
@@ -501,14 +467,12 @@ describe("Db disconnect/reconnect", () => {
         "worker mode: peer write did not reach edge while db was disconnected",
       );
 
-      const disconnectedLocalRows = await withTimeout(
+      const disconnectedLocalRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(serverOnlyTitle), {
           tier: "local",
           localUpdates: "immediate",
-          propagation: "local-only",
         }),
-        LOCAL_OPERATION_TIMEOUT_MS,
-        "worker mode: local-only read while disconnected did not resolve",
+        "worker mode: local-tier read while disconnected did not resolve",
       );
       expect(disconnectedLocalRows).toEqual([]);
 
@@ -531,9 +495,8 @@ describe("Db disconnect/reconnect", () => {
       const localWait = db
         .insert(todos, { title: "local wait", done: false })
         .wait({ tier: "local" });
-      await withTimeout(
+      await withWorkerOperationTimeout(
         localWait,
-        LOCAL_OPERATION_TIMEOUT_MS,
         "worker mode: local wait should resolve while disconnected",
       );
 
@@ -574,9 +537,8 @@ describe("Db disconnect/reconnect", () => {
       const title = "strict query FIFO";
       const edgeRead = db.all(todoByTitle(title), { tier: "edge", localUpdates: "deferred" });
       const laterWrite = db.insert(todos, { title, done: false });
-      await withTimeout(
+      await withWorkerOperationTimeout(
         laterWrite.wait({ tier: "local" }),
-        LOCAL_OPERATION_TIMEOUT_MS,
         "worker mode: local write did not resolve independently of a parked edge query",
       );
 
@@ -599,9 +561,8 @@ describe("Db disconnect/reconnect", () => {
 
       const edgeWait = priorWrite.wait({ tier: "edge" });
       const laterWrite = db.insert(todos, { title: "after strict wait", done: false });
-      await withTimeout(
+      await withWorkerOperationTimeout(
         laterWrite.wait({ tier: "local" }),
-        LOCAL_OPERATION_TIMEOUT_MS,
         "worker mode: local write did not resolve independently of a parked edge wait",
       );
 
@@ -642,13 +603,12 @@ describe("Db disconnect/reconnect", () => {
       const title = "read mode";
       db.insert(todos, { title, done: true });
 
-      const localRows = await withTimeout(
+      const localRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(title), {
           tier: "local",
           localUpdates: "immediate",
           propagation: "local-only",
         }),
-        LOCAL_OPERATION_TIMEOUT_MS,
         "worker mode: immediate local read while disconnected did not resolve",
       );
       expect(localRows.some((row) => row.title === title)).toBe(true);
@@ -670,6 +630,30 @@ describe("Db disconnect/reconnect", () => {
         SYNC_OPERATION_TIMEOUT_MS,
         "worker mode: deferred read did not resolve after reconnect",
       );
+    }, 60_000);
+
+    it("does not register a deferred subscription readiness waiter after immediate shutdown", async () => {
+      const { db } = await createDbPair(ctx, createWorkerDb);
+      await db.disconnect();
+
+      let callbacks = 0;
+      const unsubscribe = db.subscribeAll(
+        app.todos,
+        () => {
+          callbacks += 1;
+        },
+        { tier: "edge" },
+      );
+      const connection = (db as unknown as { connection: { reconnectWaiters: Set<unknown> } })
+        .connection;
+
+      await db.shutdown();
+      ctx.untrack(db);
+      await Promise.resolve();
+      await Promise.resolve();
+      unsubscribe();
+      expect(connection.reconnectWaiters.size).toBe(0);
+      expect(callbacks).toBe(0);
     }, 60_000);
   });
 });
@@ -742,6 +726,26 @@ async function expectStillPending<T>(
   const reason =
     result.state === "rejected" && result.error instanceof Error ? `: ${result.error.message}` : "";
   throw new Error(`${label} ${result.state}${reason}`);
+}
+
+async function withWorkerOperationTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  const startedAt = performance.now();
+  let softDeadlineExceeded = false;
+  const softDeadline = setTimeout(() => {
+    softDeadlineExceeded = true;
+  }, LOCAL_OPERATION_TIMEOUT_MS);
+
+  try {
+    const result = await withTimeout(promise, WORKER_OPERATION_TIMEOUT_MS, label);
+    if (softDeadlineExceeded) {
+      console.warn(
+        `${label}: exceeded ${LOCAL_OPERATION_TIMEOUT_MS}ms soft target; resolved after ${Math.round(performance.now() - startedAt)}ms`,
+      );
+    }
+    return result;
+  } finally {
+    clearTimeout(softDeadline);
+  }
 }
 
 async function waitForTodos(

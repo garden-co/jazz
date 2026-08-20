@@ -27,6 +27,8 @@ use crate::tools::public_schema::{
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
 const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
+const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
+const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2402,13 +2404,18 @@ fn convert_session_path_operand(
     {
         return Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()));
     }
+    if path_segments.len() == 1
+        && PUBLIC_AUTH_MODE_SESSION_PATHS.contains(&path_segments[0].as_str())
+    {
+        return Ok(Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()));
+    }
     if path_segments.len() == 2 && path_segments[0] == "claims" {
         return Ok(Operand::Claim(path_segments[1].clone()));
     }
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
         format!(
-            "core schema policies only support session.user_id and session.claims.* references, got session.{}",
+            "core schema policies only support session.user_id, session.authMode, and session.claims.* references, got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -3120,6 +3127,36 @@ mod tests {
             vec![Predicate::Eq(
                 Operand::Column("token_id".to_owned()),
                 Operand::Literal(GrooveValue::Uuid(Uuid::nil())),
+            )]
+        );
+    }
+
+    #[test]
+    fn converts_auth_mode_session_comparison_to_reserved_claim() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .column("body", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::SessionCmp {
+                        path: vec!["authMode".to_owned()],
+                        op: CmpOp::Eq,
+                        value: Value::Text("external".to_owned()),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).expect("authMode policy should convert");
+        let messages = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "messages")
+            .unwrap();
+
+        assert_eq!(
+            messages.read_policy.as_ref().unwrap().filters,
+            vec![Predicate::Eq(
+                Operand::Claim("authMode".to_owned()),
+                Operand::Literal(GrooveValue::String("external".to_owned())),
             )]
         );
     }

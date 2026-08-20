@@ -14,7 +14,7 @@ import type {
   BatchId,
   InsertResult,
   MutationErrorEvent,
-  MutationResult,
+  MutationReceipt,
   OpenBatchId,
   PermissionAdvice,
   Runtime,
@@ -22,6 +22,7 @@ import type {
 } from "../client.js";
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
+import { authorBytesForSubject } from "../author-id.js";
 import {
   PostcardReader,
   PostcardWriter,
@@ -662,7 +663,7 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId: string,
     values: Record<string, Value>,
     writeContext?: string | null,
-  ): MutationResult {
+  ): MutationReceipt {
     const rowId = parseUuid(objectId);
     const patch = encodeCellsForPatch(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -692,7 +693,7 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId: string,
     values: InsertValues,
     writeContext?: string | null,
-  ): MutationResult {
+  ): MutationReceipt {
     const rowId = parseUuid(objectId);
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -730,7 +731,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishMutation(write);
   }
 
-  delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
+  delete(table: string, objectId: string, writeContext?: string | null): MutationReceipt {
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -1235,7 +1236,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return { id: row.id, values: row.values, kind: "committed", batchId };
   }
 
-  private finishMutation(write: Write): MutationResult {
+  private finishMutation(write: Write): MutationReceipt {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.scheduleServerPump();
@@ -4821,32 +4822,6 @@ export function parseUuid(value: string): Uint8Array {
   const bytes = new Uint8Array(16);
   for (let i = 0; i < 16; i += 1) {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function uuidBytes(value: string): Uint8Array | null {
-  try {
-    return parseUuid(value);
-  } catch {
-    return null;
-  }
-}
-
-function authorBytesForSubject(subject: string): Uint8Array {
-  return uuidBytes(subject) ?? deterministicBytes(`session:${subject}:author`);
-}
-
-function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
   }
   return bytes;
 }

@@ -282,8 +282,8 @@ describe("Db transactions", () => {
     }
   });
 
-  it("types exclusive transaction waits without durability options", async () => {
-    if (false) {
+  it("types exclusive transaction waits without durability options", () => {
+    const checkTypes = async () => {
       const result = await db.exclusiveTransaction((tx) => tx.kind);
       void result.wait();
       // @ts-expect-error - exclusive transactions are confirmed by the global authority.
@@ -294,13 +294,17 @@ describe("Db transactions", () => {
       void committed.wait();
       // @ts-expect-error - exclusive transactions are confirmed by the global authority.
       void committed.wait({ tier: "global" });
-    }
+    };
+    void checkTypes;
   });
 
   it("commits an empty exclusive transaction opened at begin", async () => {
     await allTodos();
     const tx = db.beginExclusiveTransaction();
-    await expect(tx.commit()).resolves.toBeDefined();
+    await expect(tx.commit()).resolves.toMatchObject({
+      value: undefined,
+      wait: expect.any(Function),
+    });
   });
 
   it("rejects exclusive transaction operations after commit", async () => {
@@ -431,7 +435,8 @@ describe("Db mergeable transactions", () => {
     try {
       const tx = sessionDb.beginTransaction();
       tx.insert(app.todos, { title: "Session-scoped transaction", done: false });
-      await tx.commit();
+      const result = await tx.commit();
+      expect(result).toMatchObject({ value: undefined, wait: expect.any(Function) });
       await expect(sessionDb.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
         { id: expect.any(String), title: "Session-scoped transaction", done: false },
       ]);

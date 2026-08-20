@@ -76,7 +76,7 @@ describe("TS Update API", () => {
     );
   });
 
-  it("updates rows synchronously and returns a write handle", async () => {
+  it("updates rows synchronously and returns a mutation result", async () => {
     const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
     const { value: todo } = db.insert(app.todos, {
@@ -90,6 +90,7 @@ describe("TS Update API", () => {
 
     const result = db.update(app.todos, todo.id, { done: true });
     expect(result).toMatchObject({
+      value: undefined,
       wait: expect.any(Function),
     });
 
