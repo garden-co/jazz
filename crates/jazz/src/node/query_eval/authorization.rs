@@ -164,7 +164,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    async fn policy_authorization_row_id_graph(
+    pub(super) async fn policy_authorization_row_id_graph(
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<PolicyAuthorizationGraph, Error> {
@@ -430,13 +430,14 @@ where
         let candidate = current_row_from_cells(table, row_uuid, cells)?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
         let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
-        let program = self
-            .compile_query_program_request_with_inline_sources_and_access_paths(
+        let program = Box::pin(
+            self.compile_query_program_request_with_inline_sources_and_access_paths(
                 request,
                 inline_sources,
                 access_paths,
-            )
-            .await?;
+            ),
+        )
+        .await?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
             .await
     }
@@ -491,7 +492,7 @@ where
             .await
     }
 
-    pub(super) async fn policy_filtered_current_source_graph_via_query_engine(
+    pub(super) fn compose_policy_filtered_current_source_graph(
         &mut self,
         policy_request: Result<QueryProgramRequest, Error>,
         base: GraphBuilder,
@@ -551,17 +552,15 @@ where
                         .collect::<BTreeSet<_>>(),
                 )
             });
-        let authorized = match self.policy_authorization_row_id_graph(policy_request).await {
-            Ok(authorized) => authorized,
-            Err(Error::QueryCapability(err)) if err.contains("PolicyProofCycle") => {
-                return Err(Error::QueryCapability(err));
-            }
-            Err(Error::QueryCapability(_err)) => PolicyAuthorizationGraph {
-                graph: empty_authorized_row_id_graph(),
-                route_fields: BTreeSet::new(),
-            },
-            Err(err) => return Err(err),
-        };
+        let cache_key = policy_authorization_graph_cache_key(&policy_request);
+        let authorized = self
+            .query
+            .policy_authorization_graph_cache
+            .get(&cache_key)
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "policy dependency was not prepared before source composition",
+            ))?;
         // Authorization is existential per protected row and binding route:
         // multiple policy branches or multiple qualifying grant rows are
         // alternative proofs, not additional copies of the application row.

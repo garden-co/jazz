@@ -28,6 +28,16 @@ preparation is migration debt unless it captures a snapshot explicitly named by
 the read view; live-source preparation should disappear as Groove gains the
 corresponding declarative source primitive.
 
+Policy programs are explicit compilation dependencies, not work performed by
+source preparation. Compilation first analyzes all `SourceRequest`s, derives
+and deduplicates their policy-program requests by structural cache identity,
+and prepares those programs. Source preparation may then only look up the
+prepared policy graph and compose it synchronously with the protected source.
+A missing dependency is an orchestration error; it MUST NOT trigger recursive
+compilation, evaluation, or a retry from inside source preparation. Policy
+dependency sources remain raw evidence as described below, so they do not
+recursively apply their own read policy.
+
 Groove owns evaluation of the lowered graph. Its evaluation session discovers
 which concrete table, index, or arrangement inputs are not resident, suspends
 the affected nodes, shares hydration work, and resumes them through Groove's
