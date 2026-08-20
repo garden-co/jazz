@@ -12,9 +12,9 @@ use crate::storage::OwnedStorage;
 
 /// Owned preparation state for one interruptible evaluation.
 ///
-/// Storage suspension lives in `EvaluationWorkQueue`; the recursive evaluator
-/// is entered only for a root whose complete source frontier is ready, so its
-/// future is a short-lived execution frame rather than retained blocked work.
+/// Storage suspension and dependency ordering live in `EvaluationWorkQueue`.
+/// Every root, including retained roots without an active subscription, is
+/// evaluated only after its inputs have completed.
 struct EvaluationSession<'a> {
     relevant_nodes: HashSet<NodeId>,
     roots: HashSet<NodeId>,
@@ -40,7 +40,6 @@ pub(super) struct IncrementalEvaluation<'a> {
     binding_frontiers: HashMap<String, u64>,
     current_tick: u64,
     metrics: TickMetrics,
-    retained_roots: Vec<NodeId>,
     storage: OwnedStorage<'a>,
     storage_requests: StorageRequests<'a>,
     evaluation_inputs: Option<EvaluationInputs>,
@@ -388,7 +387,6 @@ impl EvaluationWorkQueue {
 impl IncrementalEvaluation<'_> {
     fn abandon(&mut self, nodes: &HashSet<NodeId>) {
         self.work_queue.abandon(nodes);
-        self.retained_roots.retain(|node| !nodes.contains(node));
         self.terminal_deltas.retain(|node, _| !nodes.contains(node));
         self.root_ordering_windows
             .retain(|node, _| !nodes.contains(node));
@@ -565,16 +563,6 @@ impl IncrementalEvaluation<'_> {
             return Poll::Pending;
         }
 
-        for node in std::mem::take(&mut self.retained_roots) {
-            let mut future = evaluator.update_node(node);
-            match Pin::new(&mut future).poll(cx) {
-                Poll::Ready(Ok(_)) => {}
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                Poll::Pending => {
-                    return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked.into()));
-                }
-            }
-        }
         drop(evaluator);
         runtime
             .operator_states
@@ -1122,6 +1110,9 @@ impl IvmRuntime {
             .collect::<Vec<_>>();
         active_roots.sort_unstable();
         active_roots.dedup();
+        active_roots.extend(retained_roots.iter().copied());
+        active_roots.sort_unstable();
+        active_roots.dedup();
         let (_, work_queue) = EvaluationWorkQueue::new(active_roots)
             .discover_incremental(&self.graph, recursive_storage_dependencies)?;
         Ok(IncrementalEvaluation {
@@ -1132,7 +1123,6 @@ impl IvmRuntime {
             binding_frontiers: self.binding_frontiers.clone(),
             current_tick,
             metrics,
-            retained_roots,
             storage,
             storage_requests,
             evaluation_inputs,
