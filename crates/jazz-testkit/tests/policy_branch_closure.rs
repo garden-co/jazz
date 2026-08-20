@@ -8,8 +8,7 @@ use jazz::tools::public_schema::{
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
 };
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, PolicyExpr, QueryBuilder, Schema, SchemaBuilder,
-    TableSchema, Value,
+    ColumnType, DurabilityTier, JazzClient, PolicyExpr, Schema, SchemaBuilder, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{TestingClient, wait_for_query};
@@ -301,7 +300,7 @@ async fn seed_policy_branch_closure_rows(admin: &JazzClient) {
 async fn visible_resource_labels(client: &JazzClient, expected_labels: &[&str]) -> Vec<String> {
     let rows = wait_for_query(
         client,
-        QueryBuilder::new("resources").select(&["label"]).build(),
+        jazz::query::Query::from("resources").select(["label"]),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(5),
         "member sees all resource policy branch results",

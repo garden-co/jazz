@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
-# The dedicated runner has four CPUs. Turbo gets at most two test tasks while
-# the jazz-tools browser suite gets the remaining capacity; both reuse the one
-# artifact build completed by the workflow before this script starts.
+# The test-ts runner has 16 CPUs. Turbo gets at most two test tasks, while the
+# jazz-tools browser suite caps Vitest at four file workers so Chromium retains
+# scheduling headroom; both reuse the artifact build completed before this
+# script starts.
 set -u
 
 node_tests_command=${JAZZ_NODE_TEST_COMMAND:-"pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=2"}

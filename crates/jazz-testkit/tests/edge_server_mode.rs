@@ -4,6 +4,7 @@ use jazz_testkit as support;
 
 use std::time::Duration;
 
+use jazz::query::OrderDirection;
 use jazz::row_input;
 use jazz::tools::Operation;
 use jazz::tools::public_schema::{
@@ -11,13 +12,13 @@ use jazz::tools::public_schema::{
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
 };
 use jazz::tools::{
-    AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, QueryBuilder, Schema,
-    SchemaBuilder, SubscriptionStreamItem, TableSchema, Value,
+    AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, Schema, SchemaBuilder,
+    SubscriptionStreamItem, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
-    TestingClient, has_added, has_removed, publish_permissions, wait_for_edge_query_ready,
+    TestingClient, has_added_id, has_removed, publish_permissions, wait_for_edge_query_ready,
     wait_for_query, wait_for_subscription_update,
 };
 use tempfile::TempDir;
@@ -110,10 +111,9 @@ async fn subscription_orders_by_unprojected_field() {
 
             let mut stream = client
                 .subscribe(
-                    QueryBuilder::new("todos")
-                        .select(&["title"])
-                        .order_by("rank")
-                        .build(),
+                    jazz::query::Query::from("todos")
+                        .select(["title"])
+                        .order_by("rank", OrderDirection::Asc),
                 )
                 .await
                 .expect("subscribe to projected ranked todos");
@@ -185,7 +185,7 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
                 .connect()
                 .await;
 
-            let query = QueryBuilder::new("todos").build();
+            let query = jazz::query::Query::from("todos");
             let mut stream = client
                 .subscribe(query)
                 .await
@@ -208,7 +208,7 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
                 &mut log,
                 Duration::from_secs(10),
                 "edge-tier public subscription receives inserted row",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
         })
@@ -221,8 +221,8 @@ async fn maintained_unordered_limit_and_offset_windows_open_offline() {
         .run_until(async {
             let client = JazzClient::test_client(todo_schema()).await;
             for query in [
-                QueryBuilder::new("todos").limit(2).build(),
-                QueryBuilder::new("todos").offset(1).limit(1).build(),
+                jazz::query::Query::from("todos").limit(2),
+                jazz::query::Query::from("todos").offset(1).limit(1),
             ] {
                 let _stream = client
                     .subscribe(query)
@@ -264,7 +264,7 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
             let mut row_id_order = ids.clone();
             row_id_order.sort();
 
-            let default_query = QueryBuilder::new("todos").build();
+            let default_query = jazz::query::Query::from("todos");
             let one_shot = client
                 .query(default_query.clone(), Some(DurabilityTier::EdgeServer))
                 .await
@@ -304,11 +304,11 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
 
             for (query, expected) in [
                 (
-                    QueryBuilder::new("todos").limit(2).build(),
+                    jazz::query::Query::from("todos").limit(2),
                     row_id_order[..2].to_vec(),
                 ),
                 (
-                    QueryBuilder::new("todos").offset(1).limit(2).build(),
+                    jazz::query::Query::from("todos").offset(1).limit(2),
                     row_id_order[1..3].to_vec(),
                 ),
             ] {
@@ -364,7 +364,8 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 tied.push(id);
             }
             tied.sort();
-            let tie_query = QueryBuilder::new("todos").order_by("title").build();
+            let tie_query =
+                jazz::query::Query::from("todos").order_by("title", OrderDirection::Asc);
             let tied_rows = client
                 .query(tie_query, Some(DurabilityTier::EdgeServer))
                 .await
@@ -377,10 +378,9 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
 
             let mut window = client
                 .subscribe(
-                    QueryBuilder::new("todos")
-                        .order_by("title")
-                        .limit(2)
-                        .build(),
+                    jazz::query::Query::from("todos")
+                        .order_by("title", OrderDirection::Asc)
+                        .limit(2),
                 )
                 .await
                 .expect("subscribe ordered window");
@@ -431,12 +431,12 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 &mut updates,
                 Duration::from_secs(10),
                 "promoted row enters maintained window",
-                |deltas| has_added(deltas, promoted) && has_removed(deltas, tied[1]),
+                |deltas| has_added_id(deltas, promoted) && has_removed(deltas, tied[1]),
             )
             .await;
             let promotion = updates
                 .iter()
-                .find(|delta| has_added(std::slice::from_ref(delta), promoted))
+                .find(|delta| has_added_id(std::slice::from_ref(delta), promoted))
                 .expect("promotion delta is recorded");
             assert_eq!(
                 promotion
@@ -477,7 +477,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 &mut updates,
                 Duration::from_secs(10),
                 "demoted row leaves maintained window",
-                |deltas| has_removed(deltas, promoted) && has_added(deltas, tied[1]),
+                |deltas| has_removed(deltas, promoted) && has_added_id(deltas, tied[1]),
             )
             .await;
 
@@ -502,7 +502,7 @@ async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
                 .await;
 
             let mut stream = client
-                .subscribe(QueryBuilder::new("todos").build())
+                .subscribe(jazz::query::Query::from("todos"))
                 .await
                 .expect("normal subscription should open");
             let (todo_id, _, transaction_id) = client
@@ -810,10 +810,8 @@ fn mapping_rule_access_policy() -> PolicyExpr {
     }
 }
 
-fn todo_query() -> jazz::tools::Query {
-    QueryBuilder::new("todos")
-        .select(&["title", "done"])
-        .build()
+fn todo_query() -> jazz::query::Query {
+    jazz::query::Query::from("todos").select(["title", "done"])
 }
 
 fn reserve_local_port() -> u16 {
@@ -1001,7 +999,7 @@ async fn seed_policy_graph_rows(admin: &JazzClient) -> PolicyGraphSeedRows {
 async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraphSeedRows) {
     let member_rows = wait_for_query(
         member,
-        QueryBuilder::new("resources").build(),
+        jazz::query::Query::from("resources"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(30),
         "member sees resource through seeded recursive access policy",
@@ -1016,7 +1014,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     );
     wait_for_query(
         member,
-        QueryBuilder::new("data_entries").build(),
+        jazz::query::Query::from("data_entries"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(30),
         "member sees data entry through seeded recursive access policy",
@@ -1027,7 +1025,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     .await;
     wait_for_query(
         member,
-        QueryBuilder::new("mapping_rules").build(),
+        jazz::query::Query::from("mapping_rules"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(30),
         "member sees sibling mapping rule through same seeded recursive access policy",
@@ -1038,7 +1036,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     .await;
     wait_for_query(
         member,
-        QueryBuilder::new("data_entry_entries").build(),
+        jazz::query::Query::from("data_entry_entries"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(30),
         "member sees grandchild through inherits over seeded access policy",
@@ -1050,7 +1048,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     .await;
     wait_for_query(
         member,
-        QueryBuilder::new("mapping_rule_entries").build(),
+        jazz::query::Query::from("mapping_rule_entries"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(30),
         "member sees mapping rule child through inherits over sibling seeded access policy",
@@ -1122,7 +1120,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                 .await;
             wait_for_query(
                 &spy,
-                QueryBuilder::new("resources").build(),
+                jazz::query::Query::from("resources"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(30),
                 "spy sees no resources through seeded recursive access policy",
@@ -1131,7 +1129,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
             .await;
             wait_for_query(
                 &spy,
-                QueryBuilder::new("data_entries").build(),
+                jazz::query::Query::from("data_entries"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(30),
                 "spy sees no inherited data entries through seeded recursive access policy",
@@ -1345,7 +1343,7 @@ async fn core_write_reaches_clients_on_both_edges() {
                 &mut alice_log,
                 Duration::from_secs(30),
                 "alice receives the core write through edge_us",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
             wait_for_subscription_update(
@@ -1353,7 +1351,7 @@ async fn core_write_reaches_clients_on_both_edges() {
                 &mut bob_log,
                 Duration::from_secs(30),
                 "bob receives the core write through edge_eu",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
             wait_for_row(
@@ -1446,7 +1444,7 @@ async fn edge_write_reaches_client_on_peer_edge() {
                 &mut bob_log,
                 Duration::from_secs(30),
                 "bob receives edge_us write through edge_eu",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
             wait_for_row(

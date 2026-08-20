@@ -59,6 +59,65 @@ mod tests {
     }
 
     #[test]
+    fn integer_literals_normalize_to_comparison_column_width() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "metrics",
+            [
+                ColumnSchema::new("narrow", ColumnType::I32),
+                ColumnSchema::new("wide", ColumnType::I64),
+            ],
+        )]);
+
+        let widened = Query::from("metrics")
+            .filter(gt(col("wide"), lit(9)))
+            .validate(&schema)
+            .expect("i32 literal widens for an i64 column");
+        let explicitly_wide = Query::from("metrics")
+            .filter(gt(col("wide"), lit(9_i64)))
+            .validate(&schema)
+            .unwrap();
+        assert_eq!(
+            widened.query().filters,
+            vec![gt(col("wide"), lit(9_i64))]
+        );
+        assert_eq!(widened.shape_id(), explicitly_wide.shape_id());
+
+        let narrowed = Query::from("metrics")
+            .filter(eq(col("narrow"), lit(9_i64)))
+            .validate(&schema)
+            .expect("in-range i64 literal narrows for an i32 column");
+        assert_eq!(
+            narrowed.query().filters,
+            vec![eq(col("narrow"), lit(9))]
+        );
+
+        let inferred_in = Query::from("metrics")
+            .filter(in_list(col("wide"), [lit(9), lit(10_i64)]))
+            .validate(&schema)
+            .expect("IN candidates normalize to the column width");
+        let explicit_in = Query::from("metrics")
+            .filter(in_list(col("wide"), [lit(9_i64), lit(10_i64)]))
+            .validate(&schema)
+            .unwrap();
+        assert_eq!(inferred_in.shape_id(), explicit_in.shape_id());
+
+        let out_of_range = Query::from("metrics")
+            .filter(eq(
+                col("narrow"),
+                lit(i64::from(i32::MAX) + 1),
+            ))
+            .validate(&schema)
+            .unwrap_err();
+        assert_eq!(out_of_range, QueryError::OperandTypeMismatch);
+
+        let column_width_mismatch = Query::from("metrics")
+            .filter(eq(col("narrow"), col("wide")))
+            .validate(&schema)
+            .unwrap_err();
+        assert_eq!(column_width_mismatch, QueryError::OperandTypeMismatch);
+    }
+
+    #[test]
     fn relation_predicate_or_true_is_always_true() {
         let predicate = RelationPredicate::Or(vec![
             RelationPredicate::True,
@@ -388,19 +447,7 @@ mod tests {
     #[test]
     fn flat_join_rejects_combinations_outside_its_executable_envelope() {
         fn flat() -> Query {
-            let mut query = Query::from("issues");
-            query.flat_join = Some(FlatJoin {
-                root_alias: None,
-                sources: vec![FlatJoinSource {
-                    table: "issue_tags".to_owned(),
-                    alias: None,
-                    on: FlatJoinOn {
-                        left: "issues.id".to_owned(),
-                        right: "issue_tags.issue".to_owned(),
-                    },
-                }],
-            });
-            query
+            Query::from("issues").flat_join("issue_tags", "issues.id", "issue_tags.issue")
         }
 
         let mut cases = Vec::new();
@@ -445,6 +492,112 @@ mod tests {
                 query.validate(&schema()),
                 Err(QueryError::UnsupportedFlatJoinCombination { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn flat_join_allows_nullable_scalar_keys() {
+        let schema = JazzSchema::new([
+            TableSchema::new(
+                "parents",
+                [ColumnSchema::new(
+                    "child_id",
+                    ColumnType::Uuid.nullable(),
+                )],
+            ),
+            TableSchema::new(
+                "children",
+                [ColumnSchema::new(
+                    "parent_id",
+                    ColumnType::Uuid.nullable(),
+                )],
+            ),
+        ]);
+
+        for (left, right) in [
+            ("parents.child_id", "children.id"),
+            ("parents.id", "children.parent_id"),
+        ] {
+            let mut query = Query::from("parents");
+            query.flat_join = Some(FlatJoin {
+                root_alias: None,
+                sources: vec![FlatJoinSource {
+                    table: "children".to_owned(),
+                    alias: None,
+                    on: FlatJoinOn {
+                        left: left.to_owned(),
+                        right: right.to_owned(),
+                    },
+                }],
+            });
+            query.validate(&schema).unwrap();
+        }
+    }
+
+    /// Flat-join filters preserve declared `id` field types on every source,
+    /// while `_id` remains the UUID spelling for the physical row identity.
+    #[test]
+    fn flat_join_filters_distinguish_declared_id_from_physical_id() {
+        let schema = JazzSchema::new([
+            TableSchema::new("parents", [ColumnSchema::new("id", ColumnType::String)]),
+            TableSchema::new(
+                "children",
+                [
+                    ColumnSchema::new("id", ColumnType::String),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("parent", "parents"),
+        ]);
+
+        let query = Query::from(table("parents").alias("parent"))
+            .flat_join(table("children").alias("child"), "parent._id", "child.parent")
+            .filter(eq(col("parent.id"), lit("parent-key")))
+            .filter(eq(col("child.id"), lit("child-key")))
+            .filter(eq(
+                col("child._id"),
+                lit(uuid::Uuid::from_u128(0x1234)),
+            ));
+
+        assert!(query.validate(&schema).is_ok());
+    }
+
+    #[test]
+    fn flat_join_allows_array_element_keys() {
+        let schema = JazzSchema::new([
+            TableSchema::new(
+                "parents",
+                [ColumnSchema::new(
+                    "child_ids",
+                    ColumnType::Uuid.array_of(),
+                )],
+            ),
+            TableSchema::new(
+                "children",
+                [ColumnSchema::new(
+                    "parent_ids",
+                    ColumnType::Uuid.array_of(),
+                )],
+            ),
+        ]);
+
+        for (left, right) in [
+            ("parents.child_ids", "children.id"),
+            ("parents.id", "children.parent_ids"),
+        ] {
+            let mut query = Query::from("parents");
+            query.flat_join = Some(FlatJoin {
+                root_alias: None,
+                sources: vec![FlatJoinSource {
+                    table: "children".to_owned(),
+                    alias: None,
+                    on: FlatJoinOn {
+                        left: left.to_owned(),
+                        right: right.to_owned(),
+                    },
+                }],
+            });
+            query.validate(&schema).unwrap();
         }
     }
 

@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, QueryBuilder,
-    SchemaBuilder, Session, TablePolicies, TableSchema, Value,
+    ColumnType, DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, SchemaBuilder,
+    Session, TablePolicies, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{
@@ -304,7 +304,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
 
             let alice_rows = wait_for_query(
                 &alice,
-                QueryBuilder::new("documents").build(),
+                jazz::query::Query::from("documents"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(25),
                 "alice sees forward-inherited document",
@@ -315,7 +315,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
 
             let bob_rows = wait_for_query(
                 &bob,
-                QueryBuilder::new("documents").build(),
+                jazz::query::Query::from("documents"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(3),
                 "bob does not see alice's forward-inherited document",
@@ -395,7 +395,7 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
                 .await
                 .expect("attachment reaches edge");
 
-            let query = QueryBuilder::new("files").build();
+            let query = jazz::query::Query::from("files");
             wait_for_query(
                 &alice,
                 query.clone(),
@@ -499,7 +499,7 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
 
             wait_for_query(
                 &alice,
-                QueryBuilder::new("documents").build(),
+                jazz::query::Query::from("documents"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(25),
                 "alice sees multi-hop forward-inherited document",
@@ -597,7 +597,7 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
 
             wait_for_query(
                 &alice,
-                QueryBuilder::new("shared_documents").build(),
+                jazz::query::Query::from("shared_documents"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(25),
                 "alice sees document through one of two inherited parents",
@@ -702,7 +702,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
 
             wait_for_query(
                 &alice,
-                QueryBuilder::new("shared_documents").build(),
+                jazz::query::Query::from("shared_documents"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(25),
                 "alice sees document when both inherited parents expand to branches",
@@ -829,7 +829,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
 
             let rows = alice
                 .query(
-                    QueryBuilder::new("children").build(),
+                    jazz::query::Query::from("children"),
                     Some(DurabilityTier::EdgeServer),
                 )
                 .await
