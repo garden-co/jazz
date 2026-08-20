@@ -213,18 +213,11 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     assert!(added.is_empty());
     assert!(matches!(
         terminal_operations.as_slice(),
-        [
-            groove::ivm::TerminalOperation {
-                path: remove_path,
-                edit: groove::ivm::TerminalEdit::Remove { .. },
-                ..
-            },
-            groove::ivm::TerminalOperation {
-                path: insert_path,
-                edit: groove::ivm::TerminalEdit::Insert { index: 1, .. },
-                ..
-            }
-        ] if remove_path.is_empty() && insert_path.is_empty()
+        [groove::ivm::TerminalOperation {
+            path,
+            edit: groove::ivm::TerminalEdit::Move { index: 0, .. },
+            ..
+        }] if path.is_empty()
     ));
 
     db.delete("users", row(0xa1)).unwrap();
