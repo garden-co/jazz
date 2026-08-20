@@ -44,11 +44,10 @@ where
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let mut outcome = PublicationOutcome::settled(Vec::new());
         for (table, row_uuid) in rows {
-            let mut created = self
+            let created = self
                 .create_merge_version_if_needed(&table, row_uuid)
                 .await?;
-            outcome.value.append(&mut created.value);
-            outcome.publications.append(&mut created.publications);
+            outcome.append_outcome(created);
         }
         Ok(outcome)
     }

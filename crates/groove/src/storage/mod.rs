@@ -1147,7 +1147,7 @@ impl ReopenableStorage for BoxedStorage {
 }
 
 /// Opens a persistent ordered-KV backend at an exact target-owned path.
-pub trait StorageFactory: std::fmt::Debug {
+pub trait StorageFactory: std::fmt::Debug + Send + Sync {
     fn open(
         &self,
         path: std::path::PathBuf,

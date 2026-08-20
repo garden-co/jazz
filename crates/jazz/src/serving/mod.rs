@@ -31,6 +31,7 @@ use crate::protocol::{
 };
 use crate::schema::JazzSchema;
 use crate::wire::{TransportError, WireTransport};
+use futures::lock::Mutex as LocalMutex;
 
 pub mod auth_admission;
 mod server_runtime;
@@ -245,8 +246,8 @@ struct ServerSessionState {
 }
 
 enum ShellPeerConnection {
-    Memory(Rc<RefCell<PeerConnection<BoxedStorage>>>),
-    Durable(Rc<RefCell<PeerConnection<BoxedStorage>>>),
+    Memory(Rc<LocalMutex<PeerConnection<BoxedStorage>>>),
+    Durable(Rc<LocalMutex<PeerConnection<BoxedStorage>>>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -317,7 +318,6 @@ impl ShellDb {
             }
             StorageConfig::RocksDb { path } => {
                 let refs = schema.column_families();
-                let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
                 let factory = storage_factory.ok_or_else(|| {
                     ShellError::Storage(
                         "durable server storage requires a target-shell storage factory".into(),
@@ -325,7 +325,7 @@ impl ShellDb {
                 })?;
                 let mut config = DbConfig::new(
                     schema,
-                    factory.open(&path, &refs).map_err(db_storage_error)?,
+                    crate::db::block_on(factory.open(path, refs)).map_err(db_storage_error)?,
                     identity,
                 );
                 if let Some(seed) = row_id_seed {
@@ -389,8 +389,8 @@ impl ShellDb {
 
     fn select_schema_view(&mut self, schema: JazzSchema) -> ShellResult<()> {
         match self {
-            Self::Memory(db) => *db = db.register_schema_view(schema)?,
-            Self::Durable(db) => *db = db.register_schema_view(schema)?,
+            Self::Memory(db) => *db = crate::db::block_on(db.register_schema_view(schema))?,
+            Self::Durable(db) => *db = crate::db::block_on(db.register_schema_view(schema))?,
         }
         Ok(())
     }
@@ -477,15 +477,15 @@ impl ShellDb {
 
     fn publish_schema(&self, schema: SchemaVersion) -> ShellResult<Vec<SyncMessage>> {
         match self {
-            Self::Memory(db) => db.publish_schema(schema).map_err(Into::into),
-            Self::Durable(db) => db.publish_schema(schema).map_err(Into::into),
+            Self::Memory(db) => crate::db::block_on(db.publish_schema(schema)).map_err(Into::into),
+            Self::Durable(db) => crate::db::block_on(db.publish_schema(schema)).map_err(Into::into),
         }
     }
 
     fn publish_lens(&self, lens: MigrationLens) -> ShellResult<Vec<SyncMessage>> {
         match self {
-            Self::Memory(db) => db.publish_lens(lens).map_err(Into::into),
-            Self::Durable(db) => db.publish_lens(lens).map_err(Into::into),
+            Self::Memory(db) => crate::db::block_on(db.publish_lens(lens)).map_err(Into::into),
+            Self::Durable(db) => crate::db::block_on(db.publish_lens(lens)).map_err(Into::into),
         }
     }
 
@@ -495,12 +495,14 @@ impl ShellDb {
         publication: SchemaLineagePublication,
     ) -> ShellResult<Vec<SyncMessage>> {
         match self {
-            Self::Memory(db) => db
-                .publish_schema_with_lens(catalogue_seq, publication)
-                .map_err(Into::into),
-            Self::Durable(db) => db
-                .publish_schema_with_lens(catalogue_seq, publication)
-                .map_err(Into::into),
+            Self::Memory(db) => {
+                crate::db::block_on(db.publish_schema_with_lens(catalogue_seq, publication))
+                    .map_err(Into::into)
+            }
+            Self::Durable(db) => {
+                crate::db::block_on(db.publish_schema_with_lens(catalogue_seq, publication))
+                    .map_err(Into::into)
+            }
         }
     }
 
@@ -509,8 +511,12 @@ impl ShellDb {
         pointer: CurrentWriteSchema,
     ) -> ShellResult<Vec<SyncMessage>> {
         match self {
-            Self::Memory(db) => db.set_current_write_schema(pointer).map_err(Into::into),
-            Self::Durable(db) => db.set_current_write_schema(pointer).map_err(Into::into),
+            Self::Memory(db) => {
+                crate::db::block_on(db.set_current_write_schema(pointer)).map_err(Into::into)
+            }
+            Self::Durable(db) => {
+                crate::db::block_on(db.set_current_write_schema(pointer)).map_err(Into::into)
+            }
         }
     }
 
@@ -591,8 +597,8 @@ impl ShellDb {
 
     fn tick_stats(&self) -> ShellResult<crate::db::DbTickStats> {
         match self {
-            Self::Memory(db) => db.tick_stats().map_err(Into::into),
-            Self::Durable(db) => db.tick_stats().map_err(Into::into),
+            Self::Memory(db) => crate::db::block_on(db.tick_stats()).map_err(Into::into),
+            Self::Durable(db) => crate::db::block_on(db.tick_stats()).map_err(Into::into),
         }
     }
 
@@ -619,15 +625,17 @@ impl ShellDb {
 impl ShellPeerConnection {
     fn take_resume_cursor(&self) -> Option<ResumeCursor> {
         match self {
-            Self::Memory(connection) => connection.borrow_mut().take_resume_cursor(),
-            Self::Durable(connection) => connection.borrow_mut().take_resume_cursor(),
+            Self::Memory(connection) => crate::db::block_on(connection.lock()).take_resume_cursor(),
+            Self::Durable(connection) => {
+                crate::db::block_on(connection.lock()).take_resume_cursor()
+            }
         }
     }
 
     fn last_resume_bytes(&self) -> Option<usize> {
         match self {
-            Self::Memory(connection) => connection.borrow().last_resume_bytes(),
-            Self::Durable(connection) => connection.borrow().last_resume_bytes(),
+            Self::Memory(connection) => crate::db::block_on(connection.lock()).last_resume_bytes(),
+            Self::Durable(connection) => crate::db::block_on(connection.lock()).last_resume_bytes(),
         }
     }
 }
@@ -664,7 +672,6 @@ impl InMemoryServerShell {
             }
             StorageConfig::RocksDb { path } => {
                 let refs = config.schema.column_families();
-                let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
                 let factory = storage_factory.as_deref().ok_or_else(|| {
                     ShellError::Storage(
                         "durable server storage requires a target-shell storage factory".into(),
@@ -672,7 +679,8 @@ impl InMemoryServerShell {
                 })?;
                 let mut db_config = DbConfig::new(
                     config.schema,
-                    factory.open(path, &refs).map_err(db_storage_error)?,
+                    crate::db::block_on(factory.open(path.clone(), refs))
+                        .map_err(db_storage_error)?,
                     config.identity,
                 );
                 if let Some(row_id_seed) = config.row_id_seed {
