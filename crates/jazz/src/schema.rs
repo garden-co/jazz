@@ -1507,10 +1507,11 @@ mod tests {
         let table = schema.tables[0].history_storage_table();
         let primary_key = table.primary_key.as_ref().unwrap();
 
-        assert_eq!(primary_key.columns.len(), 3);
-        assert_eq!(primary_key.columns[0].column, "row_uuid");
-        assert_eq!(primary_key.columns[1].column, "tx_time");
-        assert_eq!(primary_key.columns[2].column, "tx_node_id");
+        assert_eq!(primary_key.columns.len(), 4);
+        assert_eq!(primary_key.columns[0].column, "branch_key");
+        assert_eq!(primary_key.columns[1].column, "row_uuid");
+        assert_eq!(primary_key.columns[2].column, "tx_time");
+        assert_eq!(primary_key.columns[3].column, "tx_node_id");
         assert!(
             table
                 .columns
@@ -1634,7 +1635,13 @@ mod tests {
                 .iter()
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
-            vec!["physical_table_id", "row_uuid", "layer", "global_time"]
+            vec![
+                "physical_table_id",
+                "branch_key",
+                "row_uuid",
+                "layer",
+                "global_time"
+            ]
         );
 
         let index = table
@@ -1644,7 +1651,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             index.columns,
-            vec!["global_time", "physical_table_id", "row_uuid", "layer"]
+            vec![
+                "global_time",
+                "physical_table_id",
+                "branch_key",
+                "row_uuid",
+                "layer"
+            ]
         );
         let table_index = table
             .indices
@@ -1653,7 +1666,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             table_index.columns,
-            vec!["physical_table_id", "global_time", "row_uuid", "layer"]
+            vec![
+                "physical_table_id",
+                "branch_key",
+                "global_time",
+                "row_uuid",
+                "layer"
+            ]
         );
     }
 
@@ -1675,8 +1694,7 @@ mod tests {
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "branch_kind",
-                "branch_id",
+                "branch_key",
                 "physical_table_id",
                 "row_uuid",
                 "tx_time",
@@ -1693,8 +1711,7 @@ mod tests {
             vec![
                 "tx_time",
                 "tx_node_id",
-                "branch_kind",
-                "branch_id",
+                "branch_key",
                 "physical_table_id",
                 "row_uuid",
             ]
@@ -1768,7 +1785,7 @@ mod tests {
                 .iter()
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
-            vec!["row_uuid"]
+            vec!["branch_key", "row_uuid"]
         );
         assert_eq!(
             register_global_current
@@ -1779,7 +1796,7 @@ mod tests {
                 .iter()
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
-            vec!["row_uuid"]
+            vec!["branch_key", "row_uuid"]
         );
     }
 

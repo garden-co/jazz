@@ -92,7 +92,10 @@ where
         let content_tx = self.current_record_sort_key(table_name, row_uuid, content_record)?;
         if let Some(deletion_raw) = self.database.primary_key_get_raw(
             &physical_register_global_current_table_name(table_id),
-            &[Value::Uuid(row_uuid.0)],
+            &[
+                Value::Bytes(BranchKey::default().canonical_bytes()),
+                Value::Uuid(row_uuid.0),
+            ],
         )? {
             let deletion_record = deletion_raw.record();
             let deletion_tx =

@@ -1048,20 +1048,30 @@ impl CurrentRow {
 
     /// Row id.
     pub fn row_uuid(&self) -> RowUuid {
+        let row_idx = self
+            .record
+            .descriptor()
+            .field_index("row_uuid")
+            .unwrap_or(CurrentRowRecord::FIELD_ROW_UUID_IDX);
         RowUuid(
             self.record
                 .borrowed()
-                .get_uuid(CurrentRowRecord::FIELD_ROW_UUID_IDX)
+                .get_uuid(row_idx)
                 .expect("valid current row_uuid"),
         )
     }
 
     /// Cell value by application-schema column position.
     pub fn cell_at(&self, column_position: usize) -> Option<Value> {
+        let user_cells = self
+            .record
+            .descriptor()
+            .field_index("row_uuid")
+            .map_or(CurrentRowRecord::USER_CELLS, |idx| idx + 1);
         match self
             .record
             .borrowed()
-            .get_idx(CurrentRowRecord::USER_CELLS + column_position)
+            .get_idx(user_cells + column_position)
             .expect("valid current user cell")
         {
             Value::Nullable(None) => None,
@@ -1208,12 +1218,17 @@ impl CurrentRow {
 
     #[cfg(test)]
     pub(crate) fn test_cells_by_descriptor(&self) -> BTreeMap<String, Value> {
+        let user_cells = self
+            .record
+            .descriptor()
+            .field_index("row_uuid")
+            .map_or(CurrentRowRecord::USER_CELLS, |idx| idx + 1);
         self.record
             .descriptor()
             .fields()
             .iter()
             .enumerate()
-            .skip(CurrentRowRecord::USER_CELLS)
+            .skip(user_cells)
             .filter_map(|(idx, field)| {
                 let name = field.name.as_ref()?.as_str();
                 let name = if name.starts_with("user_") {

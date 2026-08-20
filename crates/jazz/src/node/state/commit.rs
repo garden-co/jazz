@@ -174,12 +174,12 @@ where
             )?;
             for parent in &commit.parents {
                 let parent_versions = self.query_versions_for_tx(*parent)?;
-                if !parent_versions.is_empty()
-                    && !parent_versions.iter().any(|version| {
-                        version.row_uuid() == commit.row_uuid
-                            && version.branch_key() == &branch_key
-                            && self.physical_table_id_for_version(version).ok() == Some(table_id)
-                    })
+                let same_row = parent_versions.iter().filter(|version| {
+                    version.row_uuid() == commit.row_uuid
+                        && self.physical_table_id_for_version(version).ok() == Some(table_id)
+                });
+                if same_row.clone().next().is_some()
+                    && !same_row.into_iter().any(|version| version.branch_key() == &branch_key)
                 {
                     return Err(Error::InvalidMergeableCommit(
                         "version parent belongs to a different branch-keyed incarnation",

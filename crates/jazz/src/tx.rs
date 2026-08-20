@@ -234,11 +234,11 @@ impl HistoryEntry {
 
     /// Direct parent transaction ids for this version.
     pub fn parents(&self) -> Vec<TxId> {
-        let field = if self.is_register_record() {
-            RegisterRowRecord::FIELD_PARENTS_IDX
-        } else {
-            HistoryRowRecord::FIELD_PARENTS_IDX
-        };
+        let field = self
+            .version
+            .descriptor()
+            .field_index("parents")
+            .expect("history record has parents");
         tx_ids_from_value(
             self.version
                 .borrowed()
@@ -253,9 +253,14 @@ impl HistoryEntry {
         if self.is_register_record() {
             return None;
         }
+        let user_cells = self
+            .version
+            .descriptor()
+            .field_index("updated_at")
+            .map_or(HistoryRowRecord::USER_CELLS, |idx| idx + 1);
         self.version
             .borrowed()
-            .get_idx(HistoryRowRecord::USER_CELLS + column_position)
+            .get_idx(user_cells + column_position)
             .expect("valid history cell")
             .nullable_value()
             .expect("valid nullable history cell")
@@ -275,10 +280,15 @@ impl HistoryEntry {
         if !self.is_register_record() {
             return None;
         }
+        let field = self
+            .version
+            .descriptor()
+            .field_index("_deletion")
+            .expect("register history has deletion field");
         deletion_from_value(
             self.version
                 .borrowed()
-                .get_idx(RegisterRowRecord::FIELD__DELETION_IDX)
+                .get_idx(field)
                 .expect("valid history deletion"),
         )
         .expect("valid history deletion")

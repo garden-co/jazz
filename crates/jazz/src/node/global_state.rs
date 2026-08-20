@@ -147,7 +147,13 @@ where
             .ok()?;
         if let Some(raw) = self
             .database
-            .primary_key_get_raw(&deletion_current_table, &[Value::Uuid(row_uuid.0)])
+            .primary_key_get_raw(
+                &deletion_current_table,
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
             .ok()?
         {
             let record = raw.record();
@@ -172,7 +178,13 @@ where
             .ok()?;
         let raw = self
             .database
-            .primary_key_get_raw(&content_current_table, &[Value::Uuid(row_uuid.0)])
+            .primary_key_get_raw(
+                &content_current_table,
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
             .ok()??;
         let record = raw.record();
         let tx_time = TxTime(

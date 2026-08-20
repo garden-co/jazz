@@ -221,8 +221,7 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
             .primary_key_scan_raw(
                 SHARED_DELETION_HISTORY_TABLE,
                 &[
-                    Value::U8(0),
-                    Value::Uuid(uuid::Uuid::nil()),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
                     Value::U64(table_id.0),
                 ],
             )
@@ -421,8 +420,7 @@ fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
                 .primary_key_scan_raw(
                     SHARED_DELETION_HISTORY_TABLE,
                     &[
-                        Value::U8(0),
-                        Value::Uuid(uuid::Uuid::nil()),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
                         Value::U64(table_id.0),
                         Value::Uuid(shared_row.0),
                     ],

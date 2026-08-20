@@ -905,13 +905,11 @@ mod tests {
             .include("project.org")
             .validate_runtime(&schema())
             .unwrap();
-        // Regenerated for the unified 0..=15 tag space (Anselm 2026-08-07).
-        // Shape ids are content-addressed over the canonical column-type tags,
-        // so unifying that numbering with `ValueType` changes every shape id.
-        // Deliberate, and safe only because this lands as one breaking cut.
+        // Branch-view selection is part of the canonical query shape, even
+        // when it selects the shared/default incarnation.
         assert_eq!(
             validated.shape_id().0.to_string(),
-            "3525b634-18b9-5967-8773-96b1f87a39ef"
+            "237b7022-8003-5b09-8099-7d48dea62e41"
         );
     }
 }

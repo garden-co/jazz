@@ -21,7 +21,13 @@ where
         for storage_table in self.version_storage_sources_for_layer(table, VersionLayer::Content)? {
             let raws = self
                 .database
-                .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
+                .primary_key_scan_raw(
+                    &storage_table,
+                    &[
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                        Value::Uuid(row_uuid.0),
+                    ],
+                )?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -149,9 +155,13 @@ where
             layer,
             PhysicalCurrentClass::Global,
         )?;
-        let raw = self
-            .database
-            .primary_key_get_raw(&current_table, &[Value::Uuid(row_uuid.0)])?;
+        let raw = self.database.primary_key_get_raw(
+            &current_table,
+            &[
+                Value::Bytes(BranchKey::default().canonical_bytes()),
+                Value::Uuid(row_uuid.0),
+            ],
+        )?;
         let Some(raw) = raw else {
             return Ok(None);
         };

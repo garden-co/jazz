@@ -565,7 +565,7 @@ where
         }
 
         if let Some(current_version) = self.query_local_layer_winner_in_branch(
-            &table.name,
+            version.table(),
             version.branch_key(),
             version.row_uuid(),
             VersionLayer::Content,
@@ -578,7 +578,7 @@ where
         }
 
         if let Some(current_version) = self.query_global_layer_winner_in_branch(
-            &table.name,
+            version.table(),
             version.branch_key(),
             version.row_uuid(),
             VersionLayer::Content,

@@ -1016,7 +1016,13 @@ where
         };
         let rows = self
             .database
-            .primary_key_scan_raw(current_table.as_ref(), &[Value::Uuid(version.row_uuid().0)])?;
+            .primary_key_scan_raw(
+                current_table.as_ref(),
+                &[
+                    Value::Bytes(version.branch_key().canonical_bytes()),
+                    Value::Uuid(version.row_uuid().0),
+                ],
+            )?;
         let actual = rows.first().map(|row| row.record().raw().to_vec());
         let expected = owned_record_from_storage_values(current_schema, expected_values)?
             .raw()

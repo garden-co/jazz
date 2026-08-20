@@ -131,7 +131,13 @@ fn opening_defers_malformed_current_row_to_read() {
         );
         let raw = node
             .database
-            .primary_key_get_raw(&table, &[Value::Uuid(row(0xff).0)])
+            .primary_key_get_raw(
+                &table,
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row(0xff).0),
+                ],
+            )
             .unwrap()
             .unwrap();
         let variant_tag = raw.variant_tag();

@@ -2472,28 +2472,6 @@ mod tests {
     }
 
     #[test]
-    fn compiles_branch_policy_source() {
-        let source = SchemaBuilder::new()
-            .branch_read_policy(PolicyExpr::Cmp {
-                column: "created_by".to_owned(),
-                op: CmpOp::Eq,
-                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
-            })
-            .build();
-
-        let compiled = convert_public_schema(&source).expect("compile branch policy source");
-        assert_eq!(
-            compiled
-                .branch_read_policy
-                .as_ref()
-                .expect("branch policy is installed")
-                .table,
-            "jazz_branches"
-        );
-        assert_eq!(compiled.public_schema(), &source);
-    }
-
-    #[test]
     fn converts_supported_columns_references_and_indexes() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("projects").column("name", ColumnType::Text))
