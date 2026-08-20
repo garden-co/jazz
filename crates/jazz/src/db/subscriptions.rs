@@ -31,7 +31,7 @@ where
     /// assert!(reset);
     /// assert!(added.is_empty());
     ///
-    /// db.insert("todos", todo_cells("notify subscribers", false))?;
+    /// block_on(db.insert("todos", todo_cells("notify subscribers", false)))?;
     /// let changed = block_on(subscription.next_event()).unwrap();
     /// let SubscriptionEvent::Delta { added, updated, removed, .. } = changed else {
     ///     panic!("expected subscription delta");

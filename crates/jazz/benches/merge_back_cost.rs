@@ -3,6 +3,7 @@ use std::time::Instant;
 
 mod support;
 
+use jazz::block_on;
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{BranchId, NodeUuid, RowUuid};
@@ -29,21 +30,22 @@ fn main() {
     reset_phase_counters(&mut [&mut node]);
     let write_start = Instant::now();
     for idx in 0..writes {
-        node.commit_mergeable_on_branch(
+        let publication = block_on(node.commit_mergeable_on_branch(
             branch_id,
             MergeableCommit::new(TABLE, row(idx), 10 + idx as u64).cells(BTreeMap::from([(
                 "title".to_owned(),
                 Value::String(format!("branch-{idx}")),
             )])),
-        )
+        ))
         .expect("branch write");
+        block_on(node.persist_and_settle_transaction(publication)).expect("persist branch write");
     }
     emit_phase("branch_writes", write_start.elapsed(), writes, None, &node);
 
     reset_phase_counters(&mut [&mut node]);
     let merge_start = Instant::now();
-    node.merge_back_branch(branch_id)
-        .expect("merge back branch");
+    let publication = block_on(node.merge_back_branch(branch_id)).expect("merge back branch");
+    block_on(node.persist_and_settle_transaction(publication)).expect("persist merge back");
     emit_phase(
         "merge_back_branch",
         merge_start.elapsed(),
@@ -95,17 +97,17 @@ fn open_node(uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeStat
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync)
         .expect("rocksdb");
-    let node = NodeState::new(uuid, schema, storage).expect("open node");
+    let node = block_on(NodeState::new(uuid, schema, storage)).expect("open node");
     (dir, node)
 }
 
 fn current_row_count(node: &mut NodeState<RocksDbStorage>) -> usize {
     let shape = Query::from(TABLE).validate(&schema()).expect("query shape");
-    node.query_rows(
+    block_on(node.query_rows(
         &shape,
         &shape.bind(BTreeMap::new()).expect("query binding"),
         DurabilityTier::Local,
-    )
+    ))
     .expect("current rows")
     .len()
 }

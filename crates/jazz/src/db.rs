@@ -1398,13 +1398,13 @@ pub type RowCells = BTreeMap<String, Value>;
 /// # use jazz::db::doctest_support::{block_on, open_todos_db};
 /// # use jazz::tx::DurabilityTier;
 /// let db = block_on(open_todos_db())?;
-/// let write = db.insert(
+/// let write = block_on(db.insert(
 ///     "todos",
 ///     jazz::row! {
 ///         title: "Ship it",
 ///         done: false,
 ///     },
-/// )?;
+/// ))?;
 /// block_on(write.wait(DurabilityTier::Local))?;
 ///
 /// let todos = db.prepare_query(&db.table("todos"))?;
@@ -1923,7 +1923,7 @@ where
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// let db = block_on(open_todos_db())?;
-    /// let write = db.insert("todos", todo_cells("has id", false))?;
+    /// let write = block_on(db.insert("todos", todo_cells("has id", false)))?;
     ///
     /// let _row_id = write.row_uuid();
     /// let _tx_id = write.mergeable_tx_id();
@@ -1939,7 +1939,7 @@ where
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// # use jazz::tx::DurabilityTier;
     /// let db = block_on(open_todos_db())?;
-    /// let write = db.insert("todos", todo_cells("wait locally", false))?;
+    /// let write = block_on(db.insert("todos", todo_cells("wait locally", false)))?;
     ///
     /// let tx_id = block_on(write.wait(DurabilityTier::Local))?;
     /// assert_eq!(tx_id, write.mergeable_tx_id());

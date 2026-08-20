@@ -33,11 +33,12 @@
 //! use jazz::groove::records::Value;
 //! use jazz::groove::schema::{ColumnSchema, ColumnType};
 //! use jazz::groove::storage::MemoryStorage;
+//! use jazz::db::doctest_support::block_on;
 //!
 //! fn open_node(node: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
 //!     let cfs = schema.column_families();
 //!     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-//!     NodeState::new(node, schema, MemoryStorage::new(&refs)).unwrap()
+//!     block_on(NodeState::new(node, schema, MemoryStorage::new(&refs))).unwrap()
 //! }
 //!
 //! let owner = AuthorId::from_bytes([0xa1; 16]);
@@ -59,25 +60,26 @@
 //!     ("owner".to_owned(), Value::Uuid(owner.0)),
 //! ]);
 //!
-//! let (tx_id, unit) = writer
+//! let (tx_id, unit) = block_on(writer
 //!     .commit_mergeable_unit(
 //!         MergeableCommit::new("todos", row, 1_000)
 //!             .made_by(owner)
 //!             .cells(cells),
-//!     )
+//!     ))
 //!     .unwrap();
-//! let local_rows = writer.current_rows("todos", DurabilityTier::Local).unwrap();
+//! let local_rows = block_on(writer.current_rows("todos", DurabilityTier::Local)).unwrap();
 //! assert_eq!(local_rows[0].row_uuid(), row);
 //! assert_eq!(local_rows[0].cell(&schema.tables[0], "title"), Some(Value::String("draft".to_owned())));
 //!
 //! let SyncMessage::CommitUnit { tx, versions } = unit else { unreachable!() };
-//! let [fate] = core.ingest_commit_unit(tx, versions, 1_000).unwrap().try_into().unwrap();
-//! writer.apply_sync_message(fate).unwrap();
+//! let outcome = block_on(core.ingest_commit_unit(tx, versions, 1_000)).unwrap();
+//! let [fate] = block_on(core.persist_and_settle_outcome(outcome)).unwrap().try_into().unwrap();
+//! block_on(writer.apply_sync_message(fate)).unwrap();
 //!
 //! let tx_id = jazz::tools::OpenTransactionId::new();
-//! core.open_exclusive(tx_id).unwrap();
-//! core.tx_read(tx_id, "todos", row).unwrap();
-//! core.tx_write(
+//! block_on(core.open_exclusive(tx_id)).unwrap();
+//! block_on(core.tx_read(tx_id, "todos", row)).unwrap();
+//! block_on(core.tx_write(
 //!     tx_id,
 //!     "todos",
 //!     row,
@@ -86,10 +88,10 @@
 //!         ("owner".to_owned(), Value::Uuid(owner.0)),
 //!     ]),
 //!     None::<DeletionEvent>,
-//! )
+//! ))
 //! .unwrap();
-//! let (_exclusive, _unit) = core.commit_exclusive(tx_id, owner, 1_001).unwrap();
-//! assert!(!core.row_history("todos", row).unwrap().is_empty());
+//! let (_exclusive, _unit) = block_on(core.commit_exclusive(tx_id, owner, 1_001)).unwrap();
+//! assert!(!block_on(core.row_history("todos", row)).unwrap().is_empty());
 //! ```
 
 // Legacy synchronous tests import these traits explicitly while the async API

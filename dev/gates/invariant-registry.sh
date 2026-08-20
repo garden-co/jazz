@@ -141,7 +141,7 @@ index_test_functions() {
 }
 
 check_test_citations() {
-    local registry=$1 id=$2 text=$3 remaining citation function prefix brace_names brace_name
+    local registry=$1 id=$2 text=$3 remaining citation function prefix brace_names brace_name test_path
     remaining=$text
     while [[ $remaining =~ ([a-z][a-z0-9_]*(::[A-Za-z0-9_]+)+)::\{([^}]*)\} ]]; do
         citation=${BASH_REMATCH[0]}
@@ -160,6 +160,16 @@ check_test_citations() {
         function=${citation##*::}
         if [[ ! $function =~ ^[A-Za-z_][A-Za-z0-9_]*$ || -z ${known_functions[$function]+present} ]]; then
             printf 'invariant-registry: missing test: %s:%s: %s\n' "$registry" "$id" "$citation" >&2
+            missing_tests=$((missing_tests + 1))
+            failures=$((failures + 1))
+        fi
+    done
+    remaining=$text
+    while [[ $remaining =~ (packages/[A-Za-z0-9_./-]+\.test\.(ts|tsx)) ]]; do
+        test_path=${BASH_REMATCH[1]}
+        remaining=${remaining#*"$test_path"}
+        if [[ ! -f $test_path ]]; then
+            printf 'invariant-registry: missing test file: %s:%s: %s\n' "$registry" "$id" "$test_path" >&2
             missing_tests=$((missing_tests + 1))
             failures=$((failures + 1))
         fi
@@ -184,7 +194,9 @@ check_registry() {
         if [[ -z $status || -z $coverage ]]; then
             fail "$registry:$id: status and coverage must not be empty"
         fi
-        if [[ $coverage == '✓' && ! $tests =~ [a-z][a-z0-9_]*(::[A-Za-z0-9_*]+)+ ]]; then
+        if [[ $coverage == '✓' \
+            && ! $tests =~ [a-z][a-z0-9_]*(::[A-Za-z0-9_*]+)+ \
+            && ! $tests =~ packages/[A-Za-z0-9_./-]+\.test\.(ts|tsx) ]]; then
             printf 'invariant-registry: covered without test: %s:%s\n' "$registry" "$id" >&2
             uncited_covered=$((uncited_covered + 1))
             failures=$((failures + 1))
