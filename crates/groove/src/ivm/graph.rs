@@ -1308,6 +1308,25 @@ impl NodeDescriptor {
         }
 
         let typed_inputs = input_outputs;
+        let arrangement_consumer = matches!(
+            self.operator,
+            OpType::Join(_)
+                | OpType::SemiJoin(_)
+                | OpType::AntiJoin(_)
+                | OpType::ArgMaxBy(_)
+                | OpType::ArgMinBy(_)
+                | OpType::TopBy(_)
+                | OpType::CollectBy(_)
+                | OpType::Aggregate(_)
+        );
+        if arrangement_consumer {
+            expect_arrangement_inputs(typed_inputs)?;
+        } else if typed_inputs
+            .iter()
+            .any(|input| matches!(input, NodeOutput::Arrangement(_)))
+        {
+            return Err(GraphValidationError::InvalidNodeOutput);
+        }
         let input_outputs = typed_inputs
             .iter()
             .copied()
@@ -2133,6 +2152,39 @@ mod tests {
                 NodeOutput::Records(string_output()),
             ]),
             Err(GraphValidationError::OutputDescriptorMismatch)
+        );
+    }
+
+    #[test]
+    fn validation_keeps_record_and_arrangement_edges_distinct() {
+        let filter = NodeDescriptor::new(
+            OpType::Filter(FilterOp {
+                predicate: PredicateExpr::is_not_null("f0"),
+                comparison: ValueComparison::Exact,
+            }),
+            [NodeId(1)],
+            output(),
+        );
+        assert_eq!(
+            filter.validate(&[NodeOutput::Arrangement(ArrangementDescriptor {
+                records: output(),
+            })]),
+            Err(GraphValidationError::InvalidNodeOutput),
+        );
+
+        let arrangement = NodeDescriptor::new(
+            OpType::Arrange(ArrangeOp {
+                fields: vec!["f0".to_owned()],
+                comparison: ValueComparison::Exact,
+            }),
+            [NodeId(1)],
+            NodeOutput::Arrangement(ArrangementDescriptor { records: output() }),
+        );
+        assert_eq!(
+            arrangement.validate(&[NodeOutput::Arrangement(ArrangementDescriptor {
+                records: output(),
+            })]),
+            Err(GraphValidationError::InvalidNodeOutput),
         );
     }
 

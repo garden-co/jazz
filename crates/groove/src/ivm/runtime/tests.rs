@@ -1739,8 +1739,15 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
         .keys()
         .filter(|key| {
             key.scope == ScopeId::root()
-                && key.descriptor == artists
-                && key.fields.as_ref() == ["id"]
+                && runtime.graph().node(key.input).is_some_and(|node| {
+                    matches!(
+                        (&node.descriptor.operator, node.descriptor.output),
+                        (
+                            OpType::Arrange(ArrangeOp { fields, .. }),
+                            NodeOutput::Arrangement(ArrangementDescriptor { records })
+                        ) if fields == &["id"] && records == artists
+                    )
+                })
         })
         .count();
 
