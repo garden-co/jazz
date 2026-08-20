@@ -14,8 +14,8 @@ interface Entry {
   promise: Promise<RegisteredClient>;
   holders: Set<object>;
   releaseTimer: ReturnType<typeof setTimeout> | null;
-  /** Resolver for the in-flight `releaseClient` promise, if a teardown is scheduled. */
-  pendingRelease: (() => void) | null;
+  /** Shared in-flight release, so config replacement can await deferred teardown. */
+  pendingRelease: { promise: Promise<void>; resolve(): void } | null;
   /**
    * Set once teardown has started. A later acquire must wait for this before
    * constructing a replacement, otherwise two browser workers can open the
@@ -75,9 +75,9 @@ export function acquireClient<T extends RegisteredClient>(
   if (entry.releaseTimer !== null) {
     clearTimeout(entry.releaseTimer);
     entry.releaseTimer = null;
-    const resolve = entry.pendingRelease;
+    const pendingRelease = entry.pendingRelease;
     entry.pendingRelease = null;
-    resolve?.();
+    pendingRelease?.resolve();
   }
 
   return entry.promise as Promise<T>;
@@ -94,28 +94,34 @@ export function releaseClient(key: string, holder: object): Promise<void> {
 
   entry.holders.delete(holder);
   if (entry.holders.size > 0) return Promise.resolve();
-  if (entry.releaseTimer !== null) return Promise.resolve();
+  if (entry.closing) return entry.closing;
+  if (entry.releaseTimer !== null) {
+    return entry.pendingRelease?.promise ?? Promise.resolve();
+  }
 
-  return new Promise<void>((resolve) => {
-    entry.pendingRelease = resolve;
-    entry.releaseTimer = setTimeout(() => {
-      entry.releaseTimer = null;
-      entry.pendingRelease = null;
-      if (entry.holders.size > 0) {
-        resolve();
-        return;
-      }
-      entry.closing = entry.promise
-        .then((client) => client.shutdown())
-        .catch(() => {})
-        .finally(() => {
-          if (registry.get(key) === entry) {
-            registry.delete(key);
-          }
-          resolve();
-        });
-    }, 0);
+  let resolveRelease!: () => void;
+  const releasePromise = new Promise<void>((resolve) => {
+    resolveRelease = resolve;
   });
+  entry.pendingRelease = { promise: releasePromise, resolve: resolveRelease };
+  entry.releaseTimer = setTimeout(() => {
+    entry.releaseTimer = null;
+    entry.pendingRelease = null;
+    if (entry.holders.size > 0) {
+      resolveRelease();
+      return;
+    }
+    entry.closing = entry.promise
+      .then((client) => client.shutdown())
+      .catch(() => {})
+      .finally(() => {
+        if (registry.get(key) === entry) {
+          registry.delete(key);
+        }
+        resolveRelease();
+      });
+  }, 0);
+  return releasePromise;
 }
 
 /** Test-only: drop all entries without shutting them down. */

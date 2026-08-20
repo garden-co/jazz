@@ -12,7 +12,8 @@ async function waitForApp(page: Page) {
 async function addTodo(page: Page, title: string) {
   await page.getByLabel(TODO_INPUT_LABEL).fill(title);
   await page.getByRole("button", { name: "Add" }).click();
-  await expect(page.getByText(title)).toBeVisible({ timeout: TIMEOUT });
+  await expect(page.getByText(title, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+  await expect(page.getByRole("status")).toContainText("Saved locally", { timeout: TIMEOUT });
 }
 
 async function signUp(page: Page, credentials: { name: string; email: string; password: string }) {
@@ -68,7 +69,7 @@ test("todo persistence across sign-up→logout→login", async ({ page }) => {
   });
 
   await addTodo(page, todo);
-  await expect(page.getByText(todo)).toBeVisible({ timeout: TIMEOUT });
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 
   await signOut(page);
   await expect(page.getByText(todo)).not.toBeVisible();
@@ -77,5 +78,5 @@ test("todo persistence across sign-up→logout→login", async ({ page }) => {
   await expect(page.getByText(credentials.name)).toBeVisible({
     timeout: TIMEOUT,
   });
-  await expect(page.getByText(todo)).toBeVisible({ timeout: TIMEOUT });
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });

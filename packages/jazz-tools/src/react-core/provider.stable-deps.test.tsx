@@ -76,4 +76,50 @@ describe("JazzProvider — stable config deps", () => {
     // After the fix (config removed from deps), no setTimeout call should occur.
     expect(setTimeoutSpy).not.toHaveBeenCalled();
   });
+
+  it("finishes shutting down one config before creating its same-app replacement", async () => {
+    let finishShutdown!: () => void;
+    const shutdownFinished = new Promise<void>((resolve) => {
+      finishShutdown = resolve;
+    });
+    const anonymous = makeFakeClient({ authMode: "local-first", userId: "anonymous", claims: {} });
+    anonymous.shutdown = vi.fn(() => shutdownFinished);
+    const authenticated = makeFakeClient({ authMode: "external", userId: "alice", claims: {} });
+    const createJazzClient = vi
+      .fn()
+      .mockResolvedValueOnce(anonymous)
+      .mockResolvedValueOnce(authenticated);
+
+    function Wrapper({ config }: { config: DbConfig }) {
+      return (
+        <JazzProvider config={config} createJazzClient={createJazzClient} fallback={null}>
+          <div data-testid="child" />
+        </JazzProvider>
+      );
+    }
+
+    const result = render(
+      <Wrapper
+        config={{ appId: "app-1", serverUrl: "https://jazz.example.com", secret: "anon" }}
+      />,
+    );
+    await act(async () => Promise.resolve());
+
+    result.rerender(
+      <Wrapper
+        config={{ appId: "app-1", serverUrl: "https://jazz.example.com", jwtToken: "jwt" }}
+      />,
+    );
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+
+    expect(anonymous.shutdown).toHaveBeenCalledOnce();
+    expect(createJazzClient).toHaveBeenCalledTimes(1);
+
+    finishShutdown();
+    await act(async () => Promise.resolve());
+
+    expect(createJazzClient).toHaveBeenCalledTimes(2);
+  });
 });

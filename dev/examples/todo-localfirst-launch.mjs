@@ -2,6 +2,8 @@
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { deploy, startLocalJazzServer } from "../../packages/jazz-tools/dist/testing/index.js";
+import permissions from "../../examples/todo-client-localfirst-react/permissions.ts";
+import { app } from "../../examples/todo-client-localfirst-react/schema.ts";
 
 const rootDir = resolve(import.meta.dirname, "../..");
 const exampleDir = resolve(rootDir, "examples/todo-client-localfirst-react");
@@ -55,7 +57,8 @@ try {
     appId,
     serverUrl: server.url,
     adminSecret,
-    schemaDir: exampleDir,
+    schema: app,
+    permissions,
   });
 
   const env = {
@@ -74,7 +77,7 @@ try {
   console.log(`[todo-localfirst] sync: ${server.url}/sync`);
   console.log(`[todo-localfirst] subscription_mode=${subscriptionMode}`);
   console.log(
-    `[todo-localfirst] browser receipt: node dev/examples/todo-localfirst-browser-receipt.mjs --${subscriptionMode}-mode`,
+    "[todo-localfirst] browser receipt: node dev/examples/todo-localfirst-browser-receipt.mjs",
   );
   console.log(
     "[todo-localfirst] napi receipt:    node dev/examples/todo-localfirst-napi-receipt.mjs",
