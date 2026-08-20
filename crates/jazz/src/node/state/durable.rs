@@ -883,8 +883,11 @@ self.database.finish_persistence(persisted)?;
         self.database.unsubscribe(subscription_id).await
     }
 
-    pub(crate) async fn flush_query_runtime(&mut self) -> Result<(), Error> {
-        self.database.flush().await.map_err(Error::Groove)
+    /// Resume suspended Groove evaluation, awaiting storage until every active
+    /// session completes. This does not create an empty IVM tick; Groove
+    /// remains the sole owner of evaluation and hydration progress.
+    pub(crate) async fn drive_query_runtime(&mut self) -> Result<(), Error> {
+        self.database.drive_progress().await.map_err(Error::Groove)
     }
 
     pub(crate) async fn set_initial_sync_flush_cadence(

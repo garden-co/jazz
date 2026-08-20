@@ -431,6 +431,7 @@ where
         ),
         Error,
     > {
+        self.drive_query_runtime().await?;
         if local.result_query.aggregate.is_some()
             && let Some(remote_members) =
                 self.query.settled_result_sets.get(&local.binding_view_key)

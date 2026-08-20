@@ -1173,7 +1173,7 @@ where
         .await
         .take_pending_authoritative_reset_binding_views();
     let mut consumed_authoritative_resets = BTreeSet::new();
-    node.lock().await.flush_query_runtime().await?;
+    node.lock().await.drive_query_runtime().await?;
     let live_subscriptions = subscriptions.borrow().clone();
     for weak in &live_subscriptions {
         let Some(state) = weak.upgrade() else {

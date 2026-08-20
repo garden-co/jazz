@@ -256,7 +256,6 @@ impl PeerState {
                 &binding,
                 subscription,
                 Some(table),
-                true,
             )
             .await;
         }
@@ -312,24 +311,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts, true)
-            .await
-    }
-
-    /// Build an incremental view update after the caller has already flushed
-    /// the shared Groove runtime for this refresh.
-    pub(crate) async fn query_update_for_subscription_with_opts_after_runtime_flush<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        subscription: SubscriptionKey,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        opts: RegisterShapeOptions,
-    ) -> Result<SyncMessage, Error>
-    where
-        S: OrderedKvStorage,
-    {
-        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts, false)
+        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts)
             .await
     }
 
@@ -353,7 +335,6 @@ impl PeerState {
             shape,
             binding,
             RegisterShapeOptions::default(),
-            true,
         )
         .await
     }
@@ -365,7 +346,6 @@ impl PeerState {
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
-        flush_query_runtime: bool,
     ) -> Result<SyncMessage, Error>
     where
         S: OrderedKvStorage,
@@ -394,7 +374,6 @@ impl PeerState {
                 binding,
                 subscription,
                 None,
-                flush_query_runtime,
             )
             .await;
         }
@@ -438,7 +417,6 @@ impl PeerState {
         binding: &Binding,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
-        flush_query_runtime: bool,
     ) -> Result<SyncMessage, Error>
     where
         S: OrderedKvStorage,
@@ -453,7 +431,6 @@ impl PeerState {
             shape,
             subscription,
             result_table_filter,
-            flush_query_runtime,
         )
         .await?;
         let drain_elapsed = trace_start.elapsed();
@@ -649,14 +626,11 @@ impl PeerState {
         shape: &ValidatedQuery,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
-        flush_query_runtime: bool,
     ) -> Result<ResultTransitions, Error>
     where
         S: OrderedKvStorage,
     {
-        if flush_query_runtime {
-            node.flush_query_runtime().await?;
-        }
+        node.drive_query_runtime().await?;
         let previous_member_result_set = self
             .subscriptions
             .get(&subscription)
@@ -1275,7 +1249,6 @@ impl PeerState {
             shape,
             maintained_subscription,
             None,
-            true,
         )
         .await?;
         let ResultTransitions {

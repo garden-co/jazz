@@ -1,6 +1,35 @@
 use super::*;
 
 impl Database {
+    /// Drive every suspended incremental evaluation until the runtime is
+    /// either quiescent or waiting for storage.
+    ///
+    /// Resident writes already perform this same work before `apply_batch`
+    /// returns. Runtime owners use this poll boundary to resume cold work when
+    /// its storage futures wake; individual subscriptions do not own separate
+    /// evaluators.
+    pub fn poll_progress(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        if let Err(error) = self.ensure_not_poisoned() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        match self.ivm_runtime.poll_pending_incremental(cx) {
+            std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
+            std::task::Poll::Ready(Err(error)) => {
+                self.poisoned = true;
+                std::task::Poll::Ready(Err(Error::IvmRuntime(error)))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    /// Await completion of all currently suspended incremental evaluation.
+    pub async fn drive_progress(&mut self) -> Result<(), Error> {
+        std::future::poll_fn(|cx| self.poll_progress(cx)).await
+    }
+
     pub fn poll_subscription(
         &mut self,
         subscription: &Subscription,
@@ -13,9 +42,10 @@ impl Database {
                 SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
             });
         }
-        if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
-            self.poisoned = true;
-            return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
+        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
+            && let Err(error) = result
+        {
+            return std::task::Poll::Ready(Err(error));
         }
         subscription.poll_next_event(cx).map(|event| match event {
             SubscriptionEvent::Update(update) => Ok(update.deltas),
@@ -43,9 +73,10 @@ impl Database {
                 SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
             });
         }
-        if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
-            self.poisoned = true;
-            return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
+        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
+            && let Err(error) = result
+        {
+            return std::task::Poll::Ready(Err(error));
         }
         subscription.poll_next_event(cx).map(|event| match event {
             SubscriptionEvent::Update(update) => Ok(update),
@@ -73,9 +104,10 @@ impl Database {
                 SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
             });
         }
-        if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
-            self.poisoned = true;
-            return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
+        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
+            && let Err(error) = result
+        {
+            return std::task::Poll::Ready(Err(error));
         }
         subscription.poll_next_event(cx).map(|event| match event {
             SubscriptionEvent::Update(update) => Ok(update.deltas),
@@ -103,9 +135,10 @@ impl Database {
                 SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
             });
         }
-        if let std::task::Poll::Ready(Err(error)) = self.ivm_runtime.poll_pending_incremental(cx) {
-            self.poisoned = true;
-            return std::task::Poll::Ready(Err(Error::IvmRuntime(error)));
+        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
+            && let Err(error) = result
+        {
+            return std::task::Poll::Ready(Err(error));
         }
         subscription.poll_next_event(cx).map(|event| match event {
             SubscriptionEvent::Update(update) => Ok(update),

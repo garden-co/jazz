@@ -464,6 +464,7 @@ fn recursive_retraction_loads_before_mutating_the_tick() {
 
     control.resume_operation(TestStorageOperation::ScanOpen);
     block_on(commit).unwrap();
+    block_on(database.drive_progress()).unwrap();
     assert_eq!(subscription.recv().unwrap().deltas.len(), 2);
     assert_eq!(
         control
@@ -542,7 +543,6 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
 
     storage.evict_scans("edges");
     control.pause_on(TestStorageOperation::ScanOpen);
-    storage.evict_scans("edges");
     control.fail_next(TestStorageOperation::ScanOpen);
     let mut batch = database.open_batch();
     batch.insert(
@@ -579,6 +579,7 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
     let persistence = block_on(later.persist());
     database.finish_persistence(persistence).unwrap();
 
+    storage.evict_scans("edges");
     control.fail_next(TestStorageOperation::ScanOpen);
     let mut immediate_failure = database.open_batch();
     immediate_failure.insert(
@@ -671,13 +672,14 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
     let mut first = Box::pin(database.apply_batch(first));
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    assert!(matches!(
-        first.as_mut().poll(&mut context),
-        Poll::Ready(Ok(_))
-    ));
+    let first_applied = match first.as_mut().poll(&mut context) {
+        Poll::Ready(Ok(applied)) => applied,
+        _ => panic!("resident application must complete immediately"),
+    };
     drop(first);
     assert_eq!(albums.try_recv().unwrap().deltas.len(), 1);
 
+    let mut applied = vec![first_applied];
     for id in 2..=33 {
         let mut later = database.open_batch();
         later.insert(
@@ -685,11 +687,12 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
             vec![Value::U64(id), Value::String(format!("resident-{id}"))],
         );
         let mut later = Box::pin(database.apply_batch(later));
-        assert!(matches!(
-            later.as_mut().poll(&mut context),
-            Poll::Ready(Ok(_))
-        ));
+        let later_applied = match later.as_mut().poll(&mut context) {
+            Poll::Ready(Ok(applied)) => applied,
+            _ => panic!("later resident application must complete immediately"),
+        };
         drop(later);
+        applied.push(later_applied);
         assert_eq!(albums.try_recv().unwrap().deltas.len(), 1);
     }
     assert!(reach.try_recv().is_err());
@@ -711,6 +714,10 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
             .len(),
         2
     );
+    for publication in applied {
+        let persistence = block_on(publication.persist());
+        database.finish_persistence(persistence).unwrap();
+    }
 }
 
 #[test]
