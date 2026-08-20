@@ -540,10 +540,7 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && branch_metadata_available(
-                    self,
-                    &self.parking.parked_commit_units[&tx_id].tx,
-                ) && self.missing_parent_refs(&versions)?.is_empty()
+                }) && self.missing_parent_refs(&versions)?.is_empty()
                 {
                     ready.push(tx_id);
                 }
@@ -603,10 +600,7 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && branch_metadata_available(
-                    self,
-                    &self.parking.parked_commit_units[&tx_id].tx,
-                ) && self.missing_parent_refs(&versions)?.is_empty()
+                }) && self.missing_parent_refs(&versions)?.is_empty()
                 {
                     ready.push(tx_id);
                 }

@@ -350,7 +350,3 @@ pub(super) fn counter_value_from_i128(
         )),
     }
 }
-
-fn branch_metadata_available<S: OrderedKvStorage>(_node: &NodeState<S>, _tx: &Transaction) -> bool {
-    true
-}
