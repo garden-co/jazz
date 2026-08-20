@@ -28,13 +28,13 @@ resolution, ingest/commit-unit/read-set costs) · **S1** relevance-scaled
 query-driven partial sync · **S2** realtime canvas (mergeable, tier `none`) ·
 **S3** recursive permission-filtered sync · **S4** serializable order processing
 (exclusive, TPC-C-derived) · **S5** durable streams · **S7** migration lenses ·
-**S8** branch views · **S9** durable execution. Every
-_implemented_ harness runs against the current feature set; **S8 has no harness yet** (`[needs: scenario
-harness]`).
+**S8** branch views · **S9** durable execution. Every implemented harness runs
+against the current feature set.
 
-**Implementation status (2026-07-27).** S8 is the only scenario without a
-harness; the phase-level audit below records the current coverage of the other
-scenarios.
+**Implementation status (2026-08-20).** S8 exercises sparse head overlays,
+live and frozen bases, branch-key-prefixed indexed reads, cross-branch-key
+transactions, and contribution merges. The phase-level audit below records the
+current coverage of every scenario.
 
 ### B.2 Methodology
 
@@ -120,7 +120,8 @@ Evidence checked 2026-06-14: `jazz-sim/benches/*.rs`,
 `groove/benches/*.rs`, `jazz/src/{query,node/*,db}.rs`, and appendix C.
 This table is phase-level by design: a scenario may have useful runnable
 coverage while still being unable to support every headline claim honestly.
-S8 is intentionally excluded from this audit.
+The older topology table below does not yet include S8's local mechanism
+phases; its emitted receipts are documented in the implementation status above.
 
 **Topology update (2026-06-15).** All implemented scenarios (S1–S7, S9) now route
 the full `client↔edge↔core` path through the `Db` facade with full client `Db`s
@@ -309,7 +310,7 @@ Landed capabilities were retired from the gate list; git history is the record.
   makes `INV-PERF-2` gates uniform across phase benches; and a retained-run
   validator that refuses or labels dirty-tree claim artifacts consistently.
 
-#### Prioritized benchmark gaps, excluding S8
+#### Prioritized benchmark gaps
 
 0. **HARNESS (topmost): convert every scenario to the `client↔edge↔core`
    topology through the `Db` facade.** This is now the only supported topology

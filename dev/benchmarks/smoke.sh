@@ -458,6 +458,11 @@ run_scenario \
   cargo bench -p jazz-sim --bench s7_migrations
 
 run_scenario \
+  "jazz-sim/s8_branch_views" \
+  "JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s8_branch_views" \
+  env JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s8_branch_views
+
+run_scenario \
   "jazz-sim/s9_durable_execution" \
   "JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution" \
   env JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution

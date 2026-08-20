@@ -240,6 +240,7 @@ fn run_commit_unit(config: &Config) {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
+                contribution_merge: None,
             };
             let unit = SyncMessage::CommitUnit {
                 tx: tx.clone(),

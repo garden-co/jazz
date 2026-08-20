@@ -71,6 +71,10 @@ name = "s7_migrations"
 harness = false
 
 [[bench]]
+name = "s8_branch_views"
+harness = false
+
+[[bench]]
 name = "s9_durable_execution"
 harness = false
 

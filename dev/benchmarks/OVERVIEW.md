@@ -48,13 +48,10 @@ retuning that threshold.
 
 ### `jazz-sim` scenarios
 
-S1–S7 and S9 cover SaaS, canvas, permissions, order processing, durable
-streams, text traces, migrations, and durable execution. They are retained by
-the smoke workflow.
-
-**S8 still does not exist.** The specification reserves it for
-branch/merge/offline edits. The declarative R8 fixture covers pieces of that
-story, not the complete lifecycle.
+S1–S9 cover SaaS, canvas, permissions, order processing, durable streams, text
+traces, migrations, branch views, and durable execution. They are retained by
+the smoke workflow. S8 currently measures the local branch-view mechanism;
+transport reconnect/conflict/payload-reuse phases remain to be added.
 
 ### Groove
 
@@ -148,8 +145,9 @@ Ranked by their ability to change an engineering decision:
 3. **S4 fixed-delta/varying-view gate.** S4 already separates settlement and
    propagation; add a deterministic structural bound proving propagation stays
    proportional to the affected delta.
-4. **S8 branch/merge/offline lifecycle.** Cover accumulated offline edits,
-   reconnect, merge-back, conflicts, and payload reuse end to end.
+4. **S8 branch views.** The local mechanism harness now covers sparse overlays,
+   live/frozen bases, indexed reads, cross-key transactions, and contribution
+   merges; extend it with reconnect, conflicts, and payload reuse end to end.
 5. **S5–S7 promised dimensions.** Add remote resume and evicted-prefix coverage
    for S5, full-history memory for S6, and native-versus-lens plus migration-wave
    costs for S7.
@@ -175,7 +173,7 @@ spread, not from an arbitrary percentage around today’s laptop timing.
 2. Extract focused policy/selective-hydration receipts from #1170 rather than
    merging one omnibus benchmark investigation.
 3. Add the S4 structural gate.
-4. Build S8, then fill the remaining S5–S7 dimensions.
+4. Extend S8 through transport, then fill the remaining S5–S7 dimensions.
 
 Add retention alongside each lane. A broad receipt-unification project is no
 longer a prerequisite for useful performance work.
