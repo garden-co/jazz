@@ -1165,8 +1165,9 @@ impl IvmRuntime {
         notification_publication: Option<PublicationId>,
         defer_notifications_until_durable: bool,
     ) -> Result<IncrementalEvaluation<'a>, IvmRuntimeError> {
-        if !self.pending_binding_retractions.is_empty() {
-            let mut pending = std::mem::take(&mut self.pending_binding_retractions);
+        let pending_binding_retractions = self.pending_binding_retractions.len();
+        if pending_binding_retractions != 0 {
+            let mut pending = self.pending_binding_retractions.clone();
             pending.extend(binding_deltas);
             binding_deltas = pending;
         }
@@ -1182,8 +1183,10 @@ impl IvmRuntime {
             changed_tables.iter().copied(),
             changed_bindings.iter().copied(),
         );
-        let current_tick = self.advance_tick();
-        self.bump_input_frontiers(&table_deltas, &binding_deltas);
+        // Do not commit tick lifecycle state until fallible durable evaluation
+        // has completed. In particular, queued binding retractions must remain
+        // retryable when preparing a tick encounters a storage error.
+        let current_tick = self.current_tick + 1;
         let table_delta_records = table_deltas
             .iter()
             .map(|delta| delta.deltas.len())
@@ -1195,6 +1198,10 @@ impl IvmRuntime {
             storage.as_ref(),
         )
         .await?;
+        self.current_tick = current_tick;
+        self.bump_input_frontiers(&table_deltas, &binding_deltas);
+        self.pending_binding_retractions
+            .drain(..pending_binding_retractions);
         let metrics = TickMetrics {
             tick: current_tick,
             table_delta_records,

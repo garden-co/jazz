@@ -81,6 +81,51 @@ async fn commits_do_not_scale_with_unrelated_resident_graph_size() {
 }
 
 #[futures_test::test]
+async fn subscription_install_does_not_sweep_unrelated_resident_graphs() {
+    async fn install_with_unrelated_graphs(graph_count: u64) -> std::time::Duration {
+        let storage = MemoryStorage::new(&["albums", "archived_albums"]);
+        let mut database = Database::new(two_album_tables_schema(), storage)
+            .await
+            .unwrap();
+        let mut subscriptions = Vec::with_capacity(graph_count as usize + 1);
+        for threshold in 0..graph_count {
+            subscriptions.push(
+                database
+                    .subscribe_one_sink(
+                        GraphBuilder::table("archived_albums")
+                            .filter(PredicateExpr::gt("id", Value::U64(threshold))),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let start = Instant::now();
+        subscriptions.push(
+            database
+                .subscribe_one_sink(GraphBuilder::table("albums"))
+                .await
+                .unwrap(),
+        );
+        let elapsed = start.elapsed();
+        std::hint::black_box(subscriptions);
+        elapsed
+    }
+
+    let small = install_with_unrelated_graphs(1).await;
+    let large = install_with_unrelated_graphs(1_000).await;
+    eprintln!(
+        "unrelated_graph_subscription_install_scaling_receipt small_us={} large_us={}",
+        small.as_micros(),
+        large.as_micros()
+    );
+    assert!(
+        large <= small.saturating_mul(10) + std::time::Duration::from_micros(250),
+        "subscription install must not sweep the unrelated runtime: small={small:?}, large={large:?}"
+    );
+}
+
+#[futures_test::test]
 async fn union_subscriptions_receive_deltas_from_multiple_tables() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = TestBtreeStorage::open(

@@ -1964,6 +1964,7 @@ impl IvmRuntime {
             for output in outputs.values() {
                 runtime.retain_as_subscription(subscription_id, output.node);
             }
+            install.commit();
             (outputs, initial)
         };
         self.multisink_subscriptions.insert(
@@ -2159,6 +2160,7 @@ impl IvmRuntime {
             for output in outputs.values() {
                 runtime.retain_as_subscription(subscription_id, output.node);
             }
+            install.commit();
             (outputs, initial)
         };
         let (sender, receiver) = mpsc::channel();
@@ -2832,10 +2834,6 @@ impl IvmRuntime {
     }
 
     pub(super) fn binding_snapshot_deltas(&self) -> HashMap<String, RecordDeltas> {
-        debug_assert!(
-            self.pending_binding_retractions.is_empty(),
-            "binding snapshots must not race queued binding retractions"
-        );
         self.binding_sources
             .iter()
             .map(|(shape, source)| {
@@ -2889,10 +2887,5 @@ impl IvmRuntime {
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
-    }
-
-    pub(super) fn advance_tick(&mut self) -> u64 {
-        self.current_tick += 1;
-        self.current_tick
     }
 }

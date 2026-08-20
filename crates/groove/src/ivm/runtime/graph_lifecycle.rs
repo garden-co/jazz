@@ -7,20 +7,36 @@ use super::*;
 /// hash-equal nodes retained by unrelated live operations remain installed.
 pub(super) struct EphemeralGraphInstall<'a> {
     runtime: &'a mut IvmRuntime,
+    committed: bool,
 }
 
 impl<'a> EphemeralGraphInstall<'a> {
     pub(super) fn new(runtime: &'a mut IvmRuntime) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            committed: false,
+        }
     }
 
     pub(super) fn runtime(&mut self) -> &mut IvmRuntime {
         self.runtime
     }
+
+    /// Promote this provisional installation after its roots have retainers.
+    ///
+    /// Successful installs need no cleanup: graph nodes are hash-shared and
+    /// reachable from the newly retained roots. Cancellation and failure keep
+    /// the eager cleanup path until arrangement ownership is operation-scoped.
+    pub(super) fn commit(&mut self) {
+        self.committed = true;
+    }
 }
 
 impl Drop for EphemeralGraphInstall<'_> {
     fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
         for node in self.runtime.gc_ephemeral_nodes(0) {
             self.runtime.remove_node_runtime(node);
         }
