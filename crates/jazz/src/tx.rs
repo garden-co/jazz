@@ -11,7 +11,7 @@ use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalTime, TxTime};
 use groove::records::{OwnedRecord, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Immutable transaction payload before upstream fate state are learned.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -133,6 +133,83 @@ pub struct ContributionDot {
     pub tx_id: TxId,
     /// Exact branch-keyed field or register introduced by the transaction.
     pub coordinate: ContributionCoordinate,
+}
+
+/// Index of non-causal substitutions used to compare contribution histories.
+///
+/// The index deliberately contains no branch lifecycle or merge cursor. It is
+/// reconstructed from ordinary visible transaction metadata for each local
+/// calculation.
+#[derive(Clone, Debug, Default)]
+pub struct ContributionSubstitutionIndex {
+    substitutions: BTreeMap<ContributionDot, Vec<ContributionDot>>,
+}
+
+impl ContributionSubstitutionIndex {
+    /// Add the substitutions introduced by one calculated merge transaction.
+    pub fn observe(
+        &mut self,
+        tx_id: TxId,
+        provenance: &ContributionMergeProvenance,
+    ) -> Result<(), &'static str> {
+        for substitution in &provenance.substitutions {
+            let target = ContributionDot {
+                tx_id,
+                coordinate: substitution.target.clone(),
+            };
+            if self
+                .substitutions
+                .insert(target, substitution.sources.clone())
+                .is_some()
+            {
+                return Err("contribution substitution target observed twice");
+            }
+        }
+        Ok(())
+    }
+
+    /// Recursively replace derived dots with their native contribution roots.
+    pub fn expand(
+        &self,
+        dots: impl IntoIterator<Item = ContributionDot>,
+    ) -> Result<BTreeSet<ContributionDot>, &'static str> {
+        fn visit(
+            index: &ContributionSubstitutionIndex,
+            dot: ContributionDot,
+            visiting: &mut BTreeSet<ContributionDot>,
+            expanded: &mut BTreeSet<ContributionDot>,
+        ) -> Result<(), &'static str> {
+            let Some(sources) = index.substitutions.get(&dot) else {
+                expanded.insert(dot);
+                return Ok(());
+            };
+            if !visiting.insert(dot.clone()) {
+                return Err("contribution substitution cycle");
+            }
+            for source in sources {
+                visit(index, source.clone(), visiting, expanded)?;
+            }
+            visiting.remove(&dot);
+            Ok(())
+        }
+
+        let mut expanded = BTreeSet::new();
+        for dot in dots {
+            visit(self, dot, &mut BTreeSet::new(), &mut expanded)?;
+        }
+        Ok(expanded)
+    }
+
+    /// Return source roots not already represented by target history.
+    pub fn novel(
+        &self,
+        source: impl IntoIterator<Item = ContributionDot>,
+        target: impl IntoIterator<Item = ContributionDot>,
+    ) -> Result<BTreeSet<ContributionDot>, &'static str> {
+        let source = self.expand(source)?;
+        let target = self.expand(target)?;
+        Ok(source.difference(&target).cloned().collect())
+    }
 }
 
 /// Deletion register event carried by a row version.
@@ -838,5 +915,91 @@ fn rejection_reason_from_rejected_record(
                 .to_owned(),
         )),
         _ => Err("reason"),
+    }
+}
+
+#[cfg(test)]
+mod contribution_tests {
+    use super::*;
+
+    fn tx(time: u64) -> TxId {
+        TxId::new(TxTime(time), NodeUuid::from_bytes([time as u8; 16]))
+    }
+
+    fn coordinate(branch: &str) -> ContributionCoordinate {
+        ContributionCoordinate {
+            branch_key: BranchKey::default(),
+            table: "todos".to_owned(),
+            row_uuid: RowUuid::from_bytes([7; 16]),
+            layer: MergeAspect::Content,
+            component: ContributionComponent::Column(format!("{branch}:title")),
+        }
+    }
+
+    fn provenance(target: &str, source: ContributionDot) -> ContributionMergeProvenance {
+        ContributionMergeProvenance::canonical(
+            BranchKey::default(),
+            BranchKey::default(),
+            vec![ContributionSubstitution {
+                target: coordinate(target),
+                sources: vec![source],
+            }],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn contribution_dot_closure_prevents_a_b_c_a_echo() {
+        let root = ContributionDot {
+            tx_id: tx(1),
+            coordinate: coordinate("a"),
+        };
+        let b_tx = tx(2);
+        let c_tx = tx(3);
+        let mut index = ContributionSubstitutionIndex::default();
+        index.observe(b_tx, &provenance("b", root.clone())).unwrap();
+        index
+            .observe(
+                c_tx,
+                &provenance(
+                    "c",
+                    ContributionDot {
+                        tx_id: b_tx,
+                        coordinate: coordinate("b"),
+                    },
+                ),
+            )
+            .unwrap();
+
+        let novel = index
+            .novel(
+                [ContributionDot {
+                    tx_id: c_tx,
+                    coordinate: coordinate("c"),
+                }],
+                [root],
+            )
+            .unwrap();
+        assert!(novel.is_empty());
+    }
+
+    #[test]
+    fn contribution_dot_closure_rejects_cycles() {
+        let first = ContributionDot {
+            tx_id: tx(1),
+            coordinate: coordinate("a"),
+        };
+        let second = ContributionDot {
+            tx_id: tx(2),
+            coordinate: coordinate("b"),
+        };
+        let mut index = ContributionSubstitutionIndex::default();
+        index
+            .observe(tx(1), &provenance("a", second.clone()))
+            .unwrap();
+        index
+            .observe(tx(2), &provenance("b", first.clone()))
+            .unwrap();
+        assert_eq!(index.expand([first]), Err("contribution substitution cycle"));
     }
 }

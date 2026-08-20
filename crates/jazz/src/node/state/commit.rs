@@ -122,6 +122,17 @@ where
         commits: Vec<(SchemaVersionId, MergeableCommit)>,
         made_at: TxTime,
     ) -> Result<TxId, Error> {
+        self.commit_mergeable_many_at_with_schema_versions_and_provenance(
+            commits, made_at, None,
+        )
+    }
+
+    pub(super) fn commit_mergeable_many_at_with_schema_versions_and_provenance(
+        &mut self,
+        commits: Vec<(SchemaVersionId, MergeableCommit)>,
+        made_at: TxTime,
+        contribution_merge: Option<ContributionMergeProvenance>,
+    ) -> Result<TxId, Error> {
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
@@ -139,7 +150,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            contribution_merge: None,
+            contribution_merge,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let mut batch = self.database.open_batch();

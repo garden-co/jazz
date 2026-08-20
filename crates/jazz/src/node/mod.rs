@@ -46,9 +46,9 @@ use crate::schema::{
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tx::{
-    AbsentRead, DeletionEvent, DurabilityTier, Fate, HistoryEntry, PredicateRead,
-    RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot, Transaction,
-    TransactionRecord, TxId, TxKind,
+    AbsentRead, ContributionMergeProvenance, DeletionEvent, DurabilityTier, Fate, HistoryEntry,
+    PredicateRead, RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot,
+    Transaction, TransactionRecord, TxId, TxKind,
 };
 
 fn hydrate_nested_scalar_enum_cases(
