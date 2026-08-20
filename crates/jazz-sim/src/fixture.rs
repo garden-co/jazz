@@ -399,24 +399,27 @@ pub fn apply_fixture_commit<S>(
 where
     S: OrderedKvStorage + ReopenableStorage,
 {
-    let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+    let (_tx_id, unit) = jazz::db::block_on(
+        writer.commit_mergeable_unit(
             MergeableCommit::new(&commit.table, commit.row_uuid, options.now_ms)
                 .made_by(options.made_by)
                 .cells(commit.cells.clone()),
-        )
-        .map_err(|err| format!("writer commit failed: {err}"))?;
+        ),
+    )
+    .map_err(|err| format!("writer commit failed: {err}"))?;
     ctx.send(options.writer_name, options.core_name, unit);
     let delivered = ctx.recv(options.core_name);
-    let fates = core
-        .apply_sync_message(delivered.message)
+    let fates = jazz::db::block_on(core.apply_sync_message(delivered.message))
         .map_err(|err| format!("core ingest failed: {err}"))?;
+    let fates = jazz::db::block_on(core.persist_and_settle_outcome(fates))
+        .map_err(|err| format!("core ingest persistence failed: {err}"))?;
     for fate in fates {
         ctx.send(options.core_name, options.writer_name, fate);
         let delivered = ctx.recv(options.writer_name);
-        writer
-            .apply_sync_message(delivered.message)
+        let outcome = jazz::db::block_on(writer.apply_sync_message(delivered.message))
             .map_err(|err| format!("writer fate apply failed: {err}"))?;
+        jazz::db::block_on(writer.persist_and_settle_outcome(outcome))
+            .map_err(|err| format!("writer fate persistence failed: {err}"))?;
     }
     ctx.record_counter("fixture_commits_applied", 1);
     Ok(())
@@ -444,16 +447,17 @@ pub fn sync_current_rows<S>(
 where
     S: OrderedKvStorage + ReopenableStorage,
 {
-    let update = peer
-        .current_rows_update(from, options.table)
+    let update = jazz::db::block_on(peer.current_rows_update(from, options.table))
         .map_err(|err| format!("view update failed: {err}"))?;
     if !matches!(update, SyncMessage::ViewUpdate { .. }) {
         return Err("expected view update".to_owned());
     }
     ctx.send(options.from_name, options.to_name, update);
     let delivered = ctx.recv(options.to_name);
-    to.apply_sync_message(delivered.message)
+    let outcome = jazz::db::block_on(to.apply_sync_message(delivered.message))
         .map_err(|err| format!("view apply failed: {err}"))?;
+    jazz::db::block_on(to.persist_and_settle_outcome(outcome))
+        .map_err(|err| format!("view persistence failed: {err}"))?;
     ctx.record_counter("fixture_view_updates_applied", 1);
     Ok(())
 }

@@ -1789,47 +1789,44 @@ mod tests {
         }
 
         fn insert_todo(&self, title: &str) -> jazz::ids::RowUuid {
-            self.db
-                .insert(
-                    "todos",
-                    RowCells::from([
-                        ("title".to_owned(), CoreValue::String(title.to_owned())),
-                        ("done".to_owned(), CoreValue::Bool(false)),
-                    ]),
-                )
-                .expect("insert client row")
-                .row_uuid()
+            jazz::db::block_on(self.db.insert(
+                "todos",
+                RowCells::from([
+                    ("title".to_owned(), CoreValue::String(title.to_owned())),
+                    ("done".to_owned(), CoreValue::Bool(false)),
+                ]),
+            ))
+            .expect("insert client row")
+            .row_uuid()
         }
 
         fn write_todo_tx_id(&self, title: &str) -> TxId {
-            self.db
-                .insert(
-                    "todos",
-                    RowCells::from([
-                        ("title".to_owned(), CoreValue::String(title.to_owned())),
-                        ("done".to_owned(), CoreValue::Bool(false)),
-                    ]),
-                )
-                .expect("insert client row")
-                .mergeable_tx_id()
+            jazz::db::block_on(self.db.insert(
+                "todos",
+                RowCells::from([
+                    ("title".to_owned(), CoreValue::String(title.to_owned())),
+                    ("done".to_owned(), CoreValue::Bool(false)),
+                ]),
+            ))
+            .expect("insert client row")
+            .mergeable_tx_id()
         }
 
         fn insert_private_doc(&self, title: &str, owner: AuthorId) -> jazz::ids::RowUuid {
             let owner = uuid::Uuid::from_bytes(*owner.as_bytes()).to_string();
-            self.db
-                .insert(
-                    "docs",
-                    RowCells::from([
-                        ("title".to_owned(), CoreValue::String(title.to_owned())),
-                        ("owner".to_owned(), CoreValue::String(owner)),
-                    ]),
-                )
-                .expect("insert client doc")
-                .row_uuid()
+            jazz::db::block_on(self.db.insert(
+                "docs",
+                RowCells::from([
+                    ("title".to_owned(), CoreValue::String(title.to_owned())),
+                    ("owner".to_owned(), CoreValue::String(owner)),
+                ]),
+            ))
+            .expect("insert client doc")
+            .row_uuid()
         }
 
         fn tick_take(&self) -> Vec<Vec<u8>> {
-            self.db.tick().expect("tick client db");
+            jazz::db::block_on(self.db.tick()).expect("tick client db");
             self.transport.take_outbound()
         }
 

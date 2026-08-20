@@ -189,6 +189,20 @@ unsuitable there; this is a tooling decision rather than a semantic contract.
 
 ## Open Questions
 
+- 🔶 **Server catalogue ownership debt.** The browser and ordinary Jazz
+  runtimes persist catalogue state in the runtime-owned `jazz_catalogue` and
+  `jazz_catalogue_pointer` Groove tables. `jazz-server` additionally maintains a
+  synchronous, separately persisted `StoredCatalogue` for administrative HTTP
+  routes and offline bootstrap. That duplicates catalogue persistence and makes
+  the adapter appear to require cross-thread storage solely because it is held
+  directly in shared request state. The pragmatic implementation may retain
+  this facade, but the intended cleanup is to make the server shell an async
+  facade over one authoritative runtime catalogue, retaining only independently
+  durable bootstrap state that is proven necessary while the runtime is
+  unavailable. Do not generalize this implementation debt into a requirement
+  that Jazz nodes or Groove storage be concurrently polled from multiple
+  threads.
+
 - 🔶 What is the alpha replacement packaging line for the server shell: a
   dedicated crate/package with stable config types, a reference executable over
   unstable internals, or both?
