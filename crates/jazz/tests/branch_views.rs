@@ -14,7 +14,7 @@ use jazz::node::ContributionMergeRow;
 use jazz::protocol::{
     BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
 };
-use jazz::query::{OrderDirection, Query, claim, col, eq};
+use jazz::query::{OrderDirection, Query, claim, col, eq, lit};
 use jazz::schema::{BranchDimensionSchema, JazzSchema, Policy, TableSchema};
 use jazz::time::GlobalSeq;
 
@@ -331,6 +331,129 @@ fn branch_view_join_projects_dimension_subsets_and_shared_tables() {
     assert_eq!(
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         vec![document]
+    );
+}
+
+#[test]
+fn branch_view_reachability_consumes_effective_sources() {
+    let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x9c; 16]));
+    let branched = |name, columns: Vec<ColumnSchema>| {
+        TableSchema::new(name, columns).with_branch_dimension("branch_id", dimension)
+    };
+    let schema = JazzSchema::new_with_branch_dimensions(
+        [BranchDimensionSchema::new(
+            dimension,
+            "branch",
+            ColumnType::Uuid,
+            Value::Uuid(uuid::Uuid::nil()),
+        )],
+        [
+            TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
+            branched(
+                "documents",
+                vec![
+                    ColumnSchema::new("branch_id", ColumnType::Uuid),
+                    ColumnSchema::new("title", ColumnType::String),
+                ],
+            ),
+            branched(
+                "access",
+                vec![
+                    ColumnSchema::new("branch_id", ColumnType::Uuid),
+                    ColumnSchema::new("document", ColumnType::Uuid),
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("document", "documents")
+            .with_reference("team", "teams"),
+            branched(
+                "team_edges",
+                vec![
+                    ColumnSchema::new("branch_id", ColumnType::Uuid),
+                    ColumnSchema::new("member", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("member", "teams")
+            .with_reference("parent", "teams"),
+        ],
+    );
+    let families = schema.column_families();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x9d; 16]),
+            author: AuthorId::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let base = selector(0x9e);
+    let head = selector(0x9f);
+    let document = RowUuid::from_bytes([0xa0; 16]);
+    let access = RowUuid::from_bytes([0xa1; 16]);
+    let allowed_team = uuid::Uuid::from_bytes([0xa2; 16]);
+    let denied_team = uuid::Uuid::from_bytes([0xa3; 16]);
+    for (team, name) in [(allowed_team, "allowed"), (denied_team, "denied")] {
+        db.insert_with_id(
+            "teams",
+            RowUuid(team),
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+        )
+        .unwrap();
+    }
+    db.insert_with_id_in_branch(
+        "documents",
+        base.clone(),
+        document,
+        BTreeMap::from([("title".to_owned(), Value::String("reachable".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id_in_branch(
+        "access",
+        base.clone(),
+        access,
+        BTreeMap::from([
+            ("document".to_owned(), Value::Uuid(document.0)),
+            ("team".to_owned(), Value::Uuid(allowed_team)),
+        ]),
+    )
+    .unwrap();
+    let query = db
+        .prepare_query(&Query::from("documents").reachable_via(
+            "access",
+            "document",
+            "team",
+            lit(Value::Uuid(allowed_team)),
+            "team_edges",
+            "member",
+            "parent",
+            [],
+        ))
+        .unwrap();
+    assert_eq!(
+        block_on(db.all(&query, ReadOpts::default().branch_view(base.clone(), None),))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    db.update_in_branch_view(
+        "access",
+        head.clone(),
+        Some(BranchViewBase::Current(base.clone())),
+        access,
+        BTreeMap::from([("team".to_owned(), Value::Uuid(denied_team))]),
+    )
+    .unwrap();
+    assert!(
+        block_on(db.all(
+            &query,
+            ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base))),
+        ))
+        .unwrap()
+        .is_empty(),
+        "the head access incarnation must mask reachable base evidence"
     );
 }
 

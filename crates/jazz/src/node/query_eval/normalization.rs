@@ -46,9 +46,7 @@ pub(super) fn current_query_output_request(
         CurrentQueryProgramOutput::AuthorizedRows => {
             BTreeSet::from([ProgramFactKey::AuthorizedRows])
         }
-        CurrentQueryProgramOutput::RelationSnapshot
-            if !query.array_subqueries.is_empty() || !query.reachable.is_empty() =>
-        {
+        CurrentQueryProgramOutput::RelationSnapshot if !query.array_subqueries.is_empty() => {
             BTreeSet::from([
                 ProgramFactKey::RelationEdges,
                 ProgramFactKey::PathCorrelationCoverage,
