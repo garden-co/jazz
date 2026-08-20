@@ -465,21 +465,6 @@ where
         Ok(true)
     }
 
-    /// Park a branch-targeted unit until the authenticated routing record has
-    /// arrived.  Branch metadata is a transport prerequisite, not a synthetic
-    /// transaction parent, so this deliberately shares the ordinary bounded
-    /// orphan queue and its idempotence/conflict checks.
-    pub(super) fn park_commit_unit_if_missing_branch_metadata_with_mode(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-        mode: CommitUnitParkMode,
-    ) -> Result<bool, Error> {
-        let _ = (tx, versions, now_ms, mode);
-        Ok(false)
-    }
-
     pub(super) fn missing_parent_refs(
         &mut self,
         versions: &[VersionRecord],

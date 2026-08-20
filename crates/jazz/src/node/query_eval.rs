@@ -220,14 +220,6 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    fn table_in_schema_or_branch_metadata(
-        &self,
-        table: &str,
-        schema_version: SchemaVersionId,
-    ) -> Result<TableSchema, Error> {
-        self.table_in_schema(table, schema_version)
-    }
-
     pub(super) fn resolve_time_travel_position(
         &mut self,
         time: TxTime,

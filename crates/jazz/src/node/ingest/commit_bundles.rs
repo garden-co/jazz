@@ -337,17 +337,6 @@ where
                 }]);
             }
         }
-        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
-            &tx,
-            &versions,
-            now_ms,
-            CommitUnitParkMode {
-                ingress_role: ParkedIngressRole::EdgeAccepted,
-                ..CommitUnitParkMode::default()
-            },
-        )? {
-            return Ok(Vec::new());
-        }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
@@ -484,14 +473,6 @@ where
             ingress_role: ParkedIngressRole::Relay,
             ..CommitUnitParkMode::default()
         };
-        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
-            &tx,
-            &versions,
-            u64::MAX - SKEW_TOLERANCE_MS,
-            relay_mode,
-        )? {
-            return Ok(());
-        }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
@@ -582,17 +563,6 @@ where
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
-        }
-        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
-            &tx,
-            &versions,
-            now_ms,
-            CommitUnitParkMode {
-                ingest_context,
-                ..CommitUnitParkMode::default()
-            },
-        )? {
-            return Ok(Vec::new());
         }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
@@ -769,17 +739,6 @@ where
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
-        }
-        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
-            &tx,
-            &versions,
-            now_ms,
-            CommitUnitParkMode {
-                ingest_context,
-                ingress_role: ParkedIngressRole::EdgeAuthority,
-            },
-        )? {
-            return Ok(Vec::new());
         }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,

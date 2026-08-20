@@ -245,7 +245,7 @@ where
         }
         let table = self
             .node
-            .table_in_schema_or_branch_metadata(&request.source.table, self.read_view.read_schema)
+            .table_in_schema(&request.source.table, self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         // Policy-proof dependencies are raw evidence for the outer policy.
         // Re-applying their own read policy recursively both changes the
