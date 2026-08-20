@@ -14,8 +14,8 @@ where
 {
     /// Return every persisted spelling of a logical branch key that can occur
     /// across the table's monotone schema history. Older spellings omit later
-    /// dimensions; the current selector has already supplied their immutable
-    /// migration defaults.
+    /// dimensions and are equivalent only when the selector supplies those
+    /// dimensions' immutable migration defaults.
     pub(super) fn equivalent_stored_branch_keys(
         &self,
         table: &str,
@@ -23,6 +23,17 @@ where
         selected: &BranchKey,
     ) -> Result<BTreeSet<BranchKey>, Error> {
         let table_id = self.physical_table_id_for_schema(read_schema_version, table)?;
+        let read_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&read_schema_version)
+            .ok_or(Error::InvalidStoredValue("read schema is missing"))?;
+        let read_table = read_schema
+            .schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .ok_or(Error::TableNotFound(table.to_owned()))?;
         let selected = selected
             .dimensions
             .iter()
@@ -48,6 +59,31 @@ where
             else {
                 continue;
             };
+            let historical_dimensions = table
+                .branch_by
+                .iter()
+                .map(|binding| binding.dimension)
+                .collect::<BTreeSet<_>>();
+            let missing_dimension_is_non_default = read_table.branch_by.iter().any(|binding| {
+                if historical_dimensions.contains(&binding.dimension) {
+                    return false;
+                }
+                let Some(dimension) = read_schema
+                    .schema
+                    .branch_dimensions
+                    .iter()
+                    .find(|dimension| dimension.id == binding.dimension)
+                else {
+                    return true;
+                };
+                selected.get(&binding.dimension)
+                    != Some(&crate::protocol::BranchDimensionValue::from(
+                        dimension.migration_default.clone(),
+                    ))
+            });
+            if missing_dimension_is_non_default {
+                continue;
+            }
             let mut dimensions = table
                 .branch_by
                 .iter()

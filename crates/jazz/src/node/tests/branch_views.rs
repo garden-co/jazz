@@ -695,3 +695,242 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
     assert_eq!(update.added.len(), 1);
     assert_eq!(update.removed.len(), 1);
 }
+
+#[test]
+fn added_branch_dimension_defaults_old_history_and_survives_column_rename() {
+    // Schema-lineage physical identities are not exposed by the public facade,
+    // so this internal test exercises publication, normalization, and reopen as
+    // one mechanism boundary.
+    let base = JazzSchema::new([TableSchema::new(
+        "todos",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )]);
+    let (dir, mut core) = open_history_complete_node_with_schema(node(0x91), base.clone());
+    let inherited = row(0x92);
+    core.commit_mergeable(
+        MergeableCommit::new("todos", inherited, 10).cells(title_cells("old-default")),
+    )
+    .unwrap();
+
+    let dimension = crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x93; 16]));
+    let default_workspace = uuid::Uuid::from_bytes([0x94; 16]);
+    let other_workspace = uuid::Uuid::from_bytes([0x95; 16]);
+    let evolved = JazzSchema::new_with_branch_dimensions(
+        [crate::schema::BranchDimensionSchema::new(
+            dimension,
+            "workspace",
+            ColumnType::Uuid,
+            Value::Uuid(default_workspace),
+        )],
+        [TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("workspace_id", ColumnType::Uuid),
+            ],
+        )
+        .with_branch_dimension("workspace_id", dimension)],
+    );
+    let evolved_version = SchemaVersion::new(evolved.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved_version.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_version.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "workspace_id".to_owned(),
+                    default: Value::Uuid(default_workspace),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_version.id,
+        },
+    })
+    .unwrap();
+
+    let other = row(0x96);
+    core.commit_mergeable(
+        MergeableCommit::new("todos", other, 20)
+            .branch(BranchSelector::new([(
+                "workspace",
+                Value::Uuid(other_workspace),
+            )]))
+            .cells(BTreeMap::from([
+                ("title".to_owned(), v("other")),
+                ("workspace_id".to_owned(), Value::Uuid(other_workspace)),
+            ])),
+    )
+    .unwrap();
+
+    let rows_for = |node: &mut NodeState<_>, schema: &JazzSchema, workspace| {
+        let shape = Query::from("todos").validate(schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let view = crate::protocol::ReadViewSpec {
+            source: crate::protocol::ReadViewSourceSpec::BranchView {
+                head: BranchSelector::new([("workspace", Value::Uuid(workspace))]),
+                base: None,
+            },
+            ..Default::default()
+        };
+        node.query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorId::SYSTEM,
+            &view,
+        )
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        rows_for(&mut core, &evolved, default_workspace),
+        BTreeSet::from([inherited])
+    );
+    assert_eq!(
+        rows_for(&mut core, &evolved, other_workspace),
+        BTreeSet::from([other])
+    );
+
+    let renamed = JazzSchema::new_with_branch_dimensions(
+        evolved.branch_dimensions.clone(),
+        [TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("space_id", ColumnType::Uuid),
+            ],
+        )
+        .with_branch_dimension("space_id", dimension)],
+    );
+    let renamed_version = SchemaVersion::new(renamed.clone());
+    publish_schema_lineage(
+        &mut core,
+        renamed_version.clone(),
+        MigrationLens::new(
+            evolved_version.id,
+            renamed_version.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::RenameColumn {
+                    from: "workspace_id".to_owned(),
+                    to: "space_id".to_owned(),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 2,
+            schema: renamed_version.id,
+        },
+    })
+    .unwrap();
+    drop(core);
+
+    let mut reopened = reopen_node_at(&dir, node(0x91), base);
+    assert_eq!(
+        rows_for(&mut reopened, &renamed, other_workspace),
+        BTreeSet::from([other])
+    );
+}
+
+#[test]
+fn branched_table_writes_require_an_explicit_exact_selector() {
+    let schema = branch_view_schema();
+    let (_dir, mut core) = open_history_complete_node_with_schema(node(0x97), schema);
+
+    let error = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x98), 10).cells(BTreeMap::from([
+                ("title".to_owned(), v("missing branch")),
+                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+            ])),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::node::Error::InvalidBranchKey(message)
+            if message == "branch selector for todos must provide exactly 1 dimensions"
+    ));
+}
+
+#[test]
+fn branch_dimension_evolution_rejects_non_monotone_changes() {
+    // These catalogue identities are deliberately exercised below the facade:
+    // publication must reject invalid lineage before it becomes writable.
+    let source = branch_view_schema();
+    let mut renamed_dimension = source.clone();
+    renamed_dimension.branch_dimensions[0].name = "renamed".to_owned();
+    let mut changed_default = source.clone();
+    changed_default.branch_dimensions[0].migration_default =
+        Value::Uuid(uuid::Uuid::from_bytes([0x99; 16]));
+    let mut changed_type = source.clone();
+    changed_type.branch_dimensions[0].column_type = ColumnType::String;
+    changed_type.branch_dimensions[0].migration_default = v("default");
+    let mut removed_from_table = source.clone();
+    removed_from_table.tables[0].branch_by.clear();
+
+    for (target, expected) in [
+        (
+            renamed_dimension,
+            "branch dimensions may only be appended with immutable identity, type, and default",
+        ),
+        (
+            changed_default,
+            "branch dimensions may only be appended with immutable identity, type, and default",
+        ),
+        (
+            changed_type,
+            "branch dimensions may only be appended with immutable identity, type, and default",
+        ),
+        (
+            removed_from_table,
+            "table branch dimensions cannot be removed",
+        ),
+    ] {
+        let (_dir, mut core) =
+            open_history_complete_node_with_schema(node(0x9a), source.clone());
+        let target = SchemaVersion::new(target);
+        let error = publish_schema_lineage(
+            &mut core,
+            target.clone(),
+            MigrationLens::new(
+                source.version_id(),
+                target.id,
+                vec![TableLens {
+                    source_table: "todos".to_owned(),
+                    target_table: "todos".to_owned(),
+                    ops: Vec::new(),
+                }],
+            ),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::node::Error::InvalidCatalogueUpdate(message) if message == expected
+        ));
+    }
+}
