@@ -821,9 +821,7 @@ where
                 .get_nullable_bytes(TransactionRowRecord::FIELD_CONTRIBUTION_MERGE_IDX)?
                 .map(|bytes| {
                     postcard::from_bytes(bytes).map_err(|_| {
-                        Error::InvalidStoredValue(
-                            "transaction contribution provenance must decode",
-                        )
+                        Error::InvalidStoredValue("transaction contribution provenance must decode")
                     })
                 })
                 .transpose()?,

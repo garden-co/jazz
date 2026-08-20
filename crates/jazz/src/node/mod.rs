@@ -26,7 +26,7 @@ use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
 use groove::storage::{self, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use thiserror::Error;
 
-use self::query_engine::user_column_field;
+use self::query_engine::{QueryAuthorizationMode, user_column_field};
 use crate::ids::{
     AuthorId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId, RowUuid,
     SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
@@ -46,9 +46,11 @@ use crate::schema::{
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tx::{
-    AbsentRead, ContributionMergeProvenance, DeletionEvent, DurabilityTier, Fate, HistoryEntry,
-    PredicateRead, RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot,
-    Transaction, TransactionRecord, TxId, TxKind,
+    AbsentRead, ContributionComponent, ContributionCoordinate, ContributionDot,
+    ContributionMergeProvenance, ContributionSubstitution, ContributionSubstitutionIndex,
+    DeletionEvent, DurabilityTier, Fate, HistoryEntry, MergeAspect, PredicateRead,
+    RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot, Transaction,
+    TransactionRecord, TxId, TxKind,
 };
 
 fn hydrate_nested_scalar_enum_cases(
@@ -834,6 +836,7 @@ pub enum CommitUnitTrust {
 
 include!("state/lifecycle.rs");
 include!("state/commit.rs");
+include!("state/contribution_merge.rs");
 include!("state/durable.rs");
 include!("state/catalogue.rs");
 include!("state/read_payload.rs");
@@ -1361,6 +1364,32 @@ pub struct QueryReadProfile {
     pub apply_projection: std::time::Duration,
     /// Total time spent in the profiled node query path.
     pub total: std::time::Duration,
+}
+
+/// One row selected for an atomic cross-branch contribution merge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContributionMergeRow {
+    /// Logical table containing the row.
+    pub table: String,
+    /// Global object identity shared by its branch-local incarnations.
+    pub row_uuid: RowUuid,
+}
+
+/// Explicit source and target views for a local contribution calculation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContributionMergeRequest {
+    /// Full named source branch selector.
+    pub source: BranchSelector,
+    /// Full named target branch selector.
+    pub target: BranchSelector,
+    /// Rows calculated and committed atomically.
+    pub rows: Vec<ContributionMergeRow>,
+    /// Author of the ordinary output transaction.
+    pub made_by: AuthorId,
+    /// Identity used by ordinary target write policy.
+    pub permission_subject: Option<AuthorId>,
+    /// Abstract wall clock at the calculating node.
+    pub now_ms: u64,
 }
 
 /// Builder for a local mergeable commit.

@@ -283,6 +283,71 @@ where
         }
         let (graph, descriptor, metadata, routing_fields) = if let Some((head, base)) = branch_view
         {
+            if request.visibility == RowVisibility::IncludeDeleted && base.is_none() {
+                let tier = graph_tier.expect("branch view has a current tier");
+                let head_keys = self
+                    .node
+                    .equivalent_stored_branch_keys(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        head,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let content =
+                    self.projected_branch_content_source_graph(request, &table, tier, &head_keys)?;
+                let deletions =
+                    self.projected_branch_deletion_source_graph(request, tier, &head_keys)?;
+                let base = include_deleted_branch_graph(&table, head, content, deletions)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let graph = match &authorization {
+                    SourceAuthorizationRequest::System => base,
+                    SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
+                    }
+                    | SourceAuthorizationRequest::PolicyProof {
+                        permission_subject,
+                        plan,
+                    } => {
+                        let policy_request = self
+                            .node
+                            .table_read_policy_authorization_request_for_include_deleted(
+                                self.read_view.policy_schema,
+                                &table.name,
+                                *permission_subject,
+                                tier,
+                                plan.binding_source_shape.clone(),
+                                plan.binding_user_params.clone(),
+                                plan.binding_claim_params.clone(),
+                            );
+                        let mut output_fields = current_row_fields(&table);
+                        output_fields.push("__jazz_deleted".to_owned());
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                base,
+                                &output_fields,
+                            )
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
+                            .graph
+                    }
+                };
+                return Ok(ResolvedSource {
+                    table_schema: table.clone(),
+                    graph,
+                    row_shape: SourceRowShape {
+                        source: request.source.clone(),
+                        descriptor: include_deleted_current_row_descriptor(&table),
+                        row_uuid_field: "row_uuid".to_owned(),
+                        metadata: BTreeMap::new(),
+                    },
+                    routing_fields: BTreeSet::new(),
+                    content_version: None,
+                    deletion_register: None,
+                });
+            }
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(request, SourceGap::Coverage));
             }
@@ -2798,6 +2863,56 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
             ])
             .chain([("__jazz_deleted".to_owned(), ValueType::Bool)]),
     )
+}
+
+fn include_deleted_branch_graph(
+    table: &TableSchema,
+    head: &BranchKey,
+    content: GraphBuilder,
+    deletions: GraphBuilder,
+) -> Result<GraphBuilder, Error> {
+    let content = content
+        .project_fields(branch_view_storage_source_fields(table, head)?)
+        .project_fields(storage_to_canonical_current_source_fields(
+            table, false, false,
+        ));
+    let deleted_winners = deletions
+        .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+        .project_fields([
+            ProjectField::named("row_uuid"),
+            ProjectField::named("tx_time"),
+            ProjectField::named("tx_node_id"),
+            ProjectField::renamed("updated_by", "$updatedBy"),
+            ProjectField::renamed("updated_at", "$updatedAt"),
+        ]);
+    let undeleted = GraphBuilder::anti_join(
+        content.clone(),
+        deleted_winners.clone(),
+        ["row_uuid"],
+        ["row_uuid"],
+    )
+    .project_fields(
+        current_row_fields(table)
+            .into_iter()
+            .map(ProjectField::named)
+            .chain([ProjectField::literal("__jazz_deleted", Value::Bool(false))]),
+    );
+    let deleted = GraphBuilder::join(content, deleted_winners, ["row_uuid"], ["row_uuid"])
+        .project_fields(
+            current_row_fields(table)
+                .into_iter()
+                .map(|field| {
+                    let source = match field.as_str() {
+                        "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
+                            right_field(&field)
+                        }
+                        _ => left_field(&field),
+                    };
+                    ProjectField::renamed(source, field)
+                })
+                .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
+        );
+    Ok(GraphBuilder::union([undeleted, deleted]))
 }
 
 fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {

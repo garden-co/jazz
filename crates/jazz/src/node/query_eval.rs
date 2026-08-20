@@ -512,6 +512,7 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
         authorization_mode: QueryAuthorizationMode,
+        read_view: &ReadViewSpec,
     ) -> Result<QueryProgram, Error> {
         let input_shape = self.normalized_include_deleted_row_set_shape(shape, binding)?;
         let input = RowSetProgramInput {
@@ -529,7 +530,7 @@ where
         };
         let request = QueryProgramRequest {
             authorization_mode,
-            reads: current_query_read_set(
+            reads: query_read_set_for_read_view(
                 &input.shape,
                 shape.schema_version(),
                 self.read_policy_schema_for_table_name(
@@ -538,8 +539,11 @@ where
                     &input.shape,
                 ),
                 tier,
+                read_view,
                 None,
-            ),
+                shape.query().aggregate.is_some(),
+                &self.catalogue.schema,
+            )?,
             policy: self.query_program_policy_context(identity),
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
@@ -909,6 +913,7 @@ where
                 tier,
                 identity,
                 authorization_mode,
+                &ReadViewSpec::default(),
             )?;
             let query = shape.query();
             self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
@@ -1615,13 +1620,14 @@ where
         Ok(rows)
     }
 
-    fn query_rows_including_deleted_with_query_engine(
+    pub(super) fn query_rows_including_deleted_with_query_engine(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
         authorization_mode: QueryAuthorizationMode,
+        read_view: &ReadViewSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_schema = self
             .catalogue
@@ -1644,6 +1650,7 @@ where
             tier,
             identity,
             authorization_mode,
+            read_view,
         )?;
         let deltas = self
             .database

@@ -44,6 +44,89 @@ where
         self.commit_mergeable_many_at(commits, made_at)
     }
 
+    /// Commit the already-calculated output of the high-level contribution
+    /// merge helper as one ordinary mergeable transaction.
+    pub(crate) fn commit_calculated_merge_many(
+        &mut self,
+        commits: Vec<MergeableCommit>,
+        provenance: ContributionMergeProvenance,
+    ) -> Result<TxId, Error> {
+        self.require_catalogue_ready()?;
+        provenance.validate().map_err(Error::InvalidMergeableCommit)?;
+        if commits.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "calculated merge requires at least one write",
+            ));
+        }
+        for commit in &commits {
+            commit.validate()?;
+            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
+                return Err(Error::InvalidMergeableCommit(
+                    "calculated merge permission subjects must match",
+                ));
+            }
+        }
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let mut emitted = BTreeSet::new();
+        for commit in &commits {
+            let table = self.table_in_schema(&commit.table, schema_version)?;
+            let schema = &self
+                .catalogue
+                .catalogue_schemas
+                .get(&schema_version)
+                .ok_or(Error::InvalidStoredValue("current write schema missing"))?
+                .schema;
+            let (branch_key, _) = schema
+                .project_branch_selector(&table, &commit.branch)
+                .map_err(Error::InvalidBranchKey)?;
+            let layer = if commit.deletion.is_some() {
+                MergeAspect::Deletion
+            } else {
+                MergeAspect::Content
+            };
+            if layer == MergeAspect::Deletion {
+                emitted.insert(ContributionCoordinate {
+                    branch_key,
+                    table: commit.table.clone(),
+                    row_uuid: commit.row_uuid,
+                    layer,
+                    component: ContributionComponent::Register,
+                });
+            } else {
+                let authored = commit
+                    .authored_columns
+                    .clone()
+                    .unwrap_or_else(|| commit.cells.keys().cloned().collect());
+                emitted.extend(authored.into_iter().map(|column| ContributionCoordinate {
+                    branch_key: branch_key.clone(),
+                    table: commit.table.clone(),
+                    row_uuid: commit.row_uuid,
+                    layer,
+                    component: ContributionComponent::Column(column),
+                }));
+            }
+        }
+        if provenance
+            .substitutions
+            .iter()
+            .any(|substitution| !emitted.contains(&substitution.target))
+        {
+            return Err(Error::InvalidMergeableCommit(
+                "contribution substitution target was not emitted",
+            ));
+        }
+        self.merge_commit_parent_times(&commits)?;
+        let made_at = self.mint_tx_time(commits[0].now_ms);
+        self.commit_mergeable_many_at_with_schema_versions_and_provenance(
+            commits
+                .into_iter()
+                .map(|commit| (schema_version, commit))
+                .collect(),
+            made_at,
+            Some(provenance),
+        )
+    }
+
     /// Commit local mergeable writes under one admitted authored schema.
     pub(crate) fn commit_mergeable_many_in_schema(
         &mut self,

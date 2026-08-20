@@ -1015,8 +1015,7 @@ pub(super) fn transaction_values(
         ),
         Value::Nullable(tx.contribution_merge.as_ref().map(|provenance| {
             Box::new(Value::Bytes(
-                postcard::to_allocvec(provenance)
-                    .expect("contribution provenance is serializable"),
+                postcard::to_allocvec(provenance).expect("contribution provenance is serializable"),
             ))
         })),
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),

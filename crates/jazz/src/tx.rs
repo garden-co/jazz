@@ -83,6 +83,19 @@ impl ContributionMergeProvenance {
             substitutions,
         })
     }
+
+    /// Reject non-canonical or incomplete provenance received from a helper.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let canonical = Self::canonical(
+            self.source.clone(),
+            self.target.clone(),
+            self.substitutions.clone(),
+        )?;
+        if &canonical != self {
+            return Err("contribution merge provenance must be canonical");
+        }
+        Ok(())
+    }
 }
 
 /// One derived target field and the exact native contribution dots it represents.
@@ -1000,6 +1013,9 @@ mod contribution_tests {
         index
             .observe(tx(2), &provenance("b", first.clone()))
             .unwrap();
-        assert_eq!(index.expand([first]), Err("contribution substitution cycle"));
+        assert_eq!(
+            index.expand([first]),
+            Err("contribution substitution cycle")
+        );
     }
 }
