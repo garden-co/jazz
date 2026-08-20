@@ -333,6 +333,7 @@ fn version_witness_public_fields(
         schema.deletion_field.clone(),
     ];
     fields.extend(schema.user_fields.values().cloned());
+    fields.extend(schema.identity.branch_or_prefix_field.clone());
     fields
 }
 

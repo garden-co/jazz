@@ -759,6 +759,69 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
 }
 
 #[test]
+fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
+    let (db, _schema) = open_policy_db();
+    let owner = AuthorId::from_bytes([0xb5; 16]);
+    let outsider = AuthorId::from_bytes([0xb6; 16]);
+    let branch = RowUuid::from_bytes([0xb7; 16]);
+    let selector = BranchSelector::new([("branch", Value::Uuid(branch.0))]);
+    db.insert_with_id(
+        "branches",
+        branch,
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("draft".to_owned())),
+            ("owner".to_owned(), Value::Uuid(owner.0)),
+        ]),
+    )
+    .unwrap();
+    let row = RowUuid::from_bytes([0xb8; 16]);
+    db.insert_with_id_in_branch_for_identity(
+        owner,
+        "todos",
+        selector.clone(),
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("visible".to_owned()))]),
+    )
+    .unwrap();
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe_for_identity(
+        &query,
+        ReadOpts::default().branch_view(selector, None),
+        owner,
+    ))
+    .unwrap();
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: true, ref added, .. }
+            if added.iter().any(|candidate| candidate.row_uuid() == row)
+    ));
+
+    db.update(
+        "branches",
+        branch,
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(outsider.0))]),
+    )
+    .unwrap();
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: false, ref removed, .. }
+            if removed.iter().any(|candidate| candidate.row_uuid == row)
+    ));
+
+    db.update(
+        "branches",
+        branch,
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.0))]),
+    )
+    .unwrap();
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: false, ref added, .. }
+            if added.iter().any(|candidate| candidate.row_uuid() == row)
+    ));
+}
+
+#[test]
 fn one_mergeable_transaction_can_atomically_write_multiple_branches() {
     let (db, schema) = open_db();
     let row = RowUuid::from_bytes([0x70; 16]);
@@ -971,6 +1034,128 @@ fn sibling_branch_view_subscriptions_isolate_first_writes() {
         baseline,
         "dropping the final branch view must release its maintained source"
     );
+}
+
+#[test]
+fn seeded_branch_view_subscription_matches_one_shot_reduction() {
+    let (db, schema) = open_db();
+    let table = &schema.tables[0];
+    let base = selector(0xaf);
+    let head = selector(0xb0);
+    let rows = (0_u8..12)
+        .map(|index| RowUuid::from_bytes([index.wrapping_add(0xb1); 16]))
+        .collect::<Vec<_>>();
+    for (index, row) in rows.iter().enumerate() {
+        db.insert_with_id_in_branch(
+            "todos",
+            base.clone(),
+            *row,
+            BTreeMap::from([("title".to_owned(), Value::String(format!("seed-{index}")))]),
+        )
+        .unwrap();
+    }
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let opts =
+        ReadOpts::default().branch_view(head.clone(), Some(BranchViewBase::Current(base.clone())));
+    let mut subscription = block_on(db.subscribe(&query, opts.clone())).unwrap();
+    let mut maintained = BTreeMap::<RowUuid, String>::new();
+    let apply = |maintained: &mut BTreeMap<RowUuid, String>, event: SubscriptionEvent| {
+        let SubscriptionEvent::Delta {
+            reset,
+            added,
+            updated,
+            removed,
+            ..
+        } = event
+        else {
+            panic!("branch-view subscription closed unexpectedly");
+        };
+        if reset {
+            maintained.clear();
+        }
+        for removed in removed {
+            maintained.remove(&removed.row_uuid);
+        }
+        for row in added.into_iter().chain(updated) {
+            let Value::String(title) = row.cell(table, "title").unwrap() else {
+                panic!("title must remain a string");
+            };
+            maintained.insert(row.row_uuid(), title);
+        }
+    };
+    apply(
+        &mut maintained,
+        block_on(subscription.next_event()).unwrap(),
+    );
+
+    let mut seed = 0x5eed_cafe_u64;
+    for step in 0..200_u64 {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let row = rows[(seed as usize) % rows.len()];
+        let result = match (seed >> 32) % 5 {
+            0 => db
+                .update_in_branch(
+                    "todos",
+                    base.clone(),
+                    row,
+                    BTreeMap::from([("title".to_owned(), Value::String(format!("base-{step}")))]),
+                )
+                .map(|_| ()),
+            1 => db
+                .update_in_branch_view(
+                    "todos",
+                    head.clone(),
+                    Some(BranchViewBase::Current(base.clone())),
+                    row,
+                    BTreeMap::from([("title".to_owned(), Value::String(format!("head-{step}")))]),
+                )
+                .map(|_| ()),
+            2 => db
+                .delete_in_branch_view(
+                    "todos",
+                    head.clone(),
+                    Some(BranchViewBase::Current(base.clone())),
+                    row,
+                )
+                .map(|_| ()),
+            3 => db
+                .restore_with_cells_in_branch(
+                    "todos",
+                    head.clone(),
+                    row,
+                    BTreeMap::from([(
+                        "title".to_owned(),
+                        Value::String(format!("restored-{step}")),
+                    )]),
+                )
+                .map(|_| ()),
+            _ => db
+                .update_in_branch(
+                    "todos",
+                    head.clone(),
+                    row,
+                    BTreeMap::from([("title".to_owned(), Value::String(format!("exact-{step}")))]),
+                )
+                .map(|_| ()),
+        };
+        if result.is_err() {
+            continue;
+        }
+        while let Some(event) = subscription.try_next_event() {
+            apply(&mut maintained, event);
+        }
+        let one_shot = block_on(db.all(&query, opts.clone()))
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                let Value::String(title) = row.cell(table, "title").unwrap() else {
+                    panic!("title must remain a string");
+                };
+                (row.row_uuid(), title)
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(maintained, one_shot, "diverged after seeded step {step}");
+    }
 }
 
 #[test]

@@ -352,6 +352,8 @@ where
                 return Err(source_resolution_error(request, SourceGap::Coverage));
             }
             if base.is_none_or(|base| matches!(base, BranchViewSourceBase::Current(_))) {
+                let branch_witness_field =
+                    (!table.branch_by.is_empty()).then_some("supplying_branch_key");
                 let head_keys = self
                     .node
                     .equivalent_stored_branch_keys(
@@ -418,7 +420,15 @@ where
                 let content_version = request
                     .requirements
                     .metadata
-                    .contains(&SourceMetadataRequirement::VersionPayloads)
+                    .iter()
+                    .any(|requirement| {
+                        matches!(
+                            requirement,
+                            SourceMetadataRequirement::VersionPayloads
+                                | SourceMetadataRequirement::VersionWitnesses
+                                | SourceMetadataRequirement::Provenance(_)
+                        )
+                    })
                     .then(|| ContentVersionSource {
                         graph: content.clone().project_fields(
                             maintained_view_history_storage_field_names(&table)
@@ -463,7 +473,7 @@ where
                     &authorization,
                     self.read_view.policy_schema,
                     Some(&self.read_view),
-                    Some("supplying_branch_key"),
+                    branch_witness_field,
                     Some(selected_base),
                 )
                 .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
@@ -482,6 +492,8 @@ where
                 });
             }
             if matches!(base, Some(BranchViewSourceBase::Snapshot(_, _))) {
+                let branch_witness_field =
+                    (!table.branch_by.is_empty()).then_some("supplying_branch_key");
                 let tier = graph_tier.expect("branch view has a current tier");
                 let frozen_base_key = match base {
                     Some(BranchViewSourceBase::Snapshot(key, _)) => key,
@@ -524,12 +536,14 @@ where
                     &system_authorization,
                     self.read_view.policy_schema,
                     Some(&self.read_view),
-                    Some("supplying_branch_key"),
+                    branch_witness_field,
                     Some(selected_head),
                 )
                 .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
                 let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
-                    &table, &metadata, true,
+                    &table,
+                    &metadata,
+                    branch_witness_field.is_some(),
                 );
                 // Capture the full opening view once. Anti-joining it against
                 // live head presence leaves only inherited frozen rows; all
@@ -555,7 +569,7 @@ where
                         schema_version_alias,
                         "frozen-branch-base",
                         &request.requirements,
-                        Some(("supplying_branch_key", frozen_base_key)),
+                        branch_witness_field.map(|field| (field, frozen_base_key)),
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 if descriptor != opening_descriptor || metadata != opening_metadata {
@@ -605,7 +619,7 @@ where
                             request
                         });
                         let mut output_fields = current_row_fields(&table);
-                        output_fields.push("supplying_branch_key".to_owned());
+                        output_fields.extend(branch_witness_field.map(str::to_owned));
                         self.node
                             .policy_filtered_current_source_graph_via_query_engine(
                                 policy_request,
@@ -631,7 +645,15 @@ where
                     content_version: request
                         .requirements
                         .metadata
-                        .contains(&SourceMetadataRequirement::VersionPayloads)
+                        .iter()
+                        .any(|requirement| {
+                            matches!(
+                                requirement,
+                                SourceMetadataRequirement::VersionPayloads
+                                    | SourceMetadataRequirement::VersionWitnesses
+                                    | SourceMetadataRequirement::Provenance(_)
+                            )
+                        })
                         .then(|| ContentVersionSource {
                             graph: head_content.project_fields(
                                 maintained_view_history_storage_field_names(&table)
