@@ -96,13 +96,13 @@ fn global_read_ignores_a_newer_unacknowledged_local_write() {
     let target = row(0x72);
 
     let (_, authoritative_unit) = other
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 20)
                 .cells(title_cells("authoritative remote")),
         )
         .unwrap();
     let [authoritative_fate] = core
-        .apply_sync_message(authoritative_unit)
+        .apply_sync_message_settled(authoritative_unit)
         .unwrap()
         .try_into()
         .unwrap();
@@ -115,11 +115,14 @@ fn global_read_ignores_a_newer_unacknowledged_local_write() {
     };
 
     let (pending_tx, _pending_unit) = core
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 30).cells(title_cells("pending local")),
         )
         .unwrap();
-    assert_eq!(core.transaction_state(pending_tx).unwrap().0, Fate::Pending);
+    assert_eq!(
+        core.transaction_state_settled(pending_tx).unwrap().0,
+        Fate::Pending
+    );
     assert_eq!(
         core.current_rows("todos", DurabilityTier::Local)
             .unwrap()
@@ -146,7 +149,7 @@ fn global_read_ignores_a_newer_unacknowledged_local_write() {
         panic!("expected view update");
     };
     assert_eq!(*settled_through, authoritative_seq);
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
 
     assert_eq!(
         reader

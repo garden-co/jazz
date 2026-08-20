@@ -1,6 +1,4 @@
 use super::*;
-use crate::storage::WriteManyOutcome;
-
 impl Database {
     /// Run one IVM tick without base-table writes.
     ///

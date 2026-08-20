@@ -282,7 +282,7 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
     let (_dir, mut core) = open_node_with_uuid(node(0x92));
     for (index, title) in ["one", "two"].into_iter().enumerate() {
         let tx = core
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", row(0x40 + index as u8), 1_000 + index as u64)
                     .cells(title_cells(title)),
             )

@@ -2200,12 +2200,11 @@ where
                 )?;
                 self.bind_disposable_shape_snapshot(shape, &values).await?
             }
-            PreparedQueryPlan::Graph(graph) => {
-                self.database
-                    .query_graph(graph)
-                    .await
-                    .map_err(Error::Groove)?
-            }
+            PreparedQueryPlan::Graph(graph) => self
+                .database
+                .query_graph(graph)
+                .await
+                .map_err(Error::Groove)?,
             PreparedQueryPlan::PeerMaintainedMarker => {
                 unreachable!("point reads never use peer-maintained plans")
             }

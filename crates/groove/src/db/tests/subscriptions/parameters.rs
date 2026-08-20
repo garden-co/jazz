@@ -609,12 +609,7 @@ async fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
 
 #[futures_test::test]
 async fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = TestStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();

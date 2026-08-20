@@ -103,15 +103,19 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
     let target = row(0x71);
 
     let (_base, base_unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 10).cells(title_cells("base")),
         )
         .unwrap();
-    let [base_fate] = core.apply_sync_message(base_unit).unwrap().try_into().unwrap();
-    client.apply_sync_message(base_fate).unwrap();
+    let [base_fate] = core
+        .apply_sync_message_settled(base_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    client.apply_sync_message_settled(base_fate).unwrap();
 
     let (rejected, rejected_unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, SKEW_TOLERANCE_MS + 1)
                 .cells(title_cells("rejected")),
         )
@@ -120,7 +124,7 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
         panic!("expected rejected update commit unit");
     };
     let [rejected_fate] = core
-        .ingest_commit_unit(tx, versions, 0)
+        .ingest_commit_unit_settled(tx, versions, 0)
         .unwrap()
         .try_into()
         .unwrap();
@@ -131,9 +135,9 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
             ..
         }
     ));
-    client.apply_sync_message(rejected_fate).unwrap();
+    client.apply_sync_message_settled(rejected_fate).unwrap();
     assert_eq!(
-        client.transaction_state(rejected).unwrap().0,
+        client.transaction_state_settled(rejected).unwrap().0,
         Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
     );
     // The rejected speculative version must be removed from the visible row,
@@ -149,7 +153,7 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
     );
 
     let (fresh, fresh_unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 20).cells(title_cells("fresh")),
         )
         .unwrap();
@@ -157,7 +161,7 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
         panic!("expected fresh update commit unit");
     };
     let [fresh_fate] = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap()
         .try_into()
         .unwrap();
@@ -177,7 +181,7 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
         .apply_fate_update(tx_id, fate, global_time, durability)
         .unwrap();
     assert_eq!(
-        client.transaction_state(fresh).unwrap().0,
+        client.transaction_state_settled(fresh).unwrap().0,
         Fate::Accepted
     );
     assert_eq!(ahead_current_row_count(&mut client, "todos"), 0);
