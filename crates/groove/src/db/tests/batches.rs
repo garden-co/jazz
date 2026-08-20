@@ -25,6 +25,42 @@ async fn failed_persistence_does_not_retract_an_applied_subscription_delta() {
 }
 
 #[futures_test::test]
+async fn failed_persistence_releases_later_publications_with_an_error() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+
+    let mut first = database.open_batch();
+    first.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Blue Train".to_owned())],
+    );
+    let first = database.apply_batch(first).await.unwrap();
+
+    let mut second = database.open_batch();
+    second.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Giant Steps".to_owned())],
+    );
+    let second = database.apply_batch(second).await.unwrap();
+
+    control.fail_next(TestStorageOperation::WriteMany);
+    let first = first.persist().await;
+    let second = second.persist().await;
+
+    assert!(database.finish_persistence(first).is_err());
+    assert!(database.finish_persistence(second).is_err());
+    assert_eq!(
+        control
+            .observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::WriteMany)
+            .count(),
+        1,
+        "a publication behind a failed write must not reach storage",
+    );
+}
+
+#[futures_test::test]
 async fn commits_insert_update_and_delete_batches() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =

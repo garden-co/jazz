@@ -64,6 +64,7 @@ pub struct Database {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppliedBatchLifecycle {
     Applied,
+    Persisting,
     PersistenceComplete,
     Finished,
     Abandoned,
@@ -91,29 +92,61 @@ impl AppliedBatch {
     }
 
     pub async fn persist(&self) -> PersistedBatch {
-        std::future::poll_fn(|cx| {
+        assert_eq!(
+            self.lifecycle.replace(AppliedBatchLifecycle::Persisting),
+            AppliedBatchLifecycle::Applied,
+            "an applied batch may have only one persistence attempt at a time",
+        );
+        let mut attempt = PersistenceAttempt {
+            lifecycle: Rc::clone(&self.lifecycle),
+            completed: false,
+        };
+        let turn = std::future::poll_fn(|cx| {
             let mut order = self.order.borrow_mut();
+            if let Some(message) = &order.failure {
+                return Poll::Ready(Err(crate::storage::Error::Backend {
+                    backend: "publication order",
+                    message: message.clone(),
+                }));
+            }
             if order.next == self.publication.0 {
-                return Poll::Ready(());
+                return Poll::Ready(Ok(()));
             }
             order.waiters.insert(self.publication.0, cx.waker().clone());
             Poll::Pending
         })
         .await;
         let storage_start = Instant::now();
-        let result = self.storage.write_many(self.operations.clone()).await;
+        let result = match turn {
+            Ok(()) => self.storage.write_many(self.operations.clone()).await,
+            Err(error) => Err(error),
+        };
         let storage_write_time = storage_start.elapsed();
         self.lifecycle
             .set(AppliedBatchLifecycle::PersistenceComplete);
-        if result.is_ok() {
-            let waiters = {
-                let mut order = self.order.borrow_mut();
+        attempt.completed = true;
+        let waiter = {
+            let mut order = self.order.borrow_mut();
+            if result.is_ok() {
                 order.next = order.next.saturating_add(1);
-                std::mem::take(&mut order.waiters)
-            };
-            for (_, waiter) in waiters {
-                waiter.wake();
+                let next = order.next;
+                order.waiters.remove(&next)
+            } else {
+                order.failure = Some(
+                    result
+                        .as_ref()
+                        .expect_err("failed persistence has an error")
+                        .to_string(),
+                );
+                let waiters = std::mem::take(&mut order.waiters);
+                for (_, waiter) in waiters {
+                    waiter.wake();
+                }
+                None
             }
+        };
+        if let Some(waiter) = waiter {
+            waiter.wake();
         }
         PersistedBatch {
             publication: self.publication,
@@ -135,6 +168,19 @@ impl AppliedBatch {
     }
 }
 
+struct PersistenceAttempt {
+    lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    completed: bool,
+}
+
+impl Drop for PersistenceAttempt {
+    fn drop(&mut self) {
+        if !self.completed && self.lifecycle.get() == AppliedBatchLifecycle::Persisting {
+            self.lifecycle.set(AppliedBatchLifecycle::Applied);
+        }
+    }
+}
+
 impl Drop for AppliedBatch {
     fn drop(&mut self) {
         if self.lifecycle.get() == AppliedBatchLifecycle::Applied {
@@ -147,6 +193,7 @@ impl Drop for AppliedBatch {
 struct PersistenceOrder {
     next: u64,
     waiters: BTreeMap<u64, Waker>,
+    failure: Option<String>,
 }
 
 /// Completion of one owned publication persistence operation.

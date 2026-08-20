@@ -65,6 +65,7 @@ impl Database {
             publication_persistence: Rc::new(RefCell::new(PersistenceOrder {
                 next: 1,
                 waiters: BTreeMap::new(),
+                failure: None,
             })),
             abandoned_application: Rc::new(Cell::new(false)),
             poisoned: false,
