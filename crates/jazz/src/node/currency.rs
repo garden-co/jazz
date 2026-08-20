@@ -244,12 +244,7 @@ where
         let mut versions = Vec::new();
         let mut scanned_sources = BTreeSet::new();
         for table in tables {
-            let sources = match tx.tx.target_lineage {
-                BranchLineage::Root => self.version_storage_sources(&table)?,
-                BranchLineage::Branch(branch_id) => {
-                    self.branch_version_storage_sources(&table, branch_id)?
-                }
-            };
+            let sources = self.version_storage_sources(&table)?;
             for storage_table in sources {
                 if !scanned_sources.insert(storage_table.clone()) {
                     continue;
@@ -297,34 +292,6 @@ where
                 .then_with(|| left.layer().cmp(&right.layer()))
         });
         Ok(versions)
-    }
-
-    fn branch_version_storage_sources(
-        &self,
-        table: &str,
-        branch_id: BranchId,
-    ) -> Result<Vec<String>, Error> {
-        let mut sources = Vec::new();
-        for mapping in self.catalogue.physical_mappings.values() {
-            let Some(table_mapping) = mapping.tables.get(table) else {
-                continue;
-            };
-            if !self
-                .branches
-                .branch_partitions
-                .contains(&(table_mapping.table_id, branch_id))
-            {
-                continue;
-            }
-            sources.push(physical_branch_history_table_name(
-                table_mapping.table_id,
-                branch_id,
-            ));
-            sources.push(SHARED_DELETION_HISTORY_TABLE.to_owned());
-        }
-        sources.sort();
-        sources.dedup();
-        Ok(sources)
     }
 
     pub(super) fn query_versions_for_tx_rows_by_alias(

@@ -278,21 +278,7 @@ where
                         })
                 })
                 .collect::<Vec<_>>();
-            let storage_tables =
-                std::iter::once(physical_history_table_name(target_mapping.table_id))
-                    .chain(
-                        self.branches
-                            .branch_partitions
-                            .iter()
-                            .filter(|(table_id, _)| *table_id == target_mapping.table_id)
-                            .map(|(_, branch_id)| {
-                                physical_branch_history_table_name(
-                                    target_mapping.table_id,
-                                    *branch_id,
-                                )
-                            }),
-                    )
-                    .collect::<Vec<_>>();
+            let storage_tables = [physical_history_table_name(target_mapping.table_id)];
             for storage_table in storage_tables {
                 let output = widened_projection_descriptor(
                     &logical_output,
@@ -1091,7 +1077,6 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
-            &self.branches.branch_partitions,
         )? {
             let existing = match self.database.table_schema(&desired.name) {
                 Ok(existing) => Some(existing.clone()),

@@ -59,7 +59,7 @@ use crate::query::{
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
-use crate::schema::{ColumnSchema, RuntimeSchema, branch_metadata_table_schema};
+use crate::schema::{ColumnSchema, RuntimeSchema};
 use crate::tools::{ObjectId, OutputOccurrenceId};
 
 mod materialization;
@@ -225,11 +225,7 @@ where
         table: &str,
         schema_version: SchemaVersionId,
     ) -> Result<TableSchema, Error> {
-        if table == "jazz_branches" {
-            Ok(branch_metadata_table_schema())
-        } else {
-            self.table_in_schema(table, schema_version)
-        }
+        self.table_in_schema(table, schema_version)
     }
 
     pub(super) fn resolve_time_travel_position(

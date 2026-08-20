@@ -50,13 +50,6 @@ where
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
-            SyncMessage::BranchMetadata(metadata) => {
-                self.admit_branch_metadata(metadata)?;
-                self.drain_parked_commit_units()
-            }
-            SyncMessage::FetchBranchMetadata { .. } => Err(Error::UnsupportedSyncMessage(
-                "branch metadata repair must be served by peer state",
-            )),
             SyncMessage::SessionClaims { identity, claims } => {
                 if let Some(context) = ingest_context
                     && context.trust == CommitUnitTrust::TrustedBackend
@@ -964,27 +957,13 @@ where
     /// schemas are left for the ordinary parking path.
     pub(super) fn prepare_branch_target_partitions_if_ready(
         &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
+        _tx: &Transaction,
+        _versions: &[VersionRecord],
     ) -> Result<(), Error>
     where
         S: ReopenableStorage,
     {
-        let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
-            return Ok(());
-        };
-        if !self.branches.branches.contains_key(&branch_id)
-            || !commit_unit_write_count_matches(tx, versions.len())
-            || versions.iter().any(|version| {
-                !self
-                    .catalogue
-                    .catalogue_schemas
-                    .contains_key(&version.schema_version())
-            })
-        {
-            return Ok(());
-        }
-        self.ensure_branch_target_partitions(branch_id, versions)
+        Ok(())
     }
 
 }

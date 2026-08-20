@@ -54,8 +54,7 @@ use crate::protocol::{
     SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
-    MAX_FETCH_BRANCH_METADATA, validate_fetch_branch_metadata, validate_fetch_row_versions,
-    validate_known_state_declaration, validate_shape_ast_size,
+    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
 };
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
@@ -325,11 +324,6 @@ struct StagedInboundMessage {
 
 struct PendingAuthorityViewUpdate {
     parts: ViewUpdateParts,
-    authority_receipt_eligible: bool,
-}
-
-struct PendingBranchViewUpdate {
-    message: SyncMessage,
     authority_receipt_eligible: bool,
 }
 

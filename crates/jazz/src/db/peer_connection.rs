@@ -66,14 +66,6 @@ pub(super) enum ConnectionLink {
         uploaded: BTreeSet<TxId>,
         /// Declared known-state ViewUpdates parked until missing row bodies arrive.
         pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
-        /// Branch selected by each upstream usage-site subscription.
-        branch_views: BTreeMap<SubscriptionKey, crate::ids::BranchId>,
-        /// View updates held until their branch routing record arrives.
-        pending_branch_view_updates: BTreeMap<crate::ids::BranchId, Vec<PendingBranchViewUpdate>>,
-        /// Deduplicated outstanding metadata repairs on this link.
-        pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
-        /// Round-robin cursor so a saturated repair set cannot starve later ids.
-        branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
         /// Latest support-view cut seen on this link. Receipts are accepted
         /// only after their matching `ViewUpdate` has entered the apply batch.
         scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
@@ -117,13 +109,6 @@ pub(super) enum ConnectionLink {
         deferred_subscribe_rejections: VecDeque<(SubscriptionKey, String)>,
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
-        /// Deduplicated branch-routing repairs for data-first commit relays.
-        pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
-        /// Authenticated session metadata waiting for its parent/base dependency.
-        pending_session_branch_metadata:
-            BTreeMap<crate::ids::BranchId, crate::protocol::BranchMetadata>,
-        /// Round-robin cursor so a saturated repair set cannot starve later ids.
-        branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
         /// Authorization-support purposes keyed by their ordinary support view.
         scope_purposes: BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
         /// Per-scope aggregation state. A full-scope receipt is withheld until
@@ -148,28 +133,6 @@ pub(super) struct PendingRowVersionRepair {
     pub(super) requests: Vec<crate::protocol::RowVersionRef>,
     pub(super) update: SyncMessage,
     pub(super) authority_receipt_eligible: bool,
-}
-
-/// Return one fair bounded repair page, advancing the cursor after the page.
-fn next_branch_metadata_repairs(
-    repairs: &BTreeMap<crate::ids::BranchId, ()>,
-    cursor: &mut Option<crate::ids::BranchId>,
-) -> Vec<crate::ids::BranchId> {
-    let mut page = repairs
-        .keys()
-        .copied()
-        .filter(|branch| cursor.is_none_or(|after| *branch > after))
-        .take(MAX_FETCH_BRANCH_METADATA)
-        .collect::<Vec<_>>();
-    if page.is_empty() && !repairs.is_empty() {
-        page = repairs
-            .keys()
-            .copied()
-            .take(MAX_FETCH_BRANCH_METADATA)
-            .collect();
-    }
-    *cursor = page.last().copied();
-    page
 }
 
 /// Per-connection resume state for a served subscriber.
@@ -535,17 +498,11 @@ where
     pub(super) fn stage_inbound_without_authority_receipt(&mut self) {
         if let ConnectionLink::Upstream {
             pending_row_version_repairs,
-            pending_branch_view_updates,
             ..
         } = &mut self.link
         {
             for repair in pending_row_version_repairs {
                 repair.authority_receipt_eligible = false;
-            }
-            for updates in pending_branch_view_updates.values_mut() {
-                for update in updates {
-                    update.authority_receipt_eligible = false;
-                }
             }
         }
         while let Some(message) = self.transport.try_recv() {
@@ -577,32 +534,11 @@ where
                 outbox,
                 uploaded,
                 pending_row_version_repairs,
-                branch_views,
-                pending_branch_view_updates,
-                pending_branch_metadata_repairs,
-                branch_metadata_repair_cursor,
                 scope_view_cuts,
                 scope_receipts,
                 expected_scope_authority,
                 scope_lease_manager,
             } => {
-                // Repair is deliberately retried on each non-blocked tick. The
-                // request set is bounded and deduplicated; a dropped request or
-                // response therefore cannot permanently strand a parked unit.
-                let repairs = next_branch_metadata_repairs(
-                    pending_branch_metadata_repairs,
-                    branch_metadata_repair_cursor,
-                );
-                if !repairs.is_empty() {
-                    self.transport
-                        .send(SyncMessage::FetchBranchMetadata { branches: repairs })
-                        .map_err(transport_error)?;
-                }
-                for metadata in self.node.borrow().pending_branch_metadata_uploads() {
-                    self.transport
-                        .send(SyncMessage::BranchMetadata(metadata))
-                        .map_err(transport_error)?;
-                }
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                 let claims = self.node.borrow().session_claims_with_revisions();
                 for (identity, claims, revision) in claims {
@@ -778,14 +714,6 @@ where
                         .and_then(|pending| pending.unit.clone())
                         .map(Ok)
                         .unwrap_or_else(|| self.node.borrow_mut().commit_unit_for(tx_id))?;
-                    if let SyncMessage::CommitUnit { tx, .. } = &unit
-                        && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
-                        && let Some(metadata) = self.node.borrow().branch_record(branch).cloned()
-                    {
-                        self.transport
-                            .send(SyncMessage::BranchMetadata((&metadata).into()))
-                            .map_err(transport_error)?;
-                    }
                     if let Err(error) =
                         send_with_local_sync_context(&self.node, self.transport.as_mut(), unit)
                     {
@@ -880,27 +808,6 @@ where
                             ..
                         } => {
                             scope_receipts.remove(&subscription);
-                            if let Some(branch) = branch_views.get(&subscription).copied()
-                                && self.node.borrow().branch_record(branch).is_none()
-                            {
-                                pending_branch_view_updates.entry(branch).or_default().push(
-                                    PendingBranchViewUpdate {
-                                        message,
-                                        authority_receipt_eligible,
-                                    },
-                                );
-                                if let std::collections::btree_map::Entry::Vacant(entry) =
-                                    pending_branch_metadata_repairs.entry(branch)
-                                {
-                                    entry.insert(());
-                                    self.transport
-                                        .send(SyncMessage::FetchBranchMetadata {
-                                            branches: vec![branch],
-                                        })
-                                        .map_err(transport_error)?;
-                                }
-                                continue;
-                            }
                             #[cfg(not(feature = "sync-autopsy"))]
                             let _ = subscription;
                             let missing = {
@@ -1271,41 +1178,6 @@ where
                             }
                             scope_receipts.insert(subscription, receipt);
                         }
-                        SyncMessage::BranchMetadata(metadata) => {
-                            let branch = metadata.branch_id;
-                            self.node
-                                .borrow_mut()
-                                .acknowledge_branch_metadata(&metadata)?;
-                            self.node
-                                .borrow_mut()
-                                .apply_sync_message(SyncMessage::BranchMetadata(metadata))?;
-                            pending_branch_metadata_repairs.remove(&branch);
-                            if let Some(updates) = pending_branch_view_updates.remove(&branch) {
-                                for update in updates {
-                                    let (subscription, settled_through) = match &update.message {
-                                        SyncMessage::ViewUpdate {
-                                            subscription,
-                                            settled_through,
-                                            ..
-                                        } => (*subscription, *settled_through),
-                                        _ => {
-                                            unreachable!("branch parking retains only view updates")
-                                        }
-                                    };
-                                    stage_initial_coverage_clear_for_update(
-                                        &update.message,
-                                        &self.latest_coverage_subscriptions,
-                                        &mut pending_initial_coverage_clears,
-                                    );
-                                    push_view_update_message_for_receiver(
-                                        &mut pending_view_updates,
-                                        update.message,
-                                        update.authority_receipt_eligible,
-                                    )?;
-                                    scope_view_cuts.insert(subscription, settled_through);
-                                }
-                            }
-                        }
                         message => {
                             if let SyncMessage::FateUpdate { tx_id, .. } = &message {
                                 let admitted = *self.admitted_upstream_authority.borrow();
@@ -1334,21 +1206,6 @@ where
                                 }
                                 _ => None,
                             };
-                            if let SyncMessage::CommitUnit { tx, .. } = &message
-                                && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
-                                && self.node.borrow().branch_record(branch).is_none()
-                            {
-                                if let std::collections::btree_map::Entry::Vacant(entry) =
-                                    pending_branch_metadata_repairs.entry(branch)
-                                {
-                                    entry.insert(());
-                                    self.transport
-                                        .send(SyncMessage::FetchBranchMetadata {
-                                            branches: vec![branch],
-                                        })
-                                        .map_err(transport_error)?;
-                                }
-                            }
                             if !pending_view_updates.is_empty() {
                                 apply_pending_authority_view_updates(
                                     &self.node,
@@ -1455,9 +1312,6 @@ where
                 shape_registrations,
                 deferred_subscribe_rejections,
                 served_current_rows,
-                pending_branch_metadata_repairs,
-                pending_session_branch_metadata,
-                branch_metadata_repair_cursor,
                 scope_purposes,
                 scope_aggregates,
                 authority_scope_hydrations,
@@ -1473,47 +1327,6 @@ where
                 // Core -> peer edge before any client work starts.
                 if ingest_context.trust == CommitUnitTrust::TrustedBackend {
                     send_catalogue_snapshot_if_needed(&self.node, peer, self.transport.as_mut())?;
-                }
-                let repairs = next_branch_metadata_repairs(
-                    pending_branch_metadata_repairs,
-                    branch_metadata_repair_cursor,
-                );
-                if !repairs.is_empty() {
-                    self.transport
-                        .send(SyncMessage::FetchBranchMetadata { branches: repairs })
-                        .map_err(transport_error)?;
-                }
-                if ingest_context.trust == CommitUnitTrust::Session {
-                    let pending_ids = pending_session_branch_metadata
-                        .keys()
-                        .copied()
-                        .collect::<Vec<_>>();
-                    for branch in pending_ids {
-                        let metadata = pending_session_branch_metadata
-                            .get(&branch)
-                            .cloned()
-                            .expect("pending branch metadata id remains present");
-                        if self.node.borrow_mut().admit_session_branch_metadata(
-                            metadata.clone(),
-                            ingest_context.identity,
-                        )? {
-                            pending_session_branch_metadata.remove(&branch);
-                            let responses = self.node.borrow_mut().apply_sync_message(
-                                SyncMessage::BranchMetadata(metadata.clone()),
-                            )?;
-                            for response in responses {
-                                send_with_sync_context(
-                                    &self.node,
-                                    peer,
-                                    self.transport.as_mut(),
-                                    response,
-                                )?;
-                            }
-                            self.transport
-                                .send(SyncMessage::BranchMetadata(metadata))
-                                .map_err(transport_error)?;
-                        }
-                    }
                 }
                 let mut applied_inbound = false;
                 let mut scheduled_immediate = false;
@@ -1532,10 +1345,6 @@ where
                         continue;
                     }
                     applied_inbound = true;
-                    let admitted_metadata = match &message {
-                        SyncMessage::BranchMetadata(metadata) => Some(metadata.branch_id),
-                        _ => None,
-                    };
                     #[cfg(feature = "sync-autopsy")]
                     sync_autopsy::record(format!(
                         "subscriber recv {}",
@@ -2226,19 +2035,6 @@ where
                                 )?;
                             }
                         }
-                        SyncMessage::FetchBranchMetadata { branches } => {
-                            if let Err(message) = validate_fetch_branch_metadata(&branches) {
-                                let _ = message;
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
-                            drop_peer_request(&self.node);
-                            continue;
-                        }
-                        // Branch routing records select persistent partitions.
-                        // Sessions may introduce their own locally-authored
-                        // record only when its creator matches the authenticated
-                        // link and its declared dependencies are available.
                         other => {
                             if matches!(other, SyncMessage::SessionClaims { .. })
                                 && ingest_context.trust == CommitUnitTrust::Session
@@ -2248,44 +2044,6 @@ where
                                 // broader policy context after authentication.
                                 drop_peer_request(&self.node);
                                 continue;
-                            }
-                            if let SyncMessage::BranchMetadata(metadata) = &other
-                                && ingest_context.trust == CommitUnitTrust::Session
-                            {
-                                let admitted =
-                                    self.node.borrow_mut().admit_session_branch_metadata(
-                                        metadata.clone(),
-                                        ingest_context.identity,
-                                    )?;
-                                if !admitted {
-                                    if let Some(existing) =
-                                        pending_session_branch_metadata.get(&metadata.branch_id)
-                                        && existing != metadata
-                                    {
-                                        return Err(Error::new(
-                                            ErrorCode::Protocol,
-                                            "conflicting pending branch metadata",
-                                        ));
-                                    }
-                                    pending_session_branch_metadata
-                                        .insert(metadata.branch_id, metadata.clone());
-                                    continue;
-                                }
-                            }
-                            if let SyncMessage::CommitUnit { tx, .. } = &other
-                                && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
-                                && self.node.borrow().branch_record(branch).is_none()
-                            {
-                                if let std::collections::btree_map::Entry::Vacant(entry) =
-                                    pending_branch_metadata_repairs.entry(branch)
-                                {
-                                    entry.insert(());
-                                    self.transport
-                                        .send(SyncMessage::FetchBranchMetadata {
-                                            branches: vec![branch],
-                                        })
-                                        .map_err(transport_error)?;
-                                }
                             }
                             let local_upload = match &other {
                                 SyncMessage::CommitUnit { tx, .. } => {
@@ -2505,21 +2263,6 @@ where
                                     self.transport.as_mut(),
                                     response,
                                 )?;
-                            }
-                            if let Some(branch) = admitted_metadata {
-                                pending_branch_metadata_repairs.remove(&branch);
-                                let metadata = self
-                                    .node
-                                    .borrow()
-                                    .branch_record(branch)
-                                    .map(Into::into)
-                                    .expect("admitted branch metadata remains present");
-                                // This exact echo acknowledges only the
-                                // downstream hop. Session admission may have
-                                // independently persisted an upstream relay.
-                                self.transport
-                                    .send(SyncMessage::BranchMetadata(metadata))
-                                    .map_err(transport_error)?;
                             }
                             if let Some((tx_id, unit)) = local_upload {
                                 let mut outbox = outbox.borrow_mut();

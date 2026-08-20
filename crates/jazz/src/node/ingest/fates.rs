@@ -362,32 +362,6 @@ where
             }
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
-        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
-            let branch = self
-                .branches
-                .branches
-                .get(&branch_id)
-                .cloned()
-                .ok_or(Error::BranchNotFound(branch_id))?;
-            if branch.state != codec::BranchState::Open {
-                return Ok(false);
-            }
-            if !self.branch_write_policy_allows(branch_id, permission_subject)? {
-                return Ok(false);
-            }
-            for version in versions {
-                let table = self.table_in_schema(version.table(), version.schema_version())?;
-                if !self.branch_table_write_policy_allows_version_record(
-                    &branch,
-                    &table,
-                    version,
-                    permission_subject,
-                )? {
-                    return Ok(false);
-                }
-            }
-            return Ok(true);
-        }
         for version in versions {
             if !self.version_satisfies_write_policy(version, permission_subject)? {
                 return Ok(false);
@@ -499,34 +473,8 @@ where
         now_ms: u64,
         mode: CommitUnitParkMode,
     ) -> Result<bool, Error> {
-        let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
-            return Ok(false);
-        };
-        if self.branches.branches.contains_key(&branch_id) {
-            return Ok(false);
-        }
-        if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
-            if existing.tx != *tx
-                || existing.versions != versions
-                || existing.ingest_context != mode.ingest_context
-            {
-                return Err(Error::ConflictingCommitUnit(tx.tx_id));
-            }
-            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
-            return Ok(true);
-        }
-        self.sync_metrics.parked_orphans += 1;
-        self.parking.parked_commit_units.insert(
-            tx.tx_id,
-            ParkedCommitUnit {
-                tx: tx.clone(),
-                versions: versions.to_vec(),
-                now_ms,
-                ingest_context: mode.ingest_context,
-                ingress_role: mode.ingress_role,
-            },
-        );
-        Ok(true)
+        let _ = (tx, versions, now_ms, mode);
+        Ok(false)
     }
 
     pub(super) fn missing_parent_refs(

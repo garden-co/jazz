@@ -62,19 +62,10 @@ pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, Schem
         .collect::<Result<Vec<_>, _>>()?;
     coerce_typed_literals(schema, &mut converted);
     validate_converted_schema(&converted)?;
-    let branch_read_policy =
-        convert_optional_branch_policy(schema, "branch_read_policy", schema.branch_read_policy())?;
-    let branch_write_policy = convert_optional_branch_policy(
-        schema,
-        "branch_write_policy",
-        schema.branch_write_policy(),
-    )?;
     Ok(JazzSchema::from_runtime(
         schema.clone(),
         RuntimeSchema {
             tables: converted,
-            branch_read_policy,
-            branch_write_policy,
         },
     ))
 }
@@ -86,32 +77,11 @@ pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     convert_public_schema(&schema).map_err(|error| format!("compile public schema: {error}"))
 }
 
-fn convert_optional_branch_policy(
-    schema: &Schema,
-    path: &str,
-    expr: Option<&PolicyExpr>,
-) -> Result<Option<Query>, SchemaConversionError> {
-    let Some(expr) = expr else {
-        return Ok(None);
-    };
-    let branch_name = TableName::from("jazz_branches");
-    let branch_schema = TableSchema::builder("jazz_branches")
-        .column("branch_id", ColumnType::Uuid)
-        .column("created_by", ColumnType::Uuid)
-        .nullable_column("parent", ColumnType::Uuid)
-        .nullable_column("base_global", ColumnType::Timestamp)
-        .column("state", ColumnType::Text)
-        .build();
-    let mut schema = schema.clone();
-    schema.insert(branch_name, branch_schema.clone());
-    convert_policy(&schema, &branch_schema, &branch_name, path, expr).map(Some)
 }
 
 fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
     let schema = RuntimeSchema {
         tables: tables.to_vec(),
-        branch_read_policy: None,
-        branch_write_policy: None,
     };
     for table in tables {
         if let Some(policy) = &table.read_policy {

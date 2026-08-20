@@ -120,19 +120,11 @@ impl Deref for JazzSchema {
 pub struct RuntimeSchema {
     /// Application tables in the schema.
     pub tables: Vec<TableSchema>,
-    /// Read policy for branch metadata rows. `None` means branch metadata is
-    /// public for reads.
-    pub branch_read_policy: Option<Query>,
-    /// Write policy for branch metadata rows. `None` means branch metadata is
-    /// public for writes.
-    pub branch_write_policy: Option<Query>,
 }
 
 impl PartialEq for RuntimeSchema {
     fn eq(&self, other: &Self) -> bool {
         self.tables == other.tables
-            && self.branch_read_policy == other.branch_read_policy
-            && self.branch_write_policy == other.branch_write_policy
     }
 }
 
@@ -142,8 +134,6 @@ impl RuntimeSchema {
     pub(crate) fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
         Self {
             tables: tables.into_iter().collect(),
-            branch_read_policy: None,
-            branch_write_policy: None,
         }
         .validated()
     }
@@ -198,24 +188,6 @@ impl RuntimeSchema {
                     .unwrap_or_else(|_| panic!("valid {label} write policy shape"));
             }
         }
-        if let Some(policy) = &self.branch_read_policy {
-            assert_eq!(
-                policy.table, "jazz_branches",
-                "branch read policy table must be jazz_branches"
-            );
-            policy
-                .validate_runtime(&self)
-                .expect("valid branch read policy shape");
-        }
-        if let Some(policy) = &self.branch_write_policy {
-            assert_eq!(
-                policy.table, "jazz_branches",
-                "branch write policy table must be jazz_branches"
-            );
-            policy
-                .validate_runtime(&self)
-                .expect("valid branch write policy shape");
-        }
         self
     }
 
@@ -261,8 +233,6 @@ impl RuntimeSchema {
             schema_versions_table(),
             catalogue_table(),
             catalogue_pointer_table(),
-            branch_partitions_table(),
-            branches_table(),
             transactions_table(),
             rejected_transactions_table(),
             pending_edges_table(),
@@ -280,8 +250,6 @@ impl RuntimeSchema {
             schema_versions_table(),
             catalogue_table(),
             catalogue_pointer_table(),
-            branch_partitions_table(),
-            branches_table(),
         ]
     }
 
@@ -347,19 +315,6 @@ impl RuntimeSchema {
                 ]),
             ))
     }
-}
-
-pub(crate) fn branch_metadata_table_schema() -> TableSchema {
-    TableSchema::new(
-        "jazz_branches",
-        [
-            ColumnSchema::new("branch_id", GrooveColumnType::Uuid),
-            ColumnSchema::new("created_by", GrooveColumnType::Uuid),
-            ColumnSchema::new("parent", GrooveColumnType::Uuid.nullable()),
-            ColumnSchema::new("base_global", GrooveColumnType::U64.nullable()),
-            ColumnSchema::new("state", GrooveColumnType::String),
-        ],
-    )
 }
 
 /// Per-column strategy used when upstream nodes merge concurrent content heads.
@@ -915,38 +870,6 @@ fn catalogue_pointer_table() -> GrooveTableSchema {
         ],
     )
     .with_primary_key(PrimaryKey::new("revision", IntegerKeyType::U64).user_supplied())
-}
-
-fn branch_partitions_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_branch_partitions",
-        [
-            column("physical_table_id", GrooveColumnType::U64),
-            column("branch_id", GrooveColumnType::Uuid),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
-        PrimaryKeyColumn::uuid("branch_id"),
-    ]))
-}
-
-fn branches_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_branches",
-        [
-            column("branch_id", GrooveColumnType::Uuid),
-            column("created_by", GrooveColumnType::Uuid),
-            column("parent", GrooveColumnType::Uuid.nullable()),
-            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
-            column(
-                "state",
-                storage_enum("jazz_branch_state", &["open", "merged", "discarded"]),
-            ),
-            column("metadata_pending", GrooveColumnType::Bool),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("branch_id")]))
 }
 
 fn global_changes_table() -> GrooveTableSchema {

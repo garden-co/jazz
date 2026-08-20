@@ -230,95 +230,6 @@ where
         result
     }
 
-    pub(in crate::node) fn branch_read_policy_authorized_branch_ids(
-        &mut self,
-        branch_id: BranchId,
-        identity: AuthorId,
-    ) -> Result<BTreeSet<RowUuid>, Error> {
-        let Some(policy) = self.catalogue.schema.branch_read_policy.clone() else {
-            return Ok(BTreeSet::from([RowUuid(branch_id.0)]));
-        };
-        let mut query = policy;
-        query.filters.push(crate::query::eq(
-            crate::query::col("id"),
-            crate::query::lit(Value::Uuid(branch_id.0)),
-        ));
-        let policy_shape = query.validate(&self.catalogue.schema)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let policy_shape = bind_query_params_with_mode(
-            &policy_shape,
-            &policy_binding,
-            &self.catalogue.schema,
-            ParamBindingMode::InlineAllReachableSeeds,
-        )?;
-        if !policy_shape.params().is_empty() {
-            return Err(Error::QueryCapability(
-                "branch read policy filters with runtime parameters must lower through query-engine binding sources"
-                    .to_owned(),
-            ));
-        }
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
-                &policy_shape,
-                &binding,
-                None,
-                BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-            ),
-            shape: input_shape,
-        };
-        let request = QueryProgramRequest {
-            authorization_mode: QueryAuthorizationMode::TrustedServing,
-            reads: current_query_read_set(
-                &input.shape,
-                policy_shape.schema_version(),
-                policy_shape.schema_version(),
-                DurabilityTier::Local,
-                None,
-            ),
-            policy: match self.query_program_policy_context(identity) {
-                PolicyContext::Identity {
-                    mode,
-                    permission_subject,
-                    claims,
-                    attribution,
-                } => PolicyContext::AuthorizationSubplan {
-                    protected_source: root_source_id(policy_shape.query().table.as_str()),
-                    role: PolicyDecisionRole::Read,
-                    mode,
-                    permission_subject,
-                    claims,
-                    attribution,
-                },
-                other => other,
-            },
-            input,
-            output: current_query_output_request(
-                CurrentQueryProgramOutput::AuthorizedRows,
-                policy_shape.query(),
-            ),
-        };
-        let graph = self.policy_authorization_row_id_graph(request)?.graph;
-        let deltas = self.database.query_graph(graph).map_err(Error::Groove)?;
-        let row_idx =
-            deltas
-                .descriptor
-                .field_index("row_uuid")
-                .ok_or(Error::InvalidStoredValue(
-                    "branch read authorization terminal is missing row_uuid",
-                ))?;
-        let mut rows = BTreeSet::new();
-        for (record, weight) in deltas.iter() {
-            if weight <= 0 {
-                continue;
-            }
-            rows.insert(RowUuid(record.get_uuid(row_idx)?));
-        }
-        Ok(rows)
-    }
-
     pub(super) fn query_program_policy_context(&self, identity: AuthorId) -> PolicyContext {
         if identity == AuthorId::SYSTEM {
             PolicyContext::System
@@ -534,28 +445,6 @@ where
         )?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
     }
-
-    pub(in crate::node) fn branch_write_policy_query_allows_candidate(
-        &mut self,
-        branch_id: BranchId,
-        table: &TableSchema,
-        policy: &crate::query::Query,
-        row_uuid: RowUuid,
-        cells: &BTreeMap<String, Value>,
-        identity: AuthorId,
-        insert_candidate: bool,
-    ) -> Result<bool, Error> {
-        self.write_policy_query_allows_candidate(
-            table,
-            policy,
-            row_uuid,
-            cells,
-            identity,
-            insert_candidate,
-            Some(branch_id),
-        )
-    }
-
     fn write_policy_query_program_allows(
         &mut self,
         program: &QueryProgram,

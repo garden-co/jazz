@@ -357,7 +357,6 @@ fn reconcile_nested_scalar_enum_cases(
     Ok(())
 }
 
-mod branches;
 mod catalogue_ingest;
 mod codec;
 mod currency;
@@ -383,7 +382,6 @@ pub(crate) use views::MaintainedViewBundleInputs;
 
 type ResultRowMembershipKey = crate::tools::OutputOccurrenceId;
 
-use branches::BranchRecord;
 use codec::*;
 use database_slot::DatabaseSlot;
 use open_tx::*;
@@ -526,8 +524,6 @@ pub struct NodeState<S> {
     /// bootstrap snapshot boundary and therefore carries a completion record
     /// that must be refreshed with later trusted snapshots.
     catalogue_bootstrap_marker: bool,
-    /// In-memory branch records and branch-specific storage partitions.
-    branches: Branches,
     /// Local logical time and global-application progress counters.
     clock: Clock,
     /// Commit-unit and shape-registration payloads waiting for missing context.
@@ -637,17 +633,6 @@ pub(crate) enum CatalogueBootstrapState {
     Uninitialized,
     /// A durable genesis, mappings, and pointer have been installed.
     Ready,
-}
-
-/// Branch metadata and branch-partition layout known by the node.
-#[derive(Clone, Debug, Default)]
-struct Branches {
-    /// In-memory branch records indexed by branch ID.
-    branches: BTreeMap<BranchId, BranchRecord>,
-    /// Storage partitions materialized for physical-table/branch pairs.
-    branch_partitions: BTreeSet<(PhysicalTableId, BranchId)>,
-    /// Locally-authored metadata awaiting an upstream acknowledgement.
-    pending_metadata_uploads: BTreeSet<BranchId>,
 }
 
 /// Local transaction clock and settled-global application progress.
@@ -1502,7 +1487,6 @@ struct CatalogueOpenState<S> {
     next_physical_table_id: u64,
     next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
-    branch_partitions: BTreeSet<(PhysicalTableId, BranchId)>,
     catalogue_bootstrap_marker: bool,
 }
 

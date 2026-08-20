@@ -398,7 +398,6 @@ where
             next_physical_table_id,
             next_physical_column_id,
             current_write_schema,
-            branch_partitions,
             catalogue_bootstrap_marker,
         } = Self::open_catalogue_stage(schema.clone(), storage, catalogue_bootstrap_state)?;
         #[cfg(feature = "testing")]
@@ -423,7 +422,6 @@ where
             &registration_schemas,
             &registration_aliases,
             &registration_mappings,
-            &branch_partitions,
             storage,
         )?;
         #[cfg(feature = "testing")]
@@ -505,11 +503,6 @@ where
             },
             catalogue_bootstrap_state,
             catalogue_bootstrap_marker,
-            branches: Branches {
-                branches: BTreeMap::new(),
-                branch_partitions,
-                pending_metadata_uploads: BTreeSet::new(),
-            },
             clock: Clock {
                 tx_time: TxTime::default(),
                 global_time_register: GlobalTime::default(),
@@ -634,7 +627,6 @@ where
         catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
         schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
         physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-        branch_partitions: &BTreeSet<(PhysicalTableId, BranchId)>,
         storage: S,
     ) -> Result<Database<S>, Error> {
         debug_assert_lowered_layouts(schema);
@@ -643,7 +635,6 @@ where
             catalogue_schemas,
             schema_version_aliases,
             physical_mappings,
-            branch_partitions,
         )?);
         let layout = StorageLayout::jazz_class_v1();
         Database::new_with_storage_layout(lowered, storage, layout).map_err(Error::from)
@@ -733,7 +724,6 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
-            &self.branches.branch_partitions,
             storage,
         )?;
         self.database.replace(database);
@@ -1182,16 +1172,6 @@ where
                 ),
             };
         }
-        let mut branch_partitions = BTreeSet::new();
-        for raw in meta_database.primary_key_scan_raw("jazz_branch_partitions", &[])? {
-            let record = raw.record();
-            let table_id = PhysicalTableId(
-                record.get_u64(BranchPartitionRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?,
-            );
-            let branch_id =
-                BranchId(record.get_uuid(BranchPartitionRowRecord::FIELD_BRANCH_ID_IDX)?);
-            branch_partitions.insert((table_id, branch_id));
-        }
         Ok(CatalogueOpenState {
             storage: meta_database.into_storage(),
             schemas: catalogue_schemas,
@@ -1206,7 +1186,6 @@ where
             next_physical_table_id,
             next_physical_column_id,
             current_write_schema,
-            branch_partitions,
             catalogue_bootstrap_marker: catalogue_bootstrap_ready.is_some(),
         })
     }

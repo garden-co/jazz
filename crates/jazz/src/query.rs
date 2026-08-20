@@ -14,7 +14,6 @@ use thiserror::Error;
 use crate::ids::SchemaVersionId;
 use crate::schema::{
     ColumnSchema as JazzColumnSchema, JazzSchema, RuntimeSchema, TableSchema,
-    branch_metadata_table_schema,
 };
 
 // Stable public syntax and relation-facade vocabulary.

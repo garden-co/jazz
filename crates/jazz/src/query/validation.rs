@@ -773,9 +773,6 @@ fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), Query
 }
 
 fn schema_table(schema: &RuntimeSchema, name: &str) -> Result<TableSchema, QueryError> {
-    if name == "jazz_branches" {
-        return Ok(branch_metadata_table_schema());
-    }
     schema
         .tables
         .iter()
