@@ -261,7 +261,13 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
             .is_empty()
     );
 
-    db.restore_in_branch("todos", head, row).unwrap();
+    db.restore_with_cells_in_branch(
+        "todos",
+        head,
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("restored".to_owned()))]),
+    )
+    .unwrap();
     let restored = block_on(subscription.next_event()).unwrap();
     assert!(
         matches!(
@@ -274,6 +280,6 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
     let table = &schema.tables[0];
     assert_eq!(
         rows[0].cell(table, "title"),
-        Some(Value::String("base".to_owned()))
+        Some(Value::String("restored".to_owned()))
     );
 }

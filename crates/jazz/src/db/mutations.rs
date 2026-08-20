@@ -97,6 +97,30 @@ where
         )
     }
 
+    /// Insert one exact branch incarnation while evaluating policy as `identity`.
+    pub fn insert_with_id_in_branch_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_exact_incarnation_absent(table, &branch, row)?;
+        self.write_mergeable_at_ms_with_authorship_in_branch(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+            None,
+            self.next_now_ms(),
+            branch,
+        )
+    }
+
     /// Insert a caller-id row while attributing provenance to `made_by`.
     ///
     /// See [`Db::insert_attributed`] for the security boundary.
@@ -315,6 +339,46 @@ where
         )
     }
 
+    /// Patch one exact branch incarnation while evaluating policy as `identity`.
+    pub fn update_in_branch_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        if patch.is_empty() {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "exact branch update requires at least one authored column",
+            ));
+        }
+        let mut node = self.node.node.borrow_mut();
+        let Some(mut cells) = node.visible_current_cells_in_branch(table, &branch, row)? else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("branch incarnation not observed: {}", row.0),
+            ));
+        };
+        let parent = node.local_content_winner_tx_id_in_branch(table, &branch, row)?;
+        drop(node);
+        let authored_columns = patch.keys().cloned().collect();
+        cells.extend(patch);
+        self.write_mergeable_at_ms_with_authorship_in_branch(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            parent.into_iter().collect(),
+            None,
+            Some(authored_columns),
+            self.next_now_ms(),
+            branch,
+        )
+    }
+
     /// Patch a row through a head-over-base view, copying inherited content
     /// into the head incarnation without a cross-branch causal parent.
     pub fn update_in_branch_view(
@@ -347,6 +411,40 @@ where
         };
         inherited.extend(patch);
         self.insert_with_id_in_branch(table, head, row, inherited)
+    }
+
+    /// Patch through a branch view while evaluating policy as `identity`.
+    pub fn update_in_branch_view_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch(table, &head, row)?
+            .is_some()
+        {
+            return self.update_in_branch_for_identity(identity, table, head, row, patch);
+        }
+        let Some(mut inherited) = self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+        else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("row is not visible in branch view: {}", row.0),
+            ));
+        };
+        inherited.extend(patch);
+        self.insert_with_id_in_branch_for_identity(identity, table, head, row, inherited)
     }
 
     /// Insert or patch one exact branch-keyed incarnation.
@@ -679,6 +777,44 @@ where
         )
     }
 
+    /// Delete one exact branch incarnation while evaluating policy as `identity`.
+    pub fn delete_in_branch_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+    ) -> Result<WriteHandle<S>, Error> {
+        let mut node = self.node.node.borrow_mut();
+        if node
+            .visible_current_cells_in_branch(table, &branch, row)?
+            .is_none()
+        {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("branch incarnation not observed: {}", row.0),
+            ));
+        }
+        let parents = node
+            .local_deletion_winner_tx_id_in_branch(table, &branch, row)?
+            .or(node.local_content_winner_tx_id_in_branch(table, &branch, row)?)
+            .into_iter()
+            .collect();
+        drop(node);
+        self.write_mergeable_at_ms_with_authorship_in_branch(
+            identity,
+            Some(identity),
+            table,
+            row,
+            BTreeMap::new(),
+            parents,
+            Some(DeletionEvent::Deleted),
+            None,
+            self.next_now_ms(),
+            branch,
+        )
+    }
+
     /// Delete a row through a head-over-base view. An inherited base row is
     /// masked by a deletion register in the head incarnation.
     pub fn delete_in_branch_view(
@@ -728,6 +864,55 @@ where
         )
     }
 
+    /// Delete through a branch view while evaluating policy as `identity`.
+    pub fn delete_in_branch_view_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+    ) -> Result<WriteHandle<S>, Error> {
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch(table, &head, row)?
+            .is_some()
+        {
+            return self.delete_in_branch_for_identity(identity, table, head, row);
+        }
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+            .is_none()
+        {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("row is not visible in branch view: {}", row.0),
+            ));
+        }
+        let parent = self
+            .node
+            .node
+            .borrow_mut()
+            .local_deletion_winner_tx_id_in_branch(table, &head, row)?;
+        self.write_mergeable_at_ms_with_authorship_in_branch(
+            identity,
+            Some(identity),
+            table,
+            row,
+            BTreeMap::new(),
+            parent.into_iter().collect(),
+            Some(DeletionEvent::Deleted),
+            None,
+            self.next_now_ms(),
+            head,
+        )
+    }
+
     /// Restore the deletion register of one exact branch-keyed incarnation.
     pub fn restore_in_branch(
         &self,
@@ -758,6 +943,104 @@ where
             self.next_now_ms(),
             branch,
         )
+    }
+
+    /// Restore an exact branch incarnation and replace its content atomically.
+    pub fn restore_with_cells_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.restore_with_cells_in_branch_for_identity(
+            self.identity.author,
+            None,
+            table,
+            branch,
+            row,
+            cells,
+        )
+    }
+
+    /// Restore an exact branch incarnation while evaluating policy as `identity`.
+    pub fn restore_with_cells_in_branch_as_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.restore_with_cells_in_branch_for_identity(
+            identity,
+            Some(identity),
+            table,
+            branch,
+            row,
+            cells,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn restore_with_cells_in_branch_for_identity(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let (content_parents, deletion_parents) = {
+            let mut node = self.node.node.borrow_mut();
+            let deletion_parent = node
+                .local_deletion_winner_tx_id_in_branch(table, &branch, row)?
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::NotObserved,
+                        format!("branch deletion not observed: {}", row.0),
+                    )
+                })?;
+            (
+                node.local_content_winner_tx_id_in_branch(table, &branch, row)?
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                vec![deletion_parent],
+            )
+        };
+        let content = MergeableCommit::new(table, row, self.next_now_ms())
+            .branch(branch.clone())
+            .made_by(made_by)
+            .parents(content_parents)
+            .cells(cells);
+        let deletion = MergeableCommit::new(table, row, self.next_now_ms())
+            .branch(branch)
+            .made_by(made_by)
+            .parents(deletion_parents)
+            .cells(BTreeMap::<String, Value>::new())
+            .deletion(DeletionEvent::Restored);
+        let (content, deletion) = match permission_subject {
+            Some(subject) => (
+                content.permission_subject(subject),
+                deletion.permission_subject(subject),
+            ),
+            None => (content, deletion),
+        };
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_many_in_schema(self.schema_version_id, vec![content, deletion])?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
     }
 
     /// Soft-delete a row with explicit millisecond provenance time.

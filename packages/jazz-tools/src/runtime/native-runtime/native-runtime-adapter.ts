@@ -132,6 +132,13 @@ type NativeDb = {
     cells: Uint8Array,
     branch: unknown,
   ): Write;
+  insertWithIdEncodedInBranchForIdentity?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    branch: unknown,
+    author: Uint8Array,
+  ): Write;
   restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
   restoreEncodedForIdentity(
     table: string,
@@ -147,6 +154,19 @@ type NativeDb = {
     updatedAtMs?: number | null,
   ): Write;
   restoreInBranch?(table: string, rowId: Uint8Array, branch: unknown): Write;
+  restoreEncodedInBranch?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    branch: unknown,
+  ): Write;
+  restoreEncodedInBranchForIdentity?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    branch: unknown,
+    author: Uint8Array,
+  ): Write;
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): Write;
   updateEncodedForIdentity(
     table: string,
@@ -174,6 +194,14 @@ type NativeDb = {
     head: unknown,
     base?: unknown,
   ): Write;
+  updateEncodedInBranchViewForIdentity?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    head: unknown,
+    base: unknown,
+    author: Uint8Array,
+  ): Write;
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
   upsertEncodedForIdentity(
     table: string,
@@ -197,6 +225,13 @@ type NativeDb = {
   ): Write;
   deleteInBranch?(table: string, rowId: Uint8Array, branch: unknown): Write;
   deleteInBranchView?(table: string, rowId: Uint8Array, head: unknown, base?: unknown): Write;
+  deleteInBranchViewForIdentity?(
+    table: string,
+    rowId: Uint8Array,
+    head: unknown,
+    base: unknown,
+    author: Uint8Array,
+  ): Write;
   requestInsertPermissionAdviceEncoded?(
     table: string,
     cells: Uint8Array,
@@ -222,12 +257,6 @@ type NativeDb = {
     callback:
       | ((urgency: "immediate" | "deferred") => void)
       | ((error: Error | null, urgency: string) => void),
-  ): void;
-  restoreEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   setNonDurableClient?(): void;
@@ -678,9 +707,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const write = writeOrNormalizeRejection("Insert", () =>
       branchView
         ? writeIdentity
-          ? (() => {
-              throw new Error("branch writes with an override identity are not yet supported");
-            })()
+          ? requireBranchMethod(
+              this.db.insertWithIdEncodedInBranchForIdentity,
+              "identity-scoped branch inserts",
+            ).call(this.db, table, rowId, cells, branchView.head, writeIdentity)
           : requireBranchMethod(this.db.insertWithIdEncodedInBranch, "branch inserts").call(
               this.db,
               table,
@@ -734,13 +764,15 @@ export class NativeRuntimeAdapter implements Runtime {
     const write = writeOrNormalizeRejection("Restore", () =>
       branchView
         ? writeIdentity
-          ? (() => {
-              throw new Error("branch writes with an override identity are not yet supported");
-            })()
-          : requireBranchMethod(this.db.restoreInBranch, "branch restores").call(
+          ? requireBranchMethod(
+              this.db.restoreEncodedInBranchForIdentity,
+              "identity-scoped branch restores",
+            ).call(this.db, table, rowId, cells, branchView.head, writeIdentity)
+          : requireBranchMethod(this.db.restoreEncodedInBranch, "branch restores").call(
               this.db,
               table,
               rowId,
+              cells,
               branchView.head,
             )
         : writeIdentity
@@ -788,9 +820,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const write = writeOrNormalizeRejection("Update", () =>
       branchView
         ? writeIdentity
-          ? (() => {
-              throw new Error("branch writes with an override identity are not yet supported");
-            })()
+          ? requireBranchMethod(
+              this.db.updateEncodedInBranchViewForIdentity,
+              "identity-scoped branch updates",
+            ).call(this.db, table, rowId, patch, branchView.head, branchView.base, writeIdentity)
           : branchView.base === undefined
             ? requireBranchMethod(this.db.updateEncodedInBranch, "exact branch updates").call(
                 this.db,
@@ -885,9 +918,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const write = writeOrNormalizeRejection("Delete", () =>
       branchView
         ? writeIdentity
-          ? (() => {
-              throw new Error("branch writes with an override identity are not yet supported");
-            })()
+          ? requireBranchMethod(
+              this.db.deleteInBranchViewForIdentity,
+              "identity-scoped branch deletes",
+            ).call(this.db, table, rowId, branchView.head, branchView.base, writeIdentity)
           : branchView.base === undefined
             ? requireBranchMethod(this.db.deleteInBranch, "exact branch deletes").call(
                 this.db,
