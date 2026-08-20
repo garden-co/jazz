@@ -146,7 +146,7 @@ fn assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
             &Default::default(),
         )
         .unwrap();
-    core.unsubscribe_groove_subscription(receiver.id());
+    crate::db::block_on(core.unsubscribe_groove_subscription(receiver.id()));
 
     assert_eq!(
         transitions

@@ -1157,7 +1157,7 @@ where
 mod authorization_scope_compiler_tests {
     use super::*;
     use crate::ids::NodeUuid;
-    use crate::legacy_test_future::ResultFutureExt as _;
+    use crate::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
     use crate::node::NodeState;
     use crate::protocol::TableLens;
     use crate::schema::WritePolicies;
@@ -1449,7 +1449,7 @@ mod authorization_scope_compiler_tests {
         let mut node =
             NodeState::new(NodeUuid::from_bytes([0x31; 16]), base.clone(), storage).unwrap();
         let evolved_id = evolved.version_id();
-        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
@@ -1471,7 +1471,7 @@ mod authorization_scope_compiler_tests {
             )),
         })
         .unwrap();
-        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -1544,7 +1544,7 @@ mod authorization_scope_compiler_tests {
         let mut node =
             NodeState::new(NodeUuid::from_bytes([0x41; 16]), base.clone(), storage).unwrap();
         let evolved_id = evolved.version_id();
-        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
@@ -1572,7 +1572,7 @@ mod authorization_scope_compiler_tests {
             )),
         })
         .unwrap();
-        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,

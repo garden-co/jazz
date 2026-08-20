@@ -1884,7 +1884,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         bob_before,
         "unaffected parent tree is retained byte-for-byte"
     );
-    node.unsubscribe_groove_subscription(subscription.id());
+    crate::db::block_on(node.unsubscribe_groove_subscription(subscription.id()));
 }
 
 #[test]
@@ -2029,7 +2029,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     };
     assert_eq!(comments.len(), 2);
     assert_eq!(attachments.len(), 1, "sibling route grouping remains isolated");
-    node.unsubscribe_groove_subscription(subscription.id());
+    crate::db::block_on(node.unsubscribe_groove_subscription(subscription.id()));
 }
 
 #[test]

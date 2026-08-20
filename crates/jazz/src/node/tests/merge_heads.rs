@@ -67,20 +67,22 @@ fn merge_heads_match_history_for_edge_accepted_units() {
         panic!("expected commit unit");
     };
 
-    edge.ingest_edge_authority_mergeable_commit_unit(
+    let outcome = crate::db::block_on(edge.ingest_edge_authority_mergeable_commit_unit(
         right_tx,
         right_versions,
         u64::MAX - SKEW_TOLERANCE_MS,
-    )
+    ))
     .unwrap();
+    settle_outcome(&mut edge, outcome).unwrap();
     edge.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
-    edge.ingest_edge_authority_mergeable_commit_unit(
+    let outcome = crate::db::block_on(edge.ingest_edge_authority_mergeable_commit_unit(
         left_tx,
         left_versions,
         u64::MAX - SKEW_TOLERANCE_MS,
-    )
+    ))
     .unwrap();
+    settle_outcome(&mut edge, outcome).unwrap();
     edge.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
 }
