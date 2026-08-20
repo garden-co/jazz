@@ -75,6 +75,10 @@ impl Database {
         self.durable_publication_frontier
     }
 
+    pub(super) fn resident_storage(&self) -> StagedWriteOverlay<'_, LayoutStorage> {
+        StagedWriteOverlay::new(&self.storage, &self.resident_writes)
+    }
+
     /// Reject any host operation after an ambiguous durable finalization.
     #[doc(hidden)]
     pub fn ensure_usable(&self) -> Result<(), Error> {

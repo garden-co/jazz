@@ -1029,8 +1029,8 @@ fn committed_terminal_output_carries_its_durable_publication_identity() {
 
 #[test]
 fn resident_publication_is_queryable_and_tagged_while_persistence_is_suspended() {
-    let (storage, control) = TestStorage::controlled(&["albums"]);
-    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+    let mut database = block_on(Database::new(indexed_schema(), storage)).unwrap();
     let subscription =
         block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
     assert!(subscription.recv().unwrap().is_empty());
@@ -1063,6 +1063,36 @@ fn resident_publication_is_queryable_and_tagged_while_persistence_is_suspended()
 
     let rows = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
     assert_eq!(rows.deltas.len(), 1);
+    assert!(
+        block_on(database.primary_key_get_raw("albums", &[Value::U64(1)]))
+            .unwrap()
+            .is_some(),
+        "direct point reads must observe applied resident writes",
+    );
+    assert_eq!(
+        block_on(database.primary_key_scan_raw("albums", &[]))
+            .unwrap()
+            .len(),
+        1,
+        "direct scans must observe applied resident writes",
+    );
+    assert!(
+        block_on(database.primary_key_last_raw("albums", &[]))
+            .unwrap()
+            .is_some(),
+        "reverse point/prefix reads must observe applied resident writes",
+    );
+    assert_eq!(
+        block_on(database.index_scan_raw(
+            "albums",
+            "albums_by_title",
+            &[Value::String("Kind of Blue".into())],
+        ))
+        .unwrap()
+        .len(),
+        1,
+        "direct index reads must observe applied resident writes",
+    );
     assert_eq!(database.durable_publication_frontier(), None);
 
     drop(persistence);

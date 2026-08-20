@@ -1363,8 +1363,10 @@ where
         let (content_parent, deletion_parent) = {
             let mut node = self.node.node.lock().await;
             (
-                node.local_content_winner_tx_id(table, row).await?,
-                node.local_deletion_winner_tx_id(table, row).await?,
+                node.local_content_winner_tx_id_in_schema(self.schema_version_id, table, row)
+                    .await?,
+                node.local_deletion_winner_tx_id_in_schema(self.schema_version_id, table, row)
+                    .await?,
             )
         };
         if deletion_parent.is_some() {
@@ -1391,7 +1393,7 @@ where
             .node
             .lock()
             .await
-            .local_deletion_winner_tx_id(table, row)
+            .local_deletion_winner_tx_id_in_schema(self.schema_version_id, table, row)
             .await?
             .is_some();
         if deleted {
@@ -1411,7 +1413,7 @@ where
             .node
             .lock()
             .await
-            .local_deletion_winner_tx_id(table, row)
+            .local_deletion_winner_tx_id_in_schema(self.schema_version_id, table, row)
             .await?
             .is_some();
         if deleted {
@@ -1428,12 +1430,12 @@ where
     ) -> Result<(Vec<TxId>, Vec<TxId>), Error> {
         let mut node = self.node.node.lock().await;
         let content_parents = node
-            .local_content_winner_tx_id(table, row)
+            .local_content_winner_tx_id_in_schema(self.schema_version_id, table, row)
             .await?
             .into_iter()
             .collect::<Vec<_>>();
         let deletion_parents = node
-            .local_deletion_winner_tx_id(table, row)
+            .local_deletion_winner_tx_id_in_schema(self.schema_version_id, table, row)
             .await?
             .into_iter()
             .collect::<Vec<_>>();

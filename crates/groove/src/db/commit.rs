@@ -33,7 +33,8 @@ impl Database {
             .drive_pending_incremental()
             .await
             .map_err(Error::IvmRuntime)?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let resident = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         let tick = self
             .ivm_runtime
             .tick(Vec::new(), &storage)
