@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-API-17`: Db::connectupstream MUST make every already-registered facade subscription eligible for immediate upstream announcement without requiring re-registration.
 - `INV-API-18`: `Db::subscribe` MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
 - `INV-API-31`: `Db::disconnect` MUST mark the `Db` intentionally offline, disconnect every schema client from its server transport, and leave the local runtime and store alive; `Db::reconnect` MUST clear that marker and reconnect every schema client. A schema client created while intentionally offline MUST remain offline until `reconnect`.
-- `INV-API-32`: While a `Db` is intentionally offline, a read with `propagation = LocalOnly` MUST resolve from current local materialized state without waiting for an upstream coverage frontier: a locally committed pending write MUST be returned, and a row written remotely during the offline period MUST be absent until reconnect delivery reaches the local store. `LocalOnly` selects the local snapshot; it is not a request to wait for that snapshot to become complete relative to an unavailable upstream.
+- `INV-API-32`: `ReadOpts.tier` selects the sufficient materialized knowledge and first-result gate; `Propagation` only controls whether evaluation or coverage may be forwarded upstream and MUST NOT change local-tier result semantics. Thus a `Local` read resolves from current local materialized state even with `Propagation::Full`: a locally committed pending write is returned, while a row written remotely but not yet delivered locally is absent. `LocalOnly` prevents upstream routing; it is not what makes a `Local` read local.
 - `INV-API-19`: Upstream announcement of a subscription MUST make its query definition available before the subscription that uses it, without re-announcing the same definition for that connection.
 - `INV-API-20`: An upstream connection MUST upload each locally-authored transaction at most once.
 - `INV-API-21`: A subscriber `PeerConnection::tick` MUST serve subscriptions under the `AuthorId` passed to `Node::accept_subscriber`, not under the serving node's own identity.
@@ -719,7 +719,7 @@ These are designed but not landed:
   teardown traps; the durable fix is an explicit async shutdown and transport
   lifecycle boundary that prevents callbacks into torn-down linear memory.
 
-### Intentional disconnect and local-only reads
+### Intentional disconnect, tiers, and propagation
 
 `Db::disconnect` marks the `Db` **intentionally offline**. It disconnects every
 schema client from its server transport and leaves the local runtime and store
@@ -728,15 +728,19 @@ marker and reconnects every schema client using the configured server URL and
 current auth configuration. A schema client created while the `Db` is
 intentionally offline remains offline until `reconnect` (`INV-API-31`).
 
-While intentionally offline, a read with `propagation = LocalOnly` resolves from
-the current local materialized state. It does not wait for an upstream coverage
-frontier and does not inspect the server (`INV-API-32`):
+`ReadOpts.tier` selects the materialized knowledge sufficient for a result and
+therefore its first-result gate. `Propagation` is independent: it controls
+whether query evaluation or coverage may be forwarded upstream, and does not
+change what a `Local` result means. Consequently, while intentionally offline,
+a `Local` read with the default `Propagation::Full` still resolves from current
+local materialized state (`INV-API-32`):
 
 - a locally committed, pending write is returned immediately;
 - a row written remotely during the offline period is absent — an empty result
   for a query matching only that row — until reconnect delivery reaches the
   local store.
 
-`LocalOnly` chooses the local snapshot. It is **not** a request to wait until
-that snapshot becomes complete relative to an upstream that is unavailable by
-construction. Convergence is asserted separately, after `reconnect`.
+`LocalOnly` prevents upstream routing. It is **not** what chooses the local
+snapshot, nor is it a request to wait until that snapshot becomes complete
+relative to an unavailable upstream. Convergence is asserted separately, after
+`reconnect`.

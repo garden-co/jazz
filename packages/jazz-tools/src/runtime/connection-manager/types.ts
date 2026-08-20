@@ -115,7 +115,7 @@ export abstract class ConnectionManager {
 
   protected onClientCreated(_input: ConnectionManagerClientInput): void {}
 
-  abstract ensureReady(tier?: DurabilityTier): Promise<void>;
+  abstract ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void>;
 
   abstract shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean;
 

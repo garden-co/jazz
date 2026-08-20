@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { createJazzClient, JazzSvelteProvider } from "jazz-tools/svelte";
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
   import type { DbConfig } from "jazz-tools";
   import { env } from "$env/dynamic/public";
   import { getToken } from "$lib/auth-client";
+  import JazzTokenRefresh from "$lib/JazzTokenRefresh.svelte";
 
   let { children: pageChildren } = $props();
-  let client = $state<ReturnType<typeof createJazzClient> | null>(null);
-  let unsubRefresh: (() => void) | undefined;
+  let config = $state<DbConfig | null>(null);
 
   onMount(() => {
     (async () => {
@@ -27,25 +27,15 @@
         );
         return;
       }
-      const config: DbConfig = { appId, serverUrl, jwtToken: token };
-      client = createJazzClient(config);
-
-      // Re-mint the Jazz JWT whenever Better Auth reports it as expired, so
-      // long-lived sessions don't silently drop to unauthenticated.
-      const resolved = await client;
-      unsubRefresh = resolved.db.onAuthChanged(async (state) => {
-        if (state.error !== "expired") return;
-        const fresh = await getToken();
-        if (fresh) resolved.db.updateAuthToken(fresh);
-      });
+      config = { appId, serverUrl, jwtToken: token };
     })();
-    return () => unsubRefresh?.();
   });
 </script>
 
-{#if client}
-  <JazzSvelteProvider {client}>
-    {#snippet children()}
+{#if config}
+  <JazzSvelteProvider {config}>
+    {#snippet children({ db })}
+      <JazzTokenRefresh {db} />
       {@render pageChildren?.()}
     {/snippet}
     {#snippet fallback()}

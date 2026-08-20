@@ -63,8 +63,8 @@ This uses `getSessionCookie`, a cheap cookie-presence check, not a full
 DB read.
 
 `src/routes/(authenticated)/+layout.svelte` fetches a Better Auth JWT
-once on mount and passes it to `createJazzClient`, which drives a
-`<JazzSvelteProvider>`. Because the hook guarantees a session on
+once on mount and passes it to `<JazzSvelteProvider>` as part of its
+configuration. Because the hook guarantees a session on
 `/dashboard/*`, the provider is only mounted when the user is
 authenticated — there's no anonymous fallback path to reason about. The
 same layout installs a `db.onAuthChanged` listener that re-mints the JWT

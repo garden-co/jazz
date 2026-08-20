@@ -7,14 +7,14 @@
 
 <!-- #region provider-svelte -->
 <script lang="ts">
-  import { createJazzClient, JazzSvelteProvider, type JazzContext } from "jazz-tools/svelte";
+  import { JazzSvelteProvider, type JazzContext } from "jazz-tools/svelte";
 
-  const client = createJazzClient({
+  const config = {
     appId: "my-app",
-  });
+  };
 </script>
 
-<JazzSvelteProvider {client}>
+<JazzSvelteProvider {config}>
   {#snippet children({ db }: { db: NonNullable<JazzContext["db"]> })}
     <YourApp />
   {/snippet}

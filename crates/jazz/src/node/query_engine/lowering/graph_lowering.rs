@@ -906,18 +906,16 @@ fn lower_linear_plan_steps(
                     &accumulated_join_fields,
                     request,
                 )?;
-                if matches!(&plan.root, LinearRoot::Source { .. }) {
-                    let mut unwrapped_left_keys = BTreeSet::new();
-                    for left_key in &left_keys {
-                        if source_field_is_nullable(root_source, left_key)
-                            && unwrapped_left_keys.insert(left_key.clone())
-                        {
-                            graph = unwrap_nullable_join_key(
-                                graph,
-                                left_key.clone(),
-                                source_field_nullable_depth(root_source, left_key),
-                            );
-                        }
+                let mut unwrapped_left_keys = BTreeSet::new();
+                for left_key in &left_keys {
+                    if nullable_fields.contains(left_key)
+                        && unwrapped_left_keys.insert(left_key.clone())
+                    {
+                        graph = unwrap_nullable_join_key(
+                            graph,
+                            left_key.clone(),
+                            nullable_field_depths.get(left_key).copied().unwrap_or(1),
+                        );
                     }
                 }
                 let right_nullable_fields = lowered_right.nullable_fields.clone();
