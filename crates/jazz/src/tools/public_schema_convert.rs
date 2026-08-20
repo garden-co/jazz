@@ -2235,6 +2235,17 @@ fn convert_policy_predicate(
         )?))),
         PolicyExpr::Cmp { column, op, value } => {
             let left = Operand::Column(column.clone());
+            if matches!(value, PolicyValue::Literal(Value::Null)) {
+                // Match `session_where`: equality against the public NULL
+                // literal is the ergonomic spelling of a null test.
+                match op {
+                    CmpOp::Eq => return Ok(Predicate::IsNull(left)),
+                    CmpOp::Ne => {
+                        return Ok(Predicate::Not(Box::new(Predicate::IsNull(left))));
+                    }
+                    CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {}
+                }
+            }
             let right = convert_policy_operand(table, path, value)?;
             Ok(match op {
                 CmpOp::Eq => Predicate::Eq(left, right),

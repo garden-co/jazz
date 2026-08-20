@@ -356,12 +356,11 @@ async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
             let (_, _, transaction_id) = bob
                 .insert("people", client_person_values(user_id, "bob@example.com"))
                 .expect("bob creates v2 person");
-            bob.wait_for_transaction(
-                transaction_id.expect("ordinary mutation commits immediately"),
-                jazz::tools::DurabilityTier::EdgeServer,
+            support::wait_for_edge_txs(
+                &bob,
+                &[transaction_id.expect("ordinary mutation commits immediately")],
             )
-            .await
-            .expect("bob person reaches edge");
+            .await;
 
             bob.shutdown().await.expect("shutdown bob");
             server.shutdown().await;

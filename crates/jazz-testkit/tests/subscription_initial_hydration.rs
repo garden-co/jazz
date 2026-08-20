@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use jazz_testkit as support;
+
 use jazz::query::{col, eq, lit};
 use jazz::row_input;
 use jazz::tools::{
@@ -32,26 +34,20 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
             )
             .await
             .expect("connect subscriber");
-            let (first_id, _, first_batch) = writer
+            let (first_id, _, first_tx) = writer
                 .insert("items", row_input!("label" => "first"))
                 .expect("insert first initial item");
-            let (second_id, _, second_batch) = writer
+            let (second_id, _, second_tx) = writer
                 .insert("items", row_input!("label" => "second"))
                 .expect("insert second initial item");
-            writer
-                .wait_for_transaction(
-                    first_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("first initial item settles");
-            writer
-                .wait_for_transaction(
-                    second_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("second initial item settles");
+            support::wait_for_edge_txs(
+                &writer,
+                &[
+                    first_tx.expect("ordinary mutation commits immediately"),
+                    second_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             let query = jazz::query::Query::from("items");
             let expected_ids = BTreeSet::from([first_id, second_id]);

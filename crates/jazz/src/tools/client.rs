@@ -2300,7 +2300,7 @@ impl PublicQueryDecoder {
     fn core_subscription_row_to_public(
         &self,
         db: &Backend,
-        query: &Query,
+        _query: &Query,
         row: &CoreSubscriptionOutputRow,
     ) -> Result<Row> {
         let (_, encoded) = row.row.encoded_record();
@@ -2320,7 +2320,7 @@ impl PublicQueryDecoder {
         #[cfg(feature = "testing")]
         let public = {
             let fields = self
-                .core_rows_to_query_results(db, query, vec![row.row.clone()])
+                .core_rows_to_query_results(db, _query, vec![row.row.clone()])
                 .ok()
                 .and_then(|mut results| results.pop())
                 .map(|result| result.fields)

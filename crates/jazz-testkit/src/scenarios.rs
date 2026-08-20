@@ -7,7 +7,7 @@ use jazz::query::Query;
 use jazz::tools::sync::ClientId;
 use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Schema,
-    SubscriptionStream, SubscriptionStreamItem, Value,
+    SubscriptionStream, SubscriptionStreamItem, TransactionId, Value,
 };
 use jazz_server::JazzServer;
 use jsonwebtoken::{EncodingKey, Header, encode};
@@ -300,6 +300,7 @@ pub async fn connect_ready_client(
         .with_server(server)
         .with_schema(schema.clone())
         .with_user_id(user_id)
+        .as_admin()
         .ready_on(ready_table, ready_timeout)
         .connect()
         .await
@@ -432,6 +433,25 @@ pub async fn wait_for_edge_query_ready(client: &JazzClient, table: &str, timeout
         |_| Some(()),
     )
     .await;
+}
+
+/// Waits until every committed transaction reaches edge-server durability.
+pub async fn wait_for_edge_txs(client: &JazzClient, transaction_ids: &[TransactionId]) {
+    for &transaction_id in transaction_ids {
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            client.wait_for_transaction(transaction_id, DurabilityTier::EdgeServer),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!("transaction {transaction_id} timed out waiting for edge-server durability")
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "transaction {transaction_id} failed waiting for edge-server durability: {error}"
+            )
+        });
+    }
 }
 
 #[allow(dead_code)]
