@@ -13,10 +13,6 @@ use super::{
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ResidentRegion {
-    Point {
-        cf: String,
-        key: Vec<u8>,
-    },
     Range {
         cf: String,
         start: Vec<u8>,
@@ -31,16 +27,12 @@ enum ResidentRegion {
 impl ResidentRegion {
     fn column_family(&self) -> &str {
         match self {
-            Self::Point { cf, .. } | Self::Range { cf, .. } | Self::Prefix { cf, .. } => cf,
+            Self::Range { cf, .. } | Self::Prefix { cf, .. } => cf,
         }
     }
 
     fn contains(&self, cf: &str, key: &[u8]) -> bool {
         match self {
-            Self::Point {
-                cf: region_cf,
-                key: region_key,
-            } => region_cf == cf && region_key == key,
             Self::Range {
                 cf: region_cf,
                 start,
@@ -55,13 +47,6 @@ impl ResidentRegion {
 
     fn covers(&self, other: &Self) -> bool {
         match (self, other) {
-            (
-                Self::Point { cf, key },
-                Self::Point {
-                    cf: other_cf,
-                    key: other_key,
-                },
-            ) => cf == other_cf && key == other_key,
             (
                 Self::Range { cf, start, end },
                 Self::Range {
@@ -85,15 +70,15 @@ impl ResidentRegion {
 #[derive(Default)]
 struct ResidentState {
     values: BTreeMap<(String, Vec<u8>), Value>,
+    points: BTreeSet<(String, Vec<u8>)>,
     regions: Vec<ResidentRegion>,
 }
 
 impl ResidentState {
     fn get(&self, cf: &str, key: &[u8]) -> Option<Option<Value>> {
-        self.regions
-            .iter()
-            .any(|region| region.contains(cf, key))
-            .then(|| self.values.get(&(cf.to_owned(), key.to_vec())).cloned())
+        (self.points.contains(&(cf.to_owned(), key.to_vec()))
+            || self.regions.iter().any(|region| region.contains(cf, key)))
+        .then(|| self.values.get(&(cf.to_owned(), key.to_vec())).cloned())
     }
 
     fn install_point(&mut self, cf: String, key: Vec<u8>, value: Option<Value>) {
@@ -105,10 +90,7 @@ impl ResidentState {
                 self.values.remove(&(cf.clone(), key.clone()));
             }
         }
-        let region = ResidentRegion::Point { cf, key };
-        if !self.regions.contains(&region) {
-            self.regions.push(region);
-        }
+        self.points.insert((cf, key));
     }
 
     fn install_region(&mut self, region: ResidentRegion, rows: &[KeyValue]) {
@@ -122,11 +104,7 @@ impl ResidentState {
             self.values.remove(&key);
         }
         for (key, value) in rows {
-            let cf = match &region {
-                ResidentRegion::Point { cf, .. }
-                | ResidentRegion::Range { cf, .. }
-                | ResidentRegion::Prefix { cf, .. } => cf.clone(),
-            };
+            let cf = region.column_family().to_owned();
             self.values.insert((cf, key.clone()), value.clone());
         }
         if !self.regions.contains(&region) {
@@ -135,40 +113,43 @@ impl ResidentState {
     }
 
     fn rows_for(&self, region: &ResidentRegion, reverse: bool) -> Option<Vec<KeyValue>> {
-        self.regions
-            .iter()
-            .any(|resident| resident.covers(region))
-            .then(|| {
-                let mut rows = self
-                    .values
-                    .iter()
-                    .filter_map(|((cf, key), value)| {
-                        region
-                            .contains(cf, key)
-                            .then_some((key.clone(), value.clone()))
-                    })
-                    .collect::<Vec<_>>();
-                if reverse {
-                    rows.reverse();
-                }
-                rows
-            })
+        let covered = self.regions.iter().any(|resident| resident.covers(region));
+        if !covered {
+            return None;
+        }
+        let mut rows: Vec<KeyValue> = match region {
+            ResidentRegion::Range { cf, start, end } => self
+                .values
+                .range((cf.clone(), start.clone())..(cf.clone(), end.clone()))
+                .map(|((_, key), value)| (key.clone(), value.clone()))
+                .collect(),
+            ResidentRegion::Prefix { cf, prefix } => self
+                .values
+                .range((cf.clone(), prefix.clone())..)
+                .take_while(|((resident_cf, key), _)| resident_cf == cf && key.starts_with(prefix))
+                .map(|((_, key), value)| (key.clone(), value.clone()))
+                .collect(),
+        };
+        if reverse {
+            rows.reverse();
+        }
+        Some(rows)
     }
 
     fn invalidate(&mut self, cf: &str, key: &[u8]) {
         self.values.remove(&(cf.to_owned(), key.to_vec()));
+        self.points.remove(&(cf.to_owned(), key.to_vec()));
         self.regions.retain(|region| !region.contains(cf, key));
     }
 
     fn evict_column_family(&mut self, cf: &str) {
         self.values.retain(|(resident_cf, _), _| resident_cf != cf);
+        self.points.retain(|(resident_cf, _)| resident_cf != cf);
         self.regions.retain(|region| region.column_family() != cf);
     }
 
     fn evict_scans(&mut self, cf: &str) {
-        self.regions.retain(|region| {
-            region.column_family() != cf || matches!(region, ResidentRegion::Point { .. })
-        });
+        self.regions.retain(|region| region.column_family() != cf);
     }
 }
 

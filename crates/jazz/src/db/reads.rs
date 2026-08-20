@@ -30,7 +30,7 @@ where
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// let db = block_on(open_todos_db())?;
-    /// let write = db.insert("todos", todo_cells("write docs", false))?;
+    /// let write = block_on(db.insert("todos", todo_cells("write docs", false)))?;
     /// let todo = write.row_uuid();
     ///
     /// let query = db.prepare_query(&db.table("todos"))?;
@@ -160,7 +160,7 @@ where
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// let db = block_on(open_todos_db())?;
-    /// let todo = db.insert("todos", todo_cells("first item", false))?.row_uuid();
+    /// let todo = block_on(db.insert("todos", todo_cells("first item", false)))?.row_uuid();
     ///
     /// let todos = db.prepare_query(&db.table("todos"))?;
     /// let found = db.one(&todos)?;
@@ -215,7 +215,7 @@ where
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// # use jazz::tx::DurabilityTier;
     /// let db = block_on(open_todos_db())?;
-    /// db.insert("todos", todo_cells("visible locally", false))?;
+    /// block_on(db.insert("todos", todo_cells("visible locally", false)))?;
     ///
     /// let opts = ReadOpts {
     ///     tier: DurabilityTier::Local,

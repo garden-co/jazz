@@ -344,7 +344,7 @@ fn seed_fixture(db: &BenchDb) {
 }
 
 fn insert_document(db: &BenchDb, row: RowUuid, team: usize, updated_at: u64) {
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         DOCUMENTS,
         row,
         BTreeMap::from([
@@ -355,7 +355,7 @@ fn insert_document(db: &BenchDb, row: RowUuid, team: usize, updated_at: u64) {
                 Value::String(format!("route {team} document {updated_at}")),
             ),
         ]),
-    )
+    ))
     .expect("insert route curve document");
 }
 

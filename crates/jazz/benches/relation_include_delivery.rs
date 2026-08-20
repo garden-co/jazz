@@ -311,7 +311,7 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
 
     reset_alloc_counter();
     let start = Instant::now();
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         "children",
         row(10_000_000),
         BTreeMap::from([
@@ -322,7 +322,7 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
             ),
             ("ordinal".to_owned(), Value::I32(1)),
         ]),
-    )
+    ))
     .expect("insert exactly one measured child");
     let event = block_on(stream.next_event()).expect("measured relation update");
     let wall_us = start.elapsed().as_micros();
@@ -339,7 +339,7 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
 
 fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
     let parent = row(1);
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         "parents",
         parent,
         BTreeMap::from([
@@ -349,10 +349,10 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
             ),
             ("ordinal".to_owned(), Value::I32(0)),
         ]),
-    )
+    ))
     .expect("insert parent");
     for index in 0..child_rows {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             "children",
             row(1_000 + index as u64),
             BTreeMap::from([
@@ -360,7 +360,7 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
                 ("label".to_owned(), Value::String(format!("child-{index}"))),
                 ("ordinal".to_owned(), Value::I32(index as i32)),
             ]),
-        )
+        ))
         .unwrap_or_else(|error| panic!("seed child {index}: {error}"));
     }
     parent

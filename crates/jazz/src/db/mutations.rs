@@ -45,7 +45,7 @@ where
     /// # use jazz::db::doctest_support::{block_on, open_todos_db};
     /// # use jazz::tx::DurabilityTier;
     /// let db = block_on(open_todos_db())?;
-    /// let write = db.insert("todos", jazz::row! { title: "new todo", done: false })?;
+    /// let write = block_on(db.insert("todos", jazz::row! { title: "new todo", done: false }))?;
     /// let row = write.row_uuid();
     /// block_on(write.wait(DurabilityTier::Local))?;
     ///
@@ -311,13 +311,13 @@ where
     /// # use jazz::groove::records::Value;
     /// let db = block_on(open_todos_db())?;
     /// let todo = RowUuid::from_bytes([1; 16]);
-    /// db.insert_with_id("todos", todo, todo_cells("draft", false))?;
+    /// block_on(db.insert_with_id("todos", todo, todo_cells("draft", false)))?;
     ///
-    /// db.update(
+    /// block_on(db.update(
     ///     "todos",
     ///     todo,
     ///     BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
-    /// )?;
+    /// ))?;
     /// let todos = db.prepare_query(&db.table("todos"))?;
     /// assert_eq!(db.read(&todos)?.len(), 1);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -651,12 +651,12 @@ where
     /// let db = block_on(open_todos_db())?;
     /// let todo = RowUuid::from_bytes([1; 16]);
     ///
-    /// db.upsert("todos", todo, todo_cells("created", false))?;
-    /// db.upsert(
+    /// block_on(db.upsert("todos", todo, todo_cells("created", false)))?;
+    /// block_on(db.upsert(
     ///     "todos",
     ///     todo,
     ///     BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]),
-    /// )?;
+    /// ))?;
     /// let todos = db.prepare_query(&db.table("todos"))?;
     /// assert_eq!(db.one(&todos)?.unwrap().row_uuid(), todo);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -805,9 +805,9 @@ where
     /// # use jazz::ids::RowUuid;
     /// let db = block_on(open_todos_db())?;
     /// let todo = RowUuid::from_bytes([1; 16]);
-    /// db.insert_with_id("todos", todo, todo_cells("remove me", false))?;
+    /// block_on(db.insert_with_id("todos", todo, todo_cells("remove me", false)))?;
     ///
-    /// db.delete("todos", todo)?;
+    /// block_on(db.delete("todos", todo))?;
     /// let todos = db.prepare_query(&db.table("todos"))?;
     /// assert!(db.read(&todos)?.is_empty());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -1335,10 +1335,10 @@ where
     /// # use jazz::ids::RowUuid;
     /// let db = block_on(open_todos_db())?;
     /// let todo = RowUuid::from_bytes([1; 16]);
-    /// db.insert_with_id("todos", todo, todo_cells("archived", false))?;
-    /// db.delete("todos", todo)?;
+    /// block_on(db.insert_with_id("todos", todo, todo_cells("archived", false)))?;
+    /// block_on(db.delete("todos", todo))?;
     ///
-    /// db.restore("todos", todo, todo_cells("restored", false))?;
+    /// block_on(db.restore("todos", todo, todo_cells("restored", false)))?;
     /// let todos = db.prepare_query(&db.table("todos"))?;
     /// assert_eq!(db.one(&todos)?.unwrap().row_uuid(), todo);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
