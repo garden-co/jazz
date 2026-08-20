@@ -142,7 +142,9 @@ where
         } else {
             None
         };
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
         if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
             self.persist_storage_consistency_marker_through(tx_id.time).await?;

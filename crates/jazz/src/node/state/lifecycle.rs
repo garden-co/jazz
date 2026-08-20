@@ -477,7 +477,9 @@ where
                     ],
                 );
             }
-            database.commit_batch(batch).await?;
+            let applied = database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+database.finish_persistence(persisted)?;
             schemas.insert(
                 staged.publication.schema.id,
                 staged.publication.schema.clone(),
@@ -1203,7 +1205,9 @@ where
                     current_schema_version_id,
                     &mapping,
                 )?;
-                meta_database.commit_batch(batch).await?;
+                let applied = meta_database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+meta_database.finish_persistence(persisted)?;
             }
             schema_version_aliases.insert(current_schema_version_id, alias);
             physical_mappings.insert(current_schema_version_id, mapping);

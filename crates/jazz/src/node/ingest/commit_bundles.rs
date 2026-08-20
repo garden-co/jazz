@@ -1189,7 +1189,9 @@ where
             .values()
             .map(|(stored, global_seq)| (stored.clone(), *global_seq))
             .collect::<Vec<_>>();
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
             self.persist_storage_consistency_marker_through(tx_time).await?;
         }

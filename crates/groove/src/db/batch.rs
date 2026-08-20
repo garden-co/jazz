@@ -3,48 +3,24 @@ use super::*;
 /// Mutable staged table writes whose reads observe writes already added to the
 /// stage. Commit runs one normal database batch commit, so current callers of
 /// [`Database::commit_batch`] and staged callers share the final tick/write path.
-pub struct StagedDatabaseBatch<'a> {
+#[cfg(test)]
+pub(crate) struct StagedDatabaseBatch<'a> {
     pub(super) database: &'a mut Database,
     pub(super) batch: DatabaseBatch,
 }
 
+#[cfg(test)]
 impl StagedDatabaseBatch<'_> {
-    pub fn reserve(&mut self, additional: usize) {
-        self.batch.reserve(additional);
-    }
-
     pub fn insert(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
         self.batch.insert(table, record);
-    }
-
-    pub fn insert_raw(
-        &mut self,
-        table: impl Into<String>,
-        key: PrimaryKeyValue,
-        record: impl Into<RawRecordInput>,
-    ) {
-        self.batch.insert_raw(table, key, record);
     }
 
     pub fn update(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
         self.batch.update(table, record);
     }
 
-    pub fn update_raw(
-        &mut self,
-        table: impl Into<String>,
-        key: PrimaryKeyValue,
-        record: impl Into<RawRecordInput>,
-    ) {
-        self.batch.update_raw(table, key, record);
-    }
-
     pub fn delete(&mut self, table: impl Into<String>, key: PrimaryKeyValue) {
         self.batch.delete(table, key);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.batch.is_empty()
     }
 
     pub async fn primary_key_scan(
@@ -57,32 +33,6 @@ impl StagedDatabaseBatch<'_> {
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_scan_with_storage(&storage, table, prefix)
-            .await
-    }
-
-    pub async fn primary_key_scan_raw(
-        &self,
-        table: &str,
-        prefix: &[Value],
-    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        self.database.ensure_batch_storage_txn(&self.batch)?;
-        let overlay = StagedWriteOverlay::new(&self.database.storage, &self.batch.txn_operations);
-        let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
-        self.database
-            .primary_key_scan_raw_with_storage(&storage, table, prefix)
-            .await
-    }
-
-    pub async fn primary_key_last_raw(
-        &self,
-        table: &str,
-        prefix: &[Value],
-    ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        self.database.ensure_batch_storage_txn(&self.batch)?;
-        let overlay = StagedWriteOverlay::new(&self.database.storage, &self.batch.txn_operations);
-        let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
-        self.database
-            .primary_key_last_raw_with_storage(&storage, table, prefix)
             .await
     }
 

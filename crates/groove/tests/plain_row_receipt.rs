@@ -122,7 +122,9 @@ async fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn s
             } else {
                 batch.update("rows", row(id, revision));
             }
-            db.commit_batch(batch).await?;
+            let applied = db.apply_batch(batch).await?;
+            let persisted = applied.persist().await;
+            db.finish_persistence(persisted)?;
         }
     }
     let write = write_started.elapsed();

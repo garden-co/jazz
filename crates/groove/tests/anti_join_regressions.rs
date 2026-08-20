@@ -67,7 +67,9 @@ async fn same_tick_left_and_blocking_right_emit_nothing() {
     let mut batch = db.open_batch();
     batch.insert("albums", vec![Value::U64(1), Value::U64(11)]);
     batch.insert("blockers", vec![Value::U64(1), Value::U64(11)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let mut materialized = BTreeMap::<String, i64>::new();
     while let Ok(deltas) = sub.try_recv() {
@@ -92,7 +94,9 @@ async fn same_tick_left_insert_and_last_blocker_retraction_emit_once() {
     let mut batch = db.open_batch();
     batch.insert("albums", vec![Value::U64(1), Value::U64(11)]);
     batch.insert("blockers", vec![Value::U64(1), Value::U64(11)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     while sub.try_recv().is_ok() {}
 
     // One commit: a second album for the artist arrives while the artist's
@@ -100,7 +104,9 @@ async fn same_tick_left_insert_and_last_blocker_retraction_emit_once() {
     let mut batch = db.open_batch();
     batch.insert("albums", vec![Value::U64(2), Value::U64(11)]);
     batch.delete("blockers", PrimaryKeyValue::U64(1));
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let mut materialized = BTreeMap::<String, i64>::new();
     while let Ok(deltas) = sub.try_recv() {

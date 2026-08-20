@@ -45,7 +45,9 @@ impl Database {
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
-    /// # database.commit_batch(batch).await?;
+    /// # let applied = database.apply_batch(batch).await?;
+    /// # let persisted = applied.persist().await;
+    /// # database.finish_persistence(persisted)?;
     /// let rows = database.index_scan("albums", "albums_by_year", &[Value::U64(1959)]).await?;
     ///
     /// assert_eq!(rows.len(), 1);
@@ -95,7 +97,9 @@ impl Database {
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
     /// # batch.insert("albums", vec![Value::U64(3), Value::String("A Love Supreme".into()), Value::U64(1965)]);
-    /// # database.commit_batch(batch).await?;
+    /// # let applied = database.apply_batch(batch).await?;
+    /// # let persisted = applied.persist().await;
+    /// # database.finish_persistence(persisted)?;
     /// let rows = database.index_scan_range(
     ///     "albums",
     ///     "albums_by_year",

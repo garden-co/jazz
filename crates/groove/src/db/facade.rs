@@ -142,10 +142,9 @@ impl Database {
         DatabaseBatch::default()
     }
 
-    /// Open a staged batch whose reads observe writes already added to the
-    /// batch. Committing the staged batch runs exactly one IVM tick and one
-    /// storage write, just like [`Database::commit_batch`].
-    pub fn open_staged_batch(&mut self) -> StagedDatabaseBatch<'_> {
+    /// Test helper whose reads observe writes already added to the batch.
+    #[cfg(test)]
+    pub(crate) fn open_staged_batch(&mut self) -> StagedDatabaseBatch<'_> {
         StagedDatabaseBatch {
             database: self,
             batch: DatabaseBatch::default(),

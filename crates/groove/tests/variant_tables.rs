@@ -148,7 +148,10 @@ async fn variant_enum_projection_normalizes_layout_tags_and_matches_named_case()
             &[Value::U64(4), Value::U64(9), Value::Bool(true)],
         )?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
     let all = database.query_graph(projected.clone()).await?.to_values()?;
     assert_eq!(all.len(), 4);
@@ -188,7 +191,10 @@ async fn variant_enum_projection_normalizes_layout_tags_and_matches_named_case()
             ],
         )?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
     let mut revised_deltas = subscription.recv()?.to_values()?;
     revised_deltas.sort_by_key(|(_, weight)| *weight);
     assert_eq!(
@@ -243,7 +249,10 @@ async fn case_local_same_name_may_have_different_types_when_not_shared()
         "events",
         VariantRecord::create(2, v2, &[Value::U64(2), Value::U64(404)])?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
     let rows = database.primary_key_scan("events", &[]).await?;
     assert_eq!(rows[0].get("value")?, Value::String("opened".into()));
     assert_eq!(rows[1].get("value")?, Value::U64(404));
@@ -348,7 +357,10 @@ async fn user_enum_nested_in_layout_enum_normalizes_immediately()
             ],
         ),
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
     let mut rows = subscription.recv()?.to_values()?;
     rows.sort_by_key(|(values, _)| match values[0] {
@@ -465,7 +477,10 @@ async fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn
             VariantRecord::create(tag as u32, descriptors[tag - 1], &values)?,
         );
     }
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
     let committed = started.elapsed();
     let deltas = subscription.recv()?;
     let delivered = started.elapsed();

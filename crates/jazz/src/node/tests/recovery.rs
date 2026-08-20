@@ -203,7 +203,9 @@ fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
         );
         node.write_global_current_update(&mut batch, &version, GlobalSeq(1))
             .unwrap();
-        node.database.commit_batch(batch).unwrap();
+        let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::db::block_on(applied.persist());
+node.database.finish_persistence(persisted).unwrap();
         assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
     }
 
@@ -428,7 +430,9 @@ where
     );
     node.write_global_current_update(&mut batch, &version, global_seq)
         .unwrap();
-    node.database.commit_batch(batch).unwrap();
+    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::db::block_on(applied.persist());
+node.database.finish_persistence(persisted).unwrap();
 }
 
 #[test]
@@ -572,7 +576,9 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
                 DurabilityTier::Edge,
             ),
         );
-        node.database.commit_batch(batch).unwrap();
+        let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::db::block_on(applied.persist());
+node.database.finish_persistence(persisted).unwrap();
     }
 
     let cfs = schema.column_families();

@@ -49,7 +49,9 @@ async fn second_subscriber_to_prepared_recursive_graph_gets_full_initial_message
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     // First subscriber: fresh recursive state, recompute path, full initial.
     let first = db.subscribe_one_sink(reachability_graph()).await.unwrap();
@@ -82,12 +84,16 @@ async fn hydrating_a_new_subscriber_must_not_steal_tick_deltas_from_existing_rec
     let a = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _empty_initial = a.recv().unwrap();
     let _tick_one = a.recv().unwrap();
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _tick_two = a.recv().unwrap();
 
     // Subscriber B shares the same recursive node and gets an immediate
@@ -97,7 +103,9 @@ async fn hydrating_a_new_subscriber_must_not_steal_tick_deltas_from_existing_rec
 
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(3), Value::U64(3), Value::U64(4)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     // A must still receive this tick's derived deltas: 3->4, 2->4, 1->4.
     let mut values = a
@@ -126,7 +134,9 @@ async fn one_shot_queries_do_not_perturb_subscription_streams() {
 
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let s = db
         .subscribe_one_sink(GraphBuilder::table("edges"))
@@ -150,7 +160,9 @@ async fn new_subscriber_uses_current_state_not_stale_hydrated_accumulated() {
     let s1 = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _empty_initial = s1.recv().unwrap();
     let _s1_tick_one = s1.recv().unwrap();
 
@@ -158,7 +170,9 @@ async fn new_subscriber_uses_current_state_not_stale_hydrated_accumulated() {
 
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     // S2's immediate initial snapshot must reflect storage as of subscription.
     let s2 = db.subscribe_one_sink(reachability_graph()).await.unwrap();

@@ -778,7 +778,9 @@ where
         let table_id = self.physical_table_id_for_authored_test_table(table)?;
         let mut batch = self.database.open_batch();
         Self::write_merge_heads(&mut batch, table_id, row_uuid, &heads)?;
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
@@ -1302,7 +1304,9 @@ where
             self.cleanup_fated_ahead_current_for_tx(&mut batch, *tx_id)
                 .await?;
         }
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         if let Some(tx_time) = tx_ids.into_iter().map(|tx_id| tx_id.time).max() {
             self.persist_storage_consistency_marker_through(tx_time)
                 .await?;

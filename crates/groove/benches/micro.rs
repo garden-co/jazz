@@ -1,6 +1,8 @@
 use std::env;
 use std::time::{Duration, Instant};
 
+use futures::executor::block_on;
+use groove::db::DatabaseBatch;
 use groove::db::{Database, GraphBuilder, PredicateExpr};
 use groove::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
 use groove::records::{RecordDescriptor, Value};
@@ -73,16 +75,16 @@ fn run_subscribe_unsubscribe(iterations: usize) -> String {
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &["albums"], Durability::WalNoSync)
             .expect("storage");
-    let mut db = Database::new(albums_schema(), storage).expect("db");
+    let mut db = block_on(Database::new(albums_schema(), storage)).expect("db");
     let mut hist = Histogram::<u64>::new(3).expect("hist");
     for i in 0..iterations {
         let graph = GraphBuilder::table("albums")
             .filter(PredicateExpr::eq("artist_id", Value::U64((i % 128) as u64)))
             .project(["title"]);
         let start = Instant::now();
-        let subscription = db.subscribe_one_sink(graph).expect("subscribe");
+        let subscription = block_on(db.subscribe_one_sink(graph)).expect("subscribe");
         let _initial = subscription.recv().expect("initial");
-        db.unsubscribe(subscription.id());
+        block_on(db.unsubscribe(subscription.id()));
         hist.record(duration_nanos(start.elapsed()))
             .expect("record");
     }
@@ -97,7 +99,7 @@ fn run_indexed_commit(iterations: usize) -> String {
         Durability::WalNoSync,
     )
     .expect("storage");
-    let mut db = Database::new(indexed_albums_schema(), storage).expect("db");
+    let mut db = block_on(Database::new(indexed_albums_schema(), storage)).expect("db");
     let mut hist = Histogram::<u64>::new(3).expect("hist");
     for i in 0..iterations {
         let mut batch = db.open_batch();
@@ -110,11 +112,20 @@ fn run_indexed_commit(iterations: usize) -> String {
             ],
         );
         let start = Instant::now();
-        db.commit_batch(batch).expect("commit");
+        finish_batch(&mut db, batch).expect("commit");
         hist.record(duration_nanos(start.elapsed()))
             .expect("record");
     }
     json_case("indexed_commit", iterations, &hist, 0)
+}
+
+fn finish_batch(db: &mut Database, batch: DatabaseBatch) -> Result<(), groove::db::Error> {
+    block_on(async {
+        let applied = db.apply_batch(batch).await?;
+        let persisted = applied.persist().await;
+        db.finish_persistence(persisted)?;
+        Ok(())
+    })
 }
 
 fn albums_schema() -> DatabaseSchema {

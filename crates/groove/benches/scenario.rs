@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::time::{Duration, Instant};
 
+use futures::executor::block_on;
 use groove::db::Subscription;
-use groove::db::{Database, GraphBuilder, PredicateExpr, PrimaryKeyValue};
+use groove::db::{Database, DatabaseBatch, GraphBuilder, PredicateExpr, PrimaryKeyValue};
 use groove::ivm::{ProjectField, RecordDeltas};
 use groove::queries::{
     BinaryOp, ColumnRef, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
@@ -42,7 +43,16 @@ fn main() {
     }
 }
 
-fn apply_bench_auto_family_override<S: OrderedKvStorage>(db: &mut Database<S>) {
+fn finish_batch(db: &mut Database, batch: DatabaseBatch) -> Result<(), groove::db::Error> {
+    block_on(async {
+        let applied = db.apply_batch(batch).await?;
+        let persisted = applied.persist().await;
+        db.finish_persistence(persisted)?;
+        Ok(())
+    })
+}
+
+fn apply_bench_auto_family_override(db: &mut Database) {
     if env::var_os("GROOVE_BENCH_DISABLE_AUTO_DIRECT_FAMILY").is_some() {
         db.set_auto_direct_family_enabled(false);
     }
@@ -57,7 +67,7 @@ fn run_groove_social_feed() {
         Durability::WalNoSync,
     )
     .expect("open rocksdb");
-    let mut db = Database::new(social_feed_schema(), storage).expect("database");
+    let mut db = block_on(Database::new(social_feed_schema(), storage)).expect("database");
     apply_bench_auto_family_override(&mut db);
     let mut workload = SocialFeedWorkload::new(config);
 
@@ -67,8 +77,7 @@ fn run_groove_social_feed() {
     let mut subscriptions = Vec::with_capacity(config.subscriptions);
     for user_id in 1..=config.subscriptions as u64 {
         subscriptions.push(
-            db.subscribe_one_sink(feed_graph(user_id))
-                .expect("subscribe social feed"),
+            block_on(db.subscribe_one_sink(feed_graph(user_id))).expect("subscribe social feed"),
         );
     }
     let subscribe_elapsed = subscribe_start.elapsed();
@@ -87,7 +96,7 @@ fn run_groove_social_feed() {
         let commit_start = Instant::now();
         let mut batch = db.open_batch();
         apply_groove_event(&mut batch, event);
-        db.commit_batch(batch).expect("commit");
+        finish_batch(&mut db, batch).expect("commit");
         metrics.record_commit(commit_start.elapsed());
         let commit = db.last_commit_metrics().expect("commit metrics");
         metrics.record_storage(commit.storage_write_time);
@@ -165,7 +174,7 @@ fn run_groove_social_feed_prepared_with(mode: PreparedFeedMode) {
         Durability::WalNoSync,
     )
     .expect("open rocksdb");
-    let mut db = Database::new(social_feed_schema(), storage).expect("database");
+    let mut db = block_on(Database::new(social_feed_schema(), storage)).expect("database");
     let mut workload = SocialFeedWorkload::new(config);
 
     seed_groove(&mut db, &mut workload);
@@ -174,28 +183,26 @@ fn run_groove_social_feed_prepared_with(mode: PreparedFeedMode) {
     let mut subscriptions = Vec::with_capacity(config.subscriptions);
     match mode {
         PreparedFeedMode::Builder => {
-            let family = db
-                .prepare_one_sink(
-                    feed_prepared_shape_graph(),
-                    "feed_params",
-                    RecordDescriptor::new([("follower_id", ColumnType::U64.clone())]),
-                    ["follower_id"],
-                )
-                .expect("subscribe feed family");
+            let family = block_on(db.prepare_one_sink(
+                feed_prepared_shape_graph(),
+                "feed_params",
+                RecordDescriptor::new([("follower_id", ColumnType::U64.clone())]),
+                ["follower_id"],
+            ))
+            .expect("subscribe feed family");
             for user_id in 1..=config.subscriptions as u64 {
                 subscriptions.push(
-                    db.bind_shape_one_sink(family.id(), &[Value::U64(user_id)])
+                    block_on(db.bind_shape_one_sink(family.id(), &[Value::U64(user_id)]))
                         .expect("subscribe feed param"),
                 );
             }
         }
         PreparedFeedMode::Sql => {
-            let prepared = db
-                .prepare_query(feed_prepared_shape_query())
+            let prepared = block_on(db.prepare_query(feed_prepared_shape_query()))
                 .expect("prepare feed family query");
             for user_id in 1..=config.subscriptions as u64 {
                 subscriptions.push(
-                    db.bind(&prepared, &[("follower_id", Value::U64(user_id))])
+                    block_on(db.bind(&prepared, &[("follower_id", Value::U64(user_id))]))
                         .expect("subscribe prepared feed"),
                 );
             }
@@ -217,7 +224,7 @@ fn run_groove_social_feed_prepared_with(mode: PreparedFeedMode) {
         let commit_start = Instant::now();
         let mut batch = db.open_batch();
         apply_groove_event(&mut batch, event);
-        db.commit_batch(batch).expect("commit");
+        finish_batch(&mut db, batch).expect("commit");
         metrics.record_commit(commit_start.elapsed());
         let commit = db.last_commit_metrics().expect("commit metrics");
         metrics.record_storage(commit.storage_write_time);
@@ -602,7 +609,7 @@ fn feed_prepared_shape_query() -> Query {
     ))
 }
 
-fn seed_groove(db: &mut Database<RocksDbStorage>, workload: &mut SocialFeedWorkload) {
+fn seed_groove(db: &mut Database, workload: &mut SocialFeedWorkload) {
     let mut batch = db.open_batch();
     for user_id in 1..=workload.config.users as u64 {
         batch.insert(
@@ -614,13 +621,13 @@ fn seed_groove(db: &mut Database<RocksDbStorage>, workload: &mut SocialFeedWorkl
             ],
         );
     }
-    db.commit_batch(batch).expect("seed users");
+    finish_batch(db, batch).expect("seed users");
 
     let mut batch = db.open_batch();
     for event in workload.seed_follows() {
         apply_groove_event(&mut batch, event);
     }
-    db.commit_batch(batch).expect("seed follows");
+    finish_batch(db, batch).expect("seed follows");
 }
 
 fn apply_groove_event(batch: &mut groove::db::DatabaseBatch, event: WorkloadEvent) {
@@ -889,7 +896,7 @@ fn run_groove_acl() {
         Durability::WalNoSync,
     )
     .expect("open rocksdb");
-    let mut db = Database::new(acl_schema(), storage).expect("database");
+    let mut db = block_on(Database::new(acl_schema(), storage)).expect("database");
     apply_bench_auto_family_override(&mut db);
     let mut workload = AclWorkload::new(config);
     seed_groove_acl(&mut db, &mut workload);
@@ -898,8 +905,7 @@ fn run_groove_acl() {
     let mut subscriptions = Vec::with_capacity(config.subscriptions);
     for principal in 1..=config.subscriptions as u64 {
         subscriptions.push(
-            db.subscribe_one_sink(acl_graph(principal))
-                .expect("subscribe acl graph"),
+            block_on(db.subscribe_one_sink(acl_graph(principal))).expect("subscribe acl graph"),
         );
     }
     let subscribe_elapsed = subscribe_start.elapsed();
@@ -918,7 +924,7 @@ fn run_groove_acl() {
         let commit_start = Instant::now();
         let mut batch = db.open_batch();
         apply_groove_acl_event(&mut batch, event);
-        db.commit_batch(batch).expect("acl commit");
+        finish_batch(&mut db, batch).expect("acl commit");
         metrics.record_commit(commit_start.elapsed());
         let commit = db.last_commit_metrics().expect("commit metrics");
         metrics.record_storage(commit.storage_write_time);
@@ -980,23 +986,22 @@ fn run_groove_acl_prepared() {
         Durability::WalNoSync,
     )
     .expect("open rocksdb");
-    let mut db = Database::new(acl_schema(), storage).expect("database");
+    let mut db = block_on(Database::new(acl_schema(), storage)).expect("database");
     let mut workload = AclWorkload::new(config);
     seed_groove_acl(&mut db, &mut workload);
 
     let subscribe_start = Instant::now();
-    let family = db
-        .prepare_one_sink(
-            acl_prepared_shape_graph(),
-            "acl_params",
-            RecordDescriptor::new([("principal_id", ColumnType::U64.clone())]),
-            ["principal_id"],
-        )
-        .expect("subscribe acl family");
+    let family = block_on(db.prepare_one_sink(
+        acl_prepared_shape_graph(),
+        "acl_params",
+        RecordDescriptor::new([("principal_id", ColumnType::U64.clone())]),
+        ["principal_id"],
+    ))
+    .expect("subscribe acl family");
     let mut subscriptions = Vec::with_capacity(config.subscriptions);
     for principal in 1..=config.subscriptions as u64 {
         subscriptions.push(
-            db.bind_shape_one_sink(family.id(), &[Value::U64(principal)])
+            block_on(db.bind_shape_one_sink(family.id(), &[Value::U64(principal)]))
                 .expect("subscribe acl param"),
         );
     }
@@ -1016,7 +1021,7 @@ fn run_groove_acl_prepared() {
         let commit_start = Instant::now();
         let mut batch = db.open_batch();
         apply_groove_acl_event(&mut batch, event);
-        db.commit_batch(batch).expect("acl commit");
+        finish_batch(&mut db, batch).expect("acl commit");
         metrics.record_commit(commit_start.elapsed());
         let commit = db.last_commit_metrics().expect("commit metrics");
         metrics.record_storage(commit.storage_write_time);
@@ -1475,7 +1480,7 @@ fn acl_prepared_shape_graph() -> GraphBuilder {
     ])
 }
 
-fn seed_groove_acl(db: &mut Database<RocksDbStorage>, workload: &mut AclWorkload) {
+fn seed_groove_acl(db: &mut Database, workload: &mut AclWorkload) {
     let mut batch = db.open_batch();
     for id in 1..=workload.config.principals as u64 {
         batch.insert(
@@ -1494,13 +1499,13 @@ fn seed_groove_acl(db: &mut Database<RocksDbStorage>, workload: &mut AclWorkload
     for id in 1..=workload.config.resources as u64 {
         batch.insert("resources", vec![Value::U64(id), Value::U64(1)]);
     }
-    db.commit_batch(batch).expect("seed acl objects");
+    finish_batch(db, batch).expect("seed acl objects");
 
     let mut batch = db.open_batch();
     for event in workload.seed_events() {
         apply_groove_acl_event(&mut batch, event);
     }
-    db.commit_batch(batch).expect("seed acl edges");
+    finish_batch(db, batch).expect("seed acl edges");
 }
 
 fn apply_groove_acl_event(batch: &mut groove::db::DatabaseBatch, event: AclEvent) {
@@ -1741,14 +1746,14 @@ fn run_oneshot_query() {
         Durability::WalNoSync,
     )
     .expect("open rocksdb");
-    let mut db = Database::new(social_feed_schema(), storage).expect("database");
+    let mut db = block_on(Database::new(social_feed_schema(), storage)).expect("database");
     seed_oneshot_posts(&mut db, config.rows, config.authors);
 
     let mut metrics = ScenarioMetrics::default();
     for i in 0..config.queries {
         let author = (i as u64 % config.authors as u64) + 1;
         let start = Instant::now();
-        let result = db.query(post_query(author)).expect("query");
+        let result = block_on(db.query(post_query(author))).expect("query");
         metrics.record_commit(start.elapsed());
         metrics.notification_records += result.deltas.len();
     }
@@ -1783,18 +1788,16 @@ fn run_oneshot_subscribe() {
         Durability::WalNoSync,
     )
     .expect("open rocksdb");
-    let mut db = Database::new(social_feed_schema(), storage).expect("database");
+    let mut db = block_on(Database::new(social_feed_schema(), storage)).expect("database");
     seed_oneshot_posts(&mut db, config.rows, config.authors);
 
     let mut metrics = ScenarioMetrics::default();
     for i in 0..config.queries {
         let author = (i as u64 % config.authors as u64) + 1;
         let start = Instant::now();
-        let subscription = db
-            .subscribe_one_sink(post_graph(author))
-            .expect("subscribe");
+        let subscription = block_on(db.subscribe_one_sink(post_graph(author))).expect("subscribe");
         let result = subscription.recv().expect("initial");
-        db.unsubscribe(subscription.id());
+        block_on(db.unsubscribe(subscription.id()));
         metrics.record_commit(start.elapsed());
         metrics.notification_records += result.deltas.len();
     }
@@ -1837,9 +1840,7 @@ fn run_oneshot_scan() {
                 Value::String("public".to_owned()),
             ])
             .expect("record");
-        storage
-            .set("posts", &u64_key(id), &record)
-            .expect("set post");
+        block_on(storage.set("posts".to_owned(), u64_key(id), record)).expect("set post");
     }
 
     let mut metrics = ScenarioMetrics::default();
@@ -1847,14 +1848,19 @@ fn run_oneshot_scan() {
         let author = (i as u64 % config.authors as u64) + 1;
         let start = Instant::now();
         let mut rows = 0usize;
-        storage
-            .scan_prefix("posts", b"", &mut |_, value| {
-                if descriptor.get(value, "author_id").ok() == Some(Value::U64(author)) {
-                    rows += 1;
+        block_on(async {
+            let mut scan = storage
+                .scan_prefix("posts".to_owned(), Vec::new())
+                .await
+                .expect("scan posts");
+            while let Some(batch) = scan.next_batch().await.expect("scan batch") {
+                for (_, value) in batch {
+                    if descriptor.get(&value, "author_id").ok() == Some(Value::U64(author)) {
+                        rows += 1;
+                    }
                 }
-                Ok(())
-            })
-            .expect("scan posts");
+            }
+        });
         metrics.record_commit(start.elapsed());
         metrics.notification_records += rows;
     }
@@ -1927,7 +1933,7 @@ fn post_graph(author: u64) -> GraphBuilder {
         .project(["author_id", "id", "created_at"])
 }
 
-fn seed_oneshot_posts(db: &mut Database<RocksDbStorage>, rows: usize, authors: usize) {
+fn seed_oneshot_posts(db: &mut Database, rows: usize, authors: usize) {
     let mut batch = db.open_batch();
     for id in 1..=rows as u64 {
         let author = (id % authors as u64) + 1;
@@ -1941,7 +1947,7 @@ fn seed_oneshot_posts(db: &mut Database<RocksDbStorage>, rows: usize, authors: u
             ],
         );
     }
-    db.commit_batch(batch).expect("seed posts");
+    finish_batch(db, batch).expect("seed posts");
 }
 
 fn posts_descriptor() -> RecordDescriptor {

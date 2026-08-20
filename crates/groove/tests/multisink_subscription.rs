@@ -41,7 +41,9 @@ async fn insert_album(db: &mut Database, id: u64, title: &str, year: u64) {
             Value::U64(year),
         ],
     );
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 }
 
 fn project_schema() -> DatabaseSchema {
@@ -206,7 +208,9 @@ async fn routed_terminal_can_select_a_nonprefix_binding_value() {
     let mut batch = db.open_batch();
     insert_doc(&mut batch, 1, 10, 20, "Spec");
     insert_doc(&mut batch, 2, 11, 21, "Roadmap");
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let shape = db
         .prepare(
@@ -240,7 +244,9 @@ async fn prepared_routed_multisink_combines_binding_sets_with_user_output_routin
     insert_doc(&mut batch, 1, 10, 20, "Spec");
     insert_doc(&mut batch, 2, 10, 21, "Roadmap");
     insert_doc(&mut batch, 3, 11, 20, "Other org");
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let shape = db
         .prepare(
@@ -314,7 +320,9 @@ async fn prepared_routed_multisink_combines_binding_sets_with_user_output_routin
     insert_doc(&mut batch, 4, 10, 20, "Design");
     insert_doc(&mut batch, 5, 10, 21, "Launch");
     insert_doc(&mut batch, 6, 10, 22, "Wrong project");
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let tick_20 = project_20.recv().unwrap();
     assert_eq!(
@@ -437,7 +445,9 @@ async fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks(
     insert_comment(&mut batch, 11, 10, 20, 1, "looks good");
     insert_comment(&mut batch, 12, 10, 21, 2, "ship it");
     insert_comment(&mut batch, 13, 10, 22, 1, "wrong project");
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let shape = db
         .prepare(routed_terminals(), "project_route", route_descriptor())
@@ -494,7 +504,9 @@ async fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks(
     insert_doc(&mut batch, 5, 10, 21, "Launch");
     insert_comment(&mut batch, 15, 10, 21, 5, "approved");
     insert_doc(&mut batch, 6, 11, 20, "Ignored");
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let tick_20 = project_20.recv().unwrap();
     assert_eq!(
@@ -549,7 +561,9 @@ async fn dropped_routed_multisink_receiver_retracts_binding_before_rebind() {
 
     let mut batch = db.open_batch();
     insert_doc(&mut batch, 1, 10, 20, "Spec");
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let rebound = db
         .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
@@ -568,7 +582,9 @@ async fn dropped_routed_multisink_receiver_retracts_binding_before_rebind() {
 
     let mut batch = db.open_batch();
     insert_doc(&mut batch, 2, 10, 20, "Design");
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     assert_eq!(
         rebound
             .recv()

@@ -844,7 +844,7 @@ fn cancelled_one_shot_query_discards_ephemeral_graph_and_hydration_state() {
 }
 
 #[test]
-fn cancelled_storage_commit_does_not_publish_the_staged_tick() {
+fn cancelled_persistence_does_not_undo_an_applied_batch() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = block_on(Database::new(schema(), storage)).unwrap();
     let subscription =
@@ -856,14 +856,24 @@ fn cancelled_storage_commit_does_not_publish_the_staged_tick() {
         "albums",
         vec![Value::U64(1), Value::String("Kind of Blue".into())],
     );
+    let applied = block_on(database.apply_batch(batch)).unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+    assert_eq!(
+        block_on(database.query_graph(GraphBuilder::table("albums")))
+            .unwrap()
+            .deltas
+            .len(),
+        1
+    );
+
     control.take_observed();
     control.pause();
-    let mut commit = Box::pin(database.commit_batch(batch));
+    let mut persistence = Box::pin(applied.persist());
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     for _ in 0..16 {
         assert!(matches!(
-            Pin::new(&mut commit).poll(&mut context),
+            Pin::new(&mut persistence).poll(&mut context),
             Poll::Pending
         ));
         if control
@@ -879,20 +889,20 @@ fn cancelled_storage_commit_does_not_publish_the_staged_tick() {
             .observed()
             .contains(&TestStorageOperation::WriteMany)
     );
-    drop(commit);
+    drop(persistence);
 
     assert!(subscription.try_recv().is_err());
-    control.resume();
-    let rows = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
-    assert!(rows.is_empty());
-
-    let mut retry = database.open_batch();
-    retry.insert(
-        "albums",
-        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    assert_eq!(
+        block_on(database.query_graph(GraphBuilder::table("albums")))
+            .unwrap()
+            .deltas
+            .len(),
+        1
     );
-    block_on(database.commit_batch(retry)).unwrap();
-    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+
+    control.resume();
+    let persisted = block_on(applied.persist());
+    database.finish_persistence(persisted).unwrap();
 }
 
 #[test]

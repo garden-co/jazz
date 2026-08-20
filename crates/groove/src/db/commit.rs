@@ -85,7 +85,9 @@ impl Database {
     ///     "albums",
     ///     vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)],
     /// );
-    /// database.commit_batch(batch).await?;
+    /// let applied = database.apply_batch(batch).await?;
+    /// let persisted = applied.persist().await;
+    /// database.finish_persistence(persisted)?;
     ///
     /// let rows = database.primary_key_scan("albums", &[Value::U64(1)]).await?;
     /// assert_eq!(rows[0].get("title")?, Value::String("Kind of Blue".into()));
@@ -93,6 +95,7 @@ impl Database {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// # }).unwrap();
     /// ```
+    #[cfg(any(test, feature = "test"))]
     pub async fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
         let publication = self
             .apply_batch_with_notification_policy(batch, false)
@@ -244,17 +247,6 @@ impl Database {
                 .settle_deferred_notifications(persistence.publication);
         }
         Ok(persistence.publication)
-    }
-
-    pub async fn update_raw(
-        &mut self,
-        table: &str,
-        key: PrimaryKeyValue,
-        record: impl Into<RawRecordInput>,
-    ) -> Result<(), Error> {
-        let mut batch = self.open_batch();
-        batch.update_raw(table, key, record);
-        self.commit_batch(batch).await
     }
 
     pub(super) fn pending_writes_from_batch(
