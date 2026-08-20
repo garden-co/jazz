@@ -221,14 +221,19 @@ where
     #[cfg(feature = "testing")]
     /// Test/bench-only encoded storage byte estimate across Jazz physical
     /// classes.
-    pub fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
-        Ok(self.node.borrow().encoded_storage_bytes_for_test()?)
+    pub async fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
+        Ok(self
+            .node
+            .lock()
+            .await
+            .encoded_storage_bytes_for_test()
+            .await?)
     }
 
     #[cfg(feature = "testing")]
     /// Test/bench-only runtime diagnostics used by performance receipts.
-    pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
-        self.node.borrow().runtime_stats_for_test()
+    pub async fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
+        self.node.lock().await.runtime_stats_for_test()
     }
 
     pub(super) fn next_subscription_key(
