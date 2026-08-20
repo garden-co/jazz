@@ -76,7 +76,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
         node.physical_table_id_for_schema(evolved_payload.id, "people")
             .unwrap(),
     );
-    let mut resolver = CurrentQuerySourceResolver {
+    let mut resolver = CurrentQuerySourcePreparer {
         node: &mut node,
         read_view: &read_view,
         inline_sources: BTreeMap::new(),
@@ -85,7 +85,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
     };
 
     assert!(resolver.needs_projected_current_source("users"));
-    let resolved = resolver.resolve_source(&source_request).unwrap();
+    let resolved = resolver.prepare_source(&source_request).unwrap();
     assert_eq!(
         resolver.current_projection_targets.len(),
         1,

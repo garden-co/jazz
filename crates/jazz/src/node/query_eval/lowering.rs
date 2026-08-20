@@ -434,7 +434,7 @@ where
     ) -> Result<QueryProgram, Error> {
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
-        let mut resolver = CurrentQuerySourceResolver {
+        let mut resolver = CurrentQuerySourcePreparer {
             node: self,
             read_view: &read_view,
             inline_sources,

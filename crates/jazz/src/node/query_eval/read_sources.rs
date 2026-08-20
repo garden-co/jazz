@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::node::query_engine::BranchViewSourceBase;
-pub(super) struct CurrentQuerySourceResolver<'a, S> {
+pub(super) struct CurrentQuerySourcePreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
@@ -30,11 +30,11 @@ pub(super) enum CurrentAccessPath {
     Index { column: String, prefix: Vec<Value> },
 }
 
-impl<S> SourceResolver for CurrentQuerySourceResolver<'_, S>
+impl<S> AsyncSourcePreparer for CurrentQuerySourcePreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
-    async fn resolve_source(
+    async fn prepare_source(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError> {
@@ -1086,7 +1086,7 @@ where
     }
 }
 
-impl<S> CurrentQuerySourceResolver<'_, S>
+impl<S> CurrentQuerySourcePreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
