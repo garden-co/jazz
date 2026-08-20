@@ -1,6 +1,7 @@
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
 import type { AuthFailureReason } from "../auth-state.js";
+import { isUsableSubject } from "../author-id.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 
 export type WebSocketFrameHandler = (frame: Uint8Array) => void;
@@ -286,9 +287,9 @@ export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Arra
   const sub = authSub(auth) ?? bytesToHex(peerIdentity);
   return JSON.stringify({
     peer_identity: bytesToHex(peerIdentity),
-    auth: { sub, ...auth },
-    sub,
     ...auth,
+    auth: { ...auth, sub },
+    sub,
   });
 }
 
@@ -376,7 +377,7 @@ function bytesToHex(bytes: Uint8Array): string {
 
 function authSub(auth: Record<string, unknown>): string | null {
   const directSub = auth.sub;
-  if (typeof directSub === "string" && directSub.trim()) return directSub.trim();
+  if (typeof directSub === "string" && isUsableSubject(directSub)) return directSub;
   const jwtToken = auth.jwt_token;
   if (typeof jwtToken === "string") {
     const jwtSub = jwtSubject(jwtToken);
@@ -385,7 +386,7 @@ function authSub(auth: Record<string, unknown>): string | null {
   const session = auth.backend_session;
   if (session && typeof session === "object") {
     const userId = (session as { user_id?: unknown }).user_id;
-    if (typeof userId === "string" && userId.trim()) return userId.trim();
+    if (typeof userId === "string" && isUsableSubject(userId)) return userId;
   }
   return null;
 }
@@ -395,7 +396,7 @@ function jwtSubject(jwtToken: string): string | null {
   if (parts.length < 2) return null;
   try {
     const payload = JSON.parse(base64UrlDecode(parts[1]!)) as { sub?: unknown };
-    return typeof payload.sub === "string" && payload.sub.trim() ? payload.sub.trim() : null;
+    return typeof payload.sub === "string" && isUsableSubject(payload.sub) ? payload.sub : null;
   } catch {
     return null;
   }

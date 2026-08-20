@@ -22,7 +22,7 @@ import { installWasmTelemetry } from "./sync-telemetry.js";
 import { parseJwtPayload, resolveClientSessionSync } from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { httpUrlToWs } from "./url.js";
-import { authorBytesForSubject } from "./author-id.js";
+import { authorBytesForSubject, isUsableSubject } from "./author-id.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -54,9 +54,11 @@ function randomBytes(): Uint8Array {
 }
 
 function subjectFromConfig(config: DbConfig): string | null {
-  if (config.cookieSession?.user_id) return config.cookieSession.user_id;
+  if (config.cookieSession?.user_id && isUsableSubject(config.cookieSession.user_id)) {
+    return config.cookieSession.user_id;
+  }
   const payload = parseJwtPayload(config.jwtToken ?? "");
-  return typeof payload?.sub === "string" && payload.sub.trim() ? payload.sub.trim() : null;
+  return typeof payload?.sub === "string" && isUsableSubject(payload.sub) ? payload.sub : null;
 }
 
 function persistentIdentitySeed(config: DbConfig, subject: string | null): string {
