@@ -1519,6 +1519,71 @@ impl ReadViewSourceSpec {
     fn canonicalize(&mut self) {}
 }
 
+/// Canonical named values for one schema-wide branch selector.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub struct BranchSelector {
+    /// Canonically encoded typed values keyed by stable branch-dimension name.
+    pub dimensions: BTreeMap<String, BranchDimensionValue>,
+}
+
+impl BranchSelector {
+    /// Construct a selector from named dimension values.
+    pub fn new(dimensions: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Self {
+        Self {
+            dimensions: dimensions
+                .into_iter()
+                .map(|(name, value)| (name.into(), BranchDimensionValue::from(value)))
+                .collect(),
+        }
+    }
+}
+
+/// Canonical wire/storage encoding of one branch-dimension value.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct BranchDimensionValue(pub Vec<u8>);
+
+impl From<Value> for BranchDimensionValue {
+    fn from(value: Value) -> Self {
+        Self(postcard::to_allocvec(&value).expect("branch dimension values are encodable"))
+    }
+}
+
+impl BranchDimensionValue {
+    /// Decode the value for validation and ordinary column projection.
+    pub fn decode(&self) -> Result<Value, postcard::Error> {
+        postcard::from_bytes(&self.0)
+    }
+}
+
+/// Optional base composed underneath the live head of a branch view.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum BranchViewBase {
+    /// A base that continues to observe current writes.
+    Current(BranchSelector),
+    /// A base frozen at one resolved snapshot.
+    Snapshot {
+        /// Branch key read at the frozen cut.
+        branch: BranchSelector,
+        /// Historic frontier shared by every source in the view.
+        snapshot: SnapshotRef,
+    },
+}
+
 /// Wire source selected by a read view.
 #[derive(
     Clone,
@@ -1536,6 +1601,13 @@ pub enum ReadViewSourceSpec {
     /// Current default branch/source.
     #[default]
     Current,
+    /// A live branch head, optionally composed over one live or frozen base.
+    BranchView {
+        /// Named values for the requested head incarnation.
+        head: BranchSelector,
+        /// Optional single fallback source.
+        base: Option<BranchViewBase>,
+    },
     /// Snapshot ref resolved by the receiving node.
     Snapshot {
         /// Historic frontier to read.

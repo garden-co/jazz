@@ -19,10 +19,8 @@ use groove::schema::{
 };
 use groove::storage::StorageLayout;
 
-use crate::ids::SchemaVersionId;
-use crate::query::Query;
-#[cfg(test)]
-use crate::query::{claim, col, eq};
+use crate::ids::{BranchDimensionId, SchemaVersionId};
+use crate::query::{Query, claim, col, eq};
 use crate::tools::public_schema::Schema as PublicSchema;
 
 pub use crate::tools::public_schema_convert::SchemaConversionError;
@@ -118,13 +116,15 @@ impl Deref for JazzSchema {
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema {
+    /// Globally named, lineage-stable branch dimensions in canonical order.
+    pub branch_dimensions: Vec<BranchDimensionSchema>,
     /// Application tables in the schema.
     pub tables: Vec<TableSchema>,
 }
 
 impl PartialEq for RuntimeSchema {
     fn eq(&self, other: &Self) -> bool {
-        self.tables == other.tables
+        self.branch_dimensions == other.branch_dimensions && self.tables == other.tables
     }
 }
 
@@ -133,14 +133,59 @@ impl RuntimeSchema {
     #[cfg(test)]
     pub(crate) fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
         Self {
+            branch_dimensions: Vec::new(),
             tables: tables.into_iter().collect(),
         }
         .validated()
     }
 
-    #[cfg(test)]
+    /// Declare one globally named branch dimension.
+    pub fn with_branch_dimension(mut self, dimension: BranchDimensionSchema) -> Self {
+        self.branch_dimensions.push(dimension);
+        self.validated()
+    }
+
     fn validated(self) -> Self {
+        let mut dimension_ids = BTreeSet::new();
+        let mut dimension_names = BTreeSet::new();
+        for dimension in &self.branch_dimensions {
+            assert!(
+                dimension_ids.insert(dimension.id),
+                "duplicate branch dimension id"
+            );
+            assert!(
+                dimension_names.insert(dimension.name.clone()),
+                "duplicate branch dimension name"
+            );
+            assert!(
+                !matches!(dimension.column_type, GrooveColumnType::Nullable(_)),
+                "branch dimensions must be non-nullable"
+            );
+        }
         for table in &self.tables {
+            let mut bound_dimensions = BTreeSet::new();
+            for binding in &table.branch_by {
+                let dimension = self
+                    .branch_dimensions
+                    .iter()
+                    .find(|dimension| dimension.id == binding.dimension)
+                    .unwrap_or_else(|| panic!("unknown branch dimension on {}", table.name));
+                let column = table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == binding.column)
+                    .unwrap_or_else(|| {
+                        panic!("unknown branch column {}.{}", table.name, binding.column)
+                    });
+                assert!(
+                    bound_dimensions.insert(binding.dimension),
+                    "duplicate table branch dimension"
+                );
+                assert_eq!(
+                    column.column_type, dimension.column_type,
+                    "branch dimension column type mismatch"
+                );
+            }
             for (column_name, strategy) in &table.merge_strategies {
                 let column = table
                     .columns
@@ -317,6 +362,45 @@ impl RuntimeSchema {
     }
 }
 
+/// One globally named branch coordinate whose identity survives column renames.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct BranchDimensionSchema {
+    /// Stable semantic identity.
+    pub id: BranchDimensionId,
+    /// Stable selector name used by branch views.
+    pub name: String,
+    /// Non-null, canonically key-encodable value type.
+    pub column_type: GrooveColumnType,
+    /// Immutable default used when this dimension is added monotonically.
+    pub migration_default: Value,
+}
+
+impl BranchDimensionSchema {
+    /// Construct a branch dimension declaration.
+    pub fn new(
+        id: BranchDimensionId,
+        name: impl Into<String>,
+        column_type: GrooveColumnType,
+        migration_default: Value,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            column_type,
+            migration_default,
+        }
+    }
+}
+
+/// Binding from an ordinary application column to a stable branch dimension.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct BranchDimensionBinding {
+    /// Application column, freely renameable through schema lineage.
+    pub column: String,
+    /// Stable dimension identity.
+    pub dimension: BranchDimensionId,
+}
+
 /// Per-column strategy used when upstream nodes merge concurrent content heads.
 ///
 /// Counter deltas are represented on the wire as an absolute user cell plus the
@@ -468,6 +552,9 @@ pub struct TableSchema {
     pub name: String,
     /// User columns.
     pub columns: Vec<ColumnSchema>,
+    /// Ordinary columns that form this table's exact branch key.
+    #[serde(default)]
+    pub branch_by: Vec<BranchDimensionBinding>,
     /// Jazz-level reference metadata by source column name.
     pub references: BTreeMap<String, String>,
     /// Read policy used when serving views.
@@ -492,12 +579,26 @@ impl TableSchema {
         Self {
             name: name.into(),
             columns: columns.into_iter().map(Into::into).collect(),
+            branch_by: Vec::new(),
             references: BTreeMap::new(),
             read_policy: None,
             write_policies: WritePolicies::default(),
             indexed_columns: BTreeSet::new(),
             merge_strategies: BTreeMap::new(),
         }
+    }
+
+    /// Bind an ordinary application column to a stable branch dimension.
+    pub fn with_branch_dimension(
+        mut self,
+        column: impl Into<String>,
+        dimension: BranchDimensionId,
+    ) -> Self {
+        self.branch_by.push(BranchDimensionBinding {
+            column: column.into(),
+            dimension,
+        });
+        self
     }
 
     /// Mark a user column as referencing another Jazz table.

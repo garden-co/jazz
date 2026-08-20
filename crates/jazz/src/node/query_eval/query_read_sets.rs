@@ -257,5 +257,8 @@ pub(super) fn query_read_set_for_read_view(
         ReadViewSourceSpec::Snapshot { .. } => Err(Error::QueryCapability(
             "snapshot read_view requires unified snapshot source lowering".to_owned(),
         )),
+        ReadViewSourceSpec::BranchView { .. } => Err(Error::QueryCapability(
+            "branch view requires branch-dimension source lowering".to_owned(),
+        )),
     }
 }

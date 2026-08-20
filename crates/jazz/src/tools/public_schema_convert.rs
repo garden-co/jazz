@@ -65,6 +65,7 @@ pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, Schem
     Ok(JazzSchema::from_runtime(
         schema.clone(),
         RuntimeSchema {
+            branch_dimensions: Vec::new(),
             tables: converted,
         },
     ))
@@ -77,10 +78,9 @@ pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     convert_public_schema(&schema).map_err(|error| format!("compile public schema: {error}"))
 }
 
-}
-
 fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
     let schema = RuntimeSchema {
+        branch_dimensions: Vec::new(),
         tables: tables.to_vec(),
     };
     for table in tables {
