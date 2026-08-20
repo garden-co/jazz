@@ -319,16 +319,16 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
             )])),
         )
         .unwrap();
+    let shape = Query::from("notes").validate(&evolved).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
     assert_eq!(
-        core.current_rows_for_schema("notes", evolved_payload.id, DurabilityTier::Local)
+        core.query_rows(&shape, &binding, DurabilityTier::Local)
             .unwrap()
             .len(),
         1
     );
     core.accept_global_for_test(tx_id).unwrap();
 
-    let shape = Query::from("notes").validate(&evolved).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
     let rows = core
         .query_rows(&shape, &binding, DurabilityTier::Local)
         .unwrap()

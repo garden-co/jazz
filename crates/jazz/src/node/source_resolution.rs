@@ -1,8 +1,9 @@
-//! Source row fabrication used by query-engine source resolution.
+//! Snapshot projection used by query-engine source lowering.
 //!
-//! These helpers are the remaining compatibility bridge for schema/lens
-//! projected sources. Query lowering still sees an explicit source graph; this
-//! module owns the temporary row materialization behind those graph leaves.
+//! Live current relations lower to Groove graph sources in `query_eval`; this
+//! module is restricted to frozen historical, transaction-overlay, and other
+//! explicitly snapshot-valued inputs. It must not launch an ordinary Jazz
+//! query to materialize another query's source.
 
 use super::*;
 use crate::node::query_engine::BranchViewSourceBase;
