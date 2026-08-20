@@ -1683,7 +1683,6 @@ async fn inherited_multiple_folder_paths_compose_with_or_inner() {
 /// Verifies that folder ownership grants UPDATE access to a folder-backed
 /// document when the child row inherits `allowedTo.update(...)` from its parent.
 #[tokio::test]
-#[ignore = "the folder owner's inherited UPDATE is staged locally but never becomes visible to an admin EdgeServer query"]
 async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
     tokio::task::LocalSet::new()
         .run_until(inherited_folder_update_allows_folder_owner_and_blocks_other_users_inner())
@@ -1707,10 +1706,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
             "documents",
             permissions(|p| {
                 p.allow_insert().always();
-                p.allow_read().where_(pe::any_of([
-                    owner_policy.clone(),
-                    inherited_non_null_policy(Operation::Select, "folder_id"),
-                ]));
+                p.allow_read().always();
                 p.allow_update()
                     .where_old(pe::any_of([
                         owner_policy,
@@ -1736,14 +1732,21 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
     .await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
 
-    let folder_id = create_folder(&admin, "folders", "Shared", &[super::ALICE_ID], false).await;
-    let doc_id = create_folder_document(
+    let (folder_id, _, folder_tx) = admin
+        .insert("folders", folder_input("Shared", &[super::ALICE_ID], false))
+        .expect("create shared folder");
+    let (doc_id, _, document_tx) = admin
+        .insert(
+            "documents",
+            folder_document_input(super::CHARLIE_ID, "Original", false, Some(folder_id)),
+        )
+        .expect("create folder document");
+    wait_for_edge_txs(
         &admin,
-        "documents",
-        super::CHARLIE_ID,
-        "Original",
-        false,
-        Some(folder_id),
+        &[
+            folder_tx.expect("folder insert should commit immediately"),
+            document_tx.expect("document insert should commit immediately"),
+        ],
     )
     .await;
     let query = Query::from("documents");
@@ -1762,13 +1765,29 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
         },
     )
     .await;
-
-    update_row(
-        &alice,
-        doc_id,
-        vec![("title".to_string(), "Edited By Folder Owner".into())],
+    wait_for_rows(
+        &bob,
+        query.clone(),
+        "the non-owner sees the document before attempting an inherited update",
+        |rows| {
+            has_row(
+                &rows,
+                doc_id,
+                &folder_document_values(super::CHARLIE_ID, "Original", false, Some(folder_id)),
+            )
+            .then_some(rows)
+        },
     )
     .await;
+
+    let alice_update_tx = alice
+        .update(
+            doc_id,
+            vec![("title".to_string(), "Edited By Folder Owner".into())],
+        )
+        .expect("folder owner update should be accepted locally")
+        .expect("folder owner update should commit immediately");
+    wait_for_edge_txs(&alice, &[alice_update_tx]).await;
     let rows_after_alice = wait_for_rows(
         &admin,
         query.clone(),
@@ -1799,12 +1818,11 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
         ),
     ));
 
-    update_row(
-        &bob,
-        doc_id,
-        vec![("title".to_string(), "Edited By Bob".into())],
-    )
-    .await;
+    let bob_update_tx = bob
+        .update(doc_id, vec![("title".to_string(), "Edited By Bob".into())])
+        .expect("non-owner update should be accepted locally")
+        .expect("non-owner update should commit immediately");
+    wait_for_edge_tx_rejection(&bob, bob_update_tx).await;
     let rows_after_bob = wait_for_query(
         &admin,
         query,
