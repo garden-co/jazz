@@ -81,6 +81,10 @@ const nextestAvailable =
 if (requireNextest && !nextestAvailable)
   throw new Error("cargo-nextest is required; install: cargo install cargo-nextest --locked");
 const useNextest = nextestAvailable;
+// Nextest's default 2 MiB test-thread stack is smaller than Cargo test's and
+// is insufficient for several broad async integration futures. Keep the
+// runner deterministic without rewriting those tests solely for harness shape.
+const rustMinStack = process.env.RUST_MIN_STACK ?? String(4 * 1024 * 1024);
 if (!useNextest && shardCount !== 1)
   throw new Error("sharding requires cargo-nextest; install: cargo install cargo-nextest --locked");
 const command = "cargo";
@@ -106,6 +110,7 @@ const child = spawn(command, commandArgs, {
   cwd: root,
   stdio: "inherit",
   detached: process.platform !== "win32",
+  env: { ...process.env, RUST_MIN_STACK: rustMinStack },
 });
 const timer = setTimeout(() => {
   timedOut = true;
@@ -163,6 +168,7 @@ const data = {
     rustcWrapper: process.env.RUSTC_WRAPPER ?? null,
     sccacheDir: process.env.SCCACHE_DIR ?? null,
     cargoTargetDir: process.env.CARGO_TARGET_DIR ?? "target",
+    rustMinStack,
   },
 };
 fs.writeFileSync(receipt, `${JSON.stringify(data, null, 2)}\n`);
