@@ -491,6 +491,150 @@ fn contribution_merge_denies_unreadable_source_before_minting() {
 }
 
 #[test]
+fn counter_contribution_merge_imports_only_novel_native_deltas() {
+    let dimension = crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x7d; 16]));
+    let schema = JazzSchema::new_with_branch_dimensions(
+        [crate::schema::BranchDimensionSchema::new(
+            dimension,
+            "branch",
+            ColumnType::Uuid,
+            Value::Uuid(uuid::Uuid::nil()),
+        )],
+        [TableSchema::new(
+            "counts",
+            [
+                ColumnSchema::new("branch_id", ColumnType::Uuid),
+                ColumnSchema::new("count", ColumnType::U64),
+            ],
+        )
+        .with_branch_dimension("branch_id", dimension)
+        .with_column_merge_strategy("count", MergeStrategy::Counter)],
+    );
+    let (_dir, mut node) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x7e; 16]), schema);
+    let row_uuid = row(0x7f);
+    let a = branch_selector(0x80);
+    let b = branch_selector(0x81);
+    let c = branch_selector(0x82);
+    let first = node
+        .commit_mergeable(
+            MergeableCommit::new("counts", row_uuid, 10)
+                .branch(a.clone())
+                .cell("count", Value::U64(5)),
+        )
+        .unwrap();
+    let request = |source: BranchSelector, target: BranchSelector, now_ms| {
+        ContributionMergeRequest {
+            source,
+            target,
+            rows: vec![ContributionMergeRow {
+                table: "counts".to_owned(),
+                row_uuid,
+            }],
+            made_by: AuthorId::SYSTEM,
+            permission_subject: None,
+            now_ms,
+        }
+    };
+    node.merge_branch_contributions(request(a.clone(), b.clone(), 20))
+        .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("counts", row_uuid, 30)
+            .branch(a.clone())
+            .parents(vec![first])
+            .cell("count", Value::U64(8)),
+    )
+    .unwrap();
+    node.merge_branch_contributions(request(a.clone(), b.clone(), 40))
+        .unwrap();
+    assert_eq!(
+        node.visible_current_cells_in_branch("counts", &b, row_uuid)
+            .unwrap()
+            .unwrap()["count"],
+        Value::U64(8)
+    );
+    node.merge_branch_contributions(request(b, c.clone(), 50))
+        .unwrap();
+    assert!(
+        node.merge_branch_contributions(request(c, a, 60))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn gset_contribution_merge_tracks_elements_as_native_operations() {
+    let dimension = crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x83; 16]));
+    let schema = JazzSchema::new_with_branch_dimensions(
+        [crate::schema::BranchDimensionSchema::new(
+            dimension,
+            "branch",
+            ColumnType::Uuid,
+            Value::Uuid(uuid::Uuid::nil()),
+        )],
+        [TableSchema::new(
+            "sets",
+            [
+                ColumnSchema::new("branch_id", ColumnType::Uuid),
+                ColumnSchema::new("members", ColumnType::Array(Box::new(ColumnType::String))),
+            ],
+        )
+        .with_branch_dimension("branch_id", dimension)
+        .with_column_merge_strategy("members", MergeStrategy::GSet)],
+    );
+    let (_dir, mut node) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x84; 16]), schema);
+    let row_uuid = row(0x85);
+    let a = branch_selector(0x86);
+    let b = branch_selector(0x87);
+    let c = branch_selector(0x88);
+    let first = node
+        .commit_mergeable(
+            MergeableCommit::new("sets", row_uuid, 10)
+                .branch(a.clone())
+                .cell("members", Value::Array(vec![v("one")])),
+        )
+        .unwrap();
+    let request = |source: BranchSelector, target: BranchSelector, now_ms| {
+        ContributionMergeRequest {
+            source,
+            target,
+            rows: vec![ContributionMergeRow {
+                table: "sets".to_owned(),
+                row_uuid,
+            }],
+            made_by: AuthorId::SYSTEM,
+            permission_subject: None,
+            now_ms,
+        }
+    };
+    node.merge_branch_contributions(request(a.clone(), b.clone(), 20))
+        .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("sets", row_uuid, 30)
+            .branch(a.clone())
+            .parents(vec![first])
+            .cell("members", Value::Array(vec![v("two")])),
+    )
+    .unwrap();
+    node.merge_branch_contributions(request(a.clone(), b.clone(), 40))
+        .unwrap();
+    assert_eq!(
+        node.visible_current_cells_in_branch("sets", &b, row_uuid)
+            .unwrap()
+            .unwrap()["members"],
+        Value::Array(vec![v("one"), v("two")])
+    );
+    node.merge_branch_contributions(request(b, c.clone(), 50))
+        .unwrap();
+    assert!(
+        node.merge_branch_contributions(request(c, a, 60))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn maintained_live_base_emits_a_delta_before_facade_refresh() {
     let schema = branch_view_schema();
     let (_dir, mut node) =

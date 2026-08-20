@@ -120,7 +120,7 @@ fn content_version_reaches_tx_in_staged_parents(
     Some(false)
 }
 
-fn counter_merge_value(
+pub(super) fn counter_merge_value(
     table_schema: &TableSchema,
     column: &str,
     row_versions_by_tx: &BTreeMap<TxId, VersionRow>,
@@ -215,7 +215,7 @@ fn counter_head_tx_ids(
 /// element in a later write cannot remove an element introduced by any parent.
 /// Elements are keyed and ordered by Groove's deterministic record encoding;
 /// this preserves distinct valid float bit patterns such as `+0.0` and `-0.0`.
-fn gset_merge_value(
+pub(super) fn gset_merge_value(
     table_schema: &TableSchema,
     column: &str,
     row_versions_by_tx: &BTreeMap<TxId, VersionRow>,
@@ -310,7 +310,7 @@ fn raw_merge_head_tx_ids(
     ))
 }
 
-fn counter_value_to_i128(value: &Value) -> Result<i128, Error> {
+pub(super) fn counter_value_to_i128(value: &Value) -> Result<i128, Error> {
     match value {
         Value::U8(value) => Ok(i128::from(*value)),
         Value::U16(value) => Ok(i128::from(*value)),
@@ -322,7 +322,7 @@ fn counter_value_to_i128(value: &Value) -> Result<i128, Error> {
     }
 }
 
-fn counter_value_from_i128(
+pub(super) fn counter_value_from_i128(
     column_type: &groove::schema::ColumnType,
     value: i128,
 ) -> Result<Value, Error> {

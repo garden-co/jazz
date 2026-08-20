@@ -97,13 +97,41 @@ where
                     .authored_columns
                     .clone()
                     .unwrap_or_else(|| commit.cells.keys().cloned().collect());
-                emitted.extend(authored.into_iter().map(|column| ContributionCoordinate {
-                    branch_key: branch_key.clone(),
-                    table: commit.table.clone(),
-                    row_uuid: commit.row_uuid,
-                    layer,
-                    component: ContributionComponent::Column(column),
-                }));
+                for column in authored {
+                    let components = match table.merge_strategy(&column) {
+                        MergeStrategy::Lww => vec![ContributionComponent::Column(column)],
+                        MergeStrategy::Counter => {
+                            vec![ContributionComponent::Operation(column.into_bytes())]
+                        }
+                        MergeStrategy::GSet => match commit.cells.get(&column) {
+                            Some(Value::Array(elements)) => elements
+                                .iter()
+                                .map(|element| {
+                                    postcard::to_allocvec(&(column.as_str(), element)).map(
+                                        ContributionComponent::Operation,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|_| {
+                                    Error::InvalidMergeableCommit(
+                                        "g-set contribution operation must encode",
+                                    )
+                                })?,
+                            _ => {
+                                return Err(Error::InvalidMergeableCommit(
+                                    "g-set calculated merge value must be an array",
+                                ));
+                            }
+                        },
+                    };
+                    emitted.extend(components.into_iter().map(|component| ContributionCoordinate {
+                        branch_key: branch_key.clone(),
+                        table: commit.table.clone(),
+                        row_uuid: commit.row_uuid,
+                        layer,
+                        component,
+                    }));
+                }
             }
         }
         if provenance

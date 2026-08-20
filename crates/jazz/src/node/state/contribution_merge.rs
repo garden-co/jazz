@@ -100,28 +100,6 @@ where
                     "calculated merge source row is unreadable",
                 ));
             }
-            if table
-                .columns
-                .iter()
-                .filter(|column| {
-                    !table
-                        .branch_by
-                        .iter()
-                        .any(|binding| binding.column == column.name)
-                })
-                .any(|column| {
-                    table
-                        .merge_strategies
-                        .get(&column.name)
-                        .copied()
-                        .unwrap_or_default()
-                        != MergeStrategy::Lww
-                })
-            {
-                return Err(Error::InvalidMergeableCommit(
-                    "contribution merge strategy is not yet supported",
-                ));
-            }
             let (source_key, _) = schema
                 .project_branch_view_selector(&table, &request.source)
                 .map_err(Error::InvalidBranchKey)?;
@@ -129,6 +107,11 @@ where
                 .project_branch_view_selector(&table, &request.target)
                 .map_err(Error::InvalidBranchKey)?;
             let versions = self.query_table_versions(&selected.table)?;
+            let all_row_versions = versions
+                .iter()
+                .filter(|version| version.row_uuid() == selected.row_uuid)
+                .cloned()
+                .collect::<Vec<_>>();
             let mut source_versions = Vec::new();
             let mut target_versions = Vec::new();
             let mut observed_transactions = BTreeSet::new();
@@ -162,7 +145,13 @@ where
              -> Result<Option<ContributionDot>, Error> {
                 let mut selected_dot: Option<ContributionDot> = None;
                 for version in versions.iter().filter(|version| version.layer() == layer) {
-                    if let ContributionComponent::Column(column) = &component {
+                    if let Some(column) = match &component {
+                        ContributionComponent::Column(column) => Some(column.as_str()),
+                        ContributionComponent::Operation(operation) => {
+                            std::str::from_utf8(operation).ok()
+                        }
+                        ContributionComponent::Register => None,
+                    } {
                         let authored = version.authored_columns(&table)?;
                         if !authored.as_ref().is_none_or(|columns| columns.contains(column))
                             || version.cell(&table, column)?.is_none()
@@ -214,46 +203,316 @@ where
                     .iter()
                     .any(|binding| binding.column == column.name)
             }) {
-                let Some(source_dot) = latest_dot(
-                    self,
-                    &source_versions,
-                    VersionLayer::Content,
-                    ContributionComponent::Column(column.name.clone()),
-                )? else {
-                    continue;
+                let strategy = table.merge_strategy(&column.name);
+                let component = match strategy {
+                    MergeStrategy::Lww => ContributionComponent::Column(column.name.clone()),
+                    MergeStrategy::Counter => {
+                        ContributionComponent::Operation(column.name.as_bytes().to_vec())
+                    }
+                    MergeStrategy::GSet => ContributionComponent::Operation(Vec::new()),
                 };
-                let target_dot = latest_dot(
-                    self,
-                    &target_versions,
-                    VersionLayer::Content,
-                    ContributionComponent::Column(column.name.clone()),
-                )?;
-                let novel = index
-                    .novel([source_dot], target_dot)
-                    .map_err(Error::InvalidMergeableCommit)?;
+                let novel = match strategy {
+                    MergeStrategy::Lww => {
+                        let Some(source_dot) = latest_dot(
+                            self,
+                            &source_versions,
+                            VersionLayer::Content,
+                            component.clone(),
+                        )? else {
+                            continue;
+                        };
+                        let target_dot = latest_dot(
+                            self,
+                            &target_versions,
+                            VersionLayer::Content,
+                            component.clone(),
+                        )?;
+                        index
+                            .novel([source_dot], target_dot)
+                            .map_err(Error::InvalidMergeableCommit)?
+                    }
+                    MergeStrategy::Counter => {
+                        let dots = |versions: &[VersionRow]| -> Result<Vec<ContributionDot>, Error> {
+                            let mut dots = Vec::new();
+                            for version in versions
+                                .iter()
+                                .filter(|version| version.layer() == VersionLayer::Content)
+                            {
+                                let authored = version.authored_columns(&table)?;
+                                if !authored
+                                    .as_ref()
+                                    .is_none_or(|columns| columns.contains(&column.name))
+                                {
+                                    continue;
+                                }
+                                dots.push(ContributionDot {
+                                    tx_id: self.version_tx_id(version)?,
+                                    coordinate: ContributionCoordinate {
+                                        branch_key: version.branch_key().clone(),
+                                        table: selected.table.clone(),
+                                        row_uuid: selected.row_uuid,
+                                        layer: MergeAspect::Content,
+                                        component: component.clone(),
+                                    },
+                                });
+                            }
+                            Ok(dots)
+                        };
+                        index
+                            .novel(dots(&source_versions)?, dots(&target_versions)?)
+                            .map_err(Error::InvalidMergeableCommit)?
+                    }
+                    MergeStrategy::GSet => {
+                        let dots = |versions: &[VersionRow]| -> Result<Vec<ContributionDot>, Error> {
+                            let branch_versions = versions
+                                .iter()
+                                .filter(|version| version.layer() == VersionLayer::Content)
+                                .map(|version| {
+                                    self.version_tx_id(version)
+                                        .map(|tx_id| (tx_id, version.clone()))
+                                })
+                                .collect::<Result<BTreeMap<_, _>, Error>>()?;
+                            let element_type = match &column.column_type {
+                                records::ValueType::Array(element) => element.as_ref().clone(),
+                                _ => {
+                                    return Err(Error::InvalidMergeableCommit(
+                                        "g-set contribution column must be an array",
+                                    ));
+                                }
+                            };
+                            let descriptor = records::RecordDescriptor::new([("element", element_type)]);
+                            let mut dots = Vec::new();
+                            for version in versions
+                                .iter()
+                                .filter(|version| version.layer() == VersionLayer::Content)
+                            {
+                                let authored = version.authored_columns(&table)?;
+                                if !authored
+                                    .as_ref()
+                                    .is_none_or(|columns| columns.contains(&column.name))
+                                {
+                                    continue;
+                                }
+                                let parent = ingest::gset_merge_value(
+                                    &table,
+                                    &column.name,
+                                    &branch_versions,
+                                    &version.parents(),
+                                )?;
+                                let Value::Array(parent) = parent else {
+                                    return Err(Error::InvalidStoredValue(
+                                        "g-set parent must materialize an array",
+                                    ));
+                                };
+                                let parent = parent
+                                    .iter()
+                                    .map(|element| descriptor.create(std::slice::from_ref(element)))
+                                    .collect::<Result<BTreeSet<_>, _>>()?;
+                                let Some(Value::Array(elements)) =
+                                    version.cell(&table, &column.name)?
+                                else {
+                                    continue;
+                                };
+                                for element in elements {
+                                    if parent.contains(&descriptor.create(std::slice::from_ref(&element))?) {
+                                        continue;
+                                    }
+                                    dots.push(ContributionDot {
+                                        tx_id: self.version_tx_id(version)?,
+                                        coordinate: ContributionCoordinate {
+                                            branch_key: version.branch_key().clone(),
+                                            table: selected.table.clone(),
+                                            row_uuid: selected.row_uuid,
+                                            layer: MergeAspect::Content,
+                                            component: ContributionComponent::Operation(
+                                                postcard::to_allocvec(&(column.name.as_str(), &element))
+                                                    .map_err(|_| Error::InvalidMergeableCommit(
+                                                        "g-set contribution operation must encode",
+                                                    ))?,
+                                            ),
+                                        },
+                                    });
+                                }
+                            }
+                            Ok(dots)
+                        };
+                        index
+                            .novel(dots(&source_versions)?, dots(&target_versions)?)
+                            .map_err(Error::InvalidMergeableCommit)?
+                    }
+                };
                 if novel.is_empty() {
                     continue;
                 }
-                let Some(value) = source_content
-                    .as_ref()
-                    .map(|version| version.cell(&table, &column.name))
-                    .transpose()?
-                    .flatten()
-                else {
-                    continue;
+                let value = match strategy {
+                    MergeStrategy::Lww => {
+                        let Some(value) = source_content
+                            .as_ref()
+                            .map(|version| version.cell(&table, &column.name))
+                            .transpose()?
+                            .flatten()
+                        else {
+                            continue;
+                        };
+                        value
+                    }
+                    MergeStrategy::Counter => {
+                        let target_value = self
+                            .query_local_layer_winner_in_branch(
+                                &selected.table,
+                                &target_key,
+                                selected.row_uuid,
+                                VersionLayer::Content,
+                            )?
+                            .or(self.query_global_layer_winner_in_branch(
+                                &selected.table,
+                                &target_key,
+                                selected.row_uuid,
+                                VersionLayer::Content,
+                            )?)
+                            .as_ref()
+                            .map(|version| version.cell(&table, &column.name))
+                            .transpose()?
+                            .flatten()
+                            .as_ref()
+                            .map(ingest::counter_value_to_i128)
+                            .transpose()?
+                            .unwrap_or(0);
+                        let mut imported = 0i128;
+                        for root in &novel {
+                            let version = all_row_versions
+                                .iter()
+                                .find(|version| {
+                                    version.branch_key() == &root.coordinate.branch_key
+                                        && self.version_tx_id(version).ok() == Some(root.tx_id)
+                                        && version.layer() == VersionLayer::Content
+                                })
+                                .ok_or(Error::MissingTransaction(root.tx_id))?;
+                            let branch_versions = all_row_versions
+                                .iter()
+                                .filter(|candidate| {
+                                    candidate.branch_key() == version.branch_key()
+                                        && candidate.layer() == VersionLayer::Content
+                                })
+                                .map(|candidate| {
+                                    self.version_tx_id(candidate)
+                                        .map(|tx_id| (tx_id, candidate.clone()))
+                                })
+                                .collect::<Result<BTreeMap<_, _>, Error>>()?;
+                            let authored_value = version
+                                .cell(&table, &column.name)?
+                                .ok_or(Error::InvalidStoredValue(
+                                    "counter contribution value missing",
+                                ))?;
+                            let parent_value = ingest::counter_merge_value(
+                                &table,
+                                &column.name,
+                                &branch_versions,
+                                &version.parents(),
+                                &mut BTreeMap::new(),
+                            )?;
+                            imported += ingest::counter_value_to_i128(&authored_value)? - parent_value;
+                        }
+                        ingest::counter_value_from_i128(
+                            &column.column_type,
+                            target_value + imported,
+                        )?
+                    }
+                    MergeStrategy::GSet => {
+                        let element_type = match &column.column_type {
+                            records::ValueType::Array(element) => element.as_ref().clone(),
+                            _ => unreachable!("validated g-set schema"),
+                        };
+                        let descriptor = records::RecordDescriptor::new([("element", element_type)]);
+                        let mut elements = BTreeMap::<Vec<u8>, Value>::new();
+                        if let Some(Value::Array(current)) = self
+                            .query_local_layer_winner_in_branch(
+                                &selected.table,
+                                &target_key,
+                                selected.row_uuid,
+                                VersionLayer::Content,
+                            )?
+                            .or(self.query_global_layer_winner_in_branch(
+                                &selected.table,
+                                &target_key,
+                                selected.row_uuid,
+                                VersionLayer::Content,
+                            )?)
+                            .as_ref()
+                            .map(|version| version.cell(&table, &column.name))
+                            .transpose()?
+                            .flatten()
+                        {
+                            for element in current {
+                                elements.insert(
+                                    descriptor.create(std::slice::from_ref(&element))?,
+                                    element,
+                                );
+                            }
+                        }
+                        for root in &novel {
+                            let ContributionComponent::Operation(operation) = &root.coordinate.component else {
+                                return Err(Error::InvalidStoredValue(
+                                    "g-set contribution operation missing",
+                                ));
+                            };
+                            let (operation_column, element): (String, Value) =
+                                postcard::from_bytes(operation).map_err(|_| {
+                                    Error::InvalidStoredValue(
+                                        "g-set contribution operation must decode",
+                                    )
+                                })?;
+                            if operation_column != column.name {
+                                return Err(Error::InvalidStoredValue(
+                                    "g-set contribution operation column mismatch",
+                                ));
+                            }
+                            elements.insert(
+                                descriptor.create(std::slice::from_ref(&element))?,
+                                element,
+                            );
+                        }
+                        Value::Array(elements.into_values().collect())
+                    }
                 };
                 cells.insert(column.name.clone(), value);
                 authored.insert(column.name.clone());
-                substitutions.push(ContributionSubstitution {
-                    target: ContributionCoordinate {
-                        branch_key: target_key.clone(),
-                        table: selected.table.clone(),
-                        row_uuid: selected.row_uuid,
-                        layer: MergeAspect::Content,
-                        component: ContributionComponent::Column(column.name.clone()),
-                    },
-                    sources: novel.into_iter().collect(),
-                });
+                if strategy == MergeStrategy::GSet {
+                    let mut by_operation = BTreeMap::<Vec<u8>, Vec<ContributionDot>>::new();
+                    for root in novel {
+                        let ContributionComponent::Operation(operation) =
+                            &root.coordinate.component
+                        else {
+                            return Err(Error::InvalidStoredValue(
+                                "g-set contribution operation missing",
+                            ));
+                        };
+                        by_operation.entry(operation.clone()).or_default().push(root);
+                    }
+                    substitutions.extend(by_operation.into_iter().map(
+                        |(operation, sources)| ContributionSubstitution {
+                            target: ContributionCoordinate {
+                                branch_key: target_key.clone(),
+                                table: selected.table.clone(),
+                                row_uuid: selected.row_uuid,
+                                layer: MergeAspect::Content,
+                                component: ContributionComponent::Operation(operation),
+                            },
+                            sources,
+                        },
+                    ));
+                } else {
+                    substitutions.push(ContributionSubstitution {
+                        target: ContributionCoordinate {
+                            branch_key: target_key.clone(),
+                            table: selected.table.clone(),
+                            row_uuid: selected.row_uuid,
+                            layer: MergeAspect::Content,
+                            component,
+                        },
+                        sources: novel.into_iter().collect(),
+                    });
+                }
             }
             if !cells.is_empty() {
                 let parents = self
