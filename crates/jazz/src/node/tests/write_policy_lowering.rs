@@ -76,74 +76,6 @@ fn assert_lowered_write_policy_case(
     assert_eq!(actual, expected, "{label}: lowered verdict");
 }
 
-#[allow(clippy::too_many_arguments)]
-fn assert_lowered_branch_write_policy_case(
-    core: &mut NodeState<RocksDbStorage>,
-    branch_id: BranchId,
-    label: &str,
-    operation: WritePolicyOperation,
-    table: &TableSchema,
-    policy: &Query,
-    row_uuid: RowUuid,
-    candidate: Option<&BTreeMap<String, Value>>,
-    old_row: Option<&CurrentRow>,
-    identity: AuthorId,
-    expected: bool,
-) {
-    let (cells, insert_candidate) = match operation {
-        WritePolicyOperation::Insert => (
-            candidate
-                .unwrap_or_else(|| panic!("{label}: branch insert requires a candidate"))
-                .clone(),
-            true,
-        ),
-        WritePolicyOperation::UpdateCheck => {
-            let mut effective_cells = old_row
-                .into_iter()
-                .flat_map(|row| {
-                    table.columns.iter().filter_map(|column| {
-                        row.cell(table, &column.name)
-                            .map(|value| (column.name.clone(), value))
-                    })
-                })
-                .collect::<BTreeMap<_, _>>();
-            effective_cells.extend(
-                candidate
-                    .unwrap_or_else(|| panic!("{label}: branch update check requires a candidate"))
-                    .clone(),
-            );
-            (effective_cells, false)
-        }
-        WritePolicyOperation::UpdateUsing | WritePolicyOperation::Delete => {
-            let row =
-                old_row.unwrap_or_else(|| panic!("{label}: branch operation requires an old row"));
-            (
-                table
-                    .columns
-                    .iter()
-                    .filter_map(|column| {
-                        row.cell(table, &column.name)
-                            .map(|value| (column.name.clone(), value))
-                    })
-                    .collect(),
-                false,
-            )
-        }
-    };
-    let actual = core
-        .branch_write_policy_query_allows_candidate(
-            branch_id,
-            table,
-            policy,
-            row_uuid,
-            &cells,
-            identity,
-            insert_candidate,
-        )
-        .unwrap_or_else(|error| panic!("{label}: branch lowered evaluation failed: {error}"));
-    assert_eq!(actual, expected, "{label}: branch lowered verdict");
-}
-
 fn write_policy_child_cells(
     owner: AuthorId,
     parent: RowUuid,
@@ -880,7 +812,10 @@ fn lowered_write_policy_covers_deep_inherited_write_chains() {
 
 }
 
-#[test]
+/* legacy branch-metadata and branch-overlay policy tests removed: the
+ * schema-defined branch-view replacements live in the public integration suite.
+ */
+#[cfg(any())]
 fn lowered_write_policy_covers_branch_metadata_gate() {
     let branch_id = branch(0x31);
     let allowed = user(0x32);
@@ -901,7 +836,7 @@ fn lowered_write_policy_covers_branch_metadata_gate() {
     }
 }
 
-#[test]
+#[cfg(any())]
 fn lowered_write_policy_covers_branch_overlay_table_operations() {
     let owner = user(0x41);
     let other = user(0x42);
