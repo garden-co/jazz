@@ -19,7 +19,7 @@ fn settle_outcome<S, T>(
     outcome: PublicationOutcome<T>,
 ) -> Result<T, Error>
 where
-    S: OrderedKvStorage,
+    S: OrderedKvStorage + ReopenableStorage,
 {
     crate::db::block_on(node.persist_and_settle_outcome(outcome))
 }

@@ -40,6 +40,7 @@ use crate::tx::{
     TxId as CoreTxId,
 };
 use base64::Engine;
+use futures::lock::Mutex as LocalMutex;
 use serde::{Deserialize, Deserializer};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -51,7 +52,7 @@ use crate::tools::{
 };
 
 type CoreClientDb = CoreDb<CoreStorage>;
-type BackendConnection = Rc<RefCell<CorePeerConnection<CoreStorage>>>;
+type BackendConnection = Rc<LocalMutex<CorePeerConnection<CoreStorage>>>;
 
 const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
@@ -256,7 +257,7 @@ impl Backend {
     }
 
     fn tick(&self) -> std::result::Result<(), CoreDbError> {
-        self.0.tick()
+        crate::db::block_on(self.0.tick())
     }
 
     fn insert(
@@ -264,7 +265,7 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = self.0.insert(table, cells)?;
+        let write = crate::db::block_on(self.0.insert(table, cells))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
@@ -274,7 +275,7 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = self.0.insert_for_identity(identity, table, cells)?;
+        let write = crate::db::block_on(self.0.insert_for_identity(identity, table, cells))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
@@ -284,10 +285,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .insert_with_id(table, row_id, cells)?
-            .mergeable_tx_id())
+        Ok(crate::db::block_on(self.0.insert_with_id(table, row_id, cells))?.mergeable_tx_id())
     }
 
     fn insert_with_id_for_identity(
@@ -297,10 +295,11 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .insert_with_id_for_identity(identity, table, row_id, cells)?
-            .mergeable_tx_id())
+        Ok(crate::db::block_on(
+            self.0
+                .insert_with_id_for_identity(identity, table, row_id, cells),
+        )?
+        .mergeable_tx_id())
     }
 
     fn upsert(
@@ -309,7 +308,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.upsert(table, row_id, cells)?.mergeable_tx_id())
+        Ok(crate::db::block_on(self.0.upsert(table, row_id, cells))?.mergeable_tx_id())
     }
 
     fn upsert_for_identity(
@@ -319,10 +318,10 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .upsert_for_identity(identity, table, row_id, cells)?
-            .mergeable_tx_id())
+        Ok(
+            crate::db::block_on(self.0.upsert_for_identity(identity, table, row_id, cells))?
+                .mergeable_tx_id(),
+        )
     }
 
     fn update(
@@ -331,7 +330,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.update(table, row_id, cells)?.mergeable_tx_id())
+        Ok(crate::db::block_on(self.0.update(table, row_id, cells))?.mergeable_tx_id())
     }
 
     fn delete_for_identity(
@@ -340,10 +339,10 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .delete_for_identity(identity, table, row_id)?
-            .mergeable_tx_id())
+        Ok(
+            crate::db::block_on(self.0.delete_for_identity(identity, table, row_id))?
+                .mergeable_tx_id(),
+        )
     }
 
     fn delete(
@@ -351,7 +350,7 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.delete(table, row_id)?.mergeable_tx_id())
+        Ok(crate::db::block_on(self.0.delete(table, row_id))?.mergeable_tx_id())
     }
 
     fn prepare_query(
@@ -399,8 +398,10 @@ impl Backend {
         author: CoreAuthorId,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        self.0
-            .transaction_all_for_identity(tx_id, prepared, author, opts)
+        crate::db::block_on(
+            self.0
+                .transaction_all_for_identity(tx_id, prepared, author, opts),
+        )
     }
 
     async fn subscribe(
@@ -423,7 +424,7 @@ impl Backend {
     }
 
     fn begin_exclusive(&self, id: OpenTransactionId) -> std::result::Result<(), CoreDbError> {
-        self.0.begin_exclusive(id)
+        crate::db::block_on(self.0.begin_exclusive(id))
     }
 
     fn exclusive_write(
@@ -433,9 +434,11 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        self.0
-            .exclusive_tx_ref(tx_id)
-            .insert_with_id(table, row_id, cells)
+        crate::db::block_on(
+            self.0
+                .exclusive_tx_ref(tx_id)
+                .insert_with_id(table, row_id, cells),
+        )
     }
 
     fn exclusive_update(
@@ -445,7 +448,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        self.0.exclusive_tx_ref(tx_id).update(table, row_id, cells)
+        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).update(table, row_id, cells))
     }
 
     fn exclusive_delete(
@@ -454,14 +457,14 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
-        self.0.exclusive_tx_ref(tx_id).delete(table, row_id)
+        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).delete(table, row_id))
     }
 
     fn commit_exclusive_handle(
         &self,
         tx_id: OpenTransactionId,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        self.0.commit_exclusive_handle(tx_id)
+        crate::db::block_on(self.0.commit_exclusive_handle(tx_id))
     }
 }
 
@@ -1580,16 +1583,17 @@ fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Res
         .collect::<Vec<_>>();
     match context.storage {
         ClientStorage::Memory => Ok(CoreStorage::new(CoreMemoryStorage::new(&refs))),
-        ClientStorage::Persistent => context
-            .storage_factory
-            .as_ref()
-            .ok_or_else(|| {
+        ClientStorage::Persistent => {
+            let factory = context.storage_factory.as_ref().ok_or_else(|| {
                 JazzError::Connection(
                     "persistent client storage requires a target-shell storage factory".to_string(),
                 )
-            })?
-            .open(&context.data_dir.join("jazz-core.rocksdb"), &refs)
-            .map_err(|error| JazzError::Connection(error.to_string())),
+            })?;
+            crate::db::block_on(
+                factory.open(context.data_dir.join("jazz-core.rocksdb"), column_families),
+            )
+            .map_err(|error| JazzError::Connection(error.to_string()))
+        }
     }
 }
 

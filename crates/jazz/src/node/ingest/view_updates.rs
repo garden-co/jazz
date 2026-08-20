@@ -47,8 +47,7 @@ where
             let mut created = self
                 .create_merge_version_if_needed_in_branch(&table, &branch_key, row_uuid)
                 .await?;
-            outcome.value.append(&mut created.value);
-            outcome.publications.append(&mut created.publications);
+            outcome.append_outcome(created);
         }
         Ok(outcome)
     }
