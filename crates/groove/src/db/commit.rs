@@ -96,7 +96,7 @@ impl Database {
     /// ```
     pub async fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
         let publication = self
-            .apply_batch_with_notification_policy(batch, true)
+            .apply_batch_with_notification_policy(batch, false)
             .await?;
         let persistence = publication.persist().await;
         self.finish_persistence(persistence)?;
