@@ -190,6 +190,24 @@ export interface TableSchema {
   columns: ColumnDescriptor[];
   indexed_columns?: string[];
   policies?: TablePolicies;
+  /** Global branch dimensions declared by this schema fragment. */
+  branchDimensions?: BranchDimensionDescriptor[];
+  /** Ordinary columns bound to stable branch dimensions. */
+  branchBy?: (string | BranchDimensionBindingDescriptor)[];
+}
+
+export interface BranchDimensionDescriptor {
+  /** Stable UUID identity, independent from the bound application column. */
+  id: string;
+  /** Stable schema-wide selector name. */
+  name: string;
+  columnType: ColumnType;
+  migrationDefault: Value;
+}
+
+export interface BranchDimensionBindingDescriptor {
+  column: string;
+  dimension: string;
 }
 
 export type Schema = Record<string, TableSchema>;
