@@ -182,6 +182,11 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
         },
         ..ReadOpts::default()
     };
+    let mut subscription = block_on(db.subscribe(&prepared, opts.clone())).unwrap();
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: true, .. }
+    ));
 
     db.delete_in_branch_view(
         "todos",
@@ -193,6 +198,14 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
         row,
     )
     .unwrap();
+    let deleted = block_on(subscription.next_event()).unwrap();
+    assert!(
+        matches!(
+            deleted,
+            SubscriptionEvent::Delta { reset: false, ref removed, .. } if removed.len() == 1
+        ),
+        "unexpected inherited-delete delta: {deleted:?}"
+    );
     assert!(
         block_on(db.all(&prepared, opts.clone()))
             .unwrap()
@@ -200,6 +213,14 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
     );
 
     db.restore_in_branch("todos", head, row).unwrap();
+    let restored = block_on(subscription.next_event()).unwrap();
+    assert!(
+        matches!(
+            restored,
+            SubscriptionEvent::Delta { reset: false, ref added, .. } if added.len() == 1
+        ),
+        "unexpected inherited-restore delta: {restored:?}"
+    );
     let rows = block_on(db.all(&prepared, opts)).unwrap();
     let table = &schema.tables[0];
     assert_eq!(
