@@ -47,9 +47,9 @@ pub use crate::protocol::PermissionAdvice;
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
 use crate::protocol::{
-    AuthorizationScopeReceipt, BindingViewKey, CoverageKey, CurrentWriteSchema, LensOp,
-    MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId, ReadViewKey,
-    ReadViewSchemaSpec, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    AuthorizationScopeReceipt, BindingViewKey, BranchSelector, BranchViewBase, CoverageKey,
+    CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
+    ReadViewKey, ReadViewSchemaSpec, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
     SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
 };
@@ -914,6 +914,14 @@ impl Default for ReadOpts {
             include_deleted: false,
             read_view: ReadViewSpec::default(),
         }
+    }
+}
+
+impl ReadOpts {
+    /// Evaluate the query as a live head branch composed over an optional base.
+    pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
+        self.read_view = ReadViewSpec::branch_view(head, base);
+        self
     }
 }
 

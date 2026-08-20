@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::node::query_engine::BranchViewSourceBase;
-use crate::protocol::{BranchDimensionValue, BranchViewBase, SnapshotRef};
+use crate::protocol::{BranchViewBase, SnapshotRef};
 
 impl<S> NodeState<S>
 where
@@ -83,35 +83,6 @@ where
             ))?
             .schema
             .clone();
-        let key_matches = |stored: &BranchKey, selected: &BranchKey| {
-            read_table.branch_by.iter().all(|binding| {
-                let dimension = read_schema
-                    .branch_dimensions
-                    .iter()
-                    .find(|dimension| dimension.id == binding.dimension)
-                    .expect("validated branch dimension binding");
-                let selected = selected
-                    .dimensions
-                    .iter()
-                    .find(|(id, _)| *id == binding.dimension)
-                    .map(|(_, value)| value);
-                let stored = stored
-                    .dimensions
-                    .iter()
-                    .find(|(id, _)| *id == binding.dimension)
-                    .map(|(_, value)| value)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        BranchDimensionValue::from(dimension.migration_default.clone())
-                    });
-                selected == Some(&stored)
-            }) && stored.dimensions.iter().all(|(id, _)| {
-                read_table
-                    .branch_by
-                    .iter()
-                    .any(|binding| binding.dimension == *id)
-            })
-        };
         let mut winners = |key: &BranchKey,
                            snapshot: Option<&SnapshotRef>|
          -> Result<
@@ -121,7 +92,7 @@ where
             let mut content = BTreeMap::new();
             let mut deletions = BTreeMap::new();
             for version in self.query_table_versions(table)? {
-                if !key_matches(version.branch_key(), key) {
+                if !read_schema.branch_key_matches(&read_table, version.branch_key(), key) {
                     continue;
                 }
                 let tx_id = self.version_tx_id(&version)?;

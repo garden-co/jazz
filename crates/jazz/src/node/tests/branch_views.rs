@@ -199,3 +199,25 @@ fn version_parents_cannot_cross_branch_keys() {
         .unwrap_err();
     assert!(matches!(error, Error::InvalidMergeableCommit(_)));
 }
+
+#[test]
+fn remote_branch_write_invalidates_live_branch_view_plans() {
+    let schema = branch_view_schema();
+    let (_writer_dir, mut writer) =
+        open_node_with_schema(NodeUuid::from_bytes([0x56; 16]), schema.clone());
+    let (_reader_dir, mut reader) =
+        open_node_with_schema(NodeUuid::from_bytes([0x57; 16]), schema);
+    let (_, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0x58), 10)
+                .branch(branch_selector(0x59))
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("remote")),
+                    ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                ])),
+        )
+        .unwrap();
+    let before = reader.groove_runtime_token();
+    reader.apply_sync_message(unit).unwrap();
+    assert_ne!(reader.groove_runtime_token(), before);
+}

@@ -251,6 +251,65 @@ impl RuntimeSchema {
         self.project_branch_selector(table, &projected)
     }
 
+    /// Compare a stored key with a selector in this schema, interpreting
+    /// dimensions absent from older monotone schemas at their migration defaults.
+    pub(crate) fn branch_key_matches(
+        &self,
+        table: &TableSchema,
+        stored: &BranchKey,
+        selected: &BranchKey,
+    ) -> bool {
+        table.branch_by.iter().all(|binding| {
+            let dimension = self
+                .branch_dimensions
+                .iter()
+                .find(|dimension| dimension.id == binding.dimension)
+                .expect("validated branch dimension binding");
+            let selected = selected
+                .dimensions
+                .iter()
+                .find(|(id, _)| *id == binding.dimension)
+                .map(|(_, value)| value);
+            let stored = stored
+                .dimensions
+                .iter()
+                .find(|(id, _)| *id == binding.dimension)
+                .map(|(_, value)| value)
+                .cloned()
+                .unwrap_or_else(|| BranchDimensionValue::from(dimension.migration_default.clone()));
+            selected == Some(&stored)
+        }) && stored.dimensions.iter().all(|(id, _)| {
+            table
+                .branch_by
+                .iter()
+                .any(|binding| binding.dimension == *id)
+        })
+    }
+
+    /// Reconstruct the table-local named selector for an exact stored key.
+    pub(crate) fn branch_selector_for_key(
+        &self,
+        table: &TableSchema,
+        key: &BranchKey,
+    ) -> Result<BranchSelector, String> {
+        let mut dimensions = BTreeMap::new();
+        for binding in &table.branch_by {
+            let dimension = self
+                .branch_dimensions
+                .iter()
+                .find(|dimension| dimension.id == binding.dimension)
+                .ok_or_else(|| format!("unknown branch dimension on {}", table.name))?;
+            let value = key
+                .dimensions
+                .iter()
+                .find(|(id, _)| *id == binding.dimension)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| BranchDimensionValue::from(dimension.migration_default.clone()));
+            dimensions.insert(dimension.name.clone(), value);
+        }
+        Ok(BranchSelector { dimensions })
+    }
+
     fn validated(self) -> Self {
         let mut dimension_ids = BTreeSet::new();
         let mut dimension_names = BTreeSet::new();
@@ -1491,6 +1550,45 @@ fn rejected_transactions_table() -> GrooveTableSchema {
 mod tests {
     use super::*;
     use groove::schema::ColumnType;
+
+    #[test]
+    fn added_branch_dimension_reads_older_keys_at_its_default() {
+        let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x31; 16]));
+        let schema = JazzSchema::new_with_branch_dimensions(
+            [BranchDimensionSchema::new(
+                dimension,
+                "workspace",
+                ColumnType::Uuid,
+                Value::Uuid(uuid::Uuid::nil()),
+            )],
+            [TableSchema::new(
+                "todos",
+                [ColumnSchema::new("workspace_id", ColumnType::Uuid)],
+            )
+            .with_branch_dimension("workspace_id", dimension)],
+        );
+        let table = &schema.tables[0];
+        let default = schema
+            .project_branch_selector(
+                table,
+                &BranchSelector::new([("workspace", Value::Uuid(uuid::Uuid::nil()))]),
+            )
+            .unwrap()
+            .0;
+        let other = schema
+            .project_branch_selector(
+                table,
+                &BranchSelector::new([(
+                    "workspace",
+                    Value::Uuid(uuid::Uuid::from_bytes([0x32; 16])),
+                )]),
+            )
+            .unwrap()
+            .0;
+
+        assert!(schema.branch_key_matches(table, &BranchKey::default(), &default));
+        assert!(!schema.branch_key_matches(table, &BranchKey::default(), &other));
+    }
 
     #[test]
     fn logical_history_descriptor_has_composite_primary_key() {

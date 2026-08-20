@@ -13,7 +13,7 @@ where
     fn merge_rows_for_versions(
         &mut self,
         records: &[VersionRecord],
-    ) -> Result<Vec<(String, RowUuid)>, Error> {
+    ) -> Result<Vec<(String, BranchKey, RowUuid)>, Error> {
         let mut rows = Vec::with_capacity(records.len());
         for record in records {
             if record.deletion().is_some() {
@@ -31,7 +31,7 @@ where
             if projected_schema != self.catalogue.current_write_schema.schema {
                 continue;
             }
-            rows.push((table, record.row_uuid()));
+            rows.push((table, record.branch_key().clone(), record.row_uuid()));
         }
         rows.sort_unstable();
         rows.dedup();
@@ -40,22 +40,32 @@ where
 
     pub(super) fn create_merge_versions_for_rows(
         &mut self,
-        rows: Vec<(String, RowUuid)>,
+        rows: Vec<(String, BranchKey, RowUuid)>,
     ) -> Result<(), Error> {
-        for (table, row_uuid) in rows {
-            self.create_merge_version_if_needed(&table, row_uuid)?;
+        for (table, branch_key, row_uuid) in rows {
+            self.create_merge_version_if_needed_in_branch(&table, &branch_key, row_uuid)?;
         }
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn create_merge_version_if_needed(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
+        self.create_merge_version_if_needed_in_branch(table, &BranchKey::default(), row_uuid)
+    }
+
+    fn create_merge_version_if_needed_in_branch(
+        &mut self,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+    ) -> Result<(), Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
-        let head_tx_ids = self.merge_head_tx_ids(table_id, row_uuid)?;
+        let head_tx_ids = self.merge_head_tx_ids(table_id, branch_key, row_uuid)?;
         let table_schema =
             self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
         let has_gset_column = table_schema
@@ -68,7 +78,7 @@ where
         let row_versions = self.query_physical_content_row_versions(
             table_id,
             table,
-            &BranchKey::default(),
+            branch_key,
             row_uuid,
         )?;
         let mut row_versions_by_tx = BTreeMap::new();
@@ -121,7 +131,17 @@ where
         if self.query_transaction(merge_tx_id)?.is_some() {
             return Ok(());
         }
+        let schema = &self
+            .catalogue
+            .catalogue_schemas
+            .get(&self.catalogue.current_write_schema.schema)
+            .expect("current write schema exists")
+            .schema;
+        let branch = schema
+            .branch_selector_for_key(&table_schema, branch_key)
+            .map_err(Error::InvalidBranchKey)?;
         let merge_commit = MergeableCommit::new(table, row_uuid, made_at.physical_ms())
+            .branch(branch)
             .parents(parents)
             .cells(cells);
         let merge_tx = self.commit_mergeable_at(merge_commit, made_at)?;
@@ -788,9 +808,10 @@ where
     fn merge_head_tx_ids(
         &mut self,
         table_id: PhysicalTableId,
+        branch_key: &BranchKey,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        self.require_merge_heads(table_id, &BranchKey::default(), row_uuid)
+        self.require_merge_heads(table_id, branch_key, row_uuid)
     }
 
     #[cfg(test)]

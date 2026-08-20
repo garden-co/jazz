@@ -88,6 +88,9 @@ where
         durability: DurabilityTier,
         update_current_indexes: bool,
     ) -> Result<(), Error> {
+        let invalidates_branch_views = versions
+            .iter()
+            .any(|version| !version.branch_key().dimensions.is_empty());
         self.merge_tx_time(tx.tx_id.time);
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
         let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
@@ -268,6 +271,9 @@ where
             self.record_child_edges(tx.tx_id, parent_edges);
         }
         self.cache_tx_versions(tx.tx_id, stored_versions);
+        if invalidates_branch_views {
+            self.groove_runtime_token = next_groove_runtime_token();
+        }
         Ok(())
     }
 

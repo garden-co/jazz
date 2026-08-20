@@ -1475,6 +1475,14 @@ impl ReadViewSpec {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
+
+    /// Select a live head branch, optionally composed over one live or frozen base.
+    pub fn branch_view(head: BranchSelector, base: Option<BranchViewBase>) -> Self {
+        Self {
+            source: ReadViewSourceSpec::BranchView { head, base },
+            ..Self::default()
+        }
+    }
 }
 
 /// Stable identity for read/serving options used by subscription coverage grouping.
@@ -1561,6 +1569,18 @@ impl BranchSelector {
                 .map(|(name, value)| (name.into(), BranchDimensionValue::from(value)))
                 .collect(),
         }
+    }
+}
+
+impl BranchViewBase {
+    /// Use the live current contents of a base branch.
+    pub fn current(branch: BranchSelector) -> Self {
+        Self::Current(branch)
+    }
+
+    /// Freeze a base branch at an application-resolved snapshot reference.
+    pub fn snapshot(branch: BranchSelector, snapshot: SnapshotRef) -> Self {
+        Self::Snapshot { branch, snapshot }
     }
 }
 
