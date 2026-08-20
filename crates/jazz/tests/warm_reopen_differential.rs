@@ -139,15 +139,13 @@ fn child_cells(parent: RowUuid, label: &str, rank: u32) -> BTreeMap<String, Valu
 
 fn seed_store(dir: &tempfile::TempDir, schema: &JazzSchema, node_byte: u8) {
     let db = open_db(dir, schema, node_byte, node_byte as u64);
-    db.insert_with_id("parents", row(1), parent_cells("alpha", 1))
-        .expect("insert alpha");
-    db.insert_with_id("parents", row(2), parent_cells("beta", 2))
-        .expect("insert beta");
-    db.insert_with_id("children", row(101), child_cells(row(1), "a-1", 1))
+    block_on(db.insert_with_id("parents", row(1), parent_cells("alpha", 1))).expect("insert alpha");
+    block_on(db.insert_with_id("parents", row(2), parent_cells("beta", 2))).expect("insert beta");
+    block_on(db.insert_with_id("children", row(101), child_cells(row(1), "a-1", 1)))
         .expect("insert a-1");
-    db.insert_with_id("children", row(102), child_cells(row(1), "a-2", 2))
+    block_on(db.insert_with_id("children", row(102), child_cells(row(1), "a-2", 2)))
         .expect("insert a-2");
-    db.insert_with_id("children", row(201), child_cells(row(2), "b-1", 1))
+    block_on(db.insert_with_id("children", row(201), child_cells(row(2), "b-1", 1)))
         .expect("insert b-1");
     db.close().expect("close seeded db");
 }
@@ -343,7 +341,7 @@ fn next_event_after(
         if let Some(event) = stream.try_next_event() {
             return event;
         }
-        db.tick()
+        block_on(db.tick())
             .unwrap_or_else(|err| panic!("{label}: tick while waiting for event failed: {err}"));
         std::thread::yield_now();
     }
@@ -400,14 +398,14 @@ fn reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent() 
         (
             "related row insert",
             Box::new(|db| {
-                db.insert_with_id("children", row(103), child_cells(row(1), "a-3", 3))
+                block_on(db.insert_with_id("children", row(103), child_cells(row(1), "a-3", 3)))
                     .expect("insert child");
             }),
         ),
         (
             "related row delete",
             Box::new(|db| {
-                db.delete("children", row(201)).expect("delete child");
+                block_on(db.delete("children", row(201))).expect("delete child");
             }),
         ),
     ];
