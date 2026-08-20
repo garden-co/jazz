@@ -267,14 +267,14 @@ where
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
-        Box::pin(self.compile_current_query_program_in_authorization_mode(
+        self.compile_current_query_program_in_authorization_mode(
             shape,
             binding,
             tier,
             identity,
             output,
             QueryAuthorizationMode::TrustedServing,
-        ))
+        )
         .await
     }
 
@@ -287,7 +287,7 @@ where
         output: CurrentQueryProgramOutput,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
-        Box::pin(self.compile_current_query_program_with_settled_view(
+        self.compile_current_query_program_with_settled_view(
             shape,
             binding,
             tier,
@@ -296,7 +296,7 @@ where
             &ReadViewSpec::default(),
             None,
             authorization_mode,
-        ))
+        )
         .await
     }
 
@@ -310,16 +310,14 @@ where
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
     ) -> Result<QueryProgram, Error> {
-        Box::pin(
-            self.compile_current_query_program_for_read_view_in_authorization_mode(
-                shape,
-                binding,
-                tier,
-                identity,
-                output,
-                read_view,
-                QueryAuthorizationMode::TrustedServing,
-            ),
+        self.compile_current_query_program_for_read_view_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            QueryAuthorizationMode::TrustedServing,
         )
         .await
     }
@@ -334,7 +332,7 @@ where
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
-        Box::pin(self.compile_current_query_program_with_settled_view(
+        self.compile_current_query_program_with_settled_view(
             shape,
             binding,
             tier,
@@ -343,7 +341,7 @@ where
             read_view,
             None,
             authorization_mode,
-        ))
+        )
         .await
     }
 
@@ -358,18 +356,16 @@ where
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
-        Box::pin(
-            self.compile_current_query_program_with_settled_view_and_prepared_claim_mode(
-                shape,
-                binding,
-                tier,
-                identity,
-                output,
-                read_view,
-                settled_binding_view,
-                authorization_mode,
-                PreparedClaimBindingMode::Strict,
-            ),
+        self.compile_current_query_program_with_settled_view_and_prepared_claim_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            settled_binding_view,
+            authorization_mode,
+            PreparedClaimBindingMode::Strict,
         )
         .await
     }
@@ -398,7 +394,7 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        Box::pin(self.compile_query_program_request(request)).await
+        self.compile_query_program_request(request).await
     }
 
     async fn compile_current_query_program_for_one_shot_read(
@@ -421,7 +417,8 @@ where
             settled_binding_view,
             authorization_mode,
         )?;
-        Box::pin(self.compile_query_program_request_with_access_paths(request, access_paths)).await
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
     async fn compile_current_query_program_with_access_paths(
@@ -442,7 +439,8 @@ where
             &ReadViewSpec::default(),
             QueryAuthorizationMode::TrustedServing,
         )?;
-        Box::pin(self.compile_query_program_request_with_access_paths(request, access_paths)).await
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
     async fn compile_historical_query_program(
@@ -474,7 +472,7 @@ where
             input,
             output: current_query_output_request(output, shape.query()),
         };
-        Box::pin(self.compile_query_program_request(request)).await
+        self.compile_query_program_request(request).await
     }
 
     async fn compile_snapshot_query_program(
@@ -552,7 +550,7 @@ where
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
         };
-        Box::pin(self.compile_query_program_request(request)).await
+        self.compile_query_program_request(request).await
     }
 
     async fn compile_open_tx_query_program(
@@ -604,7 +602,7 @@ where
             input,
             output: current_query_output_request(output, lowered_shape.query()),
         };
-        Box::pin(self.compile_query_program_request(request)).await
+        self.compile_query_program_request(request).await
     }
 
     fn current_query_program_request(
@@ -2238,10 +2236,9 @@ where
             None,
             QueryAuthorizationMode::TrustedServing,
         )?;
-        let program = Box::pin(
-            self.compile_query_program_request_with_access_paths(request, BTreeMap::new()),
-        )
-        .await?;
+        let program = self
+            .compile_query_program_request_with_access_paths(request, BTreeMap::new())
+            .await?;
         let deltas = self
             .database
             .query_graph(lowered_app_rows_graph(&program)?)

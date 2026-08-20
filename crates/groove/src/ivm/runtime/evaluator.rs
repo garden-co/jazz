@@ -283,7 +283,7 @@ impl GraphRuntimeView<'_> {
             root_ordering_windows: HashMap::default(),
         };
         evaluator
-            .update_node(node)
+            .update_subgraph(node)
             .await
             .map(|records| records.as_ref().clone())
     }
@@ -333,7 +333,7 @@ impl GraphRuntimeView<'_> {
             root_ordering_windows: HashMap::default(),
         };
         evaluator
-            .update_node(node)
+            .update_subgraph(node)
             .await
             .map(|records| records.as_ref().clone())
     }
@@ -380,13 +380,60 @@ impl GraphRuntimeView<'_> {
             root_ordering_windows: HashMap::default(),
         };
         evaluator
-            .update_node(node)
+            .update_subgraph(node)
             .await
             .map(|records| records.as_ref().clone())
     }
 }
 
 impl TickEvaluator<'_> {
+    /// Evaluate one reachable graph slice in dependency order.
+    ///
+    /// `update_node` may ask for its direct inputs, but those calls are memo
+    /// hits because every child has completed in the same evaluation context.
+    /// Keeping graph traversal here iterative makes stack use independent of
+    /// graph depth, including recursive seed/step scopes which do not use the
+    /// outer tick work queue.
+    pub(super) async fn update_subgraph(
+        &mut self,
+        root: NodeId,
+    ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
+        let mut pending = vec![(root, false)];
+        let mut discovered = HashSet::new();
+        let mut order = Vec::new();
+        while let Some((node, expanded)) = pending.pop() {
+            if expanded {
+                order.push(node);
+                continue;
+            }
+            if !discovered.insert(node) {
+                continue;
+            }
+            let graph_node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            pending.push((node, true));
+            pending.extend(
+                graph_node
+                    .descriptor
+                    .inputs
+                    .iter()
+                    .rev()
+                    .map(|input| (*input, false)),
+            );
+        }
+
+        let mut result = None;
+        for node in order {
+            let records = self.update_node(node).await?;
+            if node == root {
+                result = Some(records);
+            }
+        }
+        result.ok_or(IvmRuntimeError::GraphNodeNotFound(root))
+    }
+
     pub(super) fn apply_root_ordering(
         &self,
         ordering_node: NodeId,

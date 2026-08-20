@@ -409,7 +409,7 @@ where
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<QueryProgram, Error> {
-        Box::pin(self.compile_query_program_request_with_access_paths(request, BTreeMap::new()))
+        self.compile_query_program_request_with_access_paths(request, BTreeMap::new())
             .await
     }
 
@@ -418,12 +418,10 @@ where
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
-        Box::pin(
-            self.compile_query_program_request_with_inline_sources_and_access_paths(
-                request,
-                BTreeMap::new(),
-                access_paths,
-            ),
+        self.compile_query_program_request_with_inline_sources_and_access_paths(
+            request,
+            BTreeMap::new(),
+            access_paths,
         )
         .await
     }

@@ -435,9 +435,9 @@ where
                 request,
                 inline_sources,
                 access_paths,
-            ),
+            )
         )
-        .await?;
+            .await?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
             .await
     }
