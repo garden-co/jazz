@@ -244,10 +244,10 @@ fn drive(
     traces: &mut BTreeMap<&'static str, Vec<EventTrace>>,
 ) {
     for _ in 0..40 {
-        client.tick().expect("tick client before server");
+        block_on(client.tick()).expect("tick client before server");
         drain_events(streams, table_schemas, traces);
-        server.tick().expect("tick server");
-        client.tick().expect("tick client after server");
+        block_on(server.tick()).expect("tick server");
+        block_on(client.tick()).expect("tick client after server");
         drain_events(streams, table_schemas, traces);
     }
 }
@@ -317,33 +317,28 @@ fn run_scenario(mode: CoverageMode) -> ScenarioReceipt {
     // endpoints spins forever because no endpoint can produce that event yet.
     drive(&server, &client, &mut streams, &table_schemas, &mut traces);
 
-    server
-        .update(
-            "alpha_items",
-            row(100),
-            BTreeMap::from([(
-                "title".to_owned(),
-                Value::String("alpha-updated".to_owned()),
-            )]),
-        )
-        .expect("update visible row");
-    server
-        .insert_with_id(
-            "beta_items",
-            row(310),
-            cells("beta-inserted-visible", visible_owner),
-        )
-        .expect("insert visible row");
-    server
-        .insert_with_id(
-            "gamma_items",
-            row(320),
-            cells("gamma-inserted-hidden", hidden_owner),
-        )
-        .expect("insert hidden row");
-    server
-        .delete("delta_items", row(103))
-        .expect("delete visible row");
+    block_on(server.update(
+        "alpha_items",
+        row(100),
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("alpha-updated".to_owned()),
+        )]),
+    ))
+    .expect("update visible row");
+    block_on(server.insert_with_id(
+        "beta_items",
+        row(310),
+        cells("beta-inserted-visible", visible_owner),
+    ))
+    .expect("insert visible row");
+    block_on(server.insert_with_id(
+        "gamma_items",
+        row(320),
+        cells("gamma-inserted-hidden", hidden_owner),
+    ))
+    .expect("insert hidden row");
+    block_on(server.delete("delta_items", row(103))).expect("delete visible row");
 
     drive(&server, &client, &mut streams, &table_schemas, &mut traces);
 
