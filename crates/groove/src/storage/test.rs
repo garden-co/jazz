@@ -26,14 +26,28 @@ pub enum TestStorageOperation {
     Reopen,
 }
 
-#[derive(Default)]
 struct ControlState {
+    yield_before_ready: bool,
     paused: bool,
     paused_operations: BTreeSet<TestStorageOperation>,
     permits: usize,
     observed: Vec<TestStorageOperation>,
     waiters: Vec<Waker>,
     failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
+}
+
+impl Default for ControlState {
+    fn default() -> Self {
+        Self {
+            yield_before_ready: true,
+            paused: false,
+            paused_operations: BTreeSet::new(),
+            permits: 0,
+            observed: Vec::new(),
+            waiters: Vec::new(),
+            failures: BTreeMap::new(),
+        }
+    }
 }
 
 /// Controller held by tests independently from the storage under test.
@@ -119,11 +133,17 @@ impl TestStorageControl {
 
     async fn before(&self, operation: TestStorageOperation) -> Result<(), Error> {
         let mut recorded = false;
+        let mut yielded = false;
         poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
             if !recorded {
                 state.observed.push(operation);
                 recorded = true;
+            }
+            if state.yield_before_ready && !yielded {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
             }
             if !state.paused && !state.paused_operations.contains(&operation) {
                 return Poll::Ready(());
@@ -157,25 +177,34 @@ impl TestStorageControl {
 
 /// In-memory ordered storage whose suspension points are controlled by tests.
 ///
-/// It implements the production storage contract directly. Immediate and
-/// suspended behavior therefore exercise the same Groove call path.
+/// It implements the production storage contract directly. Every operation
+/// yields once before completing, while the controller can hold that same
+/// suspension point for ordering and failure-path tests.
 #[derive(Clone)]
-pub struct TestStorage {
-    inner: MemoryStorage,
+pub struct YieldingStorage<S> {
+    inner: S,
     control: TestStorageControl,
 }
 
-impl TestStorage {
+pub type TestStorage = YieldingStorage<MemoryStorage>;
+
+impl YieldingStorage<MemoryStorage> {
     pub fn new(column_families: &[&str]) -> Self {
-        Self {
-            inner: MemoryStorage::new(column_families),
-            control: TestStorageControl::default(),
-        }
+        Self::wrap(MemoryStorage::new(column_families))
     }
 
     pub fn controlled(column_families: &[&str]) -> (Self, TestStorageControl) {
         let storage = Self::new(column_families);
         (storage.clone(), storage.control.clone())
+    }
+}
+
+impl<S> YieldingStorage<S> {
+    pub fn wrap(inner: S) -> Self {
+        Self {
+            inner,
+            control: TestStorageControl::default(),
+        }
     }
 
     pub fn control(&self) -> TestStorageControl {
@@ -197,7 +226,10 @@ impl StorageCursor for TestStorageCursor<'_> {
     }
 }
 
-impl OrderedKvStorage for TestStorage {
+impl<S> OrderedKvStorage for YieldingStorage<S>
+where
+    S: OrderedKvStorage,
+{
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             self.control.before(TestStorageOperation::Get).await?;
@@ -319,7 +351,10 @@ impl OrderedKvStorage for TestStorage {
     }
 }
 
-impl ReopenableStorage for TestStorage {
+impl<S> ReopenableStorage for YieldingStorage<S>
+where
+    S: ReopenableStorage + 'static,
+{
     fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
             self.control.before(TestStorageOperation::Reopen).await?;

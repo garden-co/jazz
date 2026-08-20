@@ -53,7 +53,7 @@ use join::{AntiJoinState, ArrangementState, JoinState, touched_join_keys};
 use persist::apply_persist_delta;
 use recursion::{
     RecursiveState, hydrate_recursive_arrangements, recompute_recursive, recursive_delta,
-    recursive_read_tables,
+    recursive_read_tables, require_snapshot_inputs, snapshot_requirement,
 };
 use state::{
     ArrangementKey, ArrangementUpdateMode, AsOf, EvalContext, EvalMemoEntry, EvalMemoKey, EvalMode,

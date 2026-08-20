@@ -5,7 +5,7 @@ mod common;
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::query::{ArraySubquery, OrderDirection, Query, col, eq, param};
 use jazz::result_tree::ResultRelation;
@@ -41,7 +41,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db() -> Db<MemoryStorage> {
+fn open_db() -> Db<TestStorage> {
     let schema = schema();
     let column_families = schema.column_families();
     let references = column_families
@@ -51,7 +51,7 @@ fn open_db() -> Db<MemoryStorage> {
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&references),
+            TestStorage::new(&references),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x71; 16]),
                 author: AuthorId::from_bytes([0x72; 16]),

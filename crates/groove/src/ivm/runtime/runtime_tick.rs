@@ -155,9 +155,8 @@ impl EvaluationWorkQueue {
     fn discover_incremental(
         self,
         graph: &IvmGraph,
-        storage_dependents: std::collections::BTreeMap<StorageRequestKey, Vec<NodeId>>,
     ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
-        self.discover(graph, false, storage_dependents)
+        self.discover(graph, false, std::collections::BTreeMap::new())
     }
 
     fn discover(
@@ -240,6 +239,22 @@ impl EvaluationWorkQueue {
             *remaining = remaining.saturating_sub(1);
             if *remaining == 0 {
                 self.make_runnable(node);
+            }
+        }
+    }
+
+    fn wait_for_storage(
+        &mut self,
+        node: NodeId,
+        requests: impl IntoIterator<Item = StorageRequestKey>,
+    ) {
+        let requests = requests.into_iter().collect::<Vec<_>>();
+        self.entries
+            .insert(node, EvaluationEntry::Waiting(requests.len()));
+        for request in requests {
+            let dependents = self.storage_dependents.entry(request).or_default();
+            if !dependents.contains(&node) {
+                dependents.push(node);
             }
         }
     }
@@ -437,6 +452,7 @@ impl IncrementalEvaluation<'_> {
             root_ordering_windows: std::mem::take(&mut self.root_ordering_windows),
         };
 
+        let mut registered_storage = false;
         while let Some(node) = self.work_queue.runnable.pop_front() {
             let result = {
                 let mut future = evaluator.update_node(node);
@@ -444,6 +460,24 @@ impl IncrementalEvaluation<'_> {
             };
             match result {
                 Poll::Ready(Ok(_)) => self.work_queue.complete(node),
+                Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked)) => {
+                    let requests = evaluator
+                        .evaluation_inputs
+                        .as_deref_mut()
+                        .map(EvaluationInputs::take_missing)
+                        .unwrap_or_default();
+                    if requests.is_empty() {
+                        return Poll::Ready(Err(self
+                            .work_queue
+                            .failure_for_node(node, IvmRuntimeError::EvaluationBlocked)));
+                    }
+                    for request in requests.iter().cloned() {
+                        registered_storage |=
+                            self.storage_requests
+                                .request(request, &self.storage, &runtime.schema);
+                    }
+                    self.work_queue.wait_for_storage(node, requests);
+                }
                 Poll::Ready(Err(error)) => {
                     return Poll::Ready(Err(self.work_queue.failure_for_node(node, error)));
                 }
@@ -453,6 +487,13 @@ impl IncrementalEvaluation<'_> {
                         .failure_for_node(node, IvmRuntimeError::EvaluationBlocked)));
                 }
             }
+        }
+        if registered_storage && self.storage_requests.poll(cx) > 0 {
+            // Resident storage completed synchronously. Install its results
+            // and resume the queue within this same public poll so resident
+            // writes retain their same-tick visibility contract.
+            drop(evaluator);
+            return self.poll(runtime, cx);
         }
 
         for subscription_id in &self.affected_subscriptions {
@@ -1126,23 +1167,6 @@ impl IvmRuntime {
             changed_tables.iter().copied(),
             changed_bindings.iter().copied(),
         );
-        let negative_tables = table_deltas
-            .iter()
-            .filter(|delta| delta.deltas.iter().any(|record| record.weight < 0))
-            .map(|delta| delta.table.as_str())
-            .collect::<HashSet<_>>();
-        let has_negative_bindings = binding_deltas
-            .iter()
-            .flat_map(|delta| &delta.deltas)
-            .any(|delta| delta.weight < 0);
-        let recursive_storage_dependencies =
-            self.recursive_recompute_storage_dependencies(&negative_tables, has_negative_bindings)?;
-        let mut storage_requests = StorageRequests::new();
-        for request in recursive_storage_dependencies.keys().cloned() {
-            storage_requests.request(request, &storage, &self.schema);
-        }
-        let evaluation_inputs =
-            (!recursive_storage_dependencies.is_empty()).then(EvaluationInputs::default);
         let current_tick = self.advance_tick();
         self.bump_input_frontiers(&table_deltas, &binding_deltas);
         let table_delta_records = table_deltas
@@ -1199,8 +1223,10 @@ impl IvmRuntime {
         active_roots.extend(retained_roots.iter().copied());
         active_roots.sort_unstable();
         active_roots.dedup();
-        let (_, work_queue) = EvaluationWorkQueue::new(active_roots)
-            .discover_incremental(&self.graph, recursive_storage_dependencies)?;
+        let storage_requests = StorageRequests::new();
+        let evaluation_inputs = Some(EvaluationInputs::default());
+        let (_, work_queue) =
+            EvaluationWorkQueue::new(active_roots).discover_incremental(&self.graph)?;
         Ok(IncrementalEvaluation {
             table_deltas,
             binding_deltas,
@@ -1221,85 +1247,6 @@ impl IvmRuntime {
             notification_publication,
             defer_notifications_until_durable,
         })
-    }
-
-    fn recursive_recompute_storage_dependencies(
-        &self,
-        negative_tables: &HashSet<&str>,
-        has_negative_bindings: bool,
-    ) -> Result<std::collections::BTreeMap<StorageRequestKey, Vec<NodeId>>, IvmRuntimeError> {
-        if negative_tables.is_empty() && !has_negative_bindings {
-            return Ok(std::collections::BTreeMap::new());
-        }
-        let recursive_nodes = self
-            .graph
-            .nodes()
-            .iter()
-            .filter_map(|(node, graph_node)| {
-                let OpType::Recursive(recursive) = &graph_node.descriptor.operator else {
-                    return None;
-                };
-                (self
-                    .node_meta
-                    .get(node)
-                    .is_some_and(|meta| !meta.retainers.is_empty())
-                    && (has_negative_bindings
-                        || recursive
-                            .read_tables
-                            .iter()
-                            .any(|table| negative_tables.contains(table.as_str()))))
-                .then_some(*node)
-            })
-            .collect::<Vec<_>>();
-        let mut dependents = std::collections::BTreeMap::<StorageRequestKey, Vec<NodeId>>::new();
-        for recursive_node in recursive_nodes {
-            let mut pending = vec![recursive_node];
-            let mut visited: HashSet<NodeId> = HashSet::default();
-            let mut requests = std::collections::BTreeSet::new();
-            while let Some(node_id) = pending.pop() {
-                if !visited.insert(node_id) {
-                    continue;
-                }
-                let node = self
-                    .graph
-                    .node(node_id)
-                    .ok_or(IvmRuntimeError::GraphNodeNotFound(node_id))?;
-                pending.extend(node.descriptor.inputs.iter().copied());
-                let request = match &node.descriptor.operator {
-                    OpType::TableSource(source) => {
-                        match source.scan.as_ref().map(scan_bounds).transpose()? {
-                            None => Some(StorageRequestKey::ScanPrefix {
-                                family: source.table.clone(),
-                                prefix: Vec::new(),
-                            }),
-                            Some(StaticScanBounds::Prefix(prefix)) => {
-                                Some(StorageRequestKey::ScanPrefix {
-                                    family: source.table.clone(),
-                                    prefix,
-                                })
-                            }
-                            Some(StaticScanBounds::Range { start, end }) if start < end => {
-                                Some(StorageRequestKey::ScanRange {
-                                    family: source.table.clone(),
-                                    start,
-                                    end,
-                                })
-                            }
-                            Some(StaticScanBounds::Range { .. }) => None,
-                        }
-                    }
-                    OpType::IndexSource(source) => NodeState::index_source_request(source)?,
-                    _ => None,
-                };
-                if let Some(request) = request {
-                    requests.insert(request);
-                }
-            }
-            for request in requests {
-                dependents.entry(request).or_default().push(recursive_node);
-            }
-        }
-        Ok(dependents)
     }
 
     fn bump_input_frontiers(

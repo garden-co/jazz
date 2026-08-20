@@ -15,6 +15,7 @@ use crate::records::RecordDescriptor;
 use crate::storage::{OrderedKvStorage, StorageFuture};
 
 use super::evaluation_session::EvaluationInputs;
+use super::subscriptions::BindingDelta;
 
 use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
@@ -194,8 +195,14 @@ pub(super) async fn recursive_delta(
         // table delta occurs in this tick. Evaluate the seed over a current
         // snapshot so binding-as-data opens produce their initial frontier
         // without forcing a full recursive recompute.
-        let full_table_deltas =
-            snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, seed).await?;
+        let full_table_deltas = match runtime.evaluation_inputs.as_deref_mut() {
+            Some(inputs) => {
+                snapshot_table_deltas_from_inputs(runtime.schema, runtime.graph, inputs, seed)?
+            }
+            None => {
+                snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, seed).await?
+            }
+        };
         runtime
             .eval_with_binding_and_table_deltas(
                 &full_table_deltas,
@@ -290,14 +297,22 @@ fn has_recompute_table_delta_for_recursion(
     seed: NodeId,
     step: NodeId,
 ) -> Result<bool, IvmRuntimeError> {
+    has_recompute_table_delta(runtime.graph, runtime.table_deltas, seed, step)
+}
+
+fn has_recompute_table_delta(
+    graph: &IvmGraph,
+    table_deltas: &[TableDelta],
+    seed: NodeId,
+    step: NodeId,
+) -> Result<bool, IvmRuntimeError> {
     let mut tables = HashMap::<String, RecordDescriptor>::default();
-    collect_table_source_names(runtime.graph, seed, &mut tables)?;
-    collect_table_source_names(runtime.graph, step, &mut tables)?;
+    collect_table_source_names(graph, seed, &mut tables)?;
+    collect_table_source_names(graph, step, &mut tables)?;
     let mut anti_join_right_tables = HashMap::<String, RecordDescriptor>::default();
-    collect_anti_join_right_table_sources(runtime.graph, seed, &mut anti_join_right_tables)?;
-    collect_anti_join_right_table_sources(runtime.graph, step, &mut anti_join_right_tables)?;
-    Ok(runtime
-        .table_deltas
+    collect_anti_join_right_table_sources(graph, seed, &mut anti_join_right_tables)?;
+    collect_anti_join_right_table_sources(graph, step, &mut anti_join_right_tables)?;
+    Ok(table_deltas
         .iter()
         .filter(|table_delta| tables.contains_key(&table_delta.table))
         .any(|table_delta| {
@@ -311,14 +326,74 @@ fn has_recompute_binding_delta_for_recursion(
     seed: NodeId,
     step: NodeId,
 ) -> Result<bool, IvmRuntimeError> {
+    has_recompute_binding_delta(runtime.graph, runtime.binding_deltas, seed, step)
+}
+
+fn has_recompute_binding_delta(
+    graph: &IvmGraph,
+    binding_deltas: &[BindingDelta],
+    seed: NodeId,
+    step: NodeId,
+) -> Result<bool, IvmRuntimeError> {
     let mut shapes = HashMap::<String, RecordDescriptor>::default();
-    collect_binding_sources(runtime.graph, seed, &mut shapes)?;
-    collect_binding_sources(runtime.graph, step, &mut shapes)?;
-    Ok(runtime
-        .binding_deltas
+    collect_binding_sources(graph, seed, &mut shapes)?;
+    collect_binding_sources(graph, step, &mut shapes)?;
+    Ok(binding_deltas
         .iter()
         .filter(|binding_delta| shapes.contains_key(&binding_delta.shape))
         .any(|binding_delta| binding_delta.deltas.iter().any(|delta| delta.weight <= 0)))
+}
+
+pub(super) fn snapshot_requirement(
+    graph: &IvmGraph,
+    node: NodeId,
+    seed: NodeId,
+    step: NodeId,
+    table_deltas: &[TableDelta],
+    binding_deltas: &[BindingDelta],
+    state: Option<&RecursiveState>,
+) -> Result<Option<NodeId>, IvmRuntimeError> {
+    let has_bindings = !binding_deltas.is_empty();
+    let requires_recompute = has_recompute_table_delta(graph, table_deltas, seed, step)?
+        || has_recompute_binding_delta(graph, binding_deltas, seed, step)?
+        || (!has_bindings && state.is_none_or(RecursiveState::is_empty))
+        || state.is_none_or(|state| !state.step_arrangements_hydrated());
+    Ok(if requires_recompute {
+        Some(node)
+    } else if has_bindings {
+        Some(seed)
+    } else {
+        None
+    })
+}
+
+pub(super) fn require_snapshot_inputs(
+    graph: &IvmGraph,
+    inputs: &mut EvaluationInputs,
+    root: NodeId,
+) -> Result<(), IvmRuntimeError> {
+    let mut tables = std::collections::HashSet::<TableSnapshotSource>::new();
+    collect_table_sources(graph, root, &mut tables)?;
+    let mut blocked = false;
+    for source in tables {
+        let request = NodeState::table_source_request(&TableSourceOp {
+            table: source.table,
+            scan: source.scan,
+            variant_projection: None,
+        })?;
+        if let Some(request) = request {
+            match inputs.rows(request) {
+                Ok(_) => {}
+                Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    if blocked {
+        Err(IvmRuntimeError::EvaluationBlocked)
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) async fn hydrate_recursive_arrangements(
@@ -399,6 +474,65 @@ pub(super) async fn snapshot_table_deltas(
         let mut by_variant = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
         for stored in stored_records {
             let (variant_tag, payload) = crate::records::split_variant_record(&stored)?;
+            let descriptor = table_schema
+                .record_schema_for_variant(variant_tag)
+                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                    table: source.table.clone(),
+                    version: u64::from(variant_tag),
+                })?;
+            by_variant
+                .entry((variant_tag, descriptor))
+                .or_default()
+                .push(RecordDelta {
+                    record: Bytes::copy_from_slice(payload),
+                    weight: 1,
+                });
+        }
+        output.extend(
+            by_variant
+                .into_iter()
+                .map(|((variant_tag, descriptor), deltas)| TableDelta {
+                    table: source.table.clone(),
+                    variant_tag,
+                    descriptor,
+                    deltas,
+                }),
+        );
+    }
+    Ok(output)
+}
+
+fn snapshot_table_deltas_from_inputs(
+    schema: &crate::schema::DatabaseSchema,
+    graph: &IvmGraph,
+    inputs: &mut EvaluationInputs,
+    root: NodeId,
+) -> Result<Vec<TableDelta>, IvmRuntimeError> {
+    let mut tables = std::collections::HashSet::<TableSnapshotSource>::new();
+    collect_table_sources(graph, root, &mut tables)?;
+    let tables = tables.into_iter().collect::<Vec<_>>();
+    require_snapshot_inputs(graph, inputs, root)?;
+    let mut output = Vec::new();
+    for source in tables {
+        let request = NodeState::table_source_request(&TableSourceOp {
+            table: source.table.clone(),
+            scan: source.scan.clone(),
+            variant_projection: None,
+        })?;
+        let stored_records = match request {
+            Some(request) => inputs
+                .rows(request)?
+                .iter()
+                .map(|(_, record)| record.as_slice())
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        let table_schema = schema
+            .table(&source.table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
+        let mut by_variant = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
+        for stored in stored_records {
+            let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
             let descriptor = table_schema
                 .record_schema_for_variant(variant_tag)
                 .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {

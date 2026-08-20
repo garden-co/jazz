@@ -4,8 +4,27 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use groove::records::{EnumValue, RecordDescriptor, ValueType};
-use groove::storage::{OrderedKvStorage, ReopenableStorage};
-use jazz_storage_rocksdb::RocksDbStorage;
+use groove::storage::{OrderedKvStorage, ReopenableStorage, YieldingStorage};
+use jazz_storage_rocksdb::RocksDbStorage as ImmediateRocksDbStorage;
+use std::path::Path;
+
+type RocksDbStorage = YieldingStorage<ImmediateRocksDbStorage>;
+
+trait TestRocksOpen: Sized {
+    fn open(
+        path: impl AsRef<Path>,
+        column_families: &[&str],
+    ) -> Result<Self, groove::storage::Error>;
+}
+
+impl TestRocksOpen for RocksDbStorage {
+    fn open(
+        path: impl AsRef<Path>,
+        column_families: &[&str],
+    ) -> Result<Self, groove::storage::Error> {
+        ImmediateRocksDbStorage::open(path, column_families).map(YieldingStorage::wrap)
+    }
+}
 
 use super::*;
 use crate::ids::{AuthorId, NodeUuid};

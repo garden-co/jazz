@@ -12,7 +12,7 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
@@ -52,23 +52,23 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemoryStorage> {
+fn open_db(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> Db<TestStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema.clone(),
-        MemoryStorage::new(&refs),
+        TestStorage::new(&refs),
         identity(node_byte, author),
     )))
     .unwrap()
 }
 
-fn open_core(node_byte: u8, schema: &JazzSchema) -> Db<MemoryStorage> {
+fn open_core(node_byte: u8, schema: &JazzSchema) -> Db<TestStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(DbConfig::new(
         schema.clone(),
-        MemoryStorage::new(&refs),
+        TestStorage::new(&refs),
         identity(node_byte, AuthorId::SYSTEM),
     )))
     .unwrap()
@@ -108,7 +108,7 @@ impl WireTransport for QueuedWireTransport {
 
 fn connect_client_to_edge(
     edge: &mut InMemoryServerShell,
-    client: &Db<MemoryStorage>,
+    client: &Db<TestStorage>,
     client_wire: &QueuedWireTransport,
     identity: AuthorId,
 ) -> ServerSession {
@@ -117,7 +117,7 @@ fn connect_client_to_edge(
 }
 
 fn pump_client_edge(
-    client: &Db<MemoryStorage>,
+    client: &Db<TestStorage>,
     wire: &QueuedWireTransport,
     edge: &mut InMemoryServerShell,
     session: ServerSession,
@@ -131,7 +131,7 @@ fn pump_client_edge(
     block_on(client.tick()).unwrap();
 }
 
-fn visible_titles(db: &Db<MemoryStorage>, tier: DurabilityTier) -> Vec<String> {
+fn visible_titles(db: &Db<TestStorage>, tier: DurabilityTier) -> Vec<String> {
     let query = Query::from("todos");
     let prepared = db.prepare_query(&query).unwrap();
     block_on(db.all(

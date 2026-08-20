@@ -2,7 +2,7 @@ mod common;
 
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps, SeededRowIdSource};
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, col, gt, lit};
 use jazz::schema::JazzSchema;
@@ -128,13 +128,13 @@ fn empty_schema() -> JazzSchema {
     compile_schema(&SchemaBuilder::new().build())
 }
 
-async fn open_owner(schema: JazzSchema) -> Db<MemoryStorage> {
+async fn open_owner(schema: JazzSchema) -> Db<TestStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x31; 16]),
                 author: AuthorId::from_bytes([0xa1; 16]),

@@ -10,7 +10,7 @@ use jazz::db::{
     SubscriptionEvent,
 };
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
@@ -88,13 +88,13 @@ fn schema() -> JazzSchema {
     compile_schema(&builder.build())
 }
 
-fn open_client(seed: u8, author: AuthorId, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_client(seed: u8, author: AuthorId, schema: JazzSchema) -> Db<TestStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed; 16]),
                 author,
@@ -105,13 +105,13 @@ fn open_client(seed: u8, author: AuthorId, schema: JazzSchema) -> Db<MemoryStora
     .expect("open client")
 }
 
-fn open_server(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_server(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed; 16]),
                 author: AuthorId::SYSTEM,
@@ -139,7 +139,7 @@ fn cells(title: &str, owner: AuthorId) -> BTreeMap<String, Value> {
     ])
 }
 
-fn seed_fixture(server: &Db<MemoryStorage>, visible_owner: AuthorId, hidden_owner: AuthorId) {
+fn seed_fixture(server: &Db<TestStorage>, visible_owner: AuthorId, hidden_owner: AuthorId) {
     for (idx, table) in TABLES.iter().enumerate() {
         server
             .seed_settled_mergeable_for_bootstrap(
@@ -246,8 +246,8 @@ fn drain_events(
 }
 
 fn drive(
-    server: &Db<MemoryStorage>,
-    client: &Db<MemoryStorage>,
+    server: &Db<TestStorage>,
+    client: &Db<TestStorage>,
     streams: &mut BTreeMap<&'static str, jazz::db::SubscriptionStream>,
     table_schemas: &BTreeMap<&'static str, TableSchema>,
     traces: &mut BTreeMap<&'static str, Vec<EventTrace>>,
@@ -262,7 +262,7 @@ fn drive(
 }
 
 fn final_rows(
-    client: &Db<MemoryStorage>,
+    client: &Db<TestStorage>,
     table_schemas: &BTreeMap<&'static str, TableSchema>,
 ) -> BTreeMap<&'static str, Vec<RowSummary>> {
     TABLES
