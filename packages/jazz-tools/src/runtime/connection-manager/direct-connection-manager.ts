@@ -37,7 +37,7 @@ export class DirectConnectionManager extends ConnectionManager {
     });
   }
 
-  async ensureReady(tier?: DurabilityTier): Promise<void> {
+  async ensureReady(tier?: DurabilityTier, _signal?: AbortSignal): Promise<void> {
     if (!this.isDisconnected || tier === "local") return;
     await new Promise<void>((resolve) => {
       this.reconnectWaiters.push(resolve);

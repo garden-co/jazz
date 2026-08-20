@@ -4,8 +4,7 @@ use jazz_testkit as support;
 
 use jazz::row_input;
 use jazz::tools::{
-    ClientId, ClientStorage, ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder,
-    TableSchema,
+    ClientId, ClientStorage, ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema,
 };
 use jazz_server::JazzServer;
 
@@ -66,7 +65,7 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
         .expect("reopen persistent client with valid token");
     wait_for_rows(
         &reopened,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "reopened client uploads its durable local write",
         |rows| has_row(&rows, todo_id, &expected_values).then_some(()),
     )
