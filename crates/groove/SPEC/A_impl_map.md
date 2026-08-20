@@ -45,9 +45,10 @@ state (`IvmRuntime` in `ivm/runtime/mod.rs`) includes the `graph`,
   `RuntimeStats`. The entry point is `tick_with_params` (ch. 4).
 - **hydration** — snapshots rebuild arrangements in `Replace` mode through
   `hydration_snapshot`, `hydrate_shape_graph`, and `query_snapshot` (ch. 4–5).
-- **joins/arrangements** — joins share arranged state by
-  `ArrangementKey { scope, input, fields, descriptor }`, with freshness recorded
-  as `AsOf<…, SubTick>`. The implementation lives in `runtime/join.rs`
+- **joins/arrangements** — joins and other keyed consumers take typed,
+  hash-consed `Arrange` graph nodes as explicit dependencies. Runtime state adds
+  evaluation scope and records freshness as `AsOf<…, SubTick>`. The
+  implementation lives in `runtime/join.rs`
   (`ArrangementState`, `JoinState`, `AntiJoinState`) (ch. 4).
 - **recursion** — recursive maintenance lives in `runtime/recursion.rs`, with
   `RecursiveState`, `recursive_delta`, `recompute_recursive`, and

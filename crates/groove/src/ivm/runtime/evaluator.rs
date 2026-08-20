@@ -476,8 +476,12 @@ where
                 .descriptor
                 .output;
             let group_fields = self.aggregate_group_fields(node, &aggregate);
-            let arrangement_key =
-                self.arrangement_key(*input, input_desc, group_fields, ValueComparison::Exact)?;
+            let arrangement_key = self.arrangement_key(
+                *input,
+                input_desc.records(),
+                group_fields,
+                ValueComparison::Exact,
+            )?;
             if self
                 .arrangement_states
                 .get(&arrangement_key)
@@ -528,7 +532,7 @@ where
             self.metrics.hydration_memo_computed_nodes.insert(node);
         }
 
-        let output_desc = graph_node.descriptor.output;
+        let output_desc = graph_node.descriptor.output.records();
         if self.context.sub_tick > 1 && !self.depends_on_context(node)? {
             let result = Arc::new(RecordDeltas::empty(output_desc));
             *self.memo_use_clock += 1;
@@ -584,8 +588,14 @@ where
                 self.binding_snapshots,
                 self.context.arrangement_update_mode,
             ),
+            OpType::Arrange(_) => {
+                let [input] = graph_node.descriptor.inputs.as_slice() else {
+                    return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                };
+                Ok(self.update_node(*input)?.as_ref().clone())
+            }
             OpType::FrontierSource(frontier_source) => {
-                self.frontier_source(frontier_source, &graph_node.descriptor.output)
+                self.frontier_source(frontier_source, &output_desc)
             }
             OpType::Filter(filter) => {
                 let input = self.update_unary_input(graph_node, node)?;
@@ -1881,6 +1891,19 @@ where
         fields: Arc<[String]>,
         comparison: ValueComparison,
     ) -> Result<ArrangementKey, IvmRuntimeError> {
+        let arrangement = self
+            .graph
+            .node(input)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(input))?;
+        let OpType::Arrange(spec) = &arrangement.descriptor.operator else {
+            return Err(IvmRuntimeError::UnsupportedOperator);
+        };
+        if arrangement.descriptor.output.records() != descriptor
+            || spec.fields.as_slice() != fields.as_ref()
+            || spec.comparison != comparison
+        {
+            return Err(IvmRuntimeError::GraphOutputMismatch);
+        }
         Ok(ArrangementKey {
             scope: self.operator_scope(input)?,
             input,

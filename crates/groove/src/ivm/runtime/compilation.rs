@@ -3,6 +3,26 @@
 use super::*;
 
 impl IvmRuntime {
+    fn add_arrangement_node(
+        &mut self,
+        input: NodeId,
+        records: RecordDescriptor,
+        fields: Vec<String>,
+        comparison: ValueComparison,
+    ) -> NodeId {
+        self.logical_nodes_requested += 1;
+        let node = self.graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::Arrange(ArrangeOp { fields, comparison }),
+                [input],
+                NodeOutput::Arrangement(ArrangementDescriptor { records }),
+            ),
+            NodeDurability::Ephemeral,
+        );
+        self.initialize_node_runtime(node);
+        node
+    }
+
     pub(super) fn add_dedup_graph(
         &mut self,
         graph: &GraphBuilder,
@@ -284,6 +304,12 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| field_name_at(&output, *field))
                     .collect::<Result<Vec<_>, _>>()?;
+                let arrangement = self.add_arrangement_node(
+                    compiled_input.node,
+                    output,
+                    group_field_names.clone(),
+                    ValueComparison::Exact,
+                );
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         OpType::ArgMaxBy(ArgMaxByOp {
@@ -292,7 +318,7 @@ impl IvmRuntime {
                             group_field_indices,
                             primary_key_field_indices,
                         }),
-                        [compiled_input.node],
+                        [arrangement],
                         output,
                     ),
                     NodeDurability::Ephemeral,
@@ -362,6 +388,12 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| field_name_at(&output, *field))
                     .collect::<Result<Vec<_>, _>>()?;
+                let arrangement = self.add_arrangement_node(
+                    compiled_input.node,
+                    output,
+                    group_field_names.clone(),
+                    ValueComparison::Exact,
+                );
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         OpType::ArgMinBy(ArgMinByOp {
@@ -370,7 +402,7 @@ impl IvmRuntime {
                             group_field_indices,
                             primary_key_field_indices,
                         }),
-                        [compiled_input.node],
+                        [arrangement],
                         output,
                     ),
                     NodeDurability::Ephemeral,
@@ -435,6 +467,12 @@ impl IvmRuntime {
                         tie_field_indices.len(),
                     ))
                     .collect::<Vec<_>>();
+                let arrangement = self.add_arrangement_node(
+                    compiled_input.node,
+                    output,
+                    group_field_names.clone(),
+                    ValueComparison::Exact,
+                );
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         OpType::TopBy(TopByOp {
@@ -447,7 +485,7 @@ impl IvmRuntime {
                             offset: *offset,
                             limit: *limit,
                         }),
-                        [compiled_input.node],
+                        [arrangement],
                         output,
                     ),
                     NodeDurability::Ephemeral,
@@ -492,6 +530,12 @@ impl IvmRuntime {
                     .iter()
                     .map(|aggregate| resolve_aggregate_expr(&input_output, aggregate))
                     .collect::<Result<Vec<_>, _>>()?;
+                let arrangement = self.add_arrangement_node(
+                    input_node,
+                    input_output,
+                    plan_expr_names(&group_key),
+                    ValueComparison::Exact,
+                );
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         OpType::Aggregate(AggregateOp {
@@ -499,7 +543,7 @@ impl IvmRuntime {
                             group_field_indices,
                             aggregates,
                         }),
-                        [input_node],
+                        [arrangement],
                         output,
                     ),
                     NodeDurability::Ephemeral,
@@ -724,6 +768,18 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| field_ref_name(&right_descriptor, field).map(PlanExpr::field))
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let left_arrangement = self.add_arrangement_node(
+                    compiled_left.node,
+                    left_descriptor,
+                    plan_expr_names(&left_key),
+                    *comparison,
+                );
+                let right_arrangement = self.add_arrangement_node(
+                    compiled_right.node,
+                    right_descriptor,
+                    plan_expr_names(&right_key),
+                    *comparison,
+                );
                 let node_descriptor = NodeDescriptor::new(
                     OpType::Join(JoinOp {
                         kind: JoinOpKind::Inner,
@@ -734,7 +790,7 @@ impl IvmRuntime {
                         residual_predicate: None,
                         comparison: *comparison,
                     }),
-                    [compiled_left.node, compiled_right.node],
+                    [left_arrangement, right_arrangement],
                     output,
                 );
                 let node = self
@@ -772,6 +828,18 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| field_ref_name(&right_descriptor, field).map(PlanExpr::field))
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let left_arrangement = self.add_arrangement_node(
+                    compiled_left.node,
+                    left_descriptor,
+                    plan_expr_names(&left_key),
+                    *comparison,
+                );
+                let right_arrangement = self.add_arrangement_node(
+                    compiled_right.node,
+                    right_descriptor,
+                    plan_expr_names(&right_key),
+                    *comparison,
+                );
                 let node_descriptor = NodeDescriptor::new(
                     OpType::SemiJoin(JoinOp {
                         kind: JoinOpKind::Inner,
@@ -782,7 +850,7 @@ impl IvmRuntime {
                         residual_predicate: None,
                         comparison: *comparison,
                     }),
-                    [compiled_left.node, compiled_right.node],
+                    [left_arrangement, right_arrangement],
                     output,
                 );
                 let node = self
@@ -817,6 +885,18 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| field_ref_name(&right_descriptor, field).map(PlanExpr::field))
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let left_arrangement = self.add_arrangement_node(
+                    compiled_left.node,
+                    left_descriptor,
+                    plan_expr_names(&left_key),
+                    *comparison,
+                );
+                let right_arrangement = self.add_arrangement_node(
+                    compiled_right.node,
+                    right_descriptor,
+                    plan_expr_names(&right_key),
+                    *comparison,
+                );
                 let node_descriptor = NodeDescriptor::new(
                     OpType::AntiJoin(JoinOp {
                         kind: JoinOpKind::Inner,
@@ -827,7 +907,7 @@ impl IvmRuntime {
                         residual_predicate: None,
                         comparison: *comparison,
                     }),
-                    [compiled_left.node, compiled_right.node],
+                    [left_arrangement, right_arrangement],
                     output,
                 );
                 let node = self
@@ -895,6 +975,12 @@ impl IvmRuntime {
                 .iter()
                 .map(|field| field_name_at(&input_output, *field))
                 .collect::<Result<Vec<_>, _>>()?;
+            let arrangement = self.add_arrangement_node(
+                compiled_input.node,
+                input_output,
+                group_fields.clone(),
+                ValueComparison::Exact,
+            );
             let node = self.graph.dedup_node(
                 NodeDescriptor::new(
                     OpType::CollectBy(Box::new(CollectByOp {
@@ -949,7 +1035,7 @@ impl IvmRuntime {
                         offset: collect.offset,
                         limit: collect.limit,
                     })),
-                    [compiled_input.node],
+                    [arrangement],
                     output,
                 ),
                 NodeDurability::Ephemeral,
@@ -1043,6 +1129,12 @@ impl IvmRuntime {
             ));
         }
         let collection_field_index = parent_fields.len();
+        let arrangement = self.add_arrangement_node(
+            compiled_input.node,
+            input_output,
+            group_fields.clone(),
+            ValueComparison::Exact,
+        );
         let node = self.graph.dedup_node(
             NodeDescriptor::new(
                 OpType::CollectBy(Box::new(CollectByOp {
@@ -1068,7 +1160,7 @@ impl IvmRuntime {
                     offset: collect.offset,
                     limit: collect.limit,
                 })),
-                [compiled_input.node],
+                [arrangement],
                 output,
             ),
             NodeDurability::Ephemeral,
