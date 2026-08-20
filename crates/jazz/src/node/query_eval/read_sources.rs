@@ -481,6 +481,167 @@ where
                     deletion_register,
                 });
             }
+            if matches!(base, Some(BranchViewSourceBase::Snapshot(_, _))) {
+                let tier = graph_tier.expect("branch view has a current tier");
+                let frozen_base_key = match base {
+                    Some(BranchViewSourceBase::Snapshot(key, _)) => key,
+                    _ => unreachable!("guarded frozen branch base"),
+                };
+                let head_keys = self
+                    .node
+                    .equivalent_stored_branch_keys(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        head,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let head_content =
+                    self.projected_branch_content_source_graph(request, &table, tier, &head_keys)?;
+                let head_deletions =
+                    self.projected_branch_deletion_source_graph(request, tier, &head_keys)?;
+                let head_content_presence = head_content.clone().project(["row_uuid"]);
+                let head_deletion_presence = head_deletions.clone().project(["row_uuid"]);
+                let deleted = head_deletions
+                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                    .project(["row_uuid"]);
+                let selected_head = GraphBuilder::anti_join(
+                    head_content.clone(),
+                    deleted,
+                    ["row_uuid"],
+                    ["row_uuid"],
+                )
+                .project_fields(
+                    branch_view_storage_source_fields(&table, head).map_err(|_| {
+                        source_resolution_error(request, SourceGap::SchemaProjection)
+                    })?,
+                );
+                let system_authorization = SourceAuthorizationRequest::System;
+                let (live_head, _, metadata, routing_fields) = resolved_current_source_graph(
+                    self.node,
+                    &table,
+                    tier,
+                    &request.requirements,
+                    &system_authorization,
+                    self.read_view.policy_schema,
+                    Some(&self.read_view),
+                    Some("supplying_branch_key"),
+                    Some(selected_head),
+                )
+                .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
+                let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
+                    &table, &metadata, true,
+                );
+                // Capture the full opening view once. Anti-joining it against
+                // live head presence leaves only inherited frozen rows; all
+                // subsequent head changes remain maintained table inputs.
+                let opening_rows = self
+                    .node
+                    .branch_view_rows_for_schema(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        tier,
+                        head,
+                        base,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let schema_version_alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let (opening, opening_descriptor, opening_metadata) =
+                    inline_current_graph_with_source_metadata_and_branch_witness(
+                        &table,
+                        opening_rows,
+                        schema_version_alias,
+                        "frozen-branch-base",
+                        &request.requirements,
+                        Some(("supplying_branch_key", frozen_base_key)),
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                if descriptor != opening_descriptor || metadata != opening_metadata {
+                    return Err(source_resolution_error(
+                        request,
+                        SourceGap::SchemaProjection,
+                    ));
+                }
+                let inherited = GraphBuilder::anti_join(
+                    opening,
+                    head_content_presence,
+                    ["row_uuid"],
+                    ["row_uuid"],
+                );
+                let inherited = GraphBuilder::anti_join(
+                    inherited,
+                    head_deletion_presence,
+                    ["row_uuid"],
+                    ["row_uuid"],
+                );
+                let unfiltered = GraphBuilder::union([live_head, inherited]);
+                let graph = match &authorization {
+                    SourceAuthorizationRequest::System => unfiltered,
+                    SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
+                    }
+                    | SourceAuthorizationRequest::PolicyProof {
+                        permission_subject,
+                        plan,
+                    } => {
+                        let policy_request = self.node.table_read_policy_authorization_request(
+                            self.read_view.policy_schema,
+                            &table.name,
+                            *permission_subject,
+                            ParamBindingMode::InlineAllReachableSeeds,
+                            tier,
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
+                        );
+                        let policy_request = policy_request.map(|mut request| {
+                            request.reads.primary = self.read_view.clone();
+                            request
+                        });
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                unfiltered,
+                                &current_row_fields(&table),
+                            )
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
+                            .graph
+                    }
+                };
+                return Ok(ResolvedSource {
+                    table_schema: table.clone(),
+                    graph,
+                    row_shape: SourceRowShape {
+                        source: request.source.clone(),
+                        descriptor,
+                        row_uuid_field: "row_uuid".to_owned(),
+                        metadata,
+                    },
+                    routing_fields,
+                    content_version: request
+                        .requirements
+                        .metadata
+                        .contains(&SourceMetadataRequirement::VersionPayloads)
+                        .then(|| ContentVersionSource {
+                            graph: head_content.project_fields(
+                                maintained_view_history_storage_field_names(&table)
+                                    .into_iter()
+                                    .map(ProjectField::named)
+                                    .chain(std::iter::once(ProjectField::renamed(
+                                        "branch_key",
+                                        "supplying_branch_key",
+                                    ))),
+                            ),
+                            row_uuid_field: "row_uuid".to_owned(),
+                        }),
+                    deletion_register: None,
+                });
+            }
             let rows = self
                 .node
                 .branch_view_rows_for_schema(
@@ -1968,7 +2129,11 @@ where
         }
     }
 
-    let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
+    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
+        table,
+        &metadata,
+        branch_witness_field.is_some(),
+    );
     let (base, routing_fields) = match authorization {
         SourceAuthorizationRequest::System => {
             let graph = if let Some(selected_base) = selected_base.clone() {
@@ -2208,7 +2373,37 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
     table: &TableSchema,
     metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 ) -> RecordDescriptor {
-    let mut fields = current_row_descriptor_fields(table);
+    current_row_descriptor_with_hidden_source_fields_for_branch(table, metadata, false)
+}
+
+fn current_row_descriptor_with_hidden_source_fields_for_branch(
+    table: &TableSchema,
+    metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    branch_dimensions_nonnullable: bool,
+) -> RecordDescriptor {
+    let mut fields = std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
+        .chain(table.columns.iter().map(|column| {
+            let value_type = if branch_dimensions_nonnullable
+                && table
+                    .branch_by
+                    .iter()
+                    .any(|binding| binding.column == column.name)
+            {
+                column.column_type.clone()
+            } else {
+                ValueType::Nullable(Box::new(column.column_type.clone()))
+            };
+            (user_column_field(&column.name), value_type)
+        }))
+        .chain([
+            ("$createdBy".to_owned(), ValueType::Uuid),
+            ("$createdAt".to_owned(), ValueType::U64),
+            ("$updatedBy".to_owned(), ValueType::Uuid),
+            ("$updatedAt".to_owned(), ValueType::U64),
+            ("tx_time".to_owned(), ValueType::U64),
+            ("tx_node_id".to_owned(), ValueType::U64),
+        ])
+        .collect::<Vec<_>>();
     if metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses) {
         fields.extend([
             ("table".to_owned(), ValueType::String),
@@ -2221,14 +2416,14 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
                     ValueType::Uuid,
                 ]))),
             ),
-            ("created_by".to_owned(), ValueType::Uuid),
-            ("created_at".to_owned(), ValueType::U64),
-            ("updated_by".to_owned(), ValueType::Uuid),
-            ("updated_at".to_owned(), ValueType::U64),
             (
                 "authored_columns".to_owned(),
                 ValueType::Nullable(Box::new(ValueType::Bytes)),
             ),
+            ("created_by".to_owned(), ValueType::Uuid),
+            ("created_at".to_owned(), ValueType::U64),
+            ("updated_by".to_owned(), ValueType::Uuid),
+            ("updated_at".to_owned(), ValueType::U64),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
             branch_or_prefix_field: Some(field),
@@ -2237,6 +2432,11 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
         {
             fields.push((field.clone(), ValueType::Bytes));
         }
+    }
+    if branch_dimensions_nonnullable
+        && !metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses)
+    {
+        fields.push(("supplying_branch_key".to_owned(), ValueType::Bytes));
     }
     if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
         fields.push(("coverage".to_owned(), ValueType::String));
@@ -2248,25 +2448,6 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
         ));
     }
     RecordDescriptor::new(fields)
-}
-
-fn current_row_descriptor_fields(table: &TableSchema) -> Vec<(String, ValueType)> {
-    std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
-        .chain(table.columns.iter().map(|column| {
-            (
-                user_column_field(&column.name),
-                ValueType::Nullable(Box::new(column.column_type.clone())),
-            )
-        }))
-        .chain([
-            ("$createdBy".to_owned(), ValueType::Uuid),
-            ("$createdAt".to_owned(), ValueType::U64),
-            ("$updatedBy".to_owned(), ValueType::Uuid),
-            ("$updatedAt".to_owned(), ValueType::U64),
-            ("tx_time".to_owned(), ValueType::U64),
-            ("tx_node_id".to_owned(), ValueType::U64),
-        ])
-        .collect()
 }
 
 impl<S> NodeState<S>
@@ -2581,6 +2762,31 @@ fn inline_current_graph_with_source_metadata(
     ),
     Error,
 > {
+    inline_current_graph_with_source_metadata_and_branch_witness(
+        table,
+        rows,
+        schema_version_alias,
+        coverage,
+        requirements,
+        None,
+    )
+}
+
+fn inline_current_graph_with_source_metadata_and_branch_witness(
+    table: &TableSchema,
+    rows: Vec<CurrentRow>,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+    branch_witness: Option<(&str, &BranchKey)>,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    ),
+    Error,
+> {
     let mut metadata = BTreeMap::new();
     if requirements
         .metadata
@@ -2592,7 +2798,7 @@ fn inline_current_graph_with_source_metadata(
                 schema_version_field: "schema_version".to_owned(),
                 tx_time_field: "tx_time".to_owned(),
                 tx_node_field: "tx_node_id".to_owned(),
-                branch_or_prefix_field: None,
+                branch_or_prefix_field: branch_witness.map(|(field, _)| field.to_owned()),
             },
         );
     }
@@ -2629,7 +2835,11 @@ fn inline_current_graph_with_source_metadata(
         }
     }
 
-    let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
+    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
+        table,
+        &metadata,
+        branch_witness.is_some(),
+    );
     let records = rows
         .iter()
         .map(|row| {
@@ -2639,6 +2849,7 @@ fn inline_current_graph_with_source_metadata(
                 row,
                 schema_version_alias,
                 coverage,
+                branch_witness,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2655,11 +2866,24 @@ fn inline_current_record_with_source_metadata(
     row: &CurrentRow,
     schema_version_alias: SchemaVersionAlias,
     coverage: &str,
+    branch_witness: Option<(&str, &BranchKey)>,
 ) -> Result<Vec<u8>, Error> {
     let mut values = Vec::new();
     values.push(Value::Uuid(row.row_uuid().0));
     for column in &table.columns {
-        values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
+        let value = row.cell(table, &column.name);
+        if branch_witness.is_some()
+            && table
+                .branch_by
+                .iter()
+                .any(|binding| binding.column == column.name)
+        {
+            values.push(value.ok_or(Error::InvalidStoredValue(
+                "frozen branch row is missing a branch dimension value",
+            ))?);
+        } else {
+            values.push(Value::Nullable(value.map(Box::new)));
+        }
     }
     let provenance = row.provenance()?.unwrap_or(RowProvenance {
         created_by: AuthorId::SYSTEM,
@@ -2683,12 +2907,15 @@ fn inline_current_record_with_source_metadata(
             Value::String("content".to_owned()),
             Value::U64(schema_version_alias.0),
             Value::Array(Vec::new()),
+            Value::Nullable(None),
             Value::Uuid(provenance.created_by.0),
             Value::U64(provenance.created_at.0),
             Value::Uuid(provenance.updated_by.0),
             Value::U64(provenance.updated_at.0),
-            Value::Nullable(None),
         ]);
+    }
+    if let Some((_, branch_key)) = branch_witness {
+        values.push(Value::Bytes(branch_key.canonical_bytes()));
     }
     if descriptor.field_index("coverage").is_some() {
         values.push(Value::String(coverage.to_owned()));

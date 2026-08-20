@@ -10,8 +10,11 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, BranchDimensionId, NodeUuid, RowUuid};
-use jazz::protocol::{BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec};
+use jazz::protocol::{
+    BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
+};
 use jazz::schema::{BranchDimensionSchema, JazzSchema, TableSchema};
+use jazz::time::GlobalSeq;
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -263,7 +266,7 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
 
     db.restore_with_cells_in_branch(
         "todos",
-        head,
+        head.clone(),
         row,
         BTreeMap::from([("title".to_owned(), Value::String("restored".to_owned()))]),
     )
@@ -282,4 +285,91 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
         rows[0].cell(table, "title"),
         Some(Value::String("restored".to_owned()))
     );
+}
+
+#[test]
+fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
+    let (db, schema) = open_db();
+    let row = RowUuid::from_bytes([0x74; 16]);
+    let base = selector(0x75);
+    let head = selector(0x76);
+    let seeded = db
+        .insert_with_id_in_branch(
+            "todos",
+            base.clone(),
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    let frozen = SnapshotRef {
+        owner: seeded.node,
+        global_base: GlobalSeq(0),
+        local_base: seeded.time,
+        dots: Vec::new(),
+    };
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let opts = ReadOpts::default().branch_view(
+        head.clone(),
+        Some(BranchViewBase::Snapshot {
+            branch: base.clone(),
+            snapshot: frozen,
+        }),
+    );
+    let mut subscription = block_on(db.subscribe(&prepared, opts.clone())).unwrap();
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: true, .. }
+    ));
+
+    db.update_in_branch(
+        "todos",
+        base,
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("later base".to_owned()))]),
+    )
+    .unwrap();
+    assert!(subscription.try_next_event().is_none());
+
+    db.update_in_branch_view(
+        "todos",
+        head.clone(),
+        match &opts.read_view.source {
+            ReadViewSourceSpec::BranchView { base, .. } => base.clone(),
+            _ => unreachable!(),
+        },
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("live head".to_owned()))]),
+    )
+    .unwrap();
+    let changed = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        changed,
+        SubscriptionEvent::Delta { reset: false, ref updated, .. } if updated.len() == 1
+    ));
+    let rows = block_on(db.all(&prepared, opts)).unwrap();
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("live head".to_owned()))
+    );
+
+    db.delete_in_branch("todos", head.clone(), row).unwrap();
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: false, ref removed, .. } if removed.len() == 1
+    ));
+    db.restore_with_cells_in_branch(
+        "todos",
+        head,
+        row,
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("restored head".to_owned()),
+        )]),
+    )
+    .unwrap();
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: false, ref added, .. } if added.len() == 1
+    ));
 }
