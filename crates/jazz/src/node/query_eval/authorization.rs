@@ -196,7 +196,7 @@ where
         }
 
         let result = async {
-            let program = self.compile_query_program_request(request).await?;
+            let program = Box::pin(self.compile_query_program_request(request)).await?;
             let graph = lowered_terminal_graph(&program, "policy.authorized_rows")?;
             let route_fields = program
                 .lowered
