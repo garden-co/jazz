@@ -276,7 +276,10 @@ impl SchemaViewId {
     }
 
     fn for_schema(schema: &JazzSchema) -> Self {
-        let bytes = postcard::to_allocvec(schema).expect("JazzSchema always serializes");
+        let bytes = schema.source().map_or_else(
+            || format!("{schema:?}").into_bytes(),
+            |source| serde_json::to_vec(source).expect("schema source always serializes"),
+        );
         Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
     }
 }

@@ -15,13 +15,16 @@ use jazz::db::{
     SubscriptionStream, WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::JazzSchema;
-use jazz::schema::{ColumnSchema, TableSchema};
+use jazz::schema::TableSchema;
 use jazz::serving::auth_admission::author_id_from_subject;
+use jazz::tools::{
+    ColumnType as PublicColumnType, SchemaBuilder as PublicSchemaBuilder,
+    TableSchemaBuilder as PublicTableSchemaBuilder,
+};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::{TransportError, WireTransport};
 use serde_json::json;
@@ -143,34 +146,39 @@ fn publish_empty_schema_and_wait_for_live_core(bound_port_file: &Path, data_dir:
 }
 
 fn schema_hex(schema: &JazzSchema) -> String {
-    postcard::to_allocvec(schema)
-        .expect("encode schema")
+    serde_json::to_vec(schema.source().expect("test schema has public source"))
+        .expect("encode schema source")
         .into_iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
 
 fn todos_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
-    )])
+    let source = PublicSchemaBuilder::new()
+        .table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean),
+        )
+        .build();
+    jazz::tools::public_schema_convert::convert_public_schema(&source).unwrap()
 }
 
 fn structured_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner_id", ColumnType::Uuid),
-            ],
-        ),
-    ])
+    let source = PublicSchemaBuilder::new()
+        .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+        .table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner_id", PublicColumnType::Uuid),
+        )
+        .build();
+    jazz::tools::public_schema_convert::convert_public_schema(&source).unwrap()
+}
+
+fn empty_schema() -> JazzSchema {
+    jazz::tools::public_schema_convert::convert_public_schema(&PublicSchemaBuilder::new().build())
+        .unwrap()
 }
 
 fn identity_for_subject(node: u8, subject: &str) -> DbIdentity {
@@ -544,19 +552,22 @@ fn help_lists_dev_server_commands() {
             && line.contains("--admin-secret <token>")
     }));
     assert!(lines.iter().any(|line| {
-        line.contains(" serve <schema-postcard-hex>")
+        line.contains(" serve <schema-source-json-hex>")
             && line.contains("--websocket-path <path>")
             && line.contains("--ws-path <path>")
     }));
     assert!(lines.iter().any(|line| {
-        line.contains(" dev-server <schema-postcard-hex>") && line.contains("same options as serve")
+        line.contains(" dev-server <schema-source-json-hex>")
+            && line.contains("same options as serve")
     }));
     assert!(lines.iter().any(|line| {
-        line.contains(" serve-loopback-websocket-schema <schema-postcard-hex>")
+        line.contains(" serve-loopback-websocket-schema <schema-source-json-hex>")
             && line.contains("--websocket-path <path>")
     }));
     assert!(lines.iter().any(|line| {
-        line.contains(" serve-loopback-websocket-schema-data-dir <schema-postcard-hex> <data-dir>")
+        line.contains(
+            " serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir>",
+        )
     }));
     assert!(
         lines
@@ -1231,7 +1242,7 @@ fn loopback_websocket_schema_rejects_bad_hex_without_serving() {
 
     let stderr = String::from_utf8(output.stderr).expect("schema stderr is utf-8");
     assert!(stderr.contains("error=hex input contains non-hex digit"));
-    assert!(stderr.contains(" serve-loopback-websocket-schema <schema-postcard-hex>"));
+    assert!(stderr.contains(" serve-loopback-websocket-schema <schema-source-json-hex>"));
 }
 
 #[test]
@@ -1246,7 +1257,7 @@ fn dev_server_alias_rejects_bad_hex_without_serving() {
 
     let stderr = String::from_utf8(output.stderr).expect("schema stderr is utf-8");
     assert!(stderr.contains("error=hex input contains non-hex digit"));
-    assert!(stderr.contains(" dev-server <schema-postcard-hex>"));
+    assert!(stderr.contains(" dev-server <schema-source-json-hex>"));
 }
 
 #[test]
@@ -1262,7 +1273,7 @@ fn serve_aliases_report_missing_schema_with_command_usage() {
 
         let stderr = String::from_utf8(output.stderr).expect("missing schema stderr is utf-8");
         assert!(stderr.contains("error=missing_schema"));
-        assert!(stderr.contains(&format!(" {command} <schema-postcard-hex>")));
+        assert!(stderr.contains(&format!(" {command} <schema-source-json-hex>")));
     }
 }
 
@@ -1279,8 +1290,9 @@ fn durable_loopback_websocket_command_reports_missing_arguments() {
     let stderr = String::from_utf8(missing_schema.stderr).expect("missing schema stderr is utf-8");
     assert!(stderr.contains("error=missing_schema"));
     assert!(
-        stderr
-            .contains(" serve-loopback-websocket-schema-data-dir <schema-postcard-hex> <data-dir>")
+        stderr.contains(
+            " serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir>"
+        )
     );
 
     let missing_data_dir = jazz_server_command()
@@ -1295,14 +1307,15 @@ fn durable_loopback_websocket_command_reports_missing_arguments() {
         String::from_utf8(missing_data_dir.stderr).expect("missing data-dir stderr is utf-8");
     assert!(stderr.contains("error=missing_data_dir"));
     assert!(
-        stderr
-            .contains(" serve-loopback-websocket-schema-data-dir <schema-postcard-hex> <data-dir>")
+        stderr.contains(
+            " serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir>"
+        )
     );
 }
 
 #[test]
 fn durable_loopback_websocket_command_rejects_unopenable_data_dir() {
-    let schema_hex = schema_hex(&JazzSchema::new([]));
+    let schema_hex = schema_hex(&empty_schema());
     let data_dir = std::env::temp_dir().join(format!(
         "jazz-server-unopenable-data-dir-{}",
         std::process::id()

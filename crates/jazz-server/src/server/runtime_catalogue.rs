@@ -93,12 +93,10 @@ pub(crate) async fn publish_runtime_catalogue(
         })?;
         table.policies = policies;
     }
-    let runtime_schema = public_schema_convert::convert_public_schema(&schema)
-        .map_err(|error| format!("convert permissions head schema for runtime: {error}"))?;
     runtime_shell
-        .publish_permissions_schema(runtime_schema, lineage_source)
+        .publish_permissions_source(schema, lineage_source)
         .await
-        .map_err(|error| format!("publish permissions head to runtime shell: {error}"))?;
+        .map_err(|error| format!("compile and publish permissions source: {error}"))?;
     Ok(())
 }
 

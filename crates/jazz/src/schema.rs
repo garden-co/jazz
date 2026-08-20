@@ -20,6 +20,64 @@ use groove::storage::StorageLayout;
 
 use crate::ids::SchemaVersionId;
 use crate::query::{Query, claim, col, eq};
+use crate::tools::public_schema::{PolicyExpr, Schema as PublicSchema, TableName};
+
+/// Canonically ordered, developer-authored schema source.
+///
+/// This is the durable schema representation. [`JazzSchema`] is compiled from
+/// it and remains an in-memory engine value.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SourceSchema {
+    /// Source codec version. This versions the AST envelope, not policy
+    /// lowering behavior.
+    pub format_version: u8,
+    /// Application tables sorted by name for deterministic persistence and
+    /// content hashing.
+    pub tables: Vec<SourceTableSchema>,
+    /// Source policy for branch metadata reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_read_policy: Option<PolicyExpr>,
+    /// Source policy for branch metadata writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_write_policy: Option<PolicyExpr>,
+}
+
+/// One named table in a [`SourceSchema`].
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SourceTableSchema {
+    /// Logical table name.
+    pub name: TableName,
+    /// Public structural schema and policy expressions.
+    pub schema: crate::tools::public_schema::TableSchema,
+}
+
+impl SourceSchema {
+    /// Canonicalize a public schema for persistence.
+    pub fn new(schema: &PublicSchema) -> Self {
+        let mut tables = schema
+            .iter()
+            .map(|(name, schema)| SourceTableSchema {
+                name: *name,
+                schema: schema.clone(),
+            })
+            .collect::<Vec<_>>();
+        tables.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+        Self {
+            format_version: 1,
+            tables,
+            branch_read_policy: None,
+            branch_write_policy: None,
+        }
+    }
+
+    /// Reconstruct the ordinary public schema map used by the compiler.
+    pub fn public_schema(&self) -> PublicSchema {
+        self.tables
+            .iter()
+            .map(|table| (table.name, table.schema.clone()))
+            .collect()
+    }
+}
 
 /// Namespace used for schema-version UUIDv5 ids.
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
@@ -42,18 +100,27 @@ pub const STORAGE_CONSISTENCY_MARKERS_STORE: &str = "jazz_storage_consistency_ma
 pub const MERGE_HEADS_TABLE: &str = "jazz_merge_heads";
 
 /// Complete logical Jazz schema.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug)]
 pub struct JazzSchema {
     /// Application tables in the schema.
     pub tables: Vec<TableSchema>,
     /// Read policy for branch metadata rows. `None` means branch metadata is
     /// public for reads.
-    #[serde(default)]
     pub branch_read_policy: Option<Query>,
     /// Write policy for branch metadata rows. `None` means branch metadata is
     /// public for writes.
-    #[serde(default)]
     pub branch_write_policy: Option<Query>,
+    /// Developer-authored source retained only so catalogue publication can
+    /// persist it instead of this lowered representation.
+    pub(crate) source: Option<SourceSchema>,
+}
+
+impl PartialEq for JazzSchema {
+    fn eq(&self, other: &Self) -> bool {
+        self.tables == other.tables
+            && self.branch_read_policy == other.branch_read_policy
+            && self.branch_write_policy == other.branch_write_policy
+    }
 }
 
 impl JazzSchema {
@@ -63,19 +130,36 @@ impl JazzSchema {
             tables: tables.into_iter().collect(),
             branch_read_policy: None,
             branch_write_policy: None,
+            source: None,
         }
         .validated()
+    }
+
+    /// Attach the developer-authored source from which this runtime schema was
+    /// compiled.
+    pub(crate) fn with_source(mut self, source: SourceSchema) -> Self {
+        self.source = Some(source);
+        self.validated()
+    }
+
+    /// Return the developer-authored source, when this schema entered through
+    /// a public API boundary.
+    #[doc(hidden)]
+    pub fn source(&self) -> Option<&SourceSchema> {
+        self.source.as_ref()
     }
 
     /// Set the read policy for branch metadata rows.
     pub fn with_branch_read_policy(mut self, read_policy: impl Into<Option<Query>>) -> Self {
         self.branch_read_policy = read_policy.into();
+        self.source = None;
         self.validated()
     }
 
     /// Set the write policy for branch metadata rows.
     pub fn with_branch_write_policy(mut self, write_policy: impl Into<Option<Query>>) -> Self {
         self.branch_write_policy = write_policy.into();
+        self.source = None;
         self.validated()
     }
 

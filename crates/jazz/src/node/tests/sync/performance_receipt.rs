@@ -2,9 +2,11 @@
 
 fn policy_graph_perf_schema_fixture() -> JazzSchema {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema.native.bin");
-    let bytes = std::fs::read(path).unwrap();
-    postcard::from_bytes(&bytes).unwrap()
+        .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema-source.json");
+    let source: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let source = serde_json::from_value(source["mergedSchema"].clone()).unwrap();
+    crate::tools::public_schema_convert::convert_public_schema(&source).unwrap()
 }
 
 fn policy_graph_uuid(kind: u8, idx: u32) -> uuid::Uuid {
@@ -397,4 +399,3 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
         btree_elapsed.as_secs_f64() * 1000.0
     );
 }
-

@@ -35,6 +35,56 @@ fn schema_version_id_round_trips_through_wire_ingest_and_recovery() {
 }
 
 #[test]
+fn trusted_snapshot_carries_policy_source_and_edge_recompiles_it_after_reopen() {
+    let public = crate::tools::SchemaBuilder::new()
+        .table(
+            crate::tools::TableSchema::builder("todos")
+                .column("title", crate::tools::ColumnType::Text)
+                .policies(
+                    crate::tools::TablePolicies::new()
+                        .with_select(crate::tools::PolicyExpr::True),
+                ),
+        )
+        .build();
+    let compiled = crate::tools::public_schema_convert::convert_public_schema(&public)
+        .expect("compile authority source");
+    let (_authority_dir, authority) = open_node_with_schema(node(0x33), compiled.clone());
+    let snapshot = authority.catalogue_snapshot().expect("authority snapshot");
+    let encoded = postcard::to_allocvec(&snapshot).expect("encode source snapshot");
+    let snapshot: crate::protocol::CatalogueSnapshot =
+        postcard::from_bytes(&encoded).expect("decode and compile source snapshot");
+
+    let empty = JazzSchema::new([]);
+    let edge_dir = tempfile::tempdir().expect("create edge store");
+    let cfs = empty.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(edge_dir.path(), &refs).expect("open edge store");
+    let mut edge = NodeState::new_catalogue_uninitialized(node(0x34), storage)
+        .expect("open uninitialized edge");
+    edge.apply_trusted_catalogue_snapshot(snapshot)
+        .expect("install source snapshot");
+    assert!(
+        edge.try_current_schema()
+            .expect("edge has a current schema")
+            .tables
+            .iter()
+            .find(|table| table.name == "todos")
+            .and_then(|table| table.read_policy.as_ref())
+            .is_some(),
+        "edge compiles the source PolicyExpr"
+    );
+
+    drop(edge);
+    let cfs = empty.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(edge_dir.path(), &refs).expect("reopen edge store");
+    let reopened = NodeState::new_catalogue_uninitialized(node(0x34), storage)
+        .expect("reopen edge from persisted source");
+    assert_eq!(reopened.try_current_schema().unwrap(), &compiled);
+    assert!(reopened.try_current_schema().unwrap().source().is_some());
+}
+
+#[test]
 fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     // This is an internal transport-boundary test: public clients never apply
     // trusted upstream catalogue snapshots directly.
@@ -1496,4 +1546,3 @@ fn trusted_catalogue_snapshot_activation_failure_never_exposes_a_prefix_and_reop
     assert_eq!(reopened.catalogue_schemas().len(), 2);
     assert_eq!(reopened.current_write_schema().unwrap().revision, 1);
 }
-

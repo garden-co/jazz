@@ -21,7 +21,6 @@ pub use crate::tools::transaction::{OpenTransactionId, TransactionId};
 /// This is shared by schema-default admission and every facade write path so a
 /// JSON default cannot bypass the same syntax/schema contract as an explicit
 /// value. Arrays recurse because `ColumnType::Array` permits JSON elements.
-#[cfg(any(feature = "runtime", feature = "runtime", test))]
 pub(crate) fn validate_json_value(
     value: &Value,
     column_type: &ColumnType,
@@ -73,7 +72,6 @@ pub(crate) fn validate_json_value(
 ///
 /// Instance validation stays at writes, but a bad declaration is a schema
 /// error even when a nullable column has no value or default yet.
-#[cfg(any(feature = "runtime", feature = "runtime", test))]
 pub(crate) fn validate_json_schemas(column_type: &ColumnType, path: &str) -> Result<(), String> {
     match column_type {
         ColumnType::Json {

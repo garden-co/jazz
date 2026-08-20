@@ -10,8 +10,8 @@ use crate::query::{
     PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
-    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, TableSchema as CoreTableSchema,
-    WritePolicies,
+    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, SourceSchema,
+    TableSchema as CoreTableSchema, WritePolicies,
 };
 
 use crate::tools::public_api::policy::{CmpOp, PolicyValue};
@@ -55,19 +55,84 @@ impl std::error::Error for SchemaConversionError {}
 
 #[doc(hidden)]
 pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
+    convert_source_schema(&SourceSchema::new(schema))
+}
+
+/// Decode and compile the source-level JSON schema used by native bindings.
+pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
+    let source: SourceSchema = serde_json::from_slice(bytes)
+        .map_err(|error| format!("decode public schema source: {error}"))?;
+    convert_source_schema(&source).map_err(|error| format!("compile public schema source: {error}"))
+}
+
+/// Compile a durable source schema into the engine's in-memory form.
+pub fn convert_source_schema(source: &SourceSchema) -> Result<JazzSchema, SchemaConversionError> {
+    if source.format_version != 1 {
+        return Err(SchemaConversionError::new(
+            "$",
+            format!(
+                "unsupported public schema source format version {}",
+                source.format_version
+            ),
+        ));
+    }
+    if source
+        .tables
+        .windows(2)
+        .any(|pair| pair[0].name.as_str() >= pair[1].name.as_str())
+    {
+        return Err(SchemaConversionError::new(
+            "$.tables",
+            "public schema source tables must be uniquely sorted by name",
+        ));
+    }
+    let schema = source.public_schema();
     let mut tables = schema.iter().collect::<Vec<_>>();
     tables.sort_by_key(|(name, _)| name.as_str());
     let mut converted = tables
         .into_iter()
-        .map(|(name, table)| convert_table(schema, name, table))
+        .map(|(name, table)| convert_table(&schema, name, table))
         .collect::<Result<Vec<_>, _>>()?;
-    coerce_typed_literals(schema, &mut converted);
+    coerce_typed_literals(&schema, &mut converted);
     validate_converted_schema(&converted)?;
+    let branch_read_policy = convert_optional_branch_policy(
+        &schema,
+        "branch_read_policy",
+        source.branch_read_policy.as_ref(),
+    )?;
+    let branch_write_policy = convert_optional_branch_policy(
+        &schema,
+        "branch_write_policy",
+        source.branch_write_policy.as_ref(),
+    )?;
     Ok(JazzSchema {
         tables: converted,
-        branch_read_policy: None,
-        branch_write_policy: None,
-    })
+        branch_read_policy,
+        branch_write_policy,
+        source: None,
+    }
+    .with_source(source.clone()))
+}
+
+fn convert_optional_branch_policy(
+    schema: &Schema,
+    path: &str,
+    expr: Option<&PolicyExpr>,
+) -> Result<Option<Query>, SchemaConversionError> {
+    let Some(expr) = expr else {
+        return Ok(None);
+    };
+    let branch_name = TableName::from("jazz_branches");
+    let branch_schema = TableSchema::builder("jazz_branches")
+        .column("branch_id", ColumnType::Uuid)
+        .column("created_by", ColumnType::Uuid)
+        .nullable_column("parent", ColumnType::Uuid)
+        .nullable_column("base_global", ColumnType::Timestamp)
+        .column("state", ColumnType::Text)
+        .build();
+    let mut schema = schema.clone();
+    schema.insert(branch_name, branch_schema.clone());
+    convert_policy(&schema, &branch_schema, &branch_name, path, expr).map(Some)
 }
 
 fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
@@ -75,6 +140,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
         tables: tables.to_vec(),
         branch_read_policy: None,
         branch_write_policy: None,
+        source: None,
     };
     for table in tables {
         if let Some(policy) = &table.read_policy {
@@ -2380,7 +2446,6 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionE
 mod tests {
     use super::*;
     use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
-    use crate::schema::JazzSchema;
     use crate::tools::object::ObjectId;
     use crate::tools::public_api::policy::{CmpOp, PolicyValue};
     use crate::tools::public_api::relation_ir::{
@@ -2430,33 +2495,44 @@ mod tests {
             .expect("decode policy graph perf public schema fixture")
     }
 
-    fn policy_graph_perf_fixture_native_schema() -> JazzSchema {
-        let bytes = std::fs::read(policy_graph_perf_fixture_dir().join("schema.native.bin"))
-            .expect("read policy graph perf native schema fixture");
-        postcard::from_bytes(&bytes).expect("decode policy graph perf native schema fixture")
+    #[test]
+    fn converts_policy_graph_perf_source_deterministically() {
+        let source = policy_graph_perf_fixture_schema();
+        let converted = convert_public_schema(&source).expect("convert policy graph schema");
+        let recompiled = convert_source_schema(
+            converted
+                .source()
+                .expect("public conversion retains source"),
+        )
+        .expect("retained source recompiles");
+
+        assert_eq!(converted, recompiled);
+        assert_eq!(converted.version_id(), recompiled.version_id());
+        assert_eq!(
+            SourceSchema::new(&source),
+            converted.source().unwrap().clone()
+        );
     }
 
     #[test]
-    fn converts_policy_graph_perf_public_schema_to_native_fixture_byte_stably() {
-        let converted = convert_public_schema(&policy_graph_perf_fixture_schema())
-            .expect("convert policy graph schema");
-        let expected = policy_graph_perf_fixture_native_schema();
+    fn compiles_branch_policy_source() {
+        let mut source = SourceSchema::new(&SchemaBuilder::new().build());
+        source.branch_read_policy = Some(PolicyExpr::Cmp {
+            column: "created_by".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+        });
 
-        for (index, (left, right)) in converted
-            .tables
-            .iter()
-            .zip(expected.tables.iter())
-            .enumerate()
-        {
-            assert_eq!(left, right, "first table mismatch at index {index}");
-        }
-        assert_eq!(converted.tables.len(), expected.tables.len());
+        let compiled = convert_source_schema(&source).expect("compile branch policy source");
         assert_eq!(
-            converted.version_id(),
-            expected.version_id(),
-            "server public-schema conversion must publish the same schema version that TS/NAPI clients use"
+            compiled
+                .branch_read_policy
+                .as_ref()
+                .expect("branch policy is installed")
+                .table,
+            "jazz_branches"
         );
-        assert_eq!(converted, expected);
+        assert!(compiled.source().is_some());
     }
 
     #[test]

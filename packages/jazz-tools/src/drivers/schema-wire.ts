@@ -62,6 +62,21 @@ function sortSchemaTables(schema: WasmSchema): WasmSchema {
   ) as WasmSchema;
 }
 
+/** Serialize the developer-authored schema AST for Rust compilation. */
+export function serializeSchemaSource(schema: WasmSchema): string {
+  const sorted = sortSchemaTables(schema);
+  return JSON.stringify(
+    {
+      format_version: 1,
+      tables: Object.entries(sorted).map(([name, tableSchema]) => ({
+        name,
+        schema: tableSchema,
+      })),
+    },
+    runtimeSchemaJsonReplacer,
+  );
+}
+
 export function serializeRuntimeSchema(
   schema: WasmSchema,
   options?: SerializeRuntimeSchemaOptions,

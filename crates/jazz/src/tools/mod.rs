@@ -9,7 +9,6 @@ mod object;
 pub mod policy_claims;
 pub(crate) mod public_api;
 pub mod public_schema;
-#[cfg(any(feature = "runtime", test))]
 #[doc(hidden)]
 pub mod public_schema_convert;
 pub mod schema_lens;

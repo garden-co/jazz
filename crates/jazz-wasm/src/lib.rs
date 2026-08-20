@@ -1200,8 +1200,7 @@ impl WasmDb {
     /// Register a typed schema view backed by this same runtime owner.
     #[wasm_bindgen(js_name = registerSchema)]
     pub fn register_schema(&self, schema: Vec<u8>) -> Result<WasmDb, JsValue> {
-        let schema: JazzSchema = postcard::from_bytes(&schema)
-            .map_err(|error| to_js_error(format!("decode schema: {error}")))?;
+        let schema = decode_public_schema(&schema)?;
         Ok(Self {
             inner: self
                 .inner
@@ -2386,11 +2385,14 @@ fn decode_open_args(
     schema: &[u8],
     config: &[u8],
 ) -> Result<(JazzSchema, WasmOpenDbConfig), JsValue> {
-    let schema: JazzSchema =
-        postcard::from_bytes(schema).map_err(|err| to_js_error(format!("decode schema: {err}")))?;
+    let schema = decode_public_schema(schema)?;
     let config: WasmOpenDbConfig = postcard::from_bytes(config)
         .map_err(|err| to_js_error(format!("decode open config: {err}")))?;
     Ok((schema, config))
+}
+
+fn decode_public_schema(schema: &[u8]) -> Result<JazzSchema, JsValue> {
+    jazz::tools::public_schema_convert::decode_public_schema_json(schema).map_err(to_js_error)
 }
 
 fn relation_query_from_json(query_json: &str) -> Result<RelationQuery, JsValue> {

@@ -17,6 +17,7 @@ use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
+use jazz::tools::Schema;
 use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
 use jazz_sim::policy_graph_fixture::{
@@ -247,7 +248,7 @@ fn public_fixture_dir() -> PathBuf {
 }
 
 fn usable_fixture_dir(dir: &Path) -> bool {
-    dir.join("schema.native.bin").is_file()
+    dir.join("schema-source.json").is_file()
         && (dir.join(MEMBER_SEED_ROWS_JSON).is_file()
             || dir.join(MEMBER_SEED_ROWS_COMPACT_JSON).is_file())
 }
@@ -327,7 +328,7 @@ impl Fixture {
         }
 
         eprintln!(
-            "POLICY_GRAPH_CONCURRENT_SKIP no usable fixture found; set {FIXTURE_DIR_ENV} to a directory containing schema.native.bin and member seed rows"
+            "POLICY_GRAPH_CONCURRENT_SKIP no usable fixture found; set {FIXTURE_DIR_ENV} to a directory containing schema-source.json and member seed rows"
         );
         std::process::exit(0);
     }
@@ -337,7 +338,7 @@ impl Fixture {
             Self { dir, label }
         } else {
             eprintln!(
-                "POLICY_GRAPH_CONCURRENT_SKIP fixture directory is missing schema.native.bin or member seed rows: {}",
+                "POLICY_GRAPH_CONCURRENT_SKIP fixture directory is missing schema-source.json or member seed rows: {}",
                 dir.display()
             );
             std::process::exit(0);
@@ -345,7 +346,7 @@ impl Fixture {
     }
 
     fn schema_path(&self) -> PathBuf {
-        self.dir.join("schema.native.bin")
+        self.dir.join("schema-source.json")
     }
 
     fn member_seed_path(&self) -> PathBuf {
@@ -567,8 +568,14 @@ fn duplex_counted() -> CountedDuplex {
 }
 
 fn policy_graph_schema_fixture(fixture: &Fixture) -> JazzSchema {
-    let bytes = fs::read(fixture.schema_path()).expect("read policy graph native schema fixture");
-    postcard::from_bytes(&bytes).expect("decode policy graph native schema fixture")
+    let source: JsonValue = serde_json::from_slice(
+        &fs::read(fixture.schema_path()).expect("read policy graph schema source fixture"),
+    )
+    .expect("decode policy graph schema source document");
+    let schema: Schema = serde_json::from_value(source["mergedSchema"].clone())
+        .expect("decode policy graph public schema");
+    jazz::tools::public_schema_convert::convert_public_schema(&schema)
+        .expect("compile policy graph public schema")
 }
 
 fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
@@ -1264,7 +1271,7 @@ fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSum
     );
     fields.insert(
         "fixture_note".to_owned(),
-        json!("native schema fixture plus holder/access/inherits rows loaded from the selected fixture directory; private real data is read in place and never copied into this repository"),
+        json!("public schema source plus holder/access/inherits rows loaded from the selected fixture directory; private real data is read in place and never copied into this repository"),
     );
     fields.insert(
         "seed_note".to_owned(),

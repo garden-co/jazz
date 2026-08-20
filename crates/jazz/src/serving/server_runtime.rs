@@ -473,15 +473,18 @@ impl ServerRuntimeHandle {
         result
     }
 
-    /// Publish the permissions schema selected by the catalogue shell.
-    pub async fn publish_permissions_schema(
+    /// Compile and publish the permissions source selected by the catalogue
+    /// shell.
+    pub async fn publish_permissions_source(
         &self,
-        schema: JazzSchema,
+        schema: crate::tools::Schema,
         lineage_source: SchemaVersionId,
     ) -> Result<SchemaVersionId, String> {
         let activity_tx = self.inner.activity_tx.clone();
         let result = self
             .run(move |shell| {
+                let schema = crate::tools::public_schema_convert::convert_public_schema(&schema)
+                    .map_err(|error| error.to_string())?;
                 shell
                     .publish_permissions_schema(schema, lineage_source)
                     .map_err(|error| error.to_string())
