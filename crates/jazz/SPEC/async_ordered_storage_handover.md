@@ -548,3 +548,25 @@ The desired result is not an async facade around Jazz. It is the existing Jazz
 and Groove architecture, evolved in place with explicit operation and
 subscription lifetimes, Groove-owned residency, and Jazz-owned durable and
 control-plane scheduling that may suspend without changing semantics.
+
+## Implementation decision log
+
+### 2026-08-20: binding and example configuration parity
+
+- Keep authenticated `DbConfig` inputs mutually exclusive at the type boundary.
+  Callers choose the JWT or local-secret arm before constructing the config;
+  they do not pass both keys with `undefined` values.
+- Permission checks return `allowed`, `denied`, or `unknown`. UI consumers that
+  need a boolean deliberately map only `allowed` to `true` rather than erasing
+  the distinction in the runtime API.
+- The React Native Rust crate remains paused as a root-workspace member, as the
+  existing manifest comment specifies. It is explicitly excluded so Cargo can
+  build it as the standalone crate used by the RN packaging tool; leaving it
+  neither included nor excluded makes every standalone build fail before
+  compiling source.
+- A host-target check of that standalone crate reaches its source and confirms
+  that the RN binding still depends wholesale on the removed pre-engine-swap
+  `query_manager`, `runtime_core`, `SyncManager`, and transport APIs. This debt
+  is already present on the integration base. Port RN only after defining its
+  new binding boundary; do not restore those old subsystems or add a parallel
+  runtime path merely to make the package compile in this async-storage PR.
