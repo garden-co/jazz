@@ -5,7 +5,7 @@
 //! view payloads assembled by [`crate::node::views`]. It sits above groove query
 //! planning as Jazz's stable query vocabulary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use groove::records::Value;
 use groove::schema::ColumnType;
