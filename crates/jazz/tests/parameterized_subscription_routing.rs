@@ -59,14 +59,14 @@ fn row(seed: u64) -> RowUuid {
 }
 
 fn insert_document(db: &Db<MemoryStorage>, document: RowUuid, team: RowUuid, updated_at: u64) {
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         "documents",
         document,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
             ("updated_at".to_owned(), Value::U64(updated_at)),
         ]),
-    )
+    ))
     .expect("insert document");
 }
 
