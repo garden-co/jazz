@@ -231,10 +231,14 @@ fn validate_query_canonical_parts(
     for join in &mut resolved_query.joins {
         validate_join(schema, &root, &query.table, join, &mut params)?;
     }
+    for exists in &mut resolved_query.exists {
+        validate_exists(schema, exists, &mut params)?;
+    }
     if let Some(flat_join) = &query.flat_join {
         let unsupported = [
             (flat_join.sources.is_empty(), "zero joined sources"),
             (!query.joins.is_empty(), "existential joins"),
+            (!query.exists.is_empty(), "uncorrelated existence requirements"),
             (!query.policy_branches.is_empty(), "policy branches"),
             (!query.reachable.is_empty(), "reachability"),
             (!query.inherits.is_empty(), "inherited-policy traversals"),
@@ -275,18 +279,7 @@ fn validate_query_canonical_parts(
         validate_inherits(&root, inherits)?;
     }
     for branch in &mut resolved_query.policy_branches {
-        for predicate in &mut branch.filters {
-            validate_predicate(&root, predicate, &mut params)?;
-        }
-        for join in &mut branch.joins {
-            validate_join(schema, &root, &query.table, join, &mut params)?;
-        }
-        for reachable in &mut branch.reachable {
-            validate_reachable(schema, &root, reachable, &mut params)?;
-        }
-        for inherits in &branch.inherits {
-            validate_inherits(&root, inherits)?;
-        }
+        validate_policy_branch(schema, &root, &query.table, branch, &mut params)?;
     }
     for include in &query.includes {
         validate_include(schema, &root, &include.path)?;
@@ -313,6 +306,43 @@ fn validate_query_canonical_parts(
     let normalized = normalize_query(&resolved_query);
     let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
     Ok((normalized, params, canonical))
+}
+
+fn validate_policy_branch(
+    schema: &JazzSchema,
+    root: &TableSchema,
+    root_table: &str,
+    branch: &mut PolicyBranch,
+    params: &mut BTreeMap<String, ColumnType>,
+) -> Result<(), QueryError> {
+    for predicate in &mut branch.filters {
+        validate_predicate(root, predicate, params)?;
+    }
+    for join in &mut branch.joins {
+        validate_join(schema, root, root_table, join, params)?;
+    }
+    for exists in &mut branch.exists {
+        validate_exists(schema, exists, params)?;
+    }
+    for reachable in &mut branch.reachable {
+        validate_reachable(schema, root, reachable, params)?;
+    }
+    for inherits in &branch.inherits {
+        validate_inherits(root, inherits)?;
+    }
+    Ok(())
+}
+
+fn validate_exists(
+    schema: &JazzSchema,
+    exists: &mut ExistsVia,
+    params: &mut BTreeMap<String, ColumnType>,
+) -> Result<(), QueryError> {
+    let root = schema_table(schema, &exists.table)?;
+    for alternative in &mut exists.alternatives {
+        validate_policy_branch(schema, &root, &exists.table, alternative, params)?;
+    }
+    Ok(())
 }
 
 fn flat_join_source_tables(

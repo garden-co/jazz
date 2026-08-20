@@ -343,6 +343,7 @@ fn collect_step_requirements(
             collect_predicate_requirements(on, source, requirements)?;
             Ok(())
         })(),
+        LinearStep::ExistsGate { .. } => Ok(()),
         LinearStep::Project(columns) => (|| {
             for column in columns {
                 collect_value_requirements(&column.value, source, requirements)?;

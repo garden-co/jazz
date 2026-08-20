@@ -335,6 +335,13 @@ pub(crate) enum RowSetExpr {
         /// Join predicate.
         on: PredicateExpr,
     },
+    /// Gate the input on whether an uncorrelated witness relation is non-empty.
+    ExistsGate {
+        /// Candidate rows retained while the witness relation is non-empty.
+        input: RowSetNodeId,
+        /// Uncorrelated witness relation.
+        witness: RowSetNodeId,
+    },
     /// Recursive relation traversal such as `gather`.
     RecursiveRelation {
         /// Seed input node.

@@ -111,6 +111,7 @@ impl Query {
             table: source.table,
             filters: Vec::new(),
             joins: Vec::new(),
+            exists: Vec::new(),
             flat_join,
             policy_branches: Vec::new(),
             reachable: Vec::new(),
@@ -129,6 +130,16 @@ impl Query {
     /// row policy checks treat the base query and every branch as alternatives.
     pub fn policy_branch(mut self, branch: PolicyBranch) -> Self {
         self.policy_branches.push(branch);
+        self
+    }
+
+    /// Require an uncorrelated policy subquery to produce at least one row.
+    ///
+    /// Unlike [`Query::join_via`], the witness query does not reference the
+    /// protected row. Its truth value gates the complete candidate row set for
+    /// the current policy binding.
+    pub fn exists(mut self, query: Query) -> Self {
+        self.exists.push(ExistsVia::from_query(query));
         self
     }
 

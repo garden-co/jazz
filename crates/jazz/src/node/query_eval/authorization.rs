@@ -56,6 +56,11 @@ fn compile_permission_scope_policy(
         .into_iter()
         .map(|j| rewrite_claim_join_for_binding(j, claims))
         .collect();
+    query.exists = query
+        .exists
+        .into_iter()
+        .map(|exists| rewrite_claim_exists_for_binding(exists, claims))
+        .collect();
     query.reachable = query
         .reachable
         .into_iter()
@@ -78,6 +83,11 @@ fn compile_permission_scope_policy(
             }
             reachable
         })
+        .collect();
+    query.policy_branches = query
+        .policy_branches
+        .into_iter()
+        .map(|branch| rewrite_claim_policy_branch_for_binding(branch, claims))
         .collect();
     let mut values = BTreeMap::new();
     bind_scope_claim_operands(&mut query, claim_values, &mut values);

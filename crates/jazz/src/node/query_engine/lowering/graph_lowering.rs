@@ -1122,6 +1122,63 @@ fn lower_linear_plan_steps(
                     last_join_right = None;
                 }
             }
+            LinearStep::ExistsGate { witness } => {
+                last_join_right = None;
+                let lowered_witness = lower_relation_input(witness, resolved_sources, request)?;
+                let gate_field = format!("__jazz_exists_gate_{step_index}");
+
+                let mut left_projection = fields
+                    .iter()
+                    .map(|field| ProjectField::named(field.clone()))
+                    .collect::<Vec<_>>();
+                left_projection.push(ProjectField::literal(gate_field.clone(), Value::Bool(true)));
+                graph = graph.project_fields(left_projection);
+
+                let witness_route_fields = route_fields
+                    .iter()
+                    .filter(|field| lowered_witness.fields.contains(*field))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let mut witness_projection = witness_route_fields
+                    .iter()
+                    .map(|field| ProjectField::named(field.clone()))
+                    .collect::<Vec<_>>();
+                witness_projection
+                    .push(ProjectField::literal(gate_field.clone(), Value::Bool(true)));
+                let mut witness_group = witness_route_fields.iter().cloned().collect::<Vec<_>>();
+                witness_group.push(gate_field.clone());
+                let witness = GraphBuilder::arg_max_by(
+                    lowered_witness.graph.project_fields(witness_projection),
+                    witness_group,
+                    [gate_field.clone()],
+                );
+
+                let shared_route_fields = available_route_fields
+                    .intersection(&witness_route_fields)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut left_keys = shared_route_fields.clone();
+                left_keys.push(gate_field.clone());
+                let right_keys = left_keys.clone();
+                graph = policy_join_if_needed(graph, witness, left_keys, right_keys, request);
+
+                let introduced_route_fields = witness_route_fields
+                    .difference(&available_route_fields)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let mut projection = fields
+                    .iter()
+                    .map(|field| ProjectField::renamed(left_field(field), field.clone()))
+                    .collect::<Vec<_>>();
+                projection.extend(
+                    introduced_route_fields
+                        .iter()
+                        .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+                );
+                graph = graph.project_fields(projection);
+                fields.extend(introduced_route_fields.iter().cloned());
+                available_route_fields.extend(introduced_route_fields);
+            }
             LinearStep::Project(columns) => {
                 let mut unwrap_fields = BTreeMap::<String, usize>::new();
                 let mut projected_nullable_field_depths = BTreeMap::<String, usize>::new();

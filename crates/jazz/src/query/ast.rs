@@ -11,6 +11,9 @@ pub struct Query {
     pub filters: Vec<Predicate>,
     /// Junction traversals.
     pub joins: Vec<JoinVia>,
+    /// Policy-only uncorrelated existence requirements.
+    #[serde(default)]
+    pub exists: Vec<ExistsVia>,
     /// Flat relational output. This is deliberately distinct from `joins`:
     /// `JoinVia` is an existential traversal, while a flat join emits every
     /// matching source tuple.

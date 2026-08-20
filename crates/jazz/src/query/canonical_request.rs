@@ -6,25 +6,12 @@ fn normalize_query(query: &Query) -> Query {
         normalize_join(join);
     }
     query.joins.sort_by_key(canonical_join_key);
+    for exists in &mut query.exists {
+        normalize_exists(exists);
+    }
+    query.exists.sort_by_key(canonical_exists_key);
     for branch in &mut query.policy_branches {
-        branch.filters.sort_by_key(canonical_predicate_key);
-        for join in &mut branch.joins {
-            join.filters.sort_by_key(canonical_predicate_key);
-            normalize_join(join);
-        }
-        branch.joins.sort_by_key(canonical_join_key);
-        for reachable in &mut branch.reachable {
-            reachable
-                .access_filters
-                .sort_by_key(canonical_predicate_key);
-            reachable.edge_filters.sort_by_key(canonical_predicate_key);
-            if let Some(seed) = &mut reachable.seed {
-                seed.filters.sort_by_key(canonical_predicate_key);
-            }
-        }
-        branch.reachable.sort_by_key(canonical_reachable_key);
-        branch.inherits.sort_by_key(canonical_inherits_key);
-        branch.inherits.dedup();
+        normalize_policy_branch(branch);
     }
     query
         .policy_branches
@@ -58,6 +45,38 @@ fn normalize_query(query: &Query) -> Query {
         aggregate.aggregates.sort_by_key(canonical_aggregate_key);
     }
     query
+}
+
+fn normalize_policy_branch(branch: &mut PolicyBranch) {
+    branch.filters.sort_by_key(canonical_predicate_key);
+    for join in &mut branch.joins {
+        join.filters.sort_by_key(canonical_predicate_key);
+        normalize_join(join);
+    }
+    branch.joins.sort_by_key(canonical_join_key);
+    for exists in &mut branch.exists {
+        normalize_exists(exists);
+    }
+    branch.exists.sort_by_key(canonical_exists_key);
+    for reachable in &mut branch.reachable {
+        reachable
+            .access_filters
+            .sort_by_key(canonical_predicate_key);
+        reachable.edge_filters.sort_by_key(canonical_predicate_key);
+        if let Some(seed) = &mut reachable.seed {
+            seed.filters.sort_by_key(canonical_predicate_key);
+        }
+    }
+    branch.reachable.sort_by_key(canonical_reachable_key);
+    branch.inherits.sort_by_key(canonical_inherits_key);
+    branch.inherits.dedup();
+}
+
+fn normalize_exists(exists: &mut ExistsVia) {
+    for alternative in &mut exists.alternatives {
+        normalize_policy_branch(alternative);
+    }
+    exists.alternatives.sort_by_key(canonical_policy_branch_key);
 }
 
 fn normalize_array_subquery(subquery: &mut ArraySubquery) {
@@ -120,6 +139,10 @@ fn canonical_policy_branch_key(branch: &PolicyBranch) -> Vec<u8> {
     for join in &branch.joins {
         put_bytes(&mut bytes, &canonical_join_key(join));
     }
+    put_len(&mut bytes, branch.exists.len());
+    for exists in &branch.exists {
+        put_bytes(&mut bytes, &canonical_exists_key(exists));
+    }
     put_len(&mut bytes, branch.reachable.len());
     for reachable in &branch.reachable {
         put_bytes(&mut bytes, &canonical_reachable_key(reachable));
@@ -127,6 +150,16 @@ fn canonical_policy_branch_key(branch: &PolicyBranch) -> Vec<u8> {
     put_len(&mut bytes, branch.inherits.len());
     for inherits in &branch.inherits {
         put_bytes(&mut bytes, &canonical_inherits_key(inherits));
+    }
+    bytes
+}
+
+fn canonical_exists_key(exists: &ExistsVia) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    put_str(&mut bytes, &exists.table);
+    put_len(&mut bytes, exists.alternatives.len());
+    for alternative in &exists.alternatives {
+        put_bytes(&mut bytes, &canonical_policy_branch_key(alternative));
     }
     bytes
 }
@@ -144,6 +177,13 @@ fn canonical_policy_branch_key_for_schema(
     for join in &branch.joins {
         put_bytes(&mut bytes, &canonical_join_key(join));
     }
+    put_len(&mut bytes, branch.exists.len());
+    for exists in &branch.exists {
+        put_bytes(
+            &mut bytes,
+            &canonical_exists_key_for_schema(exists, schema)?,
+        );
+    }
     put_len(&mut bytes, branch.reachable.len());
     for reachable in &branch.reachable {
         put_bytes(
@@ -154,6 +194,22 @@ fn canonical_policy_branch_key_for_schema(
     put_len(&mut bytes, branch.inherits.len());
     for inherits in &branch.inherits {
         put_bytes(&mut bytes, &canonical_inherits_key(inherits));
+    }
+    Ok(bytes)
+}
+
+fn canonical_exists_key_for_schema(
+    exists: &ExistsVia,
+    schema: &JazzSchema,
+) -> Result<Vec<u8>, QueryError> {
+    let mut bytes = Vec::new();
+    put_str(&mut bytes, &exists.table);
+    put_len(&mut bytes, exists.alternatives.len());
+    for alternative in &exists.alternatives {
+        put_bytes(
+            &mut bytes,
+            &canonical_policy_branch_key_for_schema(alternative, schema)?,
+        );
     }
     Ok(bytes)
 }
@@ -498,6 +554,16 @@ fn canonical_query_bytes_for_schema(
     put_len(&mut bytes, query.joins.len());
     for join in &query.joins {
         put_bytes(&mut bytes, &canonical_join_key(join));
+    }
+    if !query.exists.is_empty() {
+        bytes.push(b'e');
+        put_len(&mut bytes, query.exists.len());
+        for exists in &query.exists {
+            put_bytes(
+                &mut bytes,
+                &canonical_exists_key_for_schema(exists, schema)?,
+            );
+        }
     }
     if let Some(flat_join) = &query.flat_join {
         bytes.push(b'j');

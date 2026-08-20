@@ -359,7 +359,7 @@ async fn select_policies_boolean_inner() {
 /// query must still return the protected row without a prior explicit grant
 /// query.
 #[tokio::test]
-#[ignore = "server schema conversion requires the SELECT EXISTS dependency to include an outer-row equality"]
+#[ignore = "the EXISTS gate authorizes the protected row, but its access_grants witness row is not included in the synced dependency payload"]
 async fn select_policy_dependency_data_is_retrieved_as_part_of_query() {
     tokio::task::LocalSet::new()
         .run_until(select_policy_dependency_data_is_retrieved_as_part_of_query_inner())

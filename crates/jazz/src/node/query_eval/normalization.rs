@@ -26,6 +26,15 @@ fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
     }
 }
 
+fn exists_source_id(exists: &crate::query::ExistsVia, path: &str) -> SourceId {
+    SourceId {
+        table: exists.table.clone(),
+        path: SourcePath {
+            components: vec![SourceRole::Alias(path.to_owned())],
+        },
+    }
+}
+
 fn join_lookup_source_id(lookup: &crate::query::JoinSourceLookup, path: &str) -> SourceId {
     SourceId {
         table: lookup.table.clone(),
@@ -2099,6 +2108,7 @@ struct FilterJoinChain<'a> {
 struct PolicyAtomChain<'a> {
     pub(super) filters: &'a [Predicate],
     pub(super) joins: &'a [JoinVia],
+    pub(super) exists: &'a [crate::query::ExistsVia],
     pub(super) inherits: &'a [crate::query::InheritsVia],
     pub(super) reachable: &'a [crate::query::ReachableVia],
 }
@@ -2247,6 +2257,30 @@ fn normalize_policy_atom_chain(
         },
         record_join_contributions,
     )?;
+    for (index, exists) in chain.exists.iter().enumerate() {
+        let exists_prefix = format!("{prefix}:exists:{index}");
+        let witness = normalize_exists_witness(
+            nodes,
+            auxiliary_sources,
+            join_contributions,
+            reachable_contributions,
+            schema,
+            exists,
+            &exists_prefix,
+            binding_source_shape,
+            param_types,
+            inheritance_path,
+        )?;
+        let gate = RowSetNodeId(format!("{exists_prefix}:gate"));
+        nodes.insert(
+            gate.clone(),
+            RowSetExpr::ExistsGate {
+                input: current,
+                witness,
+            },
+        );
+        current = gate;
+    }
     for (index, inherits) in chain.inherits.iter().enumerate() {
         current = normalize_inherited_parent_policy(
             nodes,
@@ -2280,6 +2314,96 @@ fn normalize_policy_atom_chain(
         reachable_contributions.push(contribution);
     }
     Ok(current)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalize_exists_witness(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    join_contributions: &mut Vec<JoinContribution>,
+    reachable_contributions: &mut Vec<ReachableContribution>,
+    schema: &JazzSchema,
+    exists: &crate::query::ExistsVia,
+    prefix: &str,
+    binding_source_shape: &str,
+    param_types: &BTreeMap<String, ColumnType>,
+    inheritance_path: &InheritanceExpansionPath,
+) -> Result<RowSetNodeId, Error> {
+    let witness_source = exists_source_id(exists, prefix);
+    auxiliary_sources.insert(witness_source.clone());
+
+    if exists.alternatives.is_empty() {
+        let source = RowSetNodeId(format!("{prefix}:false:root"));
+        nodes.insert(
+            source.clone(),
+            RowSetExpr::Source {
+                source: witness_source,
+                visibility: RowVisibility::Visible,
+            },
+        );
+        return Ok(normalize_false_policy_branch(nodes, source, prefix));
+    }
+
+    let mut alternatives = Vec::new();
+    for (index, alternative) in exists.alternatives.iter().enumerate() {
+        let alternative_prefix = format!("{prefix}:alternative:{index}");
+        let source = RowSetNodeId(format!("{alternative_prefix}:root"));
+        nodes.insert(
+            source.clone(),
+            RowSetExpr::Source {
+                source: witness_source.clone(),
+                visibility: RowVisibility::Visible,
+            },
+        );
+        let current = normalize_policy_atom_chain(
+            nodes,
+            auxiliary_sources,
+            join_contributions,
+            reachable_contributions,
+            schema,
+            &witness_source,
+            source,
+            &alternative_prefix,
+            PolicyAtomChain {
+                filters: &alternative.filters,
+                joins: &alternative.joins,
+                exists: &alternative.exists,
+                inherits: &alternative.inherits,
+                reachable: &alternative.reachable,
+            },
+            binding_source_shape,
+            param_types,
+            false,
+            inheritance_path,
+        )?;
+        alternatives.push(UnionInput {
+            node: normalize_row_id_projection(
+                nodes,
+                current,
+                &witness_source,
+                RowSetNodeId(format!("{alternative_prefix}:row_id")),
+            ),
+            label: policy_branch_semantic_label(
+                &alternative.filters,
+                &alternative.joins,
+                &alternative.exists,
+                &alternative.reachable,
+                &alternative.inherits,
+            )?,
+        });
+    }
+
+    if alternatives.len() == 1 {
+        return Ok(alternatives.pop().expect("length checked above").node);
+    }
+    let union = RowSetNodeId(format!("{prefix}:alternatives"));
+    nodes.insert(
+        union.clone(),
+        RowSetExpr::Union {
+            inputs: alternatives,
+        },
+    );
+    Ok(union)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2365,6 +2489,7 @@ fn normalize_inherited_parent_policy(
                 PolicyAtomChain {
                     filters: &policy.filters,
                     joins: &policy.joins,
+                    exists: &policy.exists,
                     inherits: &policy.inherits,
                     reachable: &policy.reachable,
                 },
@@ -2432,6 +2557,7 @@ fn normalize_policy_branch_authorization(
             PolicyAtomChain {
                 filters: &policy.filters,
                 joins: &policy.joins,
+                exists: &policy.exists,
                 inherits: &policy.inherits,
                 reachable: &policy.reachable,
             },
@@ -2450,6 +2576,7 @@ fn normalize_policy_branch_authorization(
             label: policy_branch_semantic_label(
                 &policy.filters,
                 &policy.joins,
+                &policy.exists,
                 &policy.reachable,
                 &policy.inherits,
             )?,
@@ -2477,6 +2604,7 @@ fn normalize_policy_branch_authorization(
             PolicyAtomChain {
                 filters: &branch.filters,
                 joins: &branch.joins,
+                exists: &branch.exists,
                 inherits: &branch.inherits,
                 reachable: &branch.reachable,
             },
@@ -2495,6 +2623,7 @@ fn normalize_policy_branch_authorization(
             label: policy_branch_semantic_label(
                 &branch.filters,
                 &branch.joins,
+                &branch.exists,
                 &branch.reachable,
                 &branch.inherits,
             )?,
@@ -2531,14 +2660,16 @@ fn normalize_policy_branch_authorization(
 fn policy_branch_semantic_label(
     filters: &[crate::query::Predicate],
     joins: &[crate::query::JoinVia],
+    exists: &[crate::query::ExistsVia],
     reachable: &[crate::query::ReachableVia],
     inherits: &[crate::query::InheritsVia],
 ) -> Result<String, Error> {
-    let bytes = postcard::to_allocvec(&(filters, joins, reachable, inherits)).map_err(|error| {
-        Error::QueryLowering(format!(
-            "policy branch fingerprint encoding failed: {error}"
-        ))
-    })?;
+    let bytes =
+        postcard::to_allocvec(&(filters, joins, exists, reachable, inherits)).map_err(|error| {
+            Error::QueryLowering(format!(
+                "policy branch fingerprint encoding failed: {error}"
+            ))
+        })?;
     Ok(format!("policy:{}", blake3::hash(&bytes).to_hex()))
 }
 
@@ -2572,6 +2703,7 @@ fn unsupported_policy_branch_reason(query: &JazzQuery) -> Option<String> {
 fn policy_branch_base_is_converter_false(query: &JazzQuery) -> bool {
     matches!(query.filters.as_slice(), [Predicate::Any(predicates)] if predicates.is_empty())
         && query.joins.is_empty()
+        && query.exists.is_empty()
         && query.reachable.is_empty()
         && query.inherits.is_empty()
 }
@@ -2681,6 +2813,7 @@ where
                     PolicyAtomChain {
                         filters: query_chain_filters,
                         joins: &query.joins,
+                        exists: &query.exists,
                         inherits: &query.inherits,
                         reachable: &query.reachable,
                     },
@@ -2699,6 +2832,7 @@ where
                     label: policy_branch_semantic_label(
                         &query.filters,
                         &query.joins,
+                        &query.exists,
                         &query.reachable,
                         &query.inherits,
                     )?,
@@ -2726,6 +2860,7 @@ where
                     PolicyAtomChain {
                         filters: &branch.filters,
                         joins: &branch.joins,
+                        exists: &branch.exists,
                         inherits: &branch.inherits,
                         reachable: &branch.reachable,
                     },
@@ -2744,6 +2879,7 @@ where
                     label: policy_branch_semantic_label(
                         &branch.filters,
                         &branch.joins,
+                        &branch.exists,
                         &branch.reachable,
                         &branch.inherits,
                     )?,
@@ -2788,6 +2924,7 @@ where
                 PolicyAtomChain {
                     filters: query_chain_filters,
                     joins: &query.joins,
+                    exists: &query.exists,
                     inherits: &query.inherits,
                     reachable: &query.reachable,
                 },

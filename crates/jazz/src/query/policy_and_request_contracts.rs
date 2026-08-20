@@ -5,6 +5,9 @@ pub struct PolicyBranch {
     pub filters: Vec<Predicate>,
     /// Junction traversals that must be satisfied for this alternative.
     pub joins: Vec<JoinVia>,
+    /// Uncorrelated existence requirements that must be satisfied for this alternative.
+    #[serde(default)]
+    pub exists: Vec<ExistsVia>,
     /// Recursive reachability traversals that must be satisfied for this alternative.
     pub reachable: Vec<ReachableVia>,
     /// Parent-policy inheritance atoms that must be satisfied for this alternative.
@@ -23,6 +26,7 @@ impl PolicyBranch {
         let Query {
             filters,
             joins,
+            exists,
             policy_branches,
             reachable,
             inherits,
@@ -30,6 +34,7 @@ impl PolicyBranch {
         } = query;
         let base_is_converter_false = matches!(filters.as_slice(), [Predicate::Any(predicates)] if predicates.is_empty())
             && joins.is_empty()
+            && exists.is_empty()
             && reachable.is_empty()
             && inherits.is_empty();
 
@@ -38,6 +43,7 @@ impl PolicyBranch {
             alternatives.push(Self {
                 filters,
                 joins,
+                exists,
                 reachable,
                 inherits,
             });
@@ -59,6 +65,30 @@ impl PolicyBranch {
             .into_iter()
             .next()
             .expect("length checked above")
+    }
+}
+
+/// A policy-only uncorrelated existence subquery.
+///
+/// The alternatives are evaluated against `table` without an outer-row
+/// correlation. The protected row is authorized when at least one alternative
+/// produces at least one witness row.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ExistsVia {
+    /// Table scanned for witnesses.
+    pub table: String,
+    /// Disjunctive policy alternatives evaluated on witness rows.
+    pub alternatives: Vec<PolicyBranch>,
+}
+
+impl ExistsVia {
+    /// Convert a policy-shaped query into an uncorrelated existence atom.
+    pub fn from_query(query: Query) -> Self {
+        let table = query.table.clone();
+        Self {
+            table,
+            alternatives: PolicyBranch::alternatives_from_query(query),
+        }
     }
 }
 

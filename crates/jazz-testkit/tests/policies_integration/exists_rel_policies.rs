@@ -6,7 +6,7 @@ use super::*;
 /// Verifies that enforcing mode propagates into nested EXISTS_REL scans, so a
 /// missing explicit SELECT policy on a nested probed table denies the insert.
 #[tokio::test]
-#[ignore = "schema conversion does not support nested ExistsRel inside an EXISTS policy"]
+#[ignore = "nested ExistsRel correlation on admins.team_id is rejected as JoinNotRefCompatible because the columns are not declared references"]
 async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -81,7 +81,7 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
 /// Verifies local INSERT enforcement for an EXISTS_REL admin policy: sessions
 /// without a matching admin row are denied and admins are allowed.
 #[tokio::test]
-#[ignore = "schema conversion requires ExistsRel policies to include an outer-row equality"]
+#[ignore = "the synced Rust client accepts non-admin inserts optimistically instead of evaluating the ExistsRel policy locally"]
 async fn local_insert_with_exists_rel_policy_denies_non_admin() {
     tokio::task::LocalSet::new()
         .run_until(local_insert_with_exists_rel_policy_denies_non_admin_inner())
@@ -138,7 +138,7 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
 /// Verifies that EXISTS_REL scans require an explicit SELECT policy on the
 /// scanned table under enforcing mode.
 #[tokio::test]
-#[ignore = "schema conversion requires ExistsRel policies to include an outer-row equality"]
+#[ignore = "the synced Rust client accepts inserts optimistically without enforcing an explicit SELECT policy on the ExistsRel witness table"]
 async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -190,7 +190,7 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
 /// Verifies that relation predicates compare NULL literals correctly inside
 /// EXISTS_REL, allowing active rows and denying revoked rows.
 #[tokio::test]
-#[ignore = "schema conversion requires ExistsRel policies to include an outer-row equality"]
+#[ignore = "server schema conversion rejects ExistsRel equality against NULL with OperandTypeMismatch"]
 async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
     tokio::task::LocalSet::new()
         .run_until(local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_inner())
@@ -259,7 +259,7 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
 /// Verifies local DELETE enforcement for an EXISTS_REL admin policy, including
 /// that an already-deleted row cannot be deleted a second time.
 #[tokio::test]
-#[ignore = "schema conversion requires ExistsRel policies to include an outer-row equality"]
+#[ignore = "the synced Rust client accepts non-admin deletes optimistically instead of evaluating the ExistsRel policy locally"]
 async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
     tokio::task::LocalSet::new()
         .run_until(local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner())

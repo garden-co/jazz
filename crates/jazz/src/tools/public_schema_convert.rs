@@ -191,6 +191,9 @@ fn coerce_query_typed_literals(
     for join in &mut query.joins {
         coerce_join_typed_literals(join, column_types);
     }
+    for exists in &mut query.exists {
+        coerce_exists_typed_literals(exists, column_types);
+    }
     for reachable in &mut query.reachable {
         coerce_predicates_typed_literals(
             &reachable.access_table,
@@ -211,7 +214,40 @@ fn coerce_query_typed_literals(
         for join in &mut branch.joins {
             coerce_join_typed_literals(join, column_types);
         }
+        for exists in &mut branch.exists {
+            coerce_exists_typed_literals(exists, column_types);
+        }
         for reachable in &mut branch.reachable {
+            coerce_predicates_typed_literals(
+                &reachable.access_table,
+                &mut reachable.access_filters,
+                column_types,
+            );
+            coerce_predicates_typed_literals(
+                &reachable.edge_table,
+                &mut reachable.edge_filters,
+                column_types,
+            );
+            if let Some(seed) = &mut reachable.seed {
+                coerce_predicates_typed_literals(&seed.table, &mut seed.filters, column_types);
+            }
+        }
+    }
+}
+
+fn coerce_exists_typed_literals(
+    exists: &mut crate::query::ExistsVia,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+) {
+    for alternative in &mut exists.alternatives {
+        coerce_predicates_typed_literals(&exists.table, &mut alternative.filters, column_types);
+        for join in &mut alternative.joins {
+            coerce_join_typed_literals(join, column_types);
+        }
+        for nested in &mut alternative.exists {
+            coerce_exists_typed_literals(nested, column_types);
+        }
+        for reachable in &mut alternative.reachable {
             coerce_predicates_typed_literals(
                 &reachable.access_table,
                 &mut reachable.access_filters,
@@ -1212,12 +1248,13 @@ fn append_inherited_referencing_policy_branches(
                 "core schema policies do not support INHERITS_REFERENCING through reachability yet",
             ));
         }
-        let branch_query = Query::from(query.table.as_str()).join_via_with_nested_joins(
+        let mut branch_query = Query::from(query.table.as_str()).join_via_with_nested_joins(
             source_table,
             via_column,
             branch.filters,
             branch.joins,
         );
+        branch_query.exists = branch.exists;
         for branch in PolicyBranch::alternatives_from_query(branch_query) {
             query = query.policy_branch(branch);
         }
@@ -1234,47 +1271,64 @@ fn append_exists_policy_clause(
     condition: &PolicyExpr,
 ) -> Result<Query, SchemaConversionError> {
     let exists_table_name = TableName::new(exists_table.to_owned());
-    if !schema.contains_key(&exists_table_name) {
-        return Err(err(
+    let exists_table_schema = schema.get(&exists_table_name).ok_or_else(|| {
+        err(
             format!("$.{}.{}", table.as_str(), path),
             format!("EXISTS references unknown table '{exists_table}'"),
-        ));
-    }
+        )
+    })?;
 
     let mut outer_correlations = Vec::new();
-    let mut filters = Vec::new();
 
     let conditions = match condition {
         PolicyExpr::And(exprs) => exprs.as_slice(),
         expr => std::slice::from_ref(expr),
     };
 
-    for (index, expr) in conditions.iter().enumerate() {
-        match expr {
-            PolicyExpr::Cmp {
-                column,
-                op: CmpOp::Eq,
-                value: PolicyValue::SessionRef(path_segments),
-            } if path_segments.len() == 2 && path_segments[0] == "__jazz_outer_row" => {
-                outer_correlations.push(JoinCorrelation {
-                    join_column: column.clone(),
-                    source_column: path_segments[1].clone(),
-                });
-            }
-            other => filters.push(convert_policy_predicate(
-                &exists_table_name,
-                &format!("{path}.Exists[{index}]"),
-                other,
-            )?),
+    for expr in conditions {
+        if let PolicyExpr::Cmp {
+            column,
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(path_segments),
+        } = expr
+            && path_segments.len() == 2
+            && path_segments[0] == "__jazz_outer_row"
+        {
+            outer_correlations.push(JoinCorrelation {
+                join_column: column.clone(),
+                source_column: path_segments[1].clone(),
+            });
         }
     }
 
     if outer_correlations.is_empty() {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "core schema policies require EXISTS to include an equality against __jazz_outer_row",
-        ));
+        let witness = convert_policy_with_native_select_inherits(
+            schema,
+            exists_table_schema,
+            &exists_table_name,
+            &format!("{path}.Exists"),
+            condition,
+            true,
+        )?;
+        return Ok(query.exists(witness));
     }
+    let filters = conditions
+        .iter()
+        .enumerate()
+        .filter(|(_, expr)| {
+            !matches!(
+                expr,
+                PolicyExpr::Cmp {
+                    op: CmpOp::Eq,
+                    value: PolicyValue::SessionRef(path_segments),
+                    ..
+                } if path_segments.len() == 2 && path_segments[0] == "__jazz_outer_row"
+            )
+        })
+        .map(|(index, expr)| {
+            convert_policy_predicate(&exists_table_name, &format!("{path}.Exists[{index}]"), expr)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let primary_index = outer_correlations
         .iter()
         .position(|correlation| correlation.join_column == "id")
@@ -1347,13 +1401,24 @@ fn append_exists_rel_policy_clause(
     let correlation_index = lowered
         .filters
         .iter()
-        .position(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
-        .ok_or_else(|| {
-            err(
+        .position(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))));
+    let Some(correlation_index) = correlation_index else {
+        if lowered.pending_reachable.is_some() {
+            return Err(err(
                 format!("$.{}.{}", table.as_str(), path),
-                "core schema ExistsRel policies must include an outer row equality",
-            )
-        })?;
+                "core schema uncorrelated ExistsRel policies do not support a pending recursive frontier",
+            ));
+        }
+        let mut witness = Query::from(lowered.table);
+        witness.filters = lowered
+            .filters
+            .into_iter()
+            .map(|filter| filter.predicate)
+            .collect();
+        witness.joins = lowered.joins;
+        witness.reachable = lowered.reachable;
+        return Ok(query.exists(witness));
+    };
     let correlation = lowered.filters.remove(correlation_index);
     let Some(correlation_column) = correlation.column.clone() else {
         return Err(err(
@@ -2163,6 +2228,7 @@ fn inherited_parent_branch_to_child_query(
         ));
     }
     let mut query = Query::from(table.as_str());
+    query.exists = branch.exists;
     if !branch.filters.is_empty() {
         query = query.join_via_row_id(parent_table.as_str(), via_column, branch.filters);
     }
@@ -3147,6 +3213,56 @@ mod tests {
             vec![Predicate::Eq(
                 Operand::Claim("authMode".to_owned()),
                 Operand::Literal(GrooveValue::String("external".to_owned())),
+            )]
+        );
+    }
+
+    #[test]
+    fn converts_uncorrelated_exists_to_a_policy_exists_atom() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("admins")
+                    .column("user_id", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+            )
+            .table(
+                TableSchemaBuilder::new("projects")
+                    .column("name", ColumnType::Text)
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::Exists {
+                        table: "admins".to_owned(),
+                        condition: Box::new(PolicyExpr::Cmp {
+                            column: "user_id".to_owned(),
+                            op: CmpOp::Eq,
+                            value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                        }),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).expect("schema converts");
+        let projects = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "projects")
+            .expect("projects table");
+        let insert = projects
+            .write_policies
+            .insert_check
+            .as_ref()
+            .expect("insert policy");
+        assert!(insert.joins.is_empty());
+        let [exists] = insert.exists.as_slice() else {
+            panic!("expected one uncorrelated exists atom: {insert:?}");
+        };
+        assert_eq!(exists.table, "admins");
+        let [alternative] = exists.alternatives.as_slice() else {
+            panic!("expected one witness alternative: {exists:?}");
+        };
+        assert_eq!(
+            alternative.filters,
+            [Predicate::Eq(
+                Operand::Column("user_id".to_owned()),
+                Operand::Claim("user_id".to_owned()),
             )]
         );
     }

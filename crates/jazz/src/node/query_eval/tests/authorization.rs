@@ -1223,6 +1223,7 @@ fn production_policy_union_labels_survive_reorder_and_unrelated_insertion() {
         crate::query::PolicyBranch {
             filters: vec![eq(col("state"), lit(state))],
             joins: Vec::new(),
+            exists: Vec::new(),
             reachable: Vec::new(),
             inherits: Vec::new(),
         }

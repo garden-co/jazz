@@ -486,6 +486,7 @@ mod tests {
         query.policy_branches.push(PolicyBranch {
             filters: Vec::new(),
             joins: Vec::new(),
+            exists: Vec::new(),
             reachable: Vec::new(),
             inherits: Vec::new(),
         });

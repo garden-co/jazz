@@ -23,6 +23,7 @@ pub(super) fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQ
     let mut query = crate::query::Query::from(table.name.as_str());
     query.filters = policy.filters.clone();
     query.joins = policy.joins.clone();
+    query.exists = policy.exists.clone();
     query.reachable = policy.reachable.clone();
     query.inherits = policy.inherits.clone();
     query.includes = policy.includes.clone();
@@ -31,6 +32,7 @@ pub(super) fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQ
         query.policy_branches.push(crate::query::PolicyBranch {
             filters: Vec::new(),
             joins: Vec::new(),
+            exists: Vec::new(),
             reachable: Vec::new(),
             inherits: vec![crate::query::InheritsVia {
                 parent_column,
@@ -73,6 +75,63 @@ pub(super) fn rewrite_claim_join_for_binding(
             .into_iter()
             .map(|join| rewrite_claim_join_for_binding(join, claims))
             .collect(),
+    }
+}
+
+pub(super) fn rewrite_claim_exists_for_binding(
+    mut exists: crate::query::ExistsVia,
+    claims: Option<&BTreeMap<String, Value>>,
+) -> crate::query::ExistsVia {
+    exists.alternatives = exists
+        .alternatives
+        .into_iter()
+        .map(|alternative| rewrite_claim_policy_branch_for_binding(alternative, claims))
+        .collect();
+    exists
+}
+
+pub(super) fn rewrite_claim_policy_branch_for_binding(
+    mut branch: crate::query::PolicyBranch,
+    claims: Option<&BTreeMap<String, Value>>,
+) -> crate::query::PolicyBranch {
+    branch.filters = branch
+        .filters
+        .into_iter()
+        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+        .collect();
+    branch.joins = branch
+        .joins
+        .into_iter()
+        .map(|join| rewrite_claim_join_for_binding(join, claims))
+        .collect();
+    branch.exists = branch
+        .exists
+        .into_iter()
+        .map(|exists| rewrite_claim_exists_for_binding(exists, claims))
+        .collect();
+    rewrite_claim_reachable_for_binding(&mut branch.reachable, claims);
+    branch
+}
+
+pub(super) fn rewrite_claim_reachable_for_binding(
+    reachable: &mut [crate::query::ReachableVia],
+    claims: Option<&BTreeMap<String, Value>>,
+) {
+    for reachable in reachable {
+        reachable.access_filters = std::mem::take(&mut reachable.access_filters)
+            .into_iter()
+            .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+            .collect();
+        reachable.edge_filters = std::mem::take(&mut reachable.edge_filters)
+            .into_iter()
+            .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+            .collect();
+        if let Some(seed) = &mut reachable.seed {
+            seed.filters = std::mem::take(&mut seed.filters)
+                .into_iter()
+                .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+                .collect();
+        }
     }
 }
 
@@ -178,6 +237,9 @@ pub(super) fn bind_scope_claim_operands(
     for join in &mut query.joins {
         bind_scope_claim_join(join, claim_values, binding_values);
     }
+    for exists in &mut query.exists {
+        bind_scope_claim_exists(exists, claim_values, binding_values);
+    }
     for reachable in &mut query.reachable {
         for predicate in &mut reachable.access_filters {
             bind_scope_claim_predicate(predicate, claim_values, binding_values);
@@ -198,7 +260,41 @@ pub(super) fn bind_scope_claim_operands(
         for join in &mut branch.joins {
             bind_scope_claim_join(join, claim_values, binding_values);
         }
+        for exists in &mut branch.exists {
+            bind_scope_claim_exists(exists, claim_values, binding_values);
+        }
         for reachable in &mut branch.reachable {
+            for predicate in &mut reachable.access_filters {
+                bind_scope_claim_predicate(predicate, claim_values, binding_values);
+            }
+            for predicate in &mut reachable.edge_filters {
+                bind_scope_claim_predicate(predicate, claim_values, binding_values);
+            }
+            if let Some(seed) = &mut reachable.seed {
+                for predicate in &mut seed.filters {
+                    bind_scope_claim_predicate(predicate, claim_values, binding_values);
+                }
+            }
+        }
+    }
+}
+
+fn bind_scope_claim_exists(
+    exists: &mut crate::query::ExistsVia,
+    claim_values: &BTreeMap<String, Value>,
+    binding_values: &mut BTreeMap<String, Value>,
+) {
+    for alternative in &mut exists.alternatives {
+        for predicate in &mut alternative.filters {
+            bind_scope_claim_predicate(predicate, claim_values, binding_values);
+        }
+        for join in &mut alternative.joins {
+            bind_scope_claim_join(join, claim_values, binding_values);
+        }
+        for nested in &mut alternative.exists {
+            bind_scope_claim_exists(nested, claim_values, binding_values);
+        }
+        for reachable in &mut alternative.reachable {
             for predicate in &mut reachable.access_filters {
                 bind_scope_claim_predicate(predicate, claim_values, binding_values);
             }
@@ -349,6 +445,9 @@ fn rename_query_params(query: &mut JazzQuery, aliases: &BTreeMap<String, String>
     for join in &mut query.joins {
         rename_join_params(join, aliases);
     }
+    for exists in &mut query.exists {
+        rename_exists_params(exists, aliases);
+    }
     for reachable in &mut query.reachable {
         rename_reachable_params(reachable, aliases);
     }
@@ -359,7 +458,27 @@ fn rename_query_params(query: &mut JazzQuery, aliases: &BTreeMap<String, String>
         for join in &mut branch.joins {
             rename_join_params(join, aliases);
         }
+        for exists in &mut branch.exists {
+            rename_exists_params(exists, aliases);
+        }
         for reachable in &mut branch.reachable {
+            rename_reachable_params(reachable, aliases);
+        }
+    }
+}
+
+fn rename_exists_params(exists: &mut crate::query::ExistsVia, aliases: &BTreeMap<String, String>) {
+    for alternative in &mut exists.alternatives {
+        for predicate in &mut alternative.filters {
+            rename_predicate_params(predicate, aliases);
+        }
+        for join in &mut alternative.joins {
+            rename_join_params(join, aliases);
+        }
+        for nested in &mut alternative.exists {
+            rename_exists_params(nested, aliases);
+        }
+        for reachable in &mut alternative.reachable {
             rename_reachable_params(reachable, aliases);
         }
     }
@@ -549,6 +668,11 @@ pub(super) fn bind_query_params_with_mode(
         .into_iter()
         .map(|join| bind_join_filter_literals(join, binding, schema, mode))
         .collect::<Result<Vec<_>, Error>>()?;
+    query.exists = query
+        .exists
+        .into_iter()
+        .map(|exists| bind_exists_filter_literals(exists, binding, schema, mode))
+        .collect::<Result<Vec<_>, Error>>()?;
     query.reachable = query
         .reachable
         .into_iter()
@@ -607,6 +731,11 @@ pub(super) fn bind_query_params_with_mode(
                 .into_iter()
                 .map(|join| bind_join_filter_literals(join, binding, schema, mode))
                 .collect::<Result<Vec<_>, Error>>()?;
+            branch.exists = branch
+                .exists
+                .into_iter()
+                .map(|exists| bind_exists_filter_literals(exists, binding, schema, mode))
+                .collect::<Result<Vec<_>, Error>>()?;
             branch.reachable = branch
                 .reachable
                 .into_iter()
@@ -652,6 +781,64 @@ pub(super) fn bind_query_params_with_mode(
         return Err(Error::InvalidStoredValue("bound query schema changed"));
     }
     Ok(rebound)
+}
+
+fn bind_exists_filter_literals(
+    mut exists: crate::query::ExistsVia,
+    binding: &Binding,
+    schema: &JazzSchema,
+    mode: ParamBindingMode,
+) -> Result<crate::query::ExistsVia, Error> {
+    let source = bind_source_for_table(&exists.table);
+    for alternative in &mut exists.alternatives {
+        alternative.filters = std::mem::take(&mut alternative.filters)
+            .into_iter()
+            .map(|predicate| bind_query_predicate(predicate, binding, schema, &source, mode))
+            .collect::<Result<Vec<_>, _>>()?;
+        alternative.joins = std::mem::take(&mut alternative.joins)
+            .into_iter()
+            .map(|join| bind_join_filter_literals(join, binding, schema, mode))
+            .collect::<Result<Vec<_>, _>>()?;
+        alternative.exists = std::mem::take(&mut alternative.exists)
+            .into_iter()
+            .map(|exists| bind_exists_filter_literals(exists, binding, schema, mode))
+            .collect::<Result<Vec<_>, _>>()?;
+        alternative.reachable = std::mem::take(&mut alternative.reachable)
+            .into_iter()
+            .map(|mut reachable| {
+                if should_inline_reachable_seed(&reachable.from, mode) {
+                    reachable.from = bind_query_operand(reachable.from, binding, mode)?;
+                }
+                reachable.access_filters = std::mem::take(&mut reachable.access_filters)
+                    .into_iter()
+                    .map(|predicate| {
+                        bind_query_predicate(
+                            predicate,
+                            binding,
+                            schema,
+                            &bind_source_for_table(&reachable.access_table),
+                            mode,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                reachable.edge_filters = std::mem::take(&mut reachable.edge_filters)
+                    .into_iter()
+                    .map(|predicate| {
+                        bind_query_predicate(
+                            predicate,
+                            binding,
+                            schema,
+                            &bind_source_for_table(&reachable.edge_table),
+                            mode,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                bind_reachable_seed_filters(&mut reachable, binding, schema, mode)?;
+                Ok(reachable)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+    }
+    Ok(exists)
 }
 
 fn bind_flat_join_predicate(
@@ -804,11 +991,33 @@ pub(super) fn collect_reachable_seed_claim_params(
     query: &JazzQuery,
     params: &mut BTreeMap<String, ProgramClaimParam>,
 ) -> Result<(), Error> {
-    for reachable in query.reachable.iter().chain(
-        query
-            .policy_branches
+    collect_reachable_seed_claim_params_from_alternatives(
+        schema,
+        &query.reachable,
+        &query.policy_branches,
+        params,
+    )?;
+    for exists in &query.exists {
+        collect_reachable_seed_claim_params_from_alternatives(
+            schema,
+            &[],
+            &exists.alternatives,
+            params,
+        )?;
+    }
+    Ok(())
+}
+
+fn collect_reachable_seed_claim_params_from_alternatives(
+    schema: &JazzSchema,
+    reachable: &[crate::query::ReachableVia],
+    alternatives: &[crate::query::PolicyBranch],
+    params: &mut BTreeMap<String, ProgramClaimParam>,
+) -> Result<(), Error> {
+    for reachable in reachable.iter().chain(
+        alternatives
             .iter()
-            .flat_map(|branch| branch.reachable.iter()),
+            .flat_map(|alternative| alternative.reachable.iter()),
     ) {
         let Some(seed) = &reachable.seed else {
             continue;
@@ -836,6 +1045,17 @@ pub(super) fn collect_reachable_seed_claim_params(
                 ty: column.column_type.clone(),
             },
         );
+    }
+    for exists in alternatives
+        .iter()
+        .flat_map(|alternative| alternative.exists.iter())
+    {
+        collect_reachable_seed_claim_params_from_alternatives(
+            schema,
+            &[],
+            &exists.alternatives,
+            params,
+        )?;
     }
     Ok(())
 }
@@ -909,6 +1129,7 @@ fn collect_claim_field_params_from_node(
         RowSetExpr::ValueSource { .. }
         | RowSetExpr::FrontierSource { .. }
         | RowSetExpr::Source { .. }
+        | RowSetExpr::ExistsGate { .. }
         | RowSetExpr::Union { .. } => {}
     }
 }

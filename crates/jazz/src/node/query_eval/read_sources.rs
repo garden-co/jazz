@@ -2212,6 +2212,7 @@ where
         }
         let query = shape.query();
         if !query.joins.is_empty()
+            || !query.exists.is_empty()
             || !query.policy_branches.is_empty()
             || !query.array_subqueries.is_empty()
             || query.aggregate.is_some()

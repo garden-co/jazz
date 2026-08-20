@@ -445,6 +445,7 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
             | RowSetExpr::FrontierSource { .. }
             | RowSetExpr::Source { .. }
             | RowSetExpr::Join { .. }
+            | RowSetExpr::ExistsGate { .. }
             | RowSetExpr::RecursiveRelation { .. }
             | RowSetExpr::Union { .. }
             | RowSetExpr::Distinct { .. }

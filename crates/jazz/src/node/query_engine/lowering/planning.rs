@@ -79,6 +79,7 @@ pub(super) fn first_step_source(steps: &[LinearStep]) -> Option<&SourceId> {
     steps.iter().find_map(|step| match step {
         LinearStep::Join { right, .. } => right.root_source(),
         LinearStep::Filter(_)
+        | LinearStep::ExistsGate { .. }
         | LinearStep::Project(_)
         | LinearStep::OrderBy(_)
         | LinearStep::Slice { .. }
@@ -183,6 +184,9 @@ pub(super) enum LinearStep {
         right: Box<RelationInputPlan>,
         mode: JoinMode,
         on: PredicateExpr,
+    },
+    ExistsGate {
+        witness: Box<RelationInputPlan>,
     },
     Project(Vec<RowProjection>),
     OrderBy(Vec<OrderKey>),
@@ -848,8 +852,12 @@ fn collect_linear_fragments<'a>(linear: &'a LinearCurrentRoot, fragments: &mut P
 
 fn collect_step_relation_fragments<'a>(steps: &'a [LinearStep], fragments: &mut PlanFragments<'a>) {
     for step in steps {
-        if let LinearStep::Join { right, .. } = step {
-            collect_relation_fragments(right, fragments);
+        match step {
+            LinearStep::Join { right, .. } => collect_relation_fragments(right, fragments),
+            LinearStep::ExistsGate { witness } => {
+                collect_relation_fragments(witness, fragments);
+            }
+            _ => {}
         }
     }
 }
@@ -1020,6 +1028,14 @@ fn analyze_current_node(
             });
             Ok((source, steps))
         }
+        RowSetExpr::ExistsGate { input, witness } => {
+            let (source, mut steps) = analyze_current_node(input, nodes, visited)?;
+            let witness = analyze_relation_input_node(witness, nodes, visited)?;
+            steps.push(LinearStep::ExistsGate {
+                witness: Box::new(witness),
+            });
+            Ok((source, steps))
+        }
         RowSetExpr::Project { input, columns } => {
             let (source, mut steps) = analyze_current_node(input, nodes, visited)?;
             steps.push(LinearStep::Project(columns.clone()));
@@ -1159,7 +1175,10 @@ pub(crate) fn analyzed_union_labels(
 fn validate_join_relation(plan: &LinearCurrentRoot) -> Result<(), UnsupportedReason> {
     for step in &plan.steps {
         match step {
-            LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}
+            LinearStep::Filter(_)
+            | LinearStep::Join { .. }
+            | LinearStep::ExistsGate { .. }
+            | LinearStep::Project(_) => {}
             LinearStep::OrderBy(_) | LinearStep::Slice { .. } | LinearStep::Aggregate { .. } => {
                 return Err(UnsupportedReason::Operator(
                     "join inputs do not support order/slice/aggregate operators yet".to_owned(),
@@ -1213,7 +1232,10 @@ fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) 
     let mut seen_aggregate = false;
     for step in steps {
         match step {
-            LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_)
+            LinearStep::Filter(_)
+            | LinearStep::Join { .. }
+            | LinearStep::ExistsGate { .. }
+            | LinearStep::Project(_)
                 if seen_order || seen_slice || seen_aggregate =>
             {
                 gaps.push(UnsupportedReason::Operator(
@@ -1221,7 +1243,10 @@ fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) 
                         .to_owned(),
                 ));
             }
-            LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}
+            LinearStep::Filter(_)
+            | LinearStep::Join { .. }
+            | LinearStep::ExistsGate { .. }
+            | LinearStep::Project(_) => {}
             LinearStep::OrderBy(_) | LinearStep::Slice { .. } if seen_aggregate => {
                 gaps.push(UnsupportedReason::Operator(
                     "order/slice after aggregate is not lowered yet".to_owned(),

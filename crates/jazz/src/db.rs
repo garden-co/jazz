@@ -1107,6 +1107,7 @@ fn supports_pending_overlay_reconciliation(query: &Query) -> bool {
         && query.array_subqueries.is_empty()
         && query.includes.is_empty()
         && query.joins.is_empty()
+        && query.exists.is_empty()
         && query.policy_branches.is_empty()
         && query.inherits.is_empty()
         && query.reachable.is_empty()
@@ -2343,7 +2344,9 @@ impl PreparedQuery {
 }
 
 fn should_install_prepared_plan(shape: &ValidatedQuery) -> bool {
-    !shape.query().joins.is_empty() || !shape.query().reachable.is_empty()
+    !shape.query().joins.is_empty()
+        || !shape.query().exists.is_empty()
+        || !shape.query().reachable.is_empty()
 }
 
 fn subscription_delta_event(

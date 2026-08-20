@@ -129,7 +129,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
 /// Verifies that synced soft deletes are authorized by DELETE policies, and
 /// that a rejected optimistic delete restores the row for the originating peer.
 #[tokio::test]
-#[ignore = "server schema conversion requires the DELETE ExistsRel policy to include an outer-row equality"]
+#[ignore = "Alice's admin row never becomes visible to Bob, which times out before the synced DELETE policy is exercised"]
 async fn synced_soft_delete_should_use_delete_policy() {
     tokio::task::LocalSet::new()
         .run_until(synced_soft_delete_should_use_delete_policy_inner())
