@@ -110,7 +110,9 @@ async fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
         "albums",
         vec![Value::U64(7), Value::U64(11), Value::from("Blue Train")],
     );
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _tick_one = join1.recv().unwrap();
 
     let mut batch = db.open_batch();
@@ -118,7 +120,9 @@ async fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
         "albums",
         vec![Value::U64(8), Value::U64(11), Value::from("Giant Steps")],
     );
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let deltas = join1.recv().unwrap();
     let weights: Vec<i64> = deltas.iter().map(|(_, weight)| weight).collect();
@@ -140,20 +144,26 @@ async fn recursive_incremental_ticks_do_not_inflate_shared_edge_arrangements() {
     // Tick 1: edge 1 -> 2 (recompute + arrangement preparation).
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _initial = sub.recv().unwrap();
 
     // Tick 2: edge 2 -> 3 (incremental). The fixpoint loop re-applies this
     // tick's edge delta to the shared arrangement once per sub_tick.
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _tick_two = sub.recv().unwrap();
 
     // Tick 3: edge 0 -> 1 (incremental). Probes the inflated 2->3 entry.
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(3), Value::U64(0), Value::U64(1)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let mut rows = sub.recv().unwrap().to_values().unwrap();
     rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
@@ -191,20 +201,26 @@ async fn arrangement_shared_across_sub_ticks_is_applied_once_per_tick() {
     // Tick 1: 1 -> 2 (recursive recompute + arrangement preparation).
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _initial = two_hop.recv().unwrap();
 
     // Tick 2: 2 -> 3 (incremental recursion). Both consumers advance the
     // shared arrangement with this delta at different sub_ticks.
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _tick_two = two_hop.recv().unwrap();
 
     // Tick 3: 9 -> 2. The two-hop join probes the 2 -> 3 entry.
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(3), Value::U64(9), Value::U64(2)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let deltas = two_hop.recv().unwrap();
     let weights: Vec<i64> = deltas.iter().map(|(_, weight)| weight).collect();

@@ -49,7 +49,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             Value::U64(1965),
         ],
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
 
     let rows = database
         .query_graph(

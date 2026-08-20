@@ -124,7 +124,14 @@ where
                 ],
             );
         }
-        if self.database.commit_batch(batch).await.is_err() {
+        let persistence = async {
+            let applied = self.database.apply_batch(batch).await?;
+            let persisted = applied.persist().await;
+            self.database.finish_persistence(persisted)?;
+            Ok::<_, groove::db::Error>(())
+        }
+        .await;
+        if persistence.is_err() {
             self.catalogue = previous_catalogue;
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);

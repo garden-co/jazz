@@ -87,7 +87,10 @@ async fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
         "items",
         VariantRecord::create(1, v1, &[Value::String("first".into()), Value::U64(1)])?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
     assert_eq!(
         subscription.recv()?.to_values()?,
         vec![(vec![Value::U64(1), Value::String("first".into())], 1,)]
@@ -121,7 +124,10 @@ async fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
             ],
         )?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
     let mut deltas = subscription.recv()?.to_values()?;
     deltas.sort_by_key(|(_, weight)| *weight);
@@ -182,7 +188,10 @@ async fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
             ],
         )?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
     assert!(subscription.try_recv().is_err());
     assert!(
         database
@@ -257,7 +266,10 @@ async fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
             ],
         )?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
     let active_delta = active_subscription.recv()?.to_values()?;
     assert_eq!(active_delta.len(), 1);
@@ -303,7 +315,10 @@ async fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
             ],
         )?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
     let mut active_deltas = active_subscription.recv()?.to_values()?;
     active_deltas.sort_by_key(|(_, weight)| *weight);
@@ -364,7 +379,10 @@ async fn unique_variant_index_rejects_conflicts_across_versions()
             &[Value::String("same@example.com".into()), Value::U64(1)],
         )?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -380,7 +398,7 @@ async fn unique_variant_index_rejects_conflicts_across_versions()
         )?,
     );
     assert!(matches!(
-        database.commit_batch(batch).await,
+        database.apply_batch(batch).await,
         Err(Error::IvmRuntime(
             IvmRuntimeError::UniqueIndexViolation { .. }
         ))
@@ -432,7 +450,10 @@ async fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
             ],
         )?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
     let deltas = subscription.recv()?.to_values()?;
     assert_eq!(deltas.len(), 1);
@@ -502,7 +523,10 @@ async fn live_variant_index_backfills_existing_rows_without_perturbing_subscript
             ],
         )?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
     assert_eq!(subscription.recv()?.deltas.len(), 2);
 
     let index = IndexSchema::new("items_by_active", ["active"]);
@@ -530,7 +554,10 @@ async fn live_variant_index_backfills_existing_rows_without_perturbing_subscript
             ],
         )?,
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
     assert!(
         database
             .index_get("items", "items_by_active", &[Value::Bool(true)])
@@ -578,7 +605,10 @@ async fn mixed_schema_versions_survive_replacement_and_reopen()
             ],
         ),
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
     let rows = database.primary_key_scan("items", &[]).await?;
     assert_eq!(rows.len(), 2);
@@ -600,7 +630,10 @@ async fn mixed_schema_versions_survive_replacement_and_reopen()
             ],
         ),
     );
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
     let replaced = database
         .primary_key_get("items", &[Value::U64(1)])
         .await?
@@ -630,7 +663,10 @@ async fn variant_header_is_canonical_varint_and_validated_on_read()
     let payload_len = record.raw().len();
     let mut batch = database.open_batch();
     batch.insert("items", record);
-    database.commit_batch(batch).await?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
     let storage = database.into_storage();
     let entries = storage.prefix("items".to_owned(), Vec::new()).await?;
@@ -666,7 +702,7 @@ async fn writes_reject_unregistered_schema_versions() -> Result<(), Box<dyn std:
         ),
     );
     assert!(matches!(
-        database.commit_batch(batch).await,
+        database.apply_batch(batch).await,
         Err(Error::UnknownTableVariant { table, version })
             if table == "items" && version == 3
     ));

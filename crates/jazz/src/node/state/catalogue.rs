@@ -12,7 +12,9 @@ where
                 Value::Bytes(serde_json::to_vec(schema)?),
             ],
         );
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
@@ -214,7 +216,9 @@ where
                 ))?;
         let mut batch = self.database.open_batch();
         Self::write_schema_version_mapping_to_batch(&mut batch, alias, schema_version, &mapping)?;
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         self.catalogue
             .schema_version_aliases
             .insert(schema_version, alias);
@@ -653,7 +657,9 @@ where
                 Value::Bytes(serde_json::to_vec(staged)?),
             ],
         );
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
@@ -670,7 +676,9 @@ where
                 Value::Bytes(serde_json::to_vec(pending)?),
             ],
         );
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
@@ -687,7 +695,9 @@ where
                 PrimaryKeyValue::Uuid(publication_id.0),
             ]),
         );
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         self.catalogue.pending_lineages.remove(&catalogue_seq);
         Ok(())
     }
@@ -770,7 +780,9 @@ where
                 ))?;
             Self::write_schema_version_mapping_to_batch(&mut batch, alias, lens.target, mapping)?;
         }
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
@@ -800,7 +812,9 @@ where
             "jazz_catalogue_pointer",
             vec![Value::U64(pointer.revision), Value::Uuid(pointer.schema.0)],
         );
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
@@ -818,7 +832,9 @@ where
                 Value::Bytes(serde_json::to_vec(&pointer)?),
             ],
         );
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
@@ -866,7 +882,9 @@ where
             "jazz_nodes",
             vec![Value::U64(alias.0), Value::Uuid(node_uuid.0)],
         );
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(alias)
     }
 

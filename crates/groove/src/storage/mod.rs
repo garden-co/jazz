@@ -290,8 +290,8 @@ fn current_winner_key(
 /// names are backing details consumed by record-store plumbing; higher layers
 /// should use typed record-store handles instead of calling these methods
 /// directly. The trait intentionally exposes batch atomicity but no higher
-/// transaction semantics; `commit_batch` owns the tick ordering above this
-/// layer.
+/// transaction semantics; the database apply/persist/finish lifecycle owns
+/// tick and durability ordering above this layer.
 ///
 /// A read future's first poll also communicates residency. When a backend has
 /// retained a point or complete scan region, reads fully covered by that

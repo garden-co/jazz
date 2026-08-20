@@ -101,7 +101,10 @@ async fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dy
                 VariantRecord::create(tag, descriptors[tag as usize - 1], &values)?,
             );
         }
-        database.commit_batch(batch).await?;
+        let applied = database.apply_batch(batch).await?;
+        let persisted = applied.persist().await;
+        database.finish_persistence(persisted)?;
+        drop(applied);
         let delivered = subscription.recv()?;
         assert_eq!(delivered.deltas.len(), ROWS as usize);
         commits.push(started.elapsed().as_micros());

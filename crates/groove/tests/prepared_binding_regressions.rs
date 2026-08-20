@@ -54,7 +54,9 @@ async fn insert_edge(db: &mut Database, id: u64, src: u64, dst: u64) {
         "edges",
         vec![Value::U64(id), Value::U64(src), Value::U64(dst)],
     );
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 }
 
 #[futures_test::test]

@@ -151,7 +151,9 @@ impl Database {
     ///     "albums",
     ///     vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)],
     /// );
-    /// database.commit_batch(batch).await?;
+    /// let applied = database.apply_batch(batch).await?;
+    /// let persisted = applied.persist().await;
+    /// database.finish_persistence(persisted)?;
     ///
     /// assert_eq!(
     ///     subscription.recv()?.to_values()?,
@@ -217,7 +219,9 @@ impl Database {
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
-    /// # database.commit_batch(batch).await?;
+    /// # let applied = database.apply_batch(batch).await?;
+    /// # let persisted = applied.persist().await;
+    /// # database.finish_persistence(persisted)?;
     /// let query = Query::Select(Box::new(
     ///     Select::new([SelectItem::expr(Expr::column("title"))])
     ///         .from([TableRef::named("albums")])
@@ -315,7 +319,9 @@ impl Database {
     /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
-    /// # database.commit_batch(batch).await?;
+    /// # let applied = database.apply_batch(batch).await?;
+    /// # let persisted = applied.persist().await;
+    /// # database.finish_persistence(persisted)?;
     /// # let query = Query::Select(Box::new(Select::new([SelectItem::Wildcard]).from([TableRef::named("albums")]).where_(Expr::binary(Expr::column("year"), BinaryOp::Eq, Expr::parameter("year")))));
     /// # let prepared = database.prepare_query(query).await?;
     /// let subscription = database.bind(&prepared, &[("year", Value::U64(1959))]).await?;
@@ -566,7 +572,9 @@ impl Database {
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
-    /// # database.commit_batch(batch).await?;
+    /// # let applied = database.apply_batch(batch).await?;
+    /// # let persisted = applied.persist().await;
+    /// # database.finish_persistence(persisted)?;
     /// let query = Query::Select(Box::new(
     ///     Select::new([SelectItem::expr(Expr::column("title"))])
     ///         .from([TableRef::named("albums")])
@@ -607,7 +615,9 @@ impl Database {
     /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
-    /// # database.commit_batch(batch).await?;
+    /// # let applied = database.apply_batch(batch).await?;
+    /// # let persisted = applied.persist().await;
+    /// # database.finish_persistence(persisted)?;
     /// let rows = database.query_graph(
     ///     GraphBuilder::table("albums").filter(PredicateExpr::eq("year", Value::U64(1959))),
     /// ).await?;

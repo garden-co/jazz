@@ -139,7 +139,9 @@ async fn all_null_inputs_return_null_except_for_counts() {
         .unwrap();
     let mut batch = database.open_batch();
     batch.insert("metrics", vec![Value::U64(1), Value::U64(10), null()]);
-    database.commit_batch(batch).await.unwrap();
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
 
     assert_eq!(
         database
@@ -174,7 +176,9 @@ async fn nullable_aggregate_outputs_wrap_non_null_results() {
         "metrics",
         vec![Value::U64(1), Value::U64(10), some(Value::U64(5))],
     );
-    database.commit_batch(batch).await.unwrap();
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
 
     assert_eq!(
         database
@@ -213,7 +217,9 @@ async fn signed_i64_inputs_are_supported() {
         "metrics",
         vec![Value::U64(2), Value::U64(10), Value::I64(2)],
     );
-    database.commit_batch(batch).await.unwrap();
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
 
     assert_eq!(
         database
@@ -252,7 +258,9 @@ async fn sum_overflow_fails_with_a_named_error_at_the_declared_width() {
         "metrics",
         vec![Value::U64(2), Value::U64(10), Value::U8(10)],
     );
-    database.commit_batch(batch).await.unwrap();
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
 
     assert!(matches!(
         database.query_graph(metric_aggregates(["bucket"])).await,

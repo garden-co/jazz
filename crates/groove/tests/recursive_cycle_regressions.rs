@@ -69,12 +69,16 @@ async fn incremental_ticks_converge_on_cycles() {
 
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _t1 = sub.recv().unwrap();
 
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(1)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     assert_eq!(
         sorted(sub.recv().unwrap().to_values().unwrap()),
@@ -95,7 +99,9 @@ async fn recompute_converges_on_cycles_at_subscribe() {
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(1)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let sub = db
         .subscribe_one_sink(reachability_graph())
@@ -119,16 +125,22 @@ async fn retraction_recompute_converges_while_a_cycle_exists() {
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(1)]);
     batch.insert("edges", vec![Value::U64(3), Value::U64(2), Value::U64(3)]);
-    db.commit_batch(batch).await.unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _t1 = sub.recv().unwrap();
 
     // Deleting the unrelated edge triggers a retraction recompute while the
     // 1 <-> 2 cycle is still present in the base table.
     let mut batch = db.open_batch();
     batch.delete("edges", groove::db::PrimaryKeyValue::U64(3));
-    db.commit_batch(batch)
+    let applied = db
+        .apply_batch(batch)
         .await
         .expect("retraction ticks must not fail while the base data contains a cycle");
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted)
+        .expect("retraction persistence must not fail");
 
     assert_eq!(
         sorted(sub.recv().unwrap().to_values().unwrap()),

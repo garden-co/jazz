@@ -526,7 +526,14 @@ where
             }
             let mut batch = self.database.open_batch();
             Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
-            if self.database.commit_batch(batch).await.is_err() {
+            let persistence = async {
+                let applied = self.database.apply_batch(batch).await?;
+                let persisted = applied.persist().await;
+                self.database.finish_persistence(persisted)?;
+                Ok::<_, groove::db::Error>(())
+            }
+            .await;
+            if persistence.is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
                 return Err(Error::CatalogueActivationFailed);

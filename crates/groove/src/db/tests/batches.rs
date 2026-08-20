@@ -3,7 +3,7 @@
 use super::*;
 
 #[futures_test::test]
-async fn durable_commit_releases_subscription_delta_only_after_storage_succeeds() {
+async fn failed_persistence_does_not_retract_an_applied_subscription_delta() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription = database
@@ -18,8 +18,10 @@ async fn durable_commit_releases_subscription_delta_only_after_storage_succeeds(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    assert!(database.commit_batch(batch).await.is_err());
-    assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+    let applied = database.apply_batch(batch).await.unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+    let persisted = applied.persist().await;
+    assert!(database.finish_persistence(persisted).is_err());
 }
 
 #[futures_test::test]

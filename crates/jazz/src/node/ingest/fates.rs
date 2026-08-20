@@ -141,22 +141,14 @@ where
         } else {
             None
         };
-        let publication_scope = self.database.begin_durable_publication_scope()?;
-        if let Err(error) = self.database.commit_batch(batch).await {
-            publication_scope.abort(&mut self.database);
-            return Err(error.into());
-        }
+        let applied = self.database.apply_batch(batch).await?;
+        let persisted = applied.persist().await;
+        self.database.finish_persistence(persisted)?;
         *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
         if matches!(stored.fate, Fate::Rejected(_)) || stored.global_time.is_some() {
-            if let Err(error) = self
-                .persist_storage_consistency_marker_through(tx_id.time)
-                .await
-            {
-                publication_scope.abort(&mut self.database);
-                return Err(error);
-            }
+            self.persist_storage_consistency_marker_through(tx_id.time)
+                .await?;
         }
-        publication_scope.finish(&mut self.database);
         #[cfg(test)]
         {
             let rows = content_versions

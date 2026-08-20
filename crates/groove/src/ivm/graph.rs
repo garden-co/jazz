@@ -52,7 +52,9 @@ use super::op_types::*;
 /// batch.insert("artists", vec![Value::U64(2), Value::String("McCoy Tyner".into())]);
 /// batch.insert("albums", vec![Value::U64(10), Value::U64(1), Value::String("Speak No Evil".into())]);
 /// batch.insert("albums", vec![Value::U64(11), Value::U64(2), Value::String("Expansions".into())]);
-/// database.commit_batch(batch).await?;
+/// let applied = database.apply_batch(batch).await?;
+/// let persisted = applied.persist().await;
+/// database.finish_persistence(persisted)?;
 ///
 /// let albums = GraphBuilder::table("albums")
 ///     .filter(PredicateExpr::eq("title", Value::String("Speak No Evil".into())));
@@ -119,7 +121,9 @@ use super::op_types::*;
 /// let mut batch = database.open_batch();
 /// batch.insert("albums", vec![Value::U64(10), Value::U64(1), Value::String("Speak No Evil".into())]);
 /// batch.insert("albums", vec![Value::U64(11), Value::U64(2), Value::String("Expansions".into())]);
-/// database.commit_batch(batch).await?;
+/// let applied = database.apply_batch(batch).await?;
+/// let persisted = applied.persist().await;
+/// database.finish_persistence(persisted)?;
 ///
 /// assert_eq!(
 ///     subscription.recv()?.to_values()?,

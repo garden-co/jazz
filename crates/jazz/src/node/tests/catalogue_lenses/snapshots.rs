@@ -398,7 +398,9 @@ fn write_catalogue_record(
             Value::Bytes(payload),
         ],
     );
-    node.database.commit_batch(batch).unwrap();
+    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::db::block_on(applied.persist());
+node.database.finish_persistence(persisted).unwrap();
 }
 
 fn delete_catalogue_record(node: &mut NodeState<RocksDbStorage>, kind: &[u8], id: uuid::Uuid) {
@@ -410,7 +412,9 @@ fn delete_catalogue_record(node: &mut NodeState<RocksDbStorage>, kind: &[u8], id
             groove::db::PrimaryKeyValue::Uuid(id),
         ]),
     );
-    node.database.commit_batch(batch).unwrap();
+    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::db::block_on(applied.persist());
+node.database.finish_persistence(persisted).unwrap();
 }
 
 fn delete_catalogue_pointer(node: &mut NodeState<RocksDbStorage>, revision: u64) {
@@ -419,7 +423,9 @@ fn delete_catalogue_pointer(node: &mut NodeState<RocksDbStorage>, revision: u64)
         "jazz_catalogue_pointer",
         groove::db::PrimaryKeyValue::U64(revision),
     );
-    node.database.commit_batch(batch).unwrap();
+    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::db::block_on(applied.persist());
+node.database.finish_persistence(persisted).unwrap();
 }
 
 fn write_schema_mapping_record(
@@ -433,7 +439,9 @@ fn write_schema_mapping_record(
         &mut batch, alias, schema, mapping,
     )
     .unwrap();
-    node.database.commit_batch(batch).unwrap();
+    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::db::block_on(applied.persist());
+node.database.finish_persistence(persisted).unwrap();
 }
 
 fn delete_schema_mapping_record(node: &mut NodeState<RocksDbStorage>, alias: SchemaVersionAlias) {
@@ -442,7 +450,9 @@ fn delete_schema_mapping_record(node: &mut NodeState<RocksDbStorage>, alias: Sch
         "jazz_schema_versions",
         groove::db::PrimaryKeyValue::U64(alias.0),
     );
-    node.database.commit_batch(batch).unwrap();
+    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::db::block_on(applied.persist());
+node.database.finish_persistence(persisted).unwrap();
 }
 
 fn fresh_dynamic_edge_open(

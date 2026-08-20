@@ -1193,7 +1193,9 @@ where
             .values()
             .map(|(stored, global_time)| (stored.clone(), *global_time))
             .collect::<Vec<_>>();
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+        let persisted = applied.persist().await;
+        self.database.finish_persistence(persisted)?;
         self.rebuild_merge_heads_after_history_commit(&content_rows)
             .await?;
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
