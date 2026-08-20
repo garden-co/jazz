@@ -43,8 +43,8 @@ use super::query_engine::{
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
     VersionIdentityFields, VersionedRowRefSchema, aggregate_output_app_field,
     aggregate_output_column, aggregate_output_field, claim_param_field,
-    claim_path_from_param_field, left_field, lower_query_program, right_field, route_param_field,
-    user_column_field,
+    claim_path_from_param_field, left_field, prepare_and_lower_query_program, right_field,
+    route_param_field, user_column_field,
 };
 use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,

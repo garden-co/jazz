@@ -462,7 +462,7 @@ where
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
-        let result = lower_query_program(request, &mut resolver).await;
+        let result = prepare_and_lower_query_program(request, &mut resolver).await;
         if let Some(request) = trace_request {
             trace_capability_compile(
                 node_uuid,

@@ -19,6 +19,15 @@ materialize a Groove source by launching another Jazz query. In particular,
 policy preparation, source resolution, and schema projection MUST NOT call the
 ordinary one-shot query pipeline to obtain an input relation.
 
+Lowering itself is synchronous and pure. The implementation separates any
+currently necessary asynchronous source preparation from
+`lower_resolved_query_program`: preparation produces owned declarative source
+descriptions, and lowering consumes only those descriptions plus validated
+Jazz metadata. An `await` in lowering is a boundary violation. Async
+preparation is migration debt unless it captures a snapshot explicitly named by
+the read view; live-source preparation should disappear as Groove gains the
+corresponding declarative source primitive.
+
 Groove owns evaluation of the lowered graph. Its evaluation session discovers
 which concrete table, index, or arrangement inputs are not resident, suspends
 the affected nodes, shares hydration work, and resumes them through Groove's

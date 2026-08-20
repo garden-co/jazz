@@ -58,8 +58,15 @@ pub(crate) struct ClaimParameter {
 /// Result of lowering one query program.
 pub(crate) type QueryCompileResult = CapabilityResult<QueryProgram>;
 
-/// Lower one Jazz query program into the unified Groove-backed program.
-pub(crate) async fn lower_query_program(
+/// Owned declarative Groove inputs prepared before pure Jazz lowering.
+pub(crate) type ResolvedQuerySources = BTreeMap<SourceId, ResolvedSource>;
+
+/// Prepare concrete source descriptions, then synchronously lower the program.
+///
+/// This is an explicit compatibility boundary while snapshot capture and
+/// physical-layout preparation remain async. Runtime production code calls
+/// this function; the lowering phase itself is [`lower_resolved_query_program`].
+pub(crate) async fn prepare_and_lower_query_program(
     request: QueryProgramRequest,
     source_resolver: &mut impl SourceResolver,
 ) -> QueryCompileResult {
@@ -113,6 +120,30 @@ pub(crate) async fn lower_query_program(
         ));
         resolved_sources.insert(source, resolved_source);
     }
+    lower_resolved_query_program(request, resolved_sources, explain)
+}
+
+/// Purely lower a Jazz request whose Groove sources have already been prepared.
+///
+/// This function performs no storage access, hydration, registration, or
+/// evaluation and therefore must remain synchronous.
+pub(crate) fn lower_resolved_query_program(
+    request: QueryProgramRequest,
+    resolved_sources: ResolvedQuerySources,
+    mut explain: ExplainPlan,
+) -> QueryCompileResult {
+    let plan = match analyze_query_plan(&request) {
+        Ok(plan) => plan,
+        Err(gaps) => {
+            explain
+                .capabilities
+                .push("only current-source row-set lowering is implemented".to_owned());
+            return Err(Box::new(CapabilityReport {
+                gaps,
+                explain: explain_with_request(&request, explain),
+            }));
+        }
+    };
     let resolved_root = resolved_sources
         .get(plan.root_source())
         .cloned()
@@ -205,6 +236,14 @@ pub(crate) async fn lower_query_program(
         request,
         explain,
     })
+}
+
+#[cfg(test)]
+pub(crate) async fn lower_query_program(
+    request: QueryProgramRequest,
+    source_resolver: &mut impl SourceResolver,
+) -> QueryCompileResult {
+    prepare_and_lower_query_program(request, source_resolver).await
 }
 
 fn verify_routed_terminal_outputs(
