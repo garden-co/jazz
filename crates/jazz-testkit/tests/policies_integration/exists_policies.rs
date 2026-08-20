@@ -3,7 +3,9 @@ use std::time::Duration;
 use crate::JazzClient;
 use jazz::tools::DurabilityTier;
 use jazz_server::JazzServer;
-use jazz_testkit::{wait_for_edge_tx_rejection, wait_for_query};
+use jazz_testkit::{
+    connect_ready_user, wait_for_edge_tx_rejection, wait_for_edge_txs, wait_for_query,
+};
 
 use super::*;
 
@@ -119,7 +121,6 @@ async fn rebac_exists_clause_denies_non_matching_insert_inner() {
 /// Verifies that UPDATE USING policies with EXISTS are enforced on sync, and
 /// that a rejected optimistic update rolls back to server-authoritative state.
 #[tokio::test]
-#[ignore = "the admin witness row never becomes visible to the second client, which times out before UPDATE USING is exercised"]
 async fn rebac_update_denied_by_using_exists_policy() {
     tokio::task::LocalSet::new()
         .run_until(rebac_update_denied_by_using_exists_policy_inner())
@@ -154,21 +155,23 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
         .build();
 
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let alice =
-        jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::ALICE_ID))
-            .await
-            .expect("connect alice");
-    let bob =
-        jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::BOB_ID))
-            .await
-            .expect("connect permissive bob");
+    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "admins", WAIT_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "admins", WAIT_TIMEOUT).await;
 
-    let (admin_id, _, _) = alice
+    let (admin_id, _, admin_tx) = alice
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
         .expect("seed alice admin row");
-    let (protected_id, _, _) = alice
+    let (protected_id, _, protected_tx) = alice
         .insert("protected", crate::row_input!("data" => "original data"))
         .expect("seed protected row");
+    wait_for_edge_txs(
+        &alice,
+        &[
+            admin_tx.expect("admin seed should commit immediately"),
+            protected_tx.expect("protected seed should commit immediately"),
+        ],
+    )
+    .await;
 
     wait_for_admin_row(&bob, admin_id, super::ALICE_ID).await;
     wait_for_protected_row(
@@ -206,12 +209,14 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
     )
     .await;
 
-    alice
+    let alice_transaction_id = alice
         .update(
             protected_id,
             vec![("data".into(), Value::Text("updated by admin alice".into()))],
         )
-        .expect("admin update should be allowed locally");
+        .expect("admin update should be allowed locally")
+        .expect("admin update should commit immediately");
+    wait_for_edge_txs(&alice, &[alice_transaction_id]).await;
     wait_for_protected_row(
         &bob,
         protected_id,

@@ -1,6 +1,8 @@
 use crate::JazzClient;
 use jazz_server::JazzServer;
-use jazz_testkit::{wait_for_edge_tx_rejection, wait_for_query};
+use jazz_testkit::{
+    connect_ready_user, wait_for_edge_tx_rejection, wait_for_edge_txs, wait_for_query,
+};
 
 use super::*;
 
@@ -28,7 +30,6 @@ async fn wait_for_protected_rows(
 /// Verifies that synced soft deletes are authorized by DELETE policies, and
 /// that a rejected optimistic delete restores the row for the originating peer.
 #[tokio::test]
-#[ignore = "Alice's admin row never becomes visible to Bob, which times out before the synced DELETE policy is exercised"]
 async fn synced_soft_delete_should_use_delete_policy() {
     tokio::task::LocalSet::new()
         .run_until(synced_soft_delete_should_use_delete_policy_inner())
@@ -61,21 +62,37 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
         .build();
 
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let alice =
-        jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::ALICE_ID))
-            .await
-            .expect("connect alice");
-    let bob =
-        jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::BOB_ID))
-            .await
-            .expect("connect bob");
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "admins",
+        Duration::from_secs(5),
+    )
+    .await;
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "admins",
+        Duration::from_secs(5),
+    )
+    .await;
 
-    let (admin_id, _, _) = alice
+    let (admin_id, _, admin_tx) = alice
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
         .expect("seed alice admin row");
-    let (protected_id, _, _) = alice
+    let (protected_id, _, protected_tx) = alice
         .insert("protected", crate::row_input!("data" => "initial"))
         .expect("seed protected row");
+    wait_for_edge_txs(
+        &alice,
+        &[
+            admin_tx.expect("admin seed should commit immediately"),
+            protected_tx.expect("protected seed should commit immediately"),
+        ],
+    )
+    .await;
 
     wait_for_query(
         &bob,
@@ -120,9 +137,11 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
     )
     .await;
 
-    alice
+    let alice_delete_transaction = alice
         .delete(protected_id)
-        .expect("admin soft delete should be accepted locally");
+        .expect("admin soft delete should be accepted locally")
+        .expect("admin delete should commit immediately");
+    wait_for_edge_txs(&alice, &[alice_delete_transaction]).await;
 
     wait_for_protected_rows(
         &bob,
