@@ -20,6 +20,7 @@ use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
+use jazz_sim::fixture::{apply_sync_message_settled, settle_outcome};
 use jazz_sim::{emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
@@ -119,26 +120,32 @@ fn publish_chain(
     // harness is the authority here, so it exercises the same trusted
     // catalogue ingress used by a core after the sequencer has ordered them.
     for (schema, lens) in schemas.iter().skip(1).zip(lenses) {
-        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
-            catalogue_seq: core.active_catalogue_seq() + 1,
-            publication: Box::new(SchemaLineagePublication::new(
-                SchemaVersion::new(schema.clone()),
-                lens.clone(),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
-        })
+        let outcome = jazz::db::block_on(core.apply_trusted_catalogue_message(
+            SyncMessage::PublishSchemaWithLens {
+                author: AuthorId::SYSTEM,
+                catalogue_seq: core.active_catalogue_seq() + 1,
+                publication: Box::new(SchemaLineagePublication::new(
+                    SchemaVersion::new(schema.clone()),
+                    lens.clone(),
+                    Vec::<String>::new(),
+                    Vec::<String>::new(),
+                )),
+            },
+        ))
         .unwrap();
+        settle_outcome(core, outcome).unwrap();
     }
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 4,
-            schema: schemas[3].version_id(),
+    let outcome = jazz::db::block_on(core.apply_trusted_catalogue_message(
+        SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 4,
+                schema: schemas[3].version_id(),
+            },
         },
-    })
+    ))
     .unwrap();
+    settle_outcome(core, outcome).unwrap();
 }
 
 fn rows_for_schema(
@@ -146,11 +153,11 @@ fn rows_for_schema(
     schema: &JazzSchema,
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let shape = Query::from("todos").validate(schema).unwrap();
-    core.query_rows(
+    jazz::db::block_on(core.query_rows(
         &shape,
         &shape.bind(BTreeMap::new()).unwrap(),
         DurabilityTier::Local,
-    )
+    ))
     .unwrap()
     .into_iter()
     .map(|row| row_cells(row, &schema.tables[0]))
@@ -164,7 +171,7 @@ struct ClientHarness {
     edge: NodeState<RocksDbStorage>,
     edge_peer: PeerState,
     outbound: Rc<RefCell<Vec<SyncMessage>>>,
-    _upstream: Rc<RefCell<jazz::db::PeerConnection<RocksDbStorage>>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<RocksDbStorage>>>,
 }
 
 struct QueueTransport {
@@ -188,10 +195,10 @@ fn commit_client_mergeable(
     row: RowUuid,
     cells: BTreeMap<String, Value>,
 ) -> SyncMessage {
-    let tx = client.db.mergeable_tx().unwrap();
-    tx.insert_with_id(table, row, cells).unwrap();
-    tx.commit().unwrap();
-    client.db.tick().unwrap();
+    let tx = jazz::db::block_on(client.db.mergeable_tx()).unwrap();
+    jazz::db::block_on(tx.insert_with_id(table, row, cells)).unwrap();
+    jazz::db::block_on(tx.commit()).unwrap();
+    jazz::db::block_on(client.db.tick()).unwrap();
     client
         .outbound
         .borrow_mut()
@@ -207,15 +214,19 @@ fn deliver_client_unit(
 ) {
     if let SyncMessage::CommitUnit { tx, versions } = unit.clone() {
         let start = std::time::Instant::now();
-        client
-            .edge_peer
-            .ingest_edge_mergeable_commit_unit(&mut client.edge, tx, versions, u64::MAX)
-            .unwrap();
+        let outcome = jazz::db::block_on(client.edge_peer.ingest_edge_mergeable_commit_unit(
+            &mut client.edge,
+            tx,
+            versions,
+            u64::MAX,
+        ))
+        .unwrap();
+        settle_outcome(&mut client.edge, outcome).unwrap();
         edge_acceptance_us.push(start.elapsed().as_micros() as u64);
     } else {
         unreachable!();
     }
-    core.apply_sync_message(unit).unwrap();
+    apply_sync_message_settled(core, unit).unwrap();
 }
 
 fn emit_edge_phase_summaries(edge_acceptance_us: &[u64]) {
@@ -263,7 +274,7 @@ fn emit_lens_tax_metrics() {
                 ("search_name".to_owned(), v(value)),
             ]),
         );
-        core.apply_sync_message(unit).unwrap();
+        apply_sync_message_settled(&mut core, unit).unwrap();
     }
 
     let native_read = measured_query_us(&mut core, &schemas[3], READ_ITERS, ROWS);
@@ -345,9 +356,8 @@ fn measured_query_us(
     let mut timings = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let start = Instant::now();
-        let rows = core
-            .query_rows(&shape, &binding, DurabilityTier::Local)
-            .unwrap();
+        let rows =
+            jazz::db::block_on(core.query_rows(&shape, &binding, DurabilityTier::Local)).unwrap();
         timings.push(start.elapsed().as_micros() as u64);
         assert_eq!(rows.len(), expected_rows);
     }
@@ -387,7 +397,7 @@ fn measured_write_us(
             cells,
         );
         let start = Instant::now();
-        core.apply_sync_message(unit).unwrap();
+        apply_sync_message_settled(core, unit).unwrap();
         timings.push(start.elapsed().as_micros() as u64);
     }
     timings.sort_unstable();
@@ -494,7 +504,7 @@ fn open_node(
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
             .unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).unwrap();
+    let node = jazz::db::block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
     (temp_dir, node)
 }
 

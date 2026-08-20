@@ -16,6 +16,7 @@ cold-settle-attribution = ["jazz/cold-settle-attribution"]
 automerge = "0.10.0"
 backtrace = { version = "0.3", optional = true }
 diamond-types = "1.0.0"
+futures = "0.3"
 hdrhistogram = "7.5.4"
 jazz = { path = "../jazz", default-features = false, features = [
   "testing",

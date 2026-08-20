@@ -238,8 +238,7 @@ fn assert_counts(
     expected: &BTreeMap<String, usize>,
 ) {
     for table in &schema.tables {
-        let rows = node
-            .current_rows(&table.name, DurabilityTier::Global)
+        let rows = jazz::db::block_on(node.current_rows(&table.name, DurabilityTier::Global))
             .expect("current rows");
         assert_eq!(
             rows.len(),
@@ -255,9 +254,9 @@ fn final_state_hash(nodes: &mut [&mut NodeState<RocksDbStorage>], schema: &JazzS
     for (node_idx, node) in nodes.iter_mut().enumerate() {
         mix_str(&mut hash, &format!("node:{node_idx}"));
         for table in &schema.tables {
-            let mut rows = node
-                .current_rows(&table.name, DurabilityTier::Global)
-                .expect("current rows");
+            let mut rows =
+                jazz::db::block_on(node.current_rows(&table.name, DurabilityTier::Global))
+                    .expect("current rows");
             rows.sort_by_key(|row| row.row_uuid());
             for row in rows {
                 mix_current_row(&mut hash, &row, table);
@@ -335,7 +334,7 @@ fn open_node(
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
             .expect("open rocksdb");
-    let node = NodeState::new(node_uuid, schema, storage).expect("node");
+    let node = jazz::db::block_on(NodeState::new(node_uuid, schema, storage)).expect("node");
     (temp_dir, node)
 }
 

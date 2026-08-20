@@ -651,17 +651,14 @@ fn write_seed_rows(core: &Node<RocksDbStorage>, schema: &JazzSchema, rows: &[See
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let tx_id = node
-            .borrow_mut()
-            .commit_mergeable(
-                MergeableCommit::new(&row.table, row_id, (idx + 1) as u64)
-                    .made_by(AuthorId::SYSTEM)
-                    .cells(cells),
-            )
-            .unwrap_or_else(|error| panic!("seed commit row {}/{row_id:?}: {error}", row.table));
-        node.borrow_mut()
-            .finalize_local_mergeable_commit(tx_id)
-            .unwrap_or_else(|error| panic!("seed finalize row {}/{row_id:?}: {error}", row.table));
+        let mut node = jazz::db::block_on(node.lock());
+        jazz_sim::fixture::commit_mergeable_unit_settled(
+            &mut node,
+            MergeableCommit::new(&row.table, row_id, (idx + 1) as u64)
+                .made_by(AuthorId::SYSTEM)
+                .cells(cells),
+        )
+        .unwrap_or_else(|error| panic!("seed commit row {}/{row_id:?}: {error}", row.table));
     }
 }
 
@@ -1029,19 +1026,19 @@ fn run_connect_and_subscribe(
         }
 
         let server_start = Instant::now();
-        let core_tick = seeded.core.tick_stats().expect("core tick");
+        let core_tick = jazz::db::block_on(seeded.core.tick_stats()).expect("core tick");
         server_open_bundle_ms += server_start.elapsed().as_millis();
         accumulate_tick_stats(core_tick);
         if let Some(relay) = &active_relay {
             let relay_start = Instant::now();
-            let relay_tick = relay.db.tick_stats().expect("relay tick");
+            let relay_tick = jazz::db::block_on(relay.db.tick_stats()).expect("relay tick");
             server_open_bundle_ms += relay_start.elapsed().as_millis();
             accumulate_tick_stats(relay_tick);
         }
 
         let _queued_to_client = client_counters.right_inbound.borrow().len();
         let client_start = Instant::now();
-        let client_tick = client.db.tick_stats().expect("client tick");
+        let client_tick = jazz::db::block_on(client.db.tick_stats()).expect("client tick");
         drain_subscriptions(start, &mut subscriptions);
         client_apply_tick_ms += client_start.elapsed().as_millis();
         accumulate_tick_stats(client_tick);
@@ -1386,8 +1383,8 @@ fn open_history_complete_node_at(
     node_uuid: NodeUuid,
 ) -> Node<RocksDbStorage> {
     let storage = open_storage_at(path, &schema);
-    let state =
-        NodeState::new_history_complete(node_uuid, schema, storage).expect("open seed node");
+    let state = jazz::db::block_on(NodeState::new_history_complete(node_uuid, schema, storage))
+        .expect("open seed node");
     Node::new(state)
 }
 
