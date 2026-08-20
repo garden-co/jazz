@@ -40,14 +40,19 @@ where
     }
 
     /// Apply one sync message from a connection-authenticated upload path.
-    pub async fn apply_sync_message_with_ingest_context(
-        &mut self,
+    pub fn apply_sync_message_with_ingest_context<'a>(
+        &'a mut self,
         message: SyncMessage,
         ingest_context: Option<CommitUnitIngestContext>,
-    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<PublicationOutcome<Vec<SyncMessage>>, Error>> + 'a,
+        >,
+    >
     where
         S: ReopenableStorage,
     {
+        Box::pin(async move {
         // A dynamic edge has exactly one admissible pre-ready transition: the
         // authenticated upstream invokes `apply_trusted_catalogue_snapshot`
         // directly.  Incremental catalogue/data/branch traffic has no
@@ -199,6 +204,7 @@ where
                 "permission advice requires authenticated link context",
             )),
         }
+        })
     }
 
     async fn apply_publish_schema(
