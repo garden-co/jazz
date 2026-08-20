@@ -1130,7 +1130,6 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
 /// alice ──delete folder────────────────────────────► server ──► persisted
 /// ```
 #[tokio::test]
-#[ignore = "folder-owner inherited DELETE leaves the folder-backed document present after an EdgeServer-tier read"]
 async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_documents() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -1221,9 +1220,11 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     )
     .await;
 
-    alice
+    let document_delete_tx = alice
         .delete(doc_id)
-        .expect("folder owner deletes folder-backed document");
+        .expect("folder owner deletes folder-backed document")
+        .expect("document delete should commit immediately");
+    wait_for_edge_txs(&alice, &[document_delete_tx]).await;
 
     let rows_after_doc_delete = wait_for_query(
         &alice,
@@ -1248,9 +1249,11 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     )
     .await;
 
-    alice
+    let folder_delete_tx = alice
         .delete(folder_id)
-        .expect("folder owner deletes folder");
+        .expect("folder owner deletes folder")
+        .expect("folder delete should commit immediately");
+    wait_for_edge_txs(&alice, &[folder_delete_tx]).await;
 
     let rows_after_folder_delete = wait_for_query(
         &alice,
@@ -1284,7 +1287,6 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 /// bob ──delete charlie doc──────────────────────────► server ──✗ rejected
 /// ```
 #[tokio::test]
-#[ignore = "the document-owner/non-owner inherited DELETE scenario does not settle within 20 seconds"]
 async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owners() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -1400,8 +1402,11 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
                 )
     }));
 
-    bob.delete(bob_doc_id)
-        .expect("document owner deletes owned folder-backed document");
+    let owned_delete_tx = bob
+        .delete(bob_doc_id)
+        .expect("document owner deletes owned folder-backed document")
+        .expect("owned document delete should commit immediately");
+    wait_for_edge_txs(&bob, &[owned_delete_tx]).await;
 
     let rows_after_owned_delete = wait_for_rows(
         &alice,
@@ -1429,8 +1434,11 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
         "only charlie's document should remain after bob deletes his own: {rows_after_owned_delete:?}"
     );
 
-    bob.delete(charlie_doc_id)
-        .expect("optimistic local delete for unauthorized attempt");
+    let unauthorized_delete_tx = bob
+        .delete(charlie_doc_id)
+        .expect("optimistic local delete for unauthorized attempt")
+        .expect("unauthorized delete should commit locally");
+    wait_for_edge_tx_rejection(&bob, unauthorized_delete_tx).await;
 
     let rows_after_unauthorized_delete = wait_for_query(
         &alice,
