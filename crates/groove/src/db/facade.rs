@@ -66,6 +66,7 @@ impl Database {
                 next: 1,
                 waiters: BTreeMap::new(),
             })),
+            abandoned_application: Rc::new(Cell::new(false)),
             poisoned: false,
         })
     }

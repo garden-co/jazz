@@ -203,6 +203,8 @@ impl Database {
             storage_writes,
             tick,
             notifications_deferred: defer_notifications_until_durable,
+            lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
+            abandoned_application: Rc::clone(&self.abandoned_application),
         })
     }
 
@@ -212,6 +214,7 @@ impl Database {
         &mut self,
         persistence: PersistedBatch,
     ) -> Result<PublicationId, Error> {
+        persistence.receipt.finish();
         self.last_tick_metrics = Some(persistence.metrics.tick.clone());
         self.last_commit_metrics = Some(persistence.metrics.clone());
         if let Err(error) = persistence.result {
@@ -388,7 +391,7 @@ impl Database {
     }
 
     pub(super) fn ensure_not_poisoned(&self) -> Result<(), Error> {
-        if self.poisoned {
+        if self.poisoned || self.abandoned_application.get() {
             Err(Error::DatabasePoisoned)
         } else {
             Ok(())

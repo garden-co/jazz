@@ -259,7 +259,7 @@ fn blocked_index_source_retains_its_storage_request_across_polls() {
 fn projected_indexed_rows_discover_and_hydrate_referenced_rows() {
     let schema = variant_indexed_schema();
     let (storage, control) = TestStorage::controlled(&schema.column_families());
-    let mut database = block_on(Database::new(schema, storage)).unwrap();
+    let mut database = block_on(Database::new(schema, storage.clone())).unwrap();
     let physical = RecordDescriptor::new([("title", ValueType::String), ("id", ValueType::U64)]);
     let output = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
     database
@@ -294,6 +294,8 @@ fn projected_indexed_rows_discover_and_hydrate_referenced_rows() {
     );
     block_on(database.commit_batch(batch)).unwrap();
 
+    storage.evict_column_family("albums");
+    storage.evict_column_family("indices");
     control.take_observed();
     control.pause_on(TestStorageOperation::ScanOpen);
     control.pause_on(TestStorageOperation::Get);
@@ -311,7 +313,12 @@ fn projected_indexed_rows_discover_and_hydrate_referenced_rows() {
     assert!(!control.observed().contains(&TestStorageOperation::Get));
 
     control.resume_operation(TestStorageOperation::ScanOpen);
-    assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+    for _ in 0..8 {
+        assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+        if control.observed().contains(&TestStorageOperation::Get) {
+            break;
+        }
+    }
     assert_eq!(
         control
             .observed()
@@ -429,7 +436,7 @@ fn blocked_recursive_index_source_retains_the_sessions_request() {
 #[test]
 fn recursive_retraction_loads_before_mutating_the_tick() {
     let (storage, control) = TestStorage::controlled(&["edges"]);
-    let mut database = block_on(Database::new(edges_schema(), storage)).unwrap();
+    let mut database = block_on(Database::new(edges_schema(), storage.clone())).unwrap();
     let mut batch = database.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
@@ -437,6 +444,7 @@ fn recursive_retraction_loads_before_mutating_the_tick() {
     let subscription = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
     assert_eq!(subscription.recv().unwrap().deltas.len(), 3);
 
+    storage.evict_scans("edges");
     control.take_observed();
     control.pause_on(TestStorageOperation::ScanOpen);
     let mut batch = database.open_batch();
@@ -471,7 +479,7 @@ fn recursive_retraction_loads_before_mutating_the_tick() {
 #[test]
 fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked() {
     let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
-    let mut database = block_on(Database::new(albums_and_edges_schema(), storage)).unwrap();
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
     let mut seed = database.open_batch();
     seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
@@ -484,6 +492,7 @@ fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked()
     let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
     assert_eq!(reach.recv().unwrap().deltas.len(), 3);
 
+    storage.evict_scans("edges");
     control.take_observed();
     control.pause_on(TestStorageOperation::ScanOpen);
     let mut batch = database.open_batch();
@@ -516,7 +525,7 @@ fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked()
 #[test]
 fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
     let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
-    let mut database = block_on(Database::new(albums_and_edges_schema(), storage)).unwrap();
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
     let mut seed = database.open_batch();
     seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
@@ -531,7 +540,9 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
     let shared_failed_reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
     assert_eq!(shared_failed_reach.recv().unwrap().deltas.len(), 3);
 
+    storage.evict_scans("edges");
     control.pause_on(TestStorageOperation::ScanOpen);
+    storage.evict_scans("edges");
     control.fail_next(TestStorageOperation::ScanOpen);
     let mut batch = database.open_batch();
     batch.insert(
@@ -637,7 +648,7 @@ fn resident_publication_returns_before_independent_recursive_hydration() {
 #[test]
 fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
     let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
-    let mut database = block_on(Database::new(albums_and_edges_schema(), storage)).unwrap();
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
     let mut seed = database.open_batch();
     seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
@@ -648,6 +659,7 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
     let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
     assert_eq!(reach.recv().unwrap().deltas.len(), 3);
 
+    storage.evict_scans("edges");
     control.take_observed();
     control.pause_on(TestStorageOperation::ScanOpen);
     let mut first = database.open_batch();
@@ -903,6 +915,49 @@ fn cancelled_persistence_does_not_undo_an_applied_batch() {
     control.resume();
     let persisted = block_on(applied.persist());
     database.finish_persistence(persisted).unwrap();
+}
+
+#[test]
+fn dropping_an_unpersisted_applied_batch_poisons_further_database_work() {
+    let storage = TestStorage::new(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+
+    let applied = block_on(database.apply_batch(batch)).unwrap();
+    drop(applied);
+
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
+    assert!(matches!(
+        block_on(database.query_graph(GraphBuilder::table("albums"))),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
+}
+
+#[test]
+fn dropping_an_unfinished_persistence_receipt_poisons_further_database_work() {
+    let storage = TestStorage::new(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+
+    let applied = block_on(database.apply_batch(batch)).unwrap();
+    let persisted = block_on(applied.persist());
+    drop(persisted);
+
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
 }
 
 #[test]
