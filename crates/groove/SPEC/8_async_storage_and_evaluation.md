@@ -246,9 +246,12 @@ must not be repaired with Groove compatibility layers.
 
 Groove's `TestStorage` is the deterministic suspension and fault-injection
 harness for these tests. It wraps in-memory storage, implements the production
-contract directly, and is immediate unless its independent controller pauses
-operations. Tests release explicit permits rather than depending on wall-clock
-delays. The persistent B-tree backend used by storage-fidelity tests is named
+contract directly, and makes cold operations yield at least once. Completing a
+point read or an entire scan retains that result as resident, after which
+covered reads are immediately ready until explicit eviction. Writes keep the
+retained view coherent. Its independent controller can pause cold operations;
+tests release explicit permits rather than depending on wall-clock delays. The
+persistent B-tree backend used by storage-fidelity tests is named
 `TestBtreeStorage` so the two roles are not conflated.
 
 ## Open questions
