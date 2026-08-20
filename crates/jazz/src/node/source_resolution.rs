@@ -199,7 +199,28 @@ where
                     })?,
                 );
             }
-            rows.push(current_row_from_cells(&read_table, row_uuid, &cells)?);
+            let updated = match deletion {
+                Some(deletion)
+                    if self
+                        .version_tx_id(deletion)?
+                        .time
+                        .sort_key(self.version_tx_id(deletion)?.node)
+                        > self
+                            .version_tx_id(version)?
+                            .time
+                            .sort_key(self.version_tx_id(version)?.node) =>
+                {
+                    deletion
+                }
+                _ => version,
+            };
+            rows.push(current_row_from_materialized_cells_with_layer_provenance(
+                &read_table,
+                version,
+                version,
+                updated,
+                &cells,
+            )?);
         }
         sort_current_rows(&mut rows);
         Ok(rows)

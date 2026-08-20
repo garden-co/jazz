@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource};
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
@@ -102,6 +102,12 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         rows[0].cell(table, "branch_id"),
         Some(Value::Uuid(uuid::Uuid::from_bytes([0x66; 16])))
     );
+    let mut subscription = block_on(db.subscribe(&prepared, opts.clone())).unwrap();
+    let opening = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        opening,
+        SubscriptionEvent::Delta { reset: true, .. }
+    ));
 
     db.update_in_branch_view(
         "todos",
@@ -111,6 +117,17 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         BTreeMap::from([("title".to_owned(), Value::String("draft".to_owned()))]),
     )
     .unwrap();
+    let changed = block_on(subscription.next_event()).unwrap();
+    assert!(
+        matches!(
+            changed,
+            SubscriptionEvent::Delta { reset: false, ref updated, .. } if updated.len() == 1
+        ) || matches!(
+            changed,
+            SubscriptionEvent::Delta { reset: true, ref added, .. } if added.len() == 1
+        ),
+        "unexpected branch subscription delta: {changed:?}"
+    );
     db.update_in_branch(
         "todos",
         head.clone(),

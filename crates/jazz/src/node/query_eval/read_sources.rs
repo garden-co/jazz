@@ -288,9 +288,7 @@ where
         }
         let (graph, descriptor, metadata, routing_fields) = if let Some((head, base)) = branch_view
         {
-            if request.visibility != RowVisibility::Visible
-                || !request.requirements.metadata.is_empty()
-            {
+            if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(request, SourceGap::Coverage));
             }
             let rows = self
@@ -303,8 +301,27 @@ where
                     base,
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let base_graph = inline_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let (base_graph, descriptor, metadata) = if request.requirements.metadata.is_empty() {
+                (
+                    inline_current_graph(&table, rows)
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?,
+                    current_row_descriptor(&table),
+                    BTreeMap::new(),
+                )
+            } else {
+                let schema_version_alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                inline_current_graph_with_source_metadata(
+                    &table,
+                    rows,
+                    schema_version_alias,
+                    "branch-view",
+                    &request.requirements,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+            };
             let graph = match &authorization {
                 SourceAuthorizationRequest::System => base_graph,
                 SourceAuthorizationRequest::PolicyFiltered {
@@ -345,12 +362,7 @@ where
                         .graph
                 }
             };
-            (
-                graph,
-                current_row_descriptor(&table),
-                BTreeMap::new(),
-                BTreeSet::new(),
-            )
+            (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(position) = history_position {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
