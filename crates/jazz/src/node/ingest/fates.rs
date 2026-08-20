@@ -94,12 +94,13 @@ where
         }
         batch.update(
             "jazz_transactions",
-            transaction_values(
+            transaction_values_with_cardinality_scope(
                 stored.node_alias,
                 &stored.tx,
                 stored.fate.clone(),
                 stored.global_time,
                 stored.durability,
+                stored.view_scoped_cardinality,
             ),
         );
         if !matches!(stored.fate, Fate::Rejected(_)) {

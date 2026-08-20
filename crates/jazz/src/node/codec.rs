@@ -233,8 +233,8 @@ groove::define_record! {
         9 => user_metadata: Option<String>,
         10 => contribution_merge: Option<Vec<u8>>,
         11 => permission_subject: Option<AuthorId>,
-        // Retained as an inert physical slot so existing transaction records
-        // keep their fixed descriptor alignment. No core API writes or reads it.
+        // Retained physical slot, now used internally to mark redacted
+        // view-scoped transaction cardinality without changing row alignment.
         12 => merge_strategy: Option<String>,
         13 => fate: FateTag,
         14 => global_time: Option<GlobalTime>,
@@ -474,6 +474,8 @@ pub(super) struct StoredTransaction {
     pub(super) fate: Fate,
     pub(super) global_time: Option<GlobalTime>,
     pub(super) durability: DurabilityTier,
+    /// True when `n_total_writes` is only the locally known view cardinality.
+    pub(super) view_scoped_cardinality: bool,
 }
 
 impl StoredTransaction {
@@ -995,6 +997,17 @@ pub(super) fn transaction_values(
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
 ) -> Vec<Value> {
+    transaction_values_with_cardinality_scope(node_alias, tx, fate, global_time, durability, false)
+}
+
+pub(super) fn transaction_values_with_cardinality_scope(
+    node_alias: NodeAlias,
+    tx: &Transaction,
+    fate: Fate,
+    global_time: Option<GlobalTime>,
+    durability: DurabilityTier,
+    view_scoped_cardinality: bool,
+) -> Vec<Value> {
     vec![
         Value::U64(tx.tx_id.time.0),
         Value::U64(node_alias.0),
@@ -1019,9 +1032,12 @@ pub(super) fn transaction_values(
             ))
         })),
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
-        Value::Nullable(None),
+        Value::Nullable(
+            view_scoped_cardinality
+                .then(|| Box::new(Value::String("view-scoped-cardinality".to_owned()))),
+        ),
         Value::String(fate_string(&fate)),
-        Value::Nullable(global_time.map(|seq| Box::new(Value::U64(seq.0)))),
+        Value::Nullable(global_time.map(|time| Box::new(Value::U64(time.0)))),
         Value::Nullable(rejection_reason_tag(&fate).map(|reason| Box::new(Value::String(reason)))),
         Value::Nullable(
             rejection_reason_cascade_root(&fate).map(|root| Box::new(tx_id_value(root))),
@@ -1181,6 +1197,17 @@ pub(super) fn known_transaction_payload_matches(
         || &redacted_existing == incoming
         || existing == &redacted_incoming
         || redacted_existing == redacted_incoming
+}
+
+pub(super) fn known_transaction_payload_matches_redacted_cardinality(
+    existing: &Transaction,
+    incoming: &Transaction,
+) -> bool {
+    let mut existing = existing.clone();
+    existing.n_total_writes = 0;
+    let mut incoming = incoming.clone();
+    incoming.n_total_writes = 0;
+    known_transaction_payload_matches(&existing, &incoming)
 }
 
 pub(super) fn rejection_reason_tag(fate: &Fate) -> Option<String> {

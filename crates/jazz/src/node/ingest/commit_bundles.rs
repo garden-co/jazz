@@ -886,7 +886,10 @@ where
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
             existing_versions.sort();
-            if !known_transaction_payload_matches(&existing.tx, &tx) {
+            if !(known_transaction_payload_matches(&existing.tx, &tx)
+                || existing.view_scoped_cardinality
+                    && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
+            {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             let mut version_bundles = Vec::new();
@@ -901,7 +904,7 @@ where
                     None => version_bundles.push(version),
                 }
             }
-            if version_bundles.is_empty() {
+            if version_bundles.is_empty() && !existing.view_scoped_cardinality {
                 self.apply_fate_update(tx.tx_id, fate, global_time, Some(durability))?;
                 return Ok(());
             }
@@ -948,6 +951,7 @@ where
             global_time,
             durability,
             true,
+            false,
         )?;
         self.finalize_staged_transaction_ingest(
             batch,

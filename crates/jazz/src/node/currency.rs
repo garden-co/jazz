@@ -837,6 +837,9 @@ where
             durability: durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?,
+            view_scoped_cardinality: record
+                .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
+                .is_some_and(|value| value == "view-scoped-cardinality"),
         })
     }
 

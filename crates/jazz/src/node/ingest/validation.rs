@@ -11,7 +11,7 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_time, durability, true,
+            tx, versions, fate, global_time, durability, true, false,
         )
     }
 
@@ -24,7 +24,20 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_time, durability, false,
+            tx, versions, fate, global_time, durability, false, true,
+        )
+    }
+
+    pub(super) fn ingest_view_scoped_transaction_with_current_indexes(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+    ) -> Result<(), Error> {
+        self.ingest_transaction_and_versions_with_current_indexes(
+            tx, versions, fate, global_time, durability, true, true,
         )
     }
 
@@ -36,6 +49,7 @@ where
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         update_current_indexes: bool,
+        view_scoped_cardinality: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
         let publication_scope = self.database.begin_durable_publication_scope()?;
@@ -49,6 +63,7 @@ where
                 global_time,
                 durability,
                 update_current_indexes,
+                view_scoped_cardinality,
             )?;
             self.database.commit_batch(batch)?;
             let mut staged_global_times = Vec::new();
@@ -87,12 +102,29 @@ where
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         update_current_indexes: bool,
+        view_scoped_cardinality: bool,
     ) -> Result<(), Error> {
         self.merge_tx_time(tx.tx_id.time);
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
-        let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
-        let tx_values =
-            transaction_values(tx_node_alias, &tx, fate.clone(), global_time, durability);
+        let stored_tx = self.query_transaction(tx.tx_id)?;
+        let tx_already_known = stored_tx.is_some();
+        let preserve_authoritative_cardinality = view_scoped_cardinality
+            && stored_tx
+                .as_ref()
+                .is_some_and(|stored| !stored.view_scoped_cardinality);
+        let storage_tx = if preserve_authoritative_cardinality {
+            &stored_tx.as_ref().expect("checked above").tx
+        } else {
+            &tx
+        };
+        let tx_values = transaction_values_with_cardinality_scope(
+            tx_node_alias,
+            storage_tx,
+            fate.clone(),
+            global_time,
+            durability,
+            view_scoped_cardinality && !preserve_authoritative_cardinality,
+        );
         if tx_already_known {
             batch.update("jazz_transactions", tx_values);
         } else {

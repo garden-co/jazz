@@ -650,6 +650,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
     };
     authority_transport
         .send(update(vec![crate::protocol::VersionBundle {
+            scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: crate::tx::Transaction {
                 tx_id: TxId::new(TxTime::from(44), NodeUuid::from_bytes([0x44; 16])),
                 kind: crate::tx::TxKind::Mergeable,

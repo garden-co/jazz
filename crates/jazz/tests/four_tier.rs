@@ -1199,6 +1199,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         version_bundles: vec![VersionBundle {
             tx,
             versions,
+            scope: jazz::protocol::VersionBundleScope::CompleteTransaction,
             fate: Fate::Accepted,
             global_time: None,
             durability: DurabilityTier::Edge,

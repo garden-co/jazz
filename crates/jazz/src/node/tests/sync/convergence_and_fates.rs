@@ -548,6 +548,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             reset_result_set: true,
             version_carriers: Vec::new(),
             version_bundles: vec![VersionBundle {
+                scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                 tx: Transaction {
                     tx_id: bad_tx,
                     kind: TxKind::Mergeable,

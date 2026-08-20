@@ -14,10 +14,10 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-/// Version 10 carries optional field-grained contribution provenance on
-/// transactions. This is an intentional breaking baseline: older peers cannot
-/// safely decode the extended transaction payload, so negotiation rejects them.
-pub const WIRE_PROTOCOL_VERSION: u16 = 10;
+/// Version 11 adds explicit complete-transaction versus view-scoped bundle
+/// semantics. This is an intentional breaking baseline: older peers cannot
+/// safely decode the extended bundle payload, so negotiation rejects them.
+pub const WIRE_PROTOCOL_VERSION: u16 = 11;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -931,6 +931,7 @@ mod tests {
             .push(crate::protocol::VersionBundleRunOverride {
                 body_index: 2,
                 tx: None,
+                scope: None,
                 fate: Some(Fate::Pending),
                 global_time: None,
                 durability: None,
@@ -1023,6 +1024,7 @@ mod tests {
                         )
                         .unwrap(),
                     ],
+                    scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                     fate: Fate::Accepted,
                     global_time: Some(GlobalTime(10_000 + index as u64)),
                     // A sequence is the global-authority receipt, and so its

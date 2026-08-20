@@ -49,12 +49,20 @@ fn merge_receiver_version_bundle_ref(
         bundles.insert(bundle.tx.tx_id, bundle.to_owned_bundle());
         return Ok(());
     };
-    if existing.tx != *bundle.tx
+    let mut existing_tx_identity = existing.tx.clone();
+    existing_tx_identity.n_total_writes = 0;
+    let mut incoming_tx_identity = bundle.tx.clone();
+    incoming_tx_identity.n_total_writes = 0;
+    if existing_tx_identity != incoming_tx_identity
         || existing.fate != *bundle.fate
         || existing.global_time != bundle.global_time
         || existing.durability != bundle.durability
     {
         return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
+    }
+    if bundle.scope == crate::protocol::VersionBundleScope::CompleteTransaction {
+        existing.tx = bundle.tx.clone();
+        existing.scope = bundle.scope;
     }
     let mut seen = existing
         .versions
@@ -73,6 +81,13 @@ fn merge_receiver_version_bundle_ref(
         }
     }
     existing.versions = seen.into_values().collect();
+    if existing.scope == crate::protocol::VersionBundleScope::ViewScoped {
+        existing.tx.n_total_writes = existing
+            .versions
+            .len()
+            .try_into()
+            .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+    }
     Ok(())
 }
 
@@ -708,6 +723,12 @@ where
                 version.deletion().is_some()
                     || wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
             });
+            bundle.tx.n_total_writes = bundle
+                .versions
+                .len()
+                .try_into()
+                .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+            bundle.scope = crate::protocol::VersionBundleScope::ViewScoped;
         }
         let version_carriers = build_version_carriers_from_singletons(version_bundles)
             .map_err(|_| Error::InvalidStoredValue("failed to build version-bundle run"))?;
@@ -1207,9 +1228,56 @@ where
             bundle.global_time,
             bundle.durability,
         )?;
+        if usize::try_from(bundle.tx.n_total_writes).ok() != Some(bundle.versions.len()) {
+            return Err(Error::MalformedViewUpdate(
+                "version bundle count does not match its declared scope payload",
+            ));
+        }
+        if let Some(stored) = self.query_transaction(bundle.tx.tx_id)? {
+            let mut stored_identity = stored.tx;
+            stored_identity.n_total_writes = 0;
+            let mut incoming_identity = bundle.tx.clone();
+            incoming_identity.n_total_writes = 0;
+            if stored_identity != incoming_identity {
+                return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
+            }
+        }
         if bundle.tx.kind != TxKind::Exclusive {
+            if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
+                return self.ingest_view_scoped_transaction_with_current_indexes(
+                    bundle.tx,
+                    bundle.versions,
+                    bundle.fate,
+                    bundle.global_time,
+                    bundle.durability,
+                );
+            }
             return self.ingest_known_transaction(
                 bundle.tx,
+                bundle.versions,
+                bundle.fate,
+                bundle.global_time,
+                bundle.durability,
+            );
+        }
+        if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
+            let tx_id = bundle.tx.tx_id;
+            let mut known_keys = if self.query_transaction(tx_id)?.is_some() {
+                self.query_versions_for_tx(tx_id)?
+                    .iter()
+                    .map(|stored| Ok(view_version_key(&self.version_record_from_row(stored)?)))
+                    .collect::<Result<BTreeSet<_>, Error>>()?
+            } else {
+                BTreeSet::new()
+            };
+            known_keys.extend(bundle.versions.iter().map(view_version_key));
+            let mut redacted_tx = bundle.tx;
+            redacted_tx.n_total_writes = known_keys
+                .len()
+                .try_into()
+                .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+            return self.ingest_transaction_fragment_without_current_indexes(
+                redacted_tx,
                 bundle.versions,
                 bundle.fate,
                 bundle.global_time,
@@ -1294,6 +1362,14 @@ where
             bundle.global_time,
             bundle.durability,
         )?;
+        if usize::try_from(bundle.tx.n_total_writes).ok() != Some(bundle.versions.len()) {
+            return Err(Error::MalformedViewUpdate(
+                "version bundle count does not match its declared scope payload",
+            ));
+        }
+        if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
+            return Ok(false);
+        }
         if bundle.tx.kind == TxKind::Exclusive {
             let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
                 Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
@@ -1392,10 +1468,21 @@ where
             contribution_merge,
             ..
         } = stored_tx.tx.clone();
+        let scope = if usize::try_from(n_total_writes).ok() == Some(tx_versions.len()) {
+            crate::protocol::VersionBundleScope::CompleteTransaction
+        } else {
+            crate::protocol::VersionBundleScope::ViewScoped
+        };
         let tx_payload = Transaction {
             tx_id,
             kind,
-            n_total_writes,
+            n_total_writes: match scope {
+                crate::protocol::VersionBundleScope::CompleteTransaction => n_total_writes,
+                crate::protocol::VersionBundleScope::ViewScoped => tx_versions
+                    .len()
+                    .try_into()
+                    .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?,
+            },
             made_by,
             permission_subject,
             base_snapshot,
@@ -1418,6 +1505,7 @@ where
         Ok(VersionBundle {
             tx: tx_payload,
             versions,
+            scope,
             fate: stored_tx.fate.clone(),
             global_time: stored_tx.global_time,
             durability: stored_tx.durability,

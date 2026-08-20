@@ -3206,7 +3206,11 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
     assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
-    assert!(version_bundles[0].tx.n_total_writes > version_bundles[0].versions.len() as u32);
+    assert_eq!(
+        version_bundles[0].scope,
+        crate::protocol::VersionBundleScope::ViewScoped
+    );
+    assert_eq!(version_bundles[0].tx.n_total_writes, 1);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(0x71));
     assert!(peer.shipped_complete_tx_payloads().is_empty());
@@ -3404,7 +3408,11 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, docs_tx);
     assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
-    assert!(version_bundles[0].tx.n_total_writes > version_bundles[0].versions.len() as u32);
+    assert_eq!(
+        version_bundles[0].scope,
+        crate::protocol::VersionBundleScope::ViewScoped
+    );
+    assert_eq!(version_bundles[0].tx.n_total_writes, 1);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_a);
     assert!(peer.shipped_complete_tx_payloads().is_empty());

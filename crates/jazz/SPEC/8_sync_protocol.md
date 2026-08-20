@@ -129,12 +129,15 @@ The message variants and their payloads are:
 | `PublishSchemaWithLens` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                               |
 
 A `VersionBundle`, carried in `ViewUpdate.version_bundles`, is `{ tx, versions,
-fate, global_time, durability }`: a settled **view payload bundle** with the fate
-state observed when it shipped. A bundle may cover a complete transaction, a
-partial mergeable transaction, or the row/version witnesses that make an
-exclusive transaction complete for this subscription view. A bundle whose
-`versions.len() == tx.n_total_writes` is also a complete transaction payload and
-may enter the peer's complete-transaction-payload inventory for later dedup.
+scope, fate, global_time, durability }`: a settled **view payload bundle** with
+the fate state observed when it shipped. `scope` explicitly distinguishes
+`CompleteTransaction` from `ViewScoped`; cardinality equality is not a scope
+witness. A complete bundle carries the authored `tx.n_total_writes` and may
+enter the peer's complete-transaction-payload inventory for later dedup. A
+view-scoped bundle carries only the row/version witnesses admitted by that
+selected view and MUST redact `tx.n_total_writes` to `versions.len()`. It never
+establishes complete-payload coverage, even when those numbers happen to equal
+the authored transaction's true cardinality.
 
 ### 8.2 Upstream: commit units
 

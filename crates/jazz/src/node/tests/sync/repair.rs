@@ -532,6 +532,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: vec![VersionBundle {
+            scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: transaction,
             versions: vec![old_inline_task],
             fate: Fate::Accepted,

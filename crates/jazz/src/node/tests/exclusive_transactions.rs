@@ -1200,7 +1200,11 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     assert_eq!(version_bundles.len(), 1);
     let bundle = version_bundles.pop().unwrap();
     assert_eq!(bundle.tx.kind, TxKind::Exclusive);
-    assert_eq!(bundle.tx.n_total_writes, 2);
+    assert_eq!(bundle.tx.n_total_writes, 1);
+    assert_eq!(
+        bundle.scope,
+        crate::protocol::VersionBundleScope::ViewScoped
+    );
     assert_eq!(bundle.versions.len(), 1);
     assert_eq!(bundle.versions[0].row_uuid(), row(1));
     assert_eq!(result_member_adds, vec![("todos".to_owned().into(), row(1), bundle.tx.tx_id)]);
@@ -1420,7 +1424,11 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     };
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
-    assert_eq!(version_bundles[0].tx.n_total_writes, 2);
+    assert_eq!(version_bundles[0].tx.n_total_writes, 1);
+    assert_eq!(
+        version_bundles[0].scope,
+        crate::protocol::VersionBundleScope::ViewScoped
+    );
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(1));
     assert_eq!(

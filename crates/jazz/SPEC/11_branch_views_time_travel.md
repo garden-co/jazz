@@ -266,7 +266,10 @@ Trusted history replication may carry complete commit units. Client-facing
 selected delivery must not reveal unauthorized sibling versions or even hidden
 table/branch key/write-count structure merely because an authorized version shares
 their `TxId`. Selected view facts may retain the transaction witness needed for
-settlement without reconstructing hidden payload (`INV-BVIEW-17`, ch. 8).
+settlement without reconstructing hidden payload. Such bundles are explicitly
+`ViewScoped` and redact their transaction write count to the delivered version
+count; only trusted complete replication uses `CompleteTransaction` with the
+authored count (`INV-BVIEW-17`, ch. 8).
 
 ### 11.5 Maintained subscriptions
 

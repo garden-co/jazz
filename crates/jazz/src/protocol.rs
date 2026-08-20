@@ -854,12 +854,28 @@ fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static s
 }
 
 /// Transaction plus row-version payload and the upstream state observed with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum VersionBundleScope {
+    /// The bundle carries every write authored by the transaction.
+    CompleteTransaction,
+    /// The bundle carries only the writes admitted by one selected view.
+    ///
+    /// For this scope `Transaction::n_total_writes` is deliberately redacted to
+    /// the number of versions in this bundle. It is not the authored transaction
+    /// cardinality and MUST NOT establish complete-payload coverage.
+    #[default]
+    ViewScoped,
+}
+
+/// Transaction plus row-version payload and the upstream state observed with it.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct VersionBundle {
     /// Transaction payload for the versions.
     pub tx: Transaction,
     /// Row versions carried by the transaction.
     pub versions: Vec<VersionRecord>,
+    /// Whether the payload is complete or selected for one view.
+    pub scope: VersionBundleScope,
     /// Fate known when the bundle was shipped.
     pub fate: Fate,
     /// Global timestamp known when shipped.
@@ -875,6 +891,8 @@ pub struct VersionBundleRef<'a> {
     pub tx: &'a Transaction,
     /// Row versions carried by the transaction.
     pub versions: &'a [VersionRecord],
+    /// Whether the payload is complete or selected for one view.
+    pub scope: VersionBundleScope,
     /// Fate known when the bundle was shipped.
     pub fate: &'a Fate,
     /// Global timestamp known when shipped.
@@ -889,6 +907,7 @@ impl<'a> VersionBundleRef<'a> {
         VersionBundle {
             tx: self.tx.clone(),
             versions: self.versions.to_vec(),
+            scope: self.scope,
             fate: self.fate.clone(),
             global_time: self.global_time,
             durability: self.durability,
@@ -902,6 +921,7 @@ impl VersionBundle {
         VersionBundleRef {
             tx: &self.tx,
             versions: &self.versions,
+            scope: self.scope,
             fate: &self.fate,
             global_time: self.global_time,
             durability: self.durability,
@@ -969,6 +989,7 @@ impl VersionBundleRun {
                 let override_ = VersionBundleRunOverride {
                     body_index: index as u32,
                     tx: (bundle.tx != first.tx).then(|| bundle.tx.clone()),
+                    scope: (bundle.scope != first.scope).then_some(bundle.scope),
                     fate: (bundle.fate != first.fate).then(|| bundle.fate.clone()),
                     global_time: (bundle.global_time != first.global_time)
                         .then_some(bundle.global_time),
@@ -982,6 +1003,7 @@ impl VersionBundleRun {
             header: VersionBundleRunHeader {
                 table,
                 tx: first.tx.clone(),
+                scope: first.scope,
                 body_count: bodies.len() as u32,
                 fate: first.fate.clone(),
                 global_time: first.global_time,
@@ -1054,6 +1076,9 @@ impl VersionBundleRun {
                         .and_then(|override_| override_.tx.clone())
                         .unwrap_or_else(|| self.header.tx.clone()),
                     versions: body.versions.clone(),
+                    scope: override_
+                        .and_then(|override_| override_.scope)
+                        .unwrap_or(self.header.scope),
                     fate: override_
                         .and_then(|override_| override_.fate.clone())
                         .unwrap_or_else(|| self.header.fate.clone()),
@@ -1087,6 +1112,9 @@ impl VersionBundleRun {
                         .and_then(|override_| override_.tx.as_ref())
                         .unwrap_or(&self.header.tx),
                     versions: &body.versions,
+                    scope: override_
+                        .and_then(|override_| override_.scope)
+                        .unwrap_or(self.header.scope),
                     fate: override_
                         .and_then(|override_| override_.fate.as_ref())
                         .unwrap_or(&self.header.fate),
@@ -1109,6 +1137,8 @@ pub struct VersionBundleRunHeader {
     pub table: Option<groove::Intern<String>>,
     /// Default transaction payload for each body.
     pub tx: Transaction,
+    /// Default payload scope for each body.
+    pub scope: VersionBundleScope,
     /// Declared number of bodies; must match `VersionBundleRun::bodies`.
     pub body_count: u32,
     /// Default fate for each body.
@@ -1133,6 +1163,8 @@ pub struct VersionBundleRunOverride {
     pub body_index: u32,
     /// Transaction override for this body.
     pub tx: Option<Transaction>,
+    /// Payload-scope override for this body.
+    pub scope: Option<VersionBundleScope>,
     /// Fate override for this body.
     pub fate: Option<Fate>,
     /// Global timestamp override for this body. `Some(None)` overrides to absent.
@@ -1144,6 +1176,7 @@ pub struct VersionBundleRunOverride {
 impl VersionBundleRunOverride {
     fn has_overrides(&self) -> bool {
         self.tx.is_some()
+            || self.scope.is_some()
             || self.fate.is_some()
             || self.global_time.is_some()
             || self.durability.is_some()

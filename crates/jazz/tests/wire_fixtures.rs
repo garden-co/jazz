@@ -474,6 +474,7 @@ fn mixed_version_carriers(
                     )
                     .expect("fixture row encodes"),
                 ],
+                scope: jazz::protocol::VersionBundleScope::CompleteTransaction,
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(100 + index)),
                 durability: DurabilityTier::Global,
@@ -516,7 +517,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v10",
+        fixture_set: "jazz-wire-message-frames-v11",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -540,7 +541,7 @@ fn wire_message_frame_fixtures_are_current() {
         actual, expected,
         "wire fixtures changed; review compatibility and run \
          `JAZZ_UPDATE_WIRE_FIXTURES=1 cargo test -p jazz --test wire_fixtures \
-         wire_message_frame_fixtures_are_current -- --ignored --exact` to accept"
+         wire_message_frame_fixtures_are_current -- --exact` to accept"
     );
 }
 
