@@ -83,14 +83,15 @@ alongside the existing m3 soak conventions.
 
 **Gate cadence — batched (Anselm-approved 2026-07-11).** Levers may be _batched_
 before a full canonical gate run: land several commits, then run the full gate
-set once per batch **before push**, rather than paying the full set per lever.
+set once per batch before landing, rather than paying the full set per lever.
 Per-lever, use focused checks (the affected suites + all three mechanism canaries)
-and `/code-review` as the stopgap. Never push a batch that has not passed the full
-set. Two tiers make this concrete:
+and `/code-review` as the stopgap. Red checkpoint pushes are allowed when the
+user explicitly requests them; report the known failures clearly. Two tiers make
+this concrete:
 
 - _Iteration tier_ (intra-batch, per lever): focused crate suites + the three
   incremental-delivery canaries + oracle at low seed count; skip smoke. ~fast.
-- _Landing tier_ (before push): the full canonical set below + smoke +
+- _Landing tier_ (before merge): the full canonical set below + smoke +
   the jazz-private sensitive-data guard.
 
 **Sensitive-data guard.** the jazz-private sensitive-data guard (in lefthook pre-commit)
