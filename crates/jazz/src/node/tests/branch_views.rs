@@ -12,9 +12,11 @@ fn branch_view_schema() -> JazzSchema {
             [
                 ColumnSchema::new("branch_id", ColumnType::Uuid),
                 ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner", ColumnType::Uuid),
             ],
         )
-        .with_branch_dimension("branch_id", dimension),
+        .with_branch_dimension("branch_id", dimension)
+        .with_read_policy(Policy::owner_only("todos", "owner")),
         TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])],
     )
 }
@@ -32,19 +34,26 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     let overridden = row(0x44);
     let base = branch_selector(0x45);
     let head = branch_selector(0x46);
+    let owner = AuthorId::from_bytes([0x48; 16]);
 
     for (row_uuid, title) in [(inherited, "inherited"), (overridden, "base")] {
         node.commit_mergeable(
             MergeableCommit::new("todos", row_uuid, 10)
                 .branch(base.clone())
-                .cells(BTreeMap::from([("title".to_owned(), v(title))])),
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v(title)),
+                    ("owner".to_owned(), Value::Uuid(owner.0)),
+                ])),
         )
         .unwrap();
     }
     node.commit_mergeable(
         MergeableCommit::new("todos", overridden, 20)
             .branch(head.clone())
-            .cells(BTreeMap::from([("title".to_owned(), v("head"))])),
+            .cells(BTreeMap::from([
+                ("title".to_owned(), v("head")),
+                ("owner".to_owned(), Value::Uuid(owner.0)),
+            ])),
     )
     .unwrap();
     let shared = row(0x47);
@@ -89,6 +98,30 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(titles[&inherited], "inherited");
     assert_eq!(titles[&overridden], "head");
+    for row in snapshot.rows.iter().take(snapshot.root_count) {
+        assert_eq!(row.cell(todos_table, "owner"), Some(Value::Uuid(owner.0)));
+    }
+
+    let authorized = node
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            owner,
+            &read_view,
+        )
+        .unwrap();
+    assert_eq!(authorized.root_count, 2);
+    let denied = node
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorId::from_bytes([0x49; 16]),
+            &read_view,
+        )
+        .unwrap();
+    assert_eq!(denied.root_count, 0);
 
     let shared_default = node
         .query_relation_snapshot_for_serving(

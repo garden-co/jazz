@@ -290,7 +290,6 @@ where
         {
             if request.visibility != RowVisibility::Visible
                 || !request.requirements.metadata.is_empty()
-                || !matches!(authorization, SourceAuthorizationRequest::System)
             {
                 return Err(source_resolution_error(request, SourceGap::Coverage));
             }
@@ -304,8 +303,48 @@ where
                     base,
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let graph = inline_current_graph(&table, rows)
+            let base_graph = inline_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let graph = match &authorization {
+                SourceAuthorizationRequest::System => base_graph,
+                SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                }
+                | SourceAuthorizationRequest::PolicyProof {
+                    permission_subject,
+                    plan,
+                } => {
+                    if plan.protected_source.table != table.name
+                        || plan.role != PolicyDecisionRole::Read
+                        || plan.protected_row_field != "row_uuid"
+                    {
+                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                    }
+                    let policy_request = self.node.table_read_policy_authorization_request(
+                        self.read_view.policy_schema,
+                        &table.name,
+                        *permission_subject,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                        graph_tier.expect("branch view has a current tier"),
+                        plan.binding_source_shape.clone(),
+                        plan.binding_user_params.clone(),
+                        plan.binding_claim_params.clone(),
+                    );
+                    let policy_request = policy_request.map(|mut request| {
+                        request.reads.primary = self.read_view.clone();
+                        request
+                    });
+                    self.node
+                        .policy_filtered_current_source_graph_via_query_engine(
+                            policy_request,
+                            base_graph,
+                            &current_row_fields(&table),
+                        )
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                        .graph
+                }
+            };
             (
                 graph,
                 current_row_descriptor(&table),
