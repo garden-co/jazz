@@ -26,6 +26,7 @@ struct EvaluationSession<'a> {
     eval_memo_bytes: usize,
     memo_use_clock: u64,
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+    binding_frontiers: HashMap<String, u64>,
     storage: OwnedStorage<'a>,
     storage_requests: StorageRequests<'a>,
     evaluation_inputs: EvaluationInputs,
@@ -720,11 +721,25 @@ impl<'a> EvaluationSession<'a> {
             eval_memo_bytes,
             memo_use_clock: runtime.memo_use_clock,
             node_meta,
+            binding_frontiers: runtime.binding_frontiers.clone(),
             storage,
             storage_requests,
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
         })
+    }
+
+    fn advance_binding_input(&mut self, shape: &str) {
+        *self.binding_frontiers.entry(shape.to_owned()).or_default() += 1;
+        for meta in self.node_meta.values_mut() {
+            if meta
+                .input_signature
+                .as_ref()
+                .is_some_and(|signature| signature.bindings.iter().any(|binding| binding == shape))
+            {
+                meta.input_generation = meta.input_generation.wrapping_add(1);
+            }
+        }
     }
 
     fn poll(
@@ -764,7 +779,7 @@ impl<'a> EvaluationSession<'a> {
                     eval_memo: &mut self.eval_memo,
                     eval_memo_bytes: &mut self.eval_memo_bytes,
                     table_frontiers: &runtime.table_frontiers,
-                    binding_frontiers: &runtime.binding_frontiers,
+                    binding_frontiers: &self.binding_frontiers,
                     memo_use_clock: &mut self.memo_use_clock,
                     node_meta: &mut self.node_meta,
                     storage: Some(self.storage.as_ref()),
@@ -1383,7 +1398,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.hydration_roots_owned(roots, OwnedStorage::new(Rc::new(storage)), mode, None)
+        self.hydration_roots_owned(roots, OwnedStorage::new(Rc::new(storage)), mode, None, None)
             .await
     }
 
@@ -1393,6 +1408,7 @@ impl IvmRuntime {
         owned_storage: OwnedStorage<'a>,
         mode: HydrationMode,
         binding_snapshots: Option<HashMap<String, RecordDeltas>>,
+        binding_frontier_advance: Option<&str>,
     ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
         let binding_snapshots = binding_snapshots.unwrap_or_else(|| self.binding_snapshot_deltas());
@@ -1405,6 +1421,9 @@ impl IvmRuntime {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, owned_storage)?;
+        if let Some(shape) = binding_frontier_advance {
+            session.advance_binding_input(shape);
+        }
         std::future::poll_fn(|cx| {
             session.poll(
                 self,
@@ -1431,7 +1450,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.hydration_snapshots_with_binding_snapshots(outputs, storage, mode, None)
+        self.hydration_snapshots_with_binding_snapshots(outputs, storage, mode, None, None)
             .await
     }
 
@@ -1441,6 +1460,7 @@ impl IvmRuntime {
         storage: &S,
         mode: HydrationMode,
         binding_snapshots: Option<HashMap<String, RecordDeltas>>,
+        binding_frontier_advance: Option<&str>,
     ) -> Result<MultisinkDeltas, IvmRuntimeError>
     where
         S: OrderedKvStorage,
@@ -1458,6 +1478,7 @@ impl IvmRuntime {
                 OwnedStorage::new(Rc::new(storage)),
                 mode,
                 binding_snapshots,
+                binding_frontier_advance,
             )
             .await?;
         let mut sinks = BTreeMap::new();
@@ -1532,6 +1553,7 @@ impl IvmRuntime {
             storage,
             HydrationMode::Subscription,
             Some(snapshots),
+            (!binding.deltas.is_empty()).then_some(binding.shape.as_str()),
         )
         .await
     }
