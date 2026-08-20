@@ -1553,10 +1553,7 @@ fn core_identity(context: &AppContext, default_session: Option<&Session>) -> Cor
         .map(|id| id.0)
         .unwrap_or_else(Uuid::now_v7);
     let author_uuid = default_session
-        .map(|session| {
-            Uuid::parse_str(session.user_id.trim())
-                .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_URL, session.user_id.as_bytes()))
-        })
+        .map(|session| crate::tools::identity::author_id_from_principal(&session.user_id).0)
         .unwrap_or(node_uuid);
     CoreDbIdentity {
         node: CoreNodeUuid(node_uuid),
@@ -1565,10 +1562,7 @@ fn core_identity(context: &AppContext, default_session: Option<&Session>) -> Cor
 }
 
 fn core_author_from_principal(principal: &str) -> CoreAuthorId {
-    CoreAuthorId(
-        Uuid::parse_str(principal.trim())
-            .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_URL, principal.as_bytes())),
-    )
+    crate::tools::identity::author_id_from_principal(principal)
 }
 
 fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
@@ -1644,6 +1638,9 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
         ));
     };
     let mut core_claims = HashMap::new();
+    for (name, value) in claims {
+        core_claims.insert(name, json_claim_to_core_value(value)?);
+    }
     core_claims.insert("sub".to_owned(), CoreValue::String(session.user_id.clone()));
     core_claims.insert(
         "user_id".to_owned(),
@@ -1653,9 +1650,6 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
         "authMode".to_owned(),
         CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
     );
-    for (name, value) in claims {
-        core_claims.insert(name, json_claim_to_core_value(value)?);
-    }
     Ok(core_claims)
 }
 
@@ -2306,7 +2300,7 @@ impl PublicQueryDecoder {
     fn core_subscription_row_to_public(
         &self,
         db: &Backend,
-        query: &Query,
+        _query: &Query,
         row: &CoreSubscriptionOutputRow,
     ) -> Result<Row> {
         let (_, encoded) = row.row.encoded_record();
@@ -2326,7 +2320,7 @@ impl PublicQueryDecoder {
         #[cfg(feature = "testing")]
         let public = {
             let fields = self
-                .core_rows_to_query_results(db, query, vec![row.row.clone()])
+                .core_rows_to_query_results(db, _query, vec![row.row.clone()])
                 .ok()
                 .and_then(|mut results| results.pop())
                 .map(|result| result.fields)
@@ -3219,6 +3213,31 @@ mod tests {
             CoreValue::U64(9_007_199_254_740_992)
         );
         assert!(json_claim_to_core_value(json!({ "role": "admin" })).is_err());
+    }
+
+    #[test]
+    fn client_session_reserved_claims_override_application_claims() {
+        let session = Session::new("trusted-user")
+            .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
+            .with_claims(json!({
+                "sub": "spoofed-subject",
+                "user_id": "spoofed-user",
+                "authMode": "external",
+            }));
+
+        let claims = session_claims_to_core_claims(&session).unwrap();
+        assert_eq!(
+            claims.get("sub"),
+            Some(&CoreValue::String("trusted-user".to_owned()))
+        );
+        assert_eq!(
+            claims.get("user_id"),
+            Some(&CoreValue::String("trusted-user".to_owned()))
+        );
+        assert_eq!(
+            claims.get("authMode"),
+            Some(&CoreValue::String("local-first".to_owned()))
+        );
     }
 
     // This narrow internal test is necessary because the wire crossing is an

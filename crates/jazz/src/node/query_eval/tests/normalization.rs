@@ -150,6 +150,84 @@ fn declared_id_join_types_and_flat_join_physical_alias_validate() {
     assert!(flat.validate(&schema).is_ok());
 }
 
+/// Flat-join filters must route a declared string `id` to authored fields on
+/// both the root and joined source, while `_id` routes to the joined row UUID.
+///
+/// alice ──filter parent.id──► parent source
+/// alice ──filter child.id/_id──► child source
+#[test]
+fn flat_join_filters_preserve_declared_id_and_physical_alias_semantics() {
+    let schema = JazzSchema::new([
+        TableSchema::new("parents", [ColumnSchema::new("id", ColumnType::String)]),
+        TableSchema::new(
+            "children",
+            [
+                ColumnSchema::new("id", ColumnType::String),
+                ColumnSchema::new("parent", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("parent", "parents"),
+    ]);
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([8; 16]), schema.clone());
+    let physical_child_id = uuid::Uuid::from_u128(0x1234);
+    let shape = Query::from(table("parents").alias("parent"))
+        .flat_join(
+            table("children").alias("child"),
+            "parent._id",
+            "child.parent",
+        )
+        .filter(eq(col("parent.id"), lit("parent-key")))
+        .filter(eq(col("child.id"), lit("child-key")))
+        .filter(eq(col("child._id"), lit(physical_child_id)))
+        .validate(&schema)
+        .expect("declared ids and physical alias validate independently");
+    let normalized = node
+        .normalized_row_set_shape(&shape, &shape.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+
+    assert!(matches!(
+        normalized.nodes.get(&RowSetNodeId("flat_join:root_filter".to_owned())),
+        Some(RowSetExpr::Filter { predicate: NormalizedPredicateExpr::Compare { left: NormalizedValueRef::SourceField { field, .. }, .. }, .. })
+            if field == "id"
+    ));
+    assert!(matches!(
+        normalized.nodes.get(&RowSetNodeId("flat_join:0:filter".to_owned())),
+        Some(RowSetExpr::Filter { predicate: NormalizedPredicateExpr::And(predicates), .. })
+            if predicates.iter().any(|predicate| matches!(
+                predicate,
+                NormalizedPredicateExpr::Compare { left: NormalizedValueRef::SourceField { field, .. }, .. }
+                    if field == "id"
+            )) && predicates.iter().any(|predicate| matches!(
+                predicate,
+                NormalizedPredicateExpr::Compare { left: NormalizedValueRef::RowId(_), .. }
+            ))
+    ));
+}
+
+/// Outside FlatJoin, `_id` remains an ordinary authored column rather than a
+/// universal alias for the physical row identity.
+#[test]
+fn ordinary_query_does_not_infer_flat_join_physical_id_alias() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "things",
+        [ColumnSchema::new("_id", ColumnType::String)],
+    )]);
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([9; 16]), schema.clone());
+    let shape = Query::from("things")
+        .filter(eq(col("_id"), lit("authored-field")))
+        .validate(&schema)
+        .unwrap();
+    let normalized = node
+        .normalized_row_set_shape(&shape, &shape.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+
+    assert!(matches!(
+        normalized.nodes.get(&RowSetNodeId("query:filter".to_owned())),
+        Some(RowSetExpr::Filter { predicate: NormalizedPredicateExpr::Compare { left: NormalizedValueRef::SourceField { field, .. }, .. }, .. })
+            if field == "_id"
+    ));
+}
+
 /// Lookup and reachability policies must reject declared ID joins whose
 /// authored types disagree, while a matching declared-ID reachability path
 /// remains valid.

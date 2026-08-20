@@ -342,10 +342,19 @@ fn flat_join_filter_schema(
 ) -> Result<TableSchema, QueryError> {
     let mut columns = Vec::new();
     for (scope, table) in sources {
+        // `id` retains its normal effective-column semantics: a declared
+        // field wins, and only legacy tables expose their physical row UUID
+        // through that spelling. `_id` is the explicit physical-row alias.
         columns.push(JazzColumnSchema::new(
-            format!("{scope}.id"),
+            format!("{scope}._id"),
             ColumnType::Uuid,
         ));
+        if !has_declared_id(table) {
+            columns.push(JazzColumnSchema::new(
+                format!("{scope}.id"),
+                ColumnType::Uuid,
+            ));
+        }
         for magic in ["$createdBy", "$updatedBy", "$createdAt", "$updatedAt"] {
             columns.push(JazzColumnSchema::new(
                 format!("{scope}.{magic}"),
@@ -358,7 +367,6 @@ fn flat_join_filter_schema(
             table
                 .columns
                 .iter()
-                .filter(|column| column.name != "id")
                 .map(|column| {
                     JazzColumnSchema::new(
                         format!("{scope}.{}", column.name),
@@ -482,13 +490,13 @@ fn qualify_flat_join_column(
                 table: "flat join source".to_owned(),
                 column: scope.to_owned(),
             })?;
-        planner_column_type(table, field)?;
+        flat_join_column_type(table, field)?;
         return Ok(column.to_owned());
     }
 
     let mut matches = sources
         .iter()
-        .filter(|(_, table)| planner_column_type(table, column).is_ok())
+        .filter(|(_, table)| flat_join_column_type(table, column).is_ok())
         .map(|(scope, _)| scope.clone());
     let Some(scope) = matches.next() else {
         return Err(QueryError::UnknownColumn {

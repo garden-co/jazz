@@ -271,6 +271,64 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     );
 }
 
+#[test]
+fn duplicate_structured_query_authorization_mismatch_forces_reset() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x92));
+    for (index, title) in ["one", "two"].into_iter().enumerate() {
+        let tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(0x40 + index as u8), 1_000 + index as u64)
+                    .cells(title_cells(title)),
+            )
+            .unwrap();
+        accept_global(&mut core, tx, index as u64 + 1);
+    }
+    let shape = Query::from("todos")
+        .aggregate([Aggregate::count()])
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let canonical = subscription_key(&shape, &binding);
+    let target = SubscriptionKey {
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x47)),
+        ..canonical
+    };
+    let mut peer = PeerState::client_link(AuthorId::from_bytes([0x11; 16]));
+    peer.rehydrate_query_for_subscription_with_opts(
+        &mut core,
+        canonical,
+        &shape,
+        &binding,
+        RegisterShapeOptions::default(),
+    )
+    .unwrap();
+    peer.advance_authorization_progress();
+    peer.declare_known_state(
+        target,
+        Some(KnownStateDeclaration::FastWithAuthorizationProgress {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            position: GlobalSeq(2),
+            authorization_progress: 0,
+        }),
+    );
+
+    let update = peer
+        .rehydrate_query_for_subscription_from_maintained_subscription(
+            &mut core, canonical, target, &shape,
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate {
+        reset_result_set, ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+    assert!(
+        reset_result_set,
+        "structured duplicate usage must not resume across authorization generations"
+    );
+}
+
 fn output_member(root: RowUuid, joined: RowUuid, time: u64) -> ResultMemberEntry {
     RealRowMemberEntry::current_content((
         "todos".to_owned().into(),
