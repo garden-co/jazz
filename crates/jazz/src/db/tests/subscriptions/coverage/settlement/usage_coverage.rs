@@ -308,7 +308,9 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
     server.tick().unwrap();
     {
         let subscriber_ref = subscriber.borrow();
-        let ConnectionLink::Subscriber { served, .. } = &subscriber_ref.link else {
+        let ConnectionLink::Subscriber(SubscriberConnectionState { served, .. }) =
+            &subscriber_ref.link
+        else {
             panic!("expected subscriber connection");
         };
         assert!(served.is_empty(), "final query detach must unsubscribe");
@@ -344,7 +346,8 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
     client.tick().unwrap();
     server.tick().unwrap();
     let subscriber_ref = reconnected_subscriber.borrow();
-    let ConnectionLink::Subscriber { served, .. } = &subscriber_ref.link else {
+    let ConnectionLink::Subscriber(SubscriberConnectionState { served, .. }) = &subscriber_ref.link
+    else {
         panic!("expected subscriber connection");
     };
     assert!(served.is_empty(), "final stream drop must unsubscribe");
@@ -384,7 +387,7 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     server.tick().unwrap();
     client.tick().unwrap();
     let served_len = match &second_subscriber.borrow().link {
-        ConnectionLink::Subscriber { served, .. } => served.len(),
+        ConnectionLink::Subscriber(SubscriberConnectionState { served, .. }) => served.len(),
         _ => panic!("expected subscriber connection"),
     };
     assert_eq!(served_len, 2, "reconnect must replay S/q1 and distinct q2");
@@ -393,7 +396,7 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     client.tick().unwrap();
     server.tick().unwrap();
     let served_len = match &second_subscriber.borrow().link {
-        ConnectionLink::Subscriber { served, .. } => served.len(),
+        ConnectionLink::Subscriber(SubscriberConnectionState { served, .. }) => served.len(),
         _ => panic!("expected subscriber connection"),
     };
     assert_eq!(served_len, 1);
@@ -402,7 +405,7 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     client.tick().unwrap();
     server.tick().unwrap();
     let served_len = match &second_subscriber.borrow().link {
-        ConnectionLink::Subscriber { served, .. } => served.len(),
+        ConnectionLink::Subscriber(SubscriberConnectionState { served, .. }) => served.len(),
         _ => panic!("expected subscriber connection"),
     };
     assert_eq!(served_len, 0);
@@ -428,7 +431,7 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     client.tick().unwrap();
     server.tick().unwrap();
     let served_len = match &third_subscriber.borrow().link {
-        ConnectionLink::Subscriber { served, .. } => served.len(),
+        ConnectionLink::Subscriber(SubscriberConnectionState { served, .. }) => served.len(),
         _ => panic!("expected subscriber connection"),
     };
     assert_eq!(served_len, 0);
@@ -468,12 +471,12 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
     client.tick().unwrap();
 
     let subscriber_ref = subscriber.borrow();
-    let ConnectionLink::Subscriber {
+    let ConnectionLink::Subscriber(SubscriberConnectionState {
         peer,
         served,
         coverage_groups,
         ..
-    } = &subscriber_ref.link
+    }) = &subscriber_ref.link
     else {
         panic!("expected subscriber connection");
     };
@@ -494,11 +497,11 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
     client.tick().unwrap();
     server.tick().unwrap();
     let subscriber_ref = subscriber.borrow();
-    let ConnectionLink::Subscriber {
+    let ConnectionLink::Subscriber(SubscriberConnectionState {
         served,
         coverage_groups,
         ..
-    } = &subscriber_ref.link
+    }) = &subscriber_ref.link
     else {
         panic!("expected subscriber connection");
     };
@@ -721,7 +724,9 @@ fn parked_branch_opening_is_not_cleared_by_unrelated_applied_view() {
     let global_subscription = subscriptions[1];
     {
         let mut upstream = upstream.borrow_mut();
-        let ConnectionLink::Upstream { branch_views, .. } = &mut upstream.link else {
+        let ConnectionLink::Upstream(UpstreamConnectionState { branch_views, .. }) =
+            &mut upstream.link
+        else {
             unreachable!()
         };
         branch_views.insert(branch_subscription, branch);
@@ -809,11 +814,11 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     );
 
     let subscriber_ref = subscriber.borrow();
-    let ConnectionLink::Subscriber {
+    let ConnectionLink::Subscriber(SubscriberConnectionState {
         served,
         coverage_groups,
         ..
-    } = &subscriber_ref.link
+    }) = &subscriber_ref.link
     else {
         panic!("expected subscriber connection");
     };
@@ -830,11 +835,11 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     client.tick().unwrap();
     server.tick().unwrap();
     let subscriber_ref = subscriber.borrow();
-    let ConnectionLink::Subscriber {
+    let ConnectionLink::Subscriber(SubscriberConnectionState {
         served,
         coverage_groups,
         ..
-    } = &subscriber_ref.link
+    }) = &subscriber_ref.link
     else {
         panic!("expected subscriber connection");
     };
@@ -846,11 +851,11 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     client.tick().unwrap();
     server.tick().unwrap();
     let subscriber_ref = subscriber.borrow();
-    let ConnectionLink::Subscriber {
+    let ConnectionLink::Subscriber(SubscriberConnectionState {
         served,
         coverage_groups,
         ..
-    } = &subscriber_ref.link
+    }) = &subscriber_ref.link
     else {
         panic!("expected subscriber connection");
     };

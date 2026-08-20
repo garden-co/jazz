@@ -273,7 +273,7 @@ fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
     let (client_transport, _server_transport) = duplex();
     let upstream = db.connect_upstream(client_transport);
     let pending_subscribes = match &upstream.borrow().link {
-        ConnectionLink::Upstream { pending, .. } => pending
+        ConnectionLink::Upstream(UpstreamConnectionState { pending, .. }) => pending
             .iter()
             .filter(|command| matches!(command, PendingUpstreamCommand::Subscribe(_)))
             .count(),

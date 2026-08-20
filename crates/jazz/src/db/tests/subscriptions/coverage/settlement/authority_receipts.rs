@@ -421,10 +421,10 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     assert!(subscription._state.borrow().settled);
 
     let mut old = old_upstream.borrow_mut();
-    let ConnectionLink::Upstream {
+    let ConnectionLink::Upstream(UpstreamConnectionState {
         pending_row_version_repairs,
         ..
-    } = &mut old.link
+    }) = &mut old.link
     else {
         unreachable!("expected old upstream")
     };
@@ -507,10 +507,10 @@ fn fallback_replay_of_preselection_branch_view_cannot_settle() {
 
     let branch = BranchId::from_bytes([0x42; 16]);
     let mut old = old_upstream.borrow_mut();
-    let ConnectionLink::Upstream {
+    let ConnectionLink::Upstream(UpstreamConnectionState {
         pending_branch_view_updates,
         ..
-    } = &mut old.link
+    }) = &mut old.link
     else {
         unreachable!("expected old upstream")
     };

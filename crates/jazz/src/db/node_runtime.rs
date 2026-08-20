@@ -4,7 +4,8 @@
 //! subscription refresh, write-state notification, and connection lifecycle.
 
 use super::peer_connection::{
-    ConnectionLink, PeerConnection, mutation_error_event, take_pending_mutation_error_delivery,
+    ConnectionLink, PeerConnection, SubscriberConnectionState, UpstreamConnectionState,
+    mutation_error_event, take_pending_mutation_error_delivery,
 };
 use super::*;
 
@@ -203,7 +204,9 @@ where
         self.subscriber_dirty_epoch.set(next);
         for connection in self.connections.borrow().iter() {
             let mut connection = connection.borrow_mut();
-            if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut connection.link {
+            if let ConnectionLink::Subscriber(SubscriberConnectionState { serve_dirty, .. }) =
+                &mut connection.link
+            {
                 *serve_dirty = true;
                 connection.observed_subscriber_dirty_epoch.set(next);
             }
@@ -366,10 +369,10 @@ where
             .remove(&request_id);
         for connection in self.connections.borrow().iter() {
             let mut connection = connection.borrow_mut();
-            if let ConnectionLink::Upstream {
+            if let ConnectionLink::Upstream(UpstreamConnectionState {
                 scope_lease_manager,
                 ..
-            } = &mut connection.link
+            }) = &mut connection.link
             {
                 let mut empty = false;
                 for request in scope_lease_manager.requests.values_mut() {
@@ -599,7 +602,7 @@ where
             observed_session_claim_revision: Cell::new(0),
             connection_epoch,
             startup_error: None,
-            link: ConnectionLink::Upstream {
+            link: ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
                 pending,
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
@@ -616,7 +619,7 @@ where
                 scope_receipts: BTreeMap::new(),
                 expected_scope_authority,
                 scope_lease_manager: AuthorizationScopeLeaseManager::default(),
-            },
+            }),
             last_resume_bytes: None,
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
@@ -818,7 +821,7 @@ where
             observed_session_claim_revision: Cell::new(session_claim_revision),
             connection_epoch,
             startup_error,
-            link: ConnectionLink::Subscriber {
+            link: ConnectionLink::Subscriber(SubscriberConnectionState {
                 peer,
                 ingest_context,
                 session_claims,
@@ -839,7 +842,7 @@ where
                 authority_scope_hydrations: BTreeMap::new(),
                 authority_scope_hydration_count: 0,
                 serve_dirty: true,
-            },
+            }),
             last_resume_bytes: None,
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
@@ -851,14 +854,14 @@ where
     pub fn detach_connection(&self, connection: &Rc<LocalMutex<PeerConnection<S>>>) -> bool {
         let connection_ref = connection.borrow();
         let (authority, upstream_epoch) = match &connection_ref.link {
-            ConnectionLink::Upstream {
+            ConnectionLink::Upstream(UpstreamConnectionState {
                 expected_scope_authority,
                 ..
-            } => (
+            }) => (
                 *expected_scope_authority,
                 Some(connection_ref.connection_epoch),
             ),
-            ConnectionLink::Subscriber { .. } => (None, None),
+            ConnectionLink::Subscriber(_) => (None, None),
         };
         drop(connection_ref);
         let mut connections = self.connections.borrow_mut();
@@ -889,7 +892,7 @@ where
                     .rev()
                     .find_map(|connection| {
                         let connection_ref = connection.borrow();
-                        matches!(&connection_ref.link, ConnectionLink::Upstream { .. })
+                        matches!(&connection_ref.link, ConnectionLink::Upstream(_))
                             .then(|| Rc::clone(connection))
                     });
             if let Some(connection) = &fallback_connection {
@@ -936,12 +939,12 @@ where
                     // set is an optimization, never a fate authority token.
                     for candidate in self.connections.borrow().iter() {
                         let mut candidate = candidate.borrow_mut();
-                        let ConnectionLink::Upstream {
+                        let ConnectionLink::Upstream(UpstreamConnectionState {
                             expected_scope_authority,
                             uploaded,
                             outbox,
                             ..
-                        } = &mut candidate.link
+                        }) = &mut candidate.link
                         else {
                             continue;
                         };

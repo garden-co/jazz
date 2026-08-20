@@ -565,9 +565,9 @@ fn local_live_subscription_requests_global_upstream_coverage() {
     // the remote coverage request must be settled-only because local state is
     // link-local to the subscribing client.
     let subscriber_ref = subscriber.borrow();
-    let ConnectionLink::Subscriber {
+    let ConnectionLink::Subscriber(SubscriberConnectionState {
         coverage_groups, ..
-    } = &subscriber_ref.link
+    }) = &subscriber_ref.link
     else {
         panic!("expected subscriber connection");
     };
@@ -599,9 +599,9 @@ fn edge_live_subscription_requests_global_upstream_coverage() {
     // link-local; the subscription's settled contract is satisfied when the
     // globally settled coverage arrives back at the client.
     let subscriber_ref = subscriber.borrow();
-    let ConnectionLink::Subscriber {
+    let ConnectionLink::Subscriber(SubscriberConnectionState {
         coverage_groups, ..
-    } = &subscriber_ref.link
+    }) = &subscriber_ref.link
     else {
         panic!("expected subscriber connection");
     };

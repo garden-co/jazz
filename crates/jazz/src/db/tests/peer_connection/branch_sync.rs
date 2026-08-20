@@ -1085,7 +1085,8 @@ fn subscriber_connection_serves_branch_subscription_with_known_state_and_unsubsc
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
     let subscriber_ref = subscriber.borrow();
-    let ConnectionLink::Subscriber { served, .. } = &subscriber_ref.link else {
+    let ConnectionLink::Subscriber(SubscriberConnectionState { served, .. }) = &subscriber_ref.link
+    else {
         unreachable!("expected subscriber link")
     };
     assert!(
