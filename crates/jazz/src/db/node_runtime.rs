@@ -1585,6 +1585,7 @@ where
                                 "structured subscription lost its Groove terminal",
                             ));
                         };
+                        let stale_subscription_id = maintained.subscription_id();
                         // A structural-patch stream deliberately does not keep
                         // facade-level replacement rows current. Re-open the
                         // Groove terminal at an authoritative boundary so the
@@ -1603,7 +1604,15 @@ where
                                 authorization_mode,
                             )
                             .await?;
+                        let replacement_subscription_id = replacement.subscription_id();
+                        node.lock()
+                            .await
+                            .unsubscribe_groove_subscription(stale_subscription_id)
+                            .await;
                         *maintained = replacement;
+                        state_ref
+                            .local_subscription_cleanup
+                            .set(Some((groove_runtime_token, replacement_subscription_id)));
                         let settled = subscription_is_settled(
                             &node.borrow(),
                             active_authority_view_receipts,
