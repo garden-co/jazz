@@ -62,7 +62,7 @@ where
             true,
         )
         .await?;
-        let persistence = self.database.publish_batch(batch).await?;
+        let persistence = self.database.apply_batch(batch).await?;
         self.invalidate_tx_version_table_names_cache(tx_id);
         Ok(PublishedTransaction { tx_id, persistence })
     }
@@ -100,7 +100,7 @@ where
             &staged_versions,
         )
         .await?;
-        self.database.commit_batch_durable(batch).await?;
+        self.database.commit_batch(batch).await?;
         self.invalidate_tx_version_table_names_cache(tx_id);
         Ok(())
     }

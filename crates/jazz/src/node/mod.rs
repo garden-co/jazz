@@ -15,8 +15,8 @@ use std::time::Duration;
 use web_time::Instant;
 
 use groove::db::{
-    CommitMetrics, Database, DatabaseBatch, DirectRecordStoreWrite, Error as GrooveDbError,
-    GraphBuilder, PredicateExpr, PrimaryKeyValue, PublicationPersistence, PublishedBatch,
+    AppliedBatch, CommitMetrics, Database, DatabaseBatch, DirectRecordStoreWrite,
+    Error as GrooveDbError, GraphBuilder, PersistedBatch, PredicateExpr, PrimaryKeyValue,
     Subscription,
 };
 use groove::ivm::PreparedShapeId;
@@ -1536,7 +1536,7 @@ struct IngestMemo {
 #[must_use = "a published transaction must be persisted and settled"]
 pub struct PublishedTransaction {
     pub(crate) tx_id: TxId,
-    persistence: PublishedBatch,
+    persistence: AppliedBatch,
 }
 
 impl PublishedTransaction {
@@ -1546,7 +1546,7 @@ impl PublishedTransaction {
     }
 
     /// Persist the resident publication in storage order.
-    pub async fn persist(&self) -> PublicationPersistence {
+    pub async fn persist(&self) -> PersistedBatch {
         self.persistence.persist().await
     }
 }

@@ -18,7 +18,7 @@ async fn durable_commit_releases_subscription_delta_only_after_storage_succeeds(
         "albums",
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
-    assert!(database.commit_batch_durable(batch).await.is_err());
+    assert!(database.commit_batch(batch).await.is_err());
     assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
 }
 
