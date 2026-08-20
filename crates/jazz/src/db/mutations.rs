@@ -1144,48 +1144,50 @@ where
         })
     }
 
-    pub(super) async fn finish_publication_outcome<T>(
-        &self,
+    pub(super) fn finish_publication_outcome<'a, T: 'a>(
+        &'a self,
         outcome: PublicationOutcome<T>,
-    ) -> Result<T, Error> {
-        let PublicationOutcome {
-            value,
-            mut publications,
-            mut post_settlement_work,
-        } = outcome;
-        loop {
-            if !publications.is_empty() {
-                self.refresh_subscriptions().await?;
-                let mut persisted = Vec::with_capacity(publications.len());
-                for publication in &publications {
-                    persisted.push(publication.persist().await);
+    ) -> Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>> {
+        Box::pin(async move {
+            let PublicationOutcome {
+                value,
+                mut publications,
+                mut post_settlement_work,
+            } = outcome;
+            loop {
+                if !publications.is_empty() {
+                    self.refresh_subscriptions().await?;
+                    let mut persisted = Vec::with_capacity(publications.len());
+                    for publication in &publications {
+                        persisted.push(publication.persist().await);
+                    }
+                    let mut node = self.node.node.lock().await;
+                    for persistence in persisted {
+                        node.settle_published_transaction(persistence)?;
+                    }
                 }
-                let mut node = self.node.node.lock().await;
-                for persistence in persisted {
-                    node.settle_published_transaction(persistence)?;
-                }
+                let Some(message) = post_settlement_work.pop_front() else {
+                    break;
+                };
+                let mut outcome = self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .apply_sync_message_with_ingest_context(
+                        message,
+                        Some(CommitUnitIngestContext {
+                            identity: AuthorId::SYSTEM,
+                            trust: CommitUnitTrust::TrustedBackend,
+                            edge_authority: false,
+                        }),
+                    )
+                    .await?;
+                publications = outcome.publications;
+                post_settlement_work.append(&mut outcome.post_settlement_work);
             }
-            let Some(message) = post_settlement_work.pop_front() else {
-                break;
-            };
-            let mut outcome = self
-                .node
-                .node
-                .lock()
-                .await
-                .apply_sync_message_with_ingest_context(
-                    message,
-                    Some(CommitUnitIngestContext {
-                        identity: AuthorId::SYSTEM,
-                        trust: CommitUnitTrust::TrustedBackend,
-                        edge_authority: false,
-                    }),
-                )
-                .await?;
-            publications = outcome.publications;
-            post_settlement_work.append(&mut outcome.post_settlement_work);
-        }
-        Ok(value)
+            Ok(value)
+        })
     }
 
     fn check_attribution_allowed(&self, made_by: AuthorId) -> Result<(), Error> {
