@@ -139,8 +139,8 @@ where
                 (BTreeMap::new(), BTreeMap::new())
             }
             Some(BranchViewSourceBase::Current(key)) => winners(key, None)?,
-            Some(BranchViewSourceBase::Snapshot(key, snapshot)) if key == head => {
-                winners(key, Some(snapshot))?
+            Some(BranchViewSourceBase::Snapshot(key, _)) if key == head => {
+                (BTreeMap::new(), BTreeMap::new())
             }
             Some(BranchViewSourceBase::Snapshot(key, snapshot)) => winners(key, Some(snapshot))?,
         };
@@ -226,6 +226,7 @@ where
         Ok(rows)
     }
 
+    #[allow(dead_code)]
     pub(super) fn current_rows_for_schema(
         &mut self,
         table: &str,

@@ -816,7 +816,12 @@ where
                 .query_transaction(tx_id)?
                 .ok_or(Error::MissingTransaction(tx_id))?;
             let local_current = self
-                .query_local_layer_winner(table, row_uuid, version.layer())?
+                .query_local_layer_winner_in_branch(
+                    table,
+                    version.branch_key(),
+                    row_uuid,
+                    version.layer(),
+                )?
                 .as_ref()
                 .map(|winner| {
                     self.version_tx_id(winner)
@@ -824,7 +829,12 @@ where
                 })
                 .unwrap_or(false);
             let global_current = self
-                .query_global_layer_winner(table, row_uuid, version.layer())?
+                .query_global_layer_winner_in_branch(
+                    table,
+                    version.branch_key(),
+                    row_uuid,
+                    version.layer(),
+                )?
                 .as_ref()
                 .map(|winner| {
                     self.version_tx_id(winner)

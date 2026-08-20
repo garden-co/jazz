@@ -524,7 +524,7 @@ where
 
     fn policy_previous_content_subject_row(
         &mut self,
-        policy_schema_version: SchemaVersionId,
+        _policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         version: &VersionRecord,
     ) -> Result<Option<CurrentRow>, Error> {
@@ -564,9 +564,12 @@ where
             }
         }
 
-        if let Some(current_version) =
-            self.query_local_layer_winner(&table.name, version.row_uuid(), VersionLayer::Content)?
-        {
+        if let Some(current_version) = self.query_local_layer_winner_in_branch(
+            &table.name,
+            version.branch_key(),
+            version.row_uuid(),
+            VersionLayer::Content,
+        )? {
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
@@ -574,12 +577,17 @@ where
             }
         }
 
-        if let Some(current) = self
-            .current_rows_for_schema(&table.name, policy_schema_version, DurabilityTier::Global)?
-            .into_iter()
-            .find(|row| row.row_uuid() == version.row_uuid())
-        {
-            return Ok(Some(current));
+        if let Some(current_version) = self.query_global_layer_winner_in_branch(
+            &table.name,
+            version.branch_key(),
+            version.row_uuid(),
+            VersionLayer::Content,
+        )? {
+            let (_policy_schema_version, projected_table, cells) =
+                self.policy_projection_for_version_row(&current_version)?;
+            if projected_table.name == table.name {
+                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+            }
         }
 
         Ok(None)

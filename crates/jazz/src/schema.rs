@@ -269,7 +269,7 @@ impl RuntimeSchema {
             );
             assert!(
                 RecordDescriptor::new([("value", dimension.column_type.clone())])
-                    .create(&[dimension.migration_default.clone()])
+                    .create(std::slice::from_ref(&dimension.migration_default))
                     .is_ok(),
                 "branch dimension migration default must match its declared type"
             );
