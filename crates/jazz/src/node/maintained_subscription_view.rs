@@ -1214,7 +1214,13 @@ fn decode_typed_terminal_record(
                     )),
                 })
                 .transpose()?
-                .filter(|bytes| !bytes.is_empty());
+                // The empty/shared branch has a non-empty postcard encoding.
+                // Keep its historical `None` identity so ordinary result
+                // members and durable receipts do not churn merely because
+                // branch coordinates are now carried for non-shared rows.
+                .filter(|bytes| {
+                    !bytes.is_empty() && *bytes != BranchKey::default().canonical_bytes()
+                });
             let mut member = RealRowMemberEntry::current_content((
                 table.name.clone().into(),
                 row_uuid,

@@ -10,6 +10,7 @@ pub(super) fn current_query_read_set(
     policy_schema: SchemaVersionId,
     tier: DurabilityTier,
     settled_binding_view: Option<BindingViewKey>,
+    settled_requires_result_payload: bool,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {
         schema_family: SchemaFamilySelection::Current,
@@ -27,6 +28,7 @@ pub(super) fn current_query_read_set(
                         projection: projection.clone(),
                         binding_view,
                         rows: SettledBindingRows::ResultMembers,
+                        requires_result_payload: settled_requires_result_payload,
                     }
                 } else {
                     SourceExpr::VisibleCurrent {
@@ -49,6 +51,7 @@ pub(super) fn current_query_read_set(
                     projection: projection.clone(),
                     binding_view,
                     rows: SettledBindingRows::FlatTupleContributor { source_index },
+                    requires_result_payload: settled_requires_result_payload,
                 },
             );
             continue;
@@ -212,6 +215,7 @@ pub(super) fn query_read_set_for_read_view(
             policy_schema,
             tier,
             settled_binding_view,
+            matches!(read_view.source, ReadViewSourceSpec::BranchView { .. }),
         ));
     }
     match &read_view.source {
@@ -221,6 +225,7 @@ pub(super) fn query_read_set_for_read_view(
             policy_schema,
             tier,
             None,
+            false,
         )),
         ReadViewSourceSpec::Snapshot { .. } => Err(Error::QueryCapability(
             "snapshot read_view requires unified snapshot source lowering".to_owned(),

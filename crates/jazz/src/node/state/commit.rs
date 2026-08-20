@@ -506,35 +506,38 @@ where
         let (branch_key, _) = schema
             .project_branch_selector(&table_schema, branch)
             .map_err(Error::InvalidBranchKey)?;
-        let deletion = self
-            .query_local_layer_winner_in_branch(
+        let deletion = match self.query_local_layer_winner_in_branch(
+            table,
+            &branch_key,
+            row_uuid,
+            VersionLayer::Deletion,
+        )? {
+            Some(version) => Some(version),
+            None => self.query_global_layer_winner_in_branch(
                 table,
                 &branch_key,
                 row_uuid,
                 VersionLayer::Deletion,
-            )?
-            .or(self.query_global_layer_winner_in_branch(
-                table,
-                &branch_key,
-                row_uuid,
-                VersionLayer::Deletion,
-            )?);
+            )?,
+        };
         if deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
             return Ok(None);
         }
-        let Some(content) = self
-            .query_local_layer_winner_in_branch(
+        let content = match self.query_local_layer_winner_in_branch(
+            table,
+            &branch_key,
+            row_uuid,
+            VersionLayer::Content,
+        )? {
+            Some(version) => Some(version),
+            None => self.query_global_layer_winner_in_branch(
                 table,
                 &branch_key,
                 row_uuid,
                 VersionLayer::Content,
-            )?
-            .or(self.query_global_layer_winner_in_branch(
-                table,
-                &branch_key,
-                row_uuid,
-                VersionLayer::Content,
-            )?)
+            )?,
+        };
+        let Some(content) = content
         else {
             return Ok(None);
         };

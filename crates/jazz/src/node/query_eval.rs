@@ -1495,6 +1495,13 @@ where
                         let ProgramFactEntry::ResultPayload(payload) = fact else {
                             return None;
                         };
+                        // Flat joins also retain tuple payloads, but their
+                        // canonical source versions still drive source
+                        // reconstruction (including schema-lens projection).
+                        // Only branch-qualified memberships represent a
+                        // public row that can differ from its supplier
+                        // version and therefore replace source materialization.
+                        payload.member.as_real_row()?.branch_or_prefix.as_ref()?;
                         payload
                             .member
                             .as_row()

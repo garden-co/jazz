@@ -1245,7 +1245,15 @@ fn fact_output_with_terminal(
                 occurrence_id_fields,
                 occurrence_union_arm_fields,
                 payload_fields,
-                branch_or_prefix_field: version.branch_or_prefix_field.clone(),
+                // Version witnesses may carry either a legacy physical prefix
+                // or a branch key. Only view-relative sources use that field
+                // as part of public result identity; attaching a physical
+                // prefix to ordinary rows would churn durable memberships and
+                // receipts across schema projections.
+                branch_or_prefix_field: source
+                    .requires_result_payload
+                    .then(|| version.branch_or_prefix_field.clone())
+                    .flatten(),
                 version: ResultMembershipVersionSchema::Content(ContentVersionFields {
                     tx_time_field: "content_tx_time".to_owned(),
                     tx_node_field: "content_tx_node_id".to_owned(),

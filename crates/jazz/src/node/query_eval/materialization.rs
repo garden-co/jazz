@@ -491,15 +491,12 @@ where
         // version across a rename.  Payloads and application rows, however,
         // are interpreted in this subscription's read schema.
         let table = self.table(local.result_table.as_str())?.clone();
-        if member
-            .as_real_row()
-            .is_some_and(|row| row.row_digest.is_some())
-        {
+        if local.result_query.flat_join.is_some() {
             let payload = local
                 .result_payloads
                 .get(member)
                 .ok_or(Error::InvalidStoredValue(
-                    "payload-bearing result member is missing its row payload",
+                    "flat joined result member is missing its tuple payload",
                 ))?;
             return self
                 .current_row_from_result_payload(&table, payload)

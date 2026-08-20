@@ -160,6 +160,10 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         /// Partition result members from admitted tuple sources so a
         /// self-join cannot feed the same table-wide union into both sides.
         rows: SettledBindingRows,
+        /// The settled rows are view-relative renderings whose public values
+        /// must travel in result payloads rather than being reconstructed
+        /// from the immutable supplier version.
+        requires_result_payload: bool,
     },
     /// Overlay local/branch/transactional writes on top of another source.
     WithOverlays {

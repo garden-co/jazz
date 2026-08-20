@@ -69,6 +69,7 @@ where
                 projection,
                 binding_view,
                 rows,
+                requires_result_payload,
             } => {
                 if request.visibility != RowVisibility::Visible {
                     return Err(source_resolution_error(request, SourceGap::Coverage));
@@ -118,7 +119,7 @@ where
                                 metadata,
                             },
                             routing_fields: BTreeSet::new(),
-                            requires_result_payload: true,
+                            requires_result_payload: *requires_result_payload,
                             content_version: None,
                             deletion_register: None,
                         });
