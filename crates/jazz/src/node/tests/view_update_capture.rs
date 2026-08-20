@@ -350,7 +350,7 @@ impl MaintainedSubscriptionViewSubscription {
         subscription_key: SubscriptionKey,
         identity: AuthorId,
     ) -> SyncMessage {
-        core.flush_query_runtime().unwrap();
+        crate::db::block_on(core.drive_query_runtime()).unwrap();
         let output_tables = self.tables.clone();
         let mut states = BTreeMap::<ResultRowEntry, (bool, bool)>::new();
         loop {

@@ -2835,12 +2835,6 @@ where
                         ingest_context.trust,
                     )
                 {
-                    // A coverage-group refresh drains every maintained view below.
-                    // Tick the shared runtime once before that drain rather than once
-                    // per group.
-                    if !coverage_groups.is_empty() {
-                        self.node.lock().await.flush_query_runtime().await?;
-                    }
                     for (coverage, group) in coverage_groups.iter_mut() {
                         let group_subscription = SubscriptionKey {
                             shape_id: coverage.shape_id,
@@ -2868,7 +2862,7 @@ where
                                 )
                                 .await
                             } else {
-                                peer.query_update_for_subscription_with_opts_after_runtime_flush(
+                                peer.query_update_for_subscription_with_opts(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,

@@ -778,7 +778,7 @@ where
     /// Test/bench-only durability boundary for harnesses that reopen the same
     /// storage path immediately after a synthetic lifecycle transition.
     pub async fn flush_for_test(&self) -> Result<(), Error> {
-        Ok(self.node.node.lock().await.flush_query_runtime().await?)
+        Ok(self.node.node.lock().await.drive_query_runtime().await?)
     }
 
     #[cfg(feature = "testing")]
