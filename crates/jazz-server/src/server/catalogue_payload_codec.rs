@@ -17,7 +17,7 @@ use jazz::tools::public_schema::{
 use jazz::tools::schema_lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 8;
+const SCHEMA_VERSION: u8 = 9;
 const LENS_VERSION: u8 = 3;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
@@ -71,6 +71,7 @@ impl std::error::Error for CatalogueEncodingError {}
 /// Format:
 /// ```text
 /// [version: u8][table_count: u32][table_1]...[table_n]
+/// [branch_read_policy: Option<PolicyExpr>][branch_write_policy: Option<PolicyExpr>]
 /// ```
 ///
 /// Tables are sorted by name for deterministic encoding. Column order within a
@@ -88,6 +89,9 @@ pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     for (name, table_schema) in tables {
         encode_table_entry(&mut buf, name, table_schema);
     }
+
+    encode_optional_policy_expr(&mut buf, schema.branch_read_policy());
+    encode_optional_policy_expr(&mut buf, schema.branch_write_policy());
 
     buf
 }
@@ -181,7 +185,9 @@ fn decode_current_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> 
         schema.insert(name, table_schema);
     }
 
-    Ok(schema)
+    let branch_read_policy = decode_optional_policy_expr(data, &mut offset)?;
+    let branch_write_policy = decode_optional_policy_expr(data, &mut offset)?;
+    Ok(schema.with_branch_policies(branch_read_policy, branch_write_policy))
 }
 
 fn encode_row_descriptor(buf: &mut Vec<u8>, desc: &RowDescriptor) {
@@ -1995,6 +2001,27 @@ mod tests {
             decoded_todos.policies == TablePolicies::default(),
             "Stored schema encoding should be structural-only"
         );
+    }
+
+    #[test]
+    fn schema_roundtrip_preserves_branch_policies_and_hash() {
+        let read = PolicyExpr::eq_session("owner_id", vec!["user_id".to_owned()]);
+        let write = PolicyExpr::True;
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("id", ColumnType::Uuid)
+                    .column("owner_id", ColumnType::Uuid),
+            )
+            .branch_read_policy(read.clone())
+            .branch_write_policy(write.clone())
+            .build();
+
+        let decoded = decode_schema(&encode_schema(&schema)).expect("schema decodes");
+
+        assert_eq!(decoded.branch_read_policy(), Some(&read));
+        assert_eq!(decoded.branch_write_policy(), Some(&write));
+        assert_eq!(SchemaHash::compute(&decoded), SchemaHash::compute(&schema));
     }
 
     #[test]

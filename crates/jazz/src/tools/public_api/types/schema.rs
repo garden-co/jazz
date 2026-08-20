@@ -695,6 +695,21 @@ impl Schema {
     pub fn branch_write_policy(&self) -> Option<&PolicyExpr> {
         self.branch_write_policy.as_deref()
     }
+
+    /// Attach policies controlling branch metadata reads and branch mutations.
+    ///
+    /// This is primarily useful when rebuilding an admitted public schema from
+    /// durable catalogue data. Table policies are managed by the separate
+    /// permissions catalogue; branch policies remain part of the schema source.
+    pub fn with_branch_policies(
+        mut self,
+        branch_read_policy: Option<PolicyExpr>,
+        branch_write_policy: Option<PolicyExpr>,
+    ) -> Self {
+        self.branch_read_policy = branch_read_policy.map(Box::new);
+        self.branch_write_policy = branch_write_policy.map(Box::new);
+        self
+    }
 }
 
 impl Deref for Schema {

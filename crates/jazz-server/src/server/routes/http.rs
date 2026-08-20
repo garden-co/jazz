@@ -39,7 +39,6 @@ pub(super) struct SchemaSummaryResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct StoredSchemaResponse {
-    #[serde(with = "schema_tables_serde")]
     schema: Schema,
     published_at: Option<u64>,
 }
@@ -106,34 +105,8 @@ pub(super) enum PublishLensOp {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct PublishSchemaRequest {
-    #[serde(with = "schema_tables_serde")]
     schema: Schema,
     permissions: Option<std::collections::HashMap<TableName, TablePolicies>>,
-}
-
-mod schema_tables_serde {
-    use std::collections::BTreeMap;
-
-    use jazz::tools::public_schema::{Schema, TableName, TableSchema};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub(super) fn serialize<S>(schema: &Schema, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        schema
-            .iter()
-            .collect::<BTreeMap<_, _>>()
-            .serialize(serializer)
-    }
-
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Schema, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        BTreeMap::<TableName, TableSchema>::deserialize(deserializer)
-            .map(|tables| tables.into_iter().collect())
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

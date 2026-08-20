@@ -210,6 +210,11 @@ mod tests {
     }
 
     async fn publish_schema_for_test(app: &axum::Router, schema: Schema) {
+        let schema_json = serde_json::to_value(&schema).expect("schema request json");
+        assert!(
+            schema_json.get("tables").is_some(),
+            "admin schema requests retain the public Schema envelope"
+        );
         let response = app
             .clone()
             .oneshot(
@@ -219,7 +224,7 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
-                        serde_json::json!({ "schema": schema }).to_string(),
+                        serde_json::json!({ "schema": schema_json }).to_string(),
                     ))
                     .unwrap(),
             )
@@ -566,10 +571,10 @@ mod tests {
             .await
             .expect("schema body");
         let schema_json: Value = serde_json::from_slice(&schema_body).expect("schema json");
-        let expected_schema_json =
-            serde_json::to_value(schema.iter().collect::<std::collections::BTreeMap<_, _>>())
-                .expect("expected schema json");
+        let expected_schema_json = serde_json::to_value(&schema).expect("expected schema json");
         assert_eq!(schema_json["schema"], expected_schema_json);
+        assert!(schema_json["schema"].get("tables").is_some());
+        assert!(schema_json["schema"].get("users").is_none());
         assert!(schema_json.get("publishedAt").is_some());
 
         let bad_hash_response = app

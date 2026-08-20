@@ -62,19 +62,20 @@ read, and subscribe — is shown here using the `todos` example:
 ```rust
 use std::collections::BTreeMap;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource};
-use jazz::groove::{records::Value, schema::{ColumnSchema, ColumnType}, storage::MemoryStorage};
+use jazz::groove::{records::Value, storage::MemoryStorage};
 use jazz::ids::{AuthorId, NodeUuid};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-let schema = JazzSchema::new([
-    TableSchema::new("todos", [
-        ColumnSchema::new("title", ColumnType::String),
-        ColumnSchema::new("done", ColumnType::Bool),
-    ])
-    .with_read_policy(Policy::public())     // or omit — a table with no policy is public
-    .with_write_policy(Policy::public()),
-]);
+let source = SchemaBuilder::new()
+    .table(
+        TableSchemaBuilder::new("todos")
+            .column("title", ColumnType::Text)
+            .column("done", ColumnType::Boolean),
+    )
+    .build();
+let schema = JazzSchema::new(&source)?;
 let storage = MemoryStorage::new(
     &schema.column_families().iter().map(String::as_str).collect::<Vec<_>>(),
 );

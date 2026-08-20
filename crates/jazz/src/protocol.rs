@@ -2998,12 +2998,18 @@ mod tests {
         let SchemaVersionWire {
             public_schema_json, ..
         } = serde_json::from_str(&stored).expect("decode stored schema envelope");
-        let stored_source =
+        let stored_source_json =
             String::from_utf8(public_schema_json).expect("public schema JSON is UTF-8");
-        assert!(stored_source.contains("\"policies\""));
-        assert!(stored_source.contains("\"type\":\"True\""));
-        assert!(!stored_source.contains("read_policy"));
-        assert!(!stored_source.contains("write_policies"));
+        let stored_source: serde_json::Value =
+            serde_json::from_str(&stored_source_json).expect("public schema JSON decodes");
+        assert!(
+            stored_source["tables"].is_object(),
+            "schema-version payloads preserve the public Schema JSON envelope"
+        );
+        assert!(stored_source_json.contains("\"policies\""));
+        assert!(stored_source_json.contains("\"type\":\"True\""));
+        assert!(!stored_source_json.contains("read_policy"));
+        assert!(!stored_source_json.contains("write_policies"));
 
         let bytes = postcard::to_allocvec(&version).expect("source schema crosses the wire");
         let decoded: SchemaVersion =
