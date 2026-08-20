@@ -433,6 +433,39 @@ where
         .await
     }
 
+    /// Retire authority settlement synchronously without re-evaluating data.
+    ///
+    /// Connection replacement changes Jazz status, not the Groove terminal
+    /// baseline. Keeping this path non-suspending ensures consumers observe
+    /// the demotion before the replacement transport can publish anything.
+    fn demote_authority_receipt_subscriptions(&self) {
+        let mut retained = Vec::new();
+        for weak in self.subscriptions.borrow().iter() {
+            let Some(state) = weak.upgrade() else {
+                continue;
+            };
+            {
+                let mut state = state.borrow_mut();
+                if state.propagates_upstream {
+                    state.requires_authority_receipt = true;
+                    if state.settled {
+                        state.settled = false;
+                        let event = subscription_delta_event(
+                            state.read_tier,
+                            false,
+                            &state.snapshot,
+                            &state.snapshot,
+                            state.terminal_rows,
+                        );
+                        let _ = state.sender.unbounded_send(event);
+                    }
+                }
+            }
+            retained.push(Rc::downgrade(&state));
+        }
+        *self.subscriptions.borrow_mut() = retained;
+    }
+
     /// Attach this node to an upstream peer over a binding-supplied transport.
     pub fn connect_upstream(
         &self,
@@ -451,16 +484,10 @@ where
             confirmation_floor: self.node.borrow().committed_global_time(),
             binding_views: BTreeSet::new(),
         });
-        for state in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
-            let mut state = state.borrow_mut();
-            if state.propagates_upstream {
-                state.requires_authority_receipt = true;
-            }
-        }
         // A replacement link invalidates the prior link's receipt before the
         // new transport can deliver anything. Publish that demotion now rather
         // than letting cached rows remain settled until the next tick.
-        let _ = self.refresh_subscriptions();
+        self.demote_authority_receipt_subscriptions();
         let expected_scope_authority = session_context
             .filter(|context| {
                 context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0
@@ -901,7 +928,7 @@ where
                 });
             // Cached rows remain readable as stale/local state, but their
             // settled receipt died with this authority connection.
-            let _ = self.refresh_subscriptions();
+            self.demote_authority_receipt_subscriptions();
         }
         if detached && let Some(authority) = authority {
             let mut eligible = self.admitted_upstream_authorities.borrow_mut();
