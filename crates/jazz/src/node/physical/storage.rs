@@ -445,11 +445,8 @@ where
                 "stored register schema version alias missing while preparing shared deletion write",
             ))?;
         let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
-        let mut values = vec![
-            Value::Bytes(version.branch_key().canonical_bytes()),
-            Value::U64(table_id.0),
-        ];
-        values.extend(version.record.to_values()?);
+        let mut values = version.record.to_values()?;
+        values.insert(1, Value::U64(table_id.0));
         let descriptor = self
             .database
             .table_schema(SHARED_DELETION_HISTORY_TABLE)?

@@ -116,4 +116,22 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
         .unwrap();
     assert_eq!(shared_snapshot.root_count, 1);
     assert_eq!(shared_snapshot.rows[0].row_uuid(), shared);
+
+    node.commit_mergeable(
+        MergeableCommit::new("todos", overridden, 40)
+            .branch(head)
+            .deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    let after_delete = node
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorId::SYSTEM,
+            &read_view,
+        )
+        .unwrap();
+    assert_eq!(after_delete.root_count, 1);
+    assert_eq!(after_delete.rows[0].row_uuid(), inherited);
 }
