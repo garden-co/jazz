@@ -1526,6 +1526,41 @@ async fn subscription_retainers_keep_output_ancestors_alive() {
 }
 
 #[futures_test::test]
+async fn deep_retained_only_graph_ticks_through_the_dependency_queue() {
+    let schema = albums_schema();
+    let albums = schema.table("albums").unwrap().record_schema();
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let storage = crate::storage::MemoryStorage::new(&["albums"]);
+    let mut graph = GraphBuilder::table("albums");
+    for _ in 0..64 {
+        graph = graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+    }
+    let output = runtime.add_dedup_graph(&graph).unwrap().node;
+    runtime.add_retainer(output, Retainer::PreparedShape("deep-retained".to_owned()));
+    let row = albums
+        .create(&[Value::U64(1), Value::String("Blue Train".to_owned())])
+        .unwrap();
+
+    runtime
+        .tick(
+            vec![TableDelta {
+                variant_tag: 0,
+                table: "albums".to_owned(),
+                descriptor: albums,
+                deltas: vec![RecordDelta {
+                    record: row.into(),
+                    weight: 1,
+                }],
+            }],
+            &storage,
+        )
+        .await
+        .unwrap();
+
+    assert!(runtime.retained_node_ids().contains(&output));
+}
+
+#[futures_test::test]
 async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
