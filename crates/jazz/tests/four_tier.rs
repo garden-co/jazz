@@ -742,7 +742,9 @@ fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
         transaction_state(&mut edge, tx_id),
         (Fate::Accepted, None, DurabilityTier::Edge)
     );
-    let SyncMessage::CommitUnit { tx: stored_tx, .. } = edge.commit_unit_for(tx_id).unwrap() else {
+    let SyncMessage::CommitUnit { tx: stored_tx, .. } =
+        block_on(edge.commit_unit_for(tx_id)).unwrap()
+    else {
         panic!("expected stored commit unit");
     };
     assert_eq!(stored_tx.made_by, attributed_user);
@@ -770,15 +772,14 @@ fn edge_deduplicates_scope_subscription_for_repeated_deferred_units() {
             panic!("expected commit unit");
         };
         assert!(
-            edge_to_client
-                .ingest_edge_mergeable_commit_unit(
-                    &mut edge,
-                    tx,
-                    versions,
-                    u64::MAX - SKEW_TOLERANCE_MS,
-                )
-                .unwrap()
-                .is_empty(),
+            edge_ingest(
+                &mut edge_to_client,
+                &mut edge,
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS
+            )
+            .is_empty(),
             "{tx_id:?} should defer behind the shared scope"
         );
     }
@@ -812,15 +813,14 @@ fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
             panic!("expected commit unit");
         };
         assert!(
-            edge_to_a
-                .ingest_edge_mergeable_commit_unit(
-                    &mut edge,
-                    tx,
-                    versions,
-                    u64::MAX - SKEW_TOLERANCE_MS,
-                )
-                .unwrap()
-                .is_empty()
+            edge_ingest(
+                &mut edge_to_a,
+                &mut edge,
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS
+            )
+            .is_empty()
         );
     }
 
@@ -829,15 +829,14 @@ fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
         panic!("expected commit unit");
     };
     assert!(
-        edge_to_b
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty()
+        edge_ingest(
+            &mut edge_to_b,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS
+        )
+        .is_empty()
     );
 
     let scope_a = permission_scope_key(&schema, "todos", writer_a);
@@ -883,19 +882,16 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
         panic!("expected commit unit");
     };
     assert!(
-        edge_to_a
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty()
+        edge_ingest(
+            &mut edge_to_a,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS
+        )
+        .is_empty()
     );
-    let [_fate] = edge_to_a
-        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
+    let [_fate] = drain_edge_fates(&mut edge_to_a, &mut edge, u64::MAX - SKEW_TOLERANCE_MS)
         .try_into()
         .unwrap();
     assert_eq!(
@@ -907,11 +903,15 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
-    let [a_fate] = edge_to_a
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [a_fate] = edge_ingest(
+        &mut edge_to_a,
+        &mut edge,
+        tx,
+        versions,
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .try_into()
+    .unwrap();
     assert_eq!(
         a_fate,
         SyncMessage::FateUpdate {
@@ -927,15 +927,14 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
         panic!("expected commit unit");
     };
     assert!(
-        edge_to_b
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty()
+        edge_ingest(
+            &mut edge_to_b,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS
+        )
+        .is_empty()
     );
     assert_eq!(edge_to_b.deferred_edge_fate_count(), 1);
     assert_eq!(
@@ -966,20 +965,17 @@ fn edge_releases_scope_subscription_after_last_deferred_unit_resolves() {
         let SyncMessage::CommitUnit { tx, versions } = unit else {
             panic!("expected commit unit");
         };
-        edge_to_client
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap();
+        edge_ingest(
+            &mut edge_to_client,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+        );
     }
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 1);
 
-    let updates = edge_to_client
-        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap();
+    let updates = drain_edge_fates(&mut edge_to_client, &mut edge, u64::MAX - SKEW_TOLERANCE_MS);
     assert_eq!(updates.len(), 2);
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 0);
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 0);
@@ -1008,15 +1004,14 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
     };
 
     assert!(
-        edge_to_client
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty(),
+        edge_ingest(
+            &mut edge_to_client,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS
+        )
+        .is_empty(),
         "edge must defer until the permission scope settles"
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
@@ -1053,22 +1048,23 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
     };
     let mut redelivered_edge_to_client = PeerState::edge_client(client_author);
     assert!(
-        redelivered_edge_to_client
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty(),
+        edge_ingest(
+            &mut redelivered_edge_to_client,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS
+        )
+        .is_empty(),
         "redelivered unit reopens the permission-scope gate after restart"
     );
-    let [fate] = redelivered_edge_to_client
-        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [fate] = drain_edge_fates(
+        &mut redelivered_edge_to_client,
+        &mut edge,
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .try_into()
+    .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -1113,11 +1109,15 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
         panic!("expected commit unit");
     };
 
-    let [fate] = edge_to_client
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [fate] = edge_ingest(
+        &mut edge_to_client,
+        &mut edge,
+        tx,
+        versions,
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .try_into()
+    .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -1163,11 +1163,15 @@ fn edge_public_write_table_settles_without_deferral_or_scope() {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
-    let [fate] = edge_to_client
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [fate] = edge_ingest(
+        &mut edge_to_client,
+        &mut edge,
+        tx,
+        versions,
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .try_into()
+    .unwrap();
 
     assert_eq!(
         fate,
@@ -1206,37 +1210,42 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
     );
 
     let mut core_to_edge = PeerState::relay();
-    let grant_update = core_to_edge
-        .current_rows_update(&mut core, "canvasInvites")
-        .unwrap();
-    edge.apply_sync_message(grant_update).unwrap();
+    let grant_update =
+        block_on(core_to_edge.current_rows_update(&mut core, "canvasInvites")).unwrap();
+    apply_message(&mut edge, grant_update);
 
-    let (tx_id, unit) = client
-        .commit_mergeable_unit(
-            MergeableCommit::new("canvases", canvas_row, 20)
-                .made_by(client_author)
-                .cells(title_only_cells("edge final")),
-        )
-        .unwrap();
+    let (tx_id, unit) = block_on(async {
+        let (published, unit) = client
+            .commit_mergeable_unit(
+                MergeableCommit::new("canvases", canvas_row, 20)
+                    .made_by(client_author)
+                    .cells(title_only_cells("edge final")),
+            )
+            .await
+            .unwrap();
+        let tx_id = client
+            .persist_and_settle_transaction(published)
+            .await
+            .unwrap();
+        (tx_id, unit)
+    });
     let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
         panic!("expected commit unit");
     };
 
     let mut edge_to_client = PeerState::edge_client(client_author);
-    let first = edge_to_client
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            tx.clone(),
-            versions.clone(),
-            u64::MAX - SKEW_TOLERANCE_MS,
-        )
-        .unwrap();
+    let first = edge_ingest(
+        &mut edge_to_client,
+        &mut edge,
+        tx.clone(),
+        versions.clone(),
+        u64::MAX - SKEW_TOLERANCE_MS,
+    );
     assert!(first.is_empty());
-    let [edge_fate] = edge_to_client
-        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [edge_fate] =
+        drain_edge_fates(&mut edge_to_client, &mut edge, u64::MAX - SKEW_TOLERANCE_MS)
+            .try_into()
+            .unwrap();
     assert_eq!(
         edge_fate,
         SyncMessage::FateUpdate {
@@ -1256,11 +1265,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         MergeableCommit::new("canvasInvites", invite_row, 30).deletion(DeletionEvent::Deleted),
     );
 
-    let [control_fate] = control_core
-        .apply_sync_message(unit)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [control_fate] = apply_message(&mut control_core, unit).try_into().unwrap();
     assert!(matches!(
         control_fate,
         SyncMessage::FateUpdate {
@@ -1271,31 +1276,33 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
 
     let shape = Query::from("canvases").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    core.apply_sync_message(SyncMessage::ViewUpdate {
-        subscription: SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: Default::default(),
+    apply_message(
+        &mut core,
+        SyncMessage::ViewUpdate {
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: Default::default(),
+            },
+            settled_through: jazz::time::GlobalTime(0),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            version_bundles: vec![VersionBundle {
+                tx,
+                versions,
+                scope: jazz::protocol::VersionBundleScope::CompleteTransaction,
+                fate: Fate::Accepted,
+                global_time: None,
+                durability: DurabilityTier::Edge,
+            }],
+            peer_payload_inventory: PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         },
-        settled_through: jazz::time::GlobalTime(0),
-        reset_result_set: false,
-        version_carriers: Vec::new(),
-        version_bundles: vec![VersionBundle {
-            tx,
-            versions,
-            scope: jazz::protocol::VersionBundleScope::CompleteTransaction,
-            fate: Fate::Accepted,
-            global_time: None,
-            durability: DurabilityTier::Edge,
-        }],
-        peer_payload_inventory: PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    })
-    .unwrap();
+    );
 
     let (fate, global_time, durability) = transaction_state(&mut core, tx_id);
     assert_eq!(fate, Fate::Accepted);
@@ -1307,7 +1314,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         .find(|table| table.name == "canvases")
         .expect("canvases schema");
     assert_eq!(
-        core.current_rows("canvases", DurabilityTier::Edge)
+        block_on(core.current_rows("canvases", DurabilityTier::Edge))
             .unwrap()
             .into_iter()
             .map(|row| (
