@@ -198,6 +198,7 @@ where
             return Ok(PublicationOutcome {
                 value: (),
                 publications: merges.publications,
+                post_settlement_work: merges.post_settlement_work,
             });
         }
         Ok(PublicationOutcome::settled(()))
@@ -250,6 +251,7 @@ where
             return Ok(PublicationOutcome {
                 value: Fate::Accepted,
                 publications: merges.publications,
+                post_settlement_work: merges.post_settlement_work,
             });
         }
         Ok(PublicationOutcome::settled(Fate::Accepted))

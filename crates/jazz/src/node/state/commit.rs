@@ -347,14 +347,18 @@ where
             target_lineage: BranchLineage::Root,
             branch_merge: None,
         };
+        let unit = self.resident_commit_unit(tx)?;
+        Ok((published, unit))
+    }
+
+    pub(super) fn resident_commit_unit(&mut self, tx: Transaction) -> Result<SyncMessage, Error> {
         let versions = self
-            .cached_tx_versions(tx_id)
-            .expect("newly published mergeable transaction retains its resident versions")
+            .cached_tx_versions(tx.tx_id)
+            .expect("newly published transaction retains its resident versions")
             .into_iter()
             .map(|row| self.version_record_from_row(&row))
             .collect::<Result<Vec<_>, Error>>()?;
-        let unit = SyncMessage::CommitUnit { tx, versions };
-        Ok((published, unit))
+        Ok(SyncMessage::CommitUnit { tx, versions })
     }
 
     /// Settle a completed persistence receipt and release its storage boundary.
@@ -381,11 +385,34 @@ where
     pub async fn persist_and_settle_outcome<T>(
         &mut self,
         outcome: PublicationOutcome<T>,
-    ) -> Result<T, Error> {
-        let (value, publications) = outcome.into_parts();
-        for publication in publications {
-            let persistence = publication.persist().await;
-            self.settle_published_transaction(persistence)?;
+    ) -> Result<T, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let (value, mut publications, mut work) = outcome.into_parts();
+        loop {
+            for publication in publications {
+                let persistence = publication.persist().await;
+                self.settle_published_transaction(persistence)?;
+            }
+            let Some(message) = work.pop_front() else {
+                break;
+            };
+            let mut outcome = self
+                .apply_sync_message_with_ingest_context(
+                    message,
+                    Some(CommitUnitIngestContext {
+                        identity: AuthorId::SYSTEM,
+                        trust: CommitUnitTrust::TrustedBackend,
+                        edge_authority: false,
+                    }),
+                )
+                .await?;
+            // This is internal continuation work, not a reply to a remote
+            // sender. Its resident publications and further continuations are
+            // lifecycle-significant; its protocol response is not.
+            publications = outcome.publications;
+            work.append(&mut outcome.post_settlement_work);
         }
         Ok(value)
     }

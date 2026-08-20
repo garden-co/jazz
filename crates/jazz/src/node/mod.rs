@@ -1502,6 +1502,9 @@ impl PublishedTransaction {
 pub struct PublicationOutcome<T> {
     pub(crate) value: T,
     pub(crate) publications: Vec<PublishedTransaction>,
+    /// Same-node messages that may enter normal ingest only after every
+    /// publication ahead of them has settled successfully.
+    pub(crate) post_settlement_work: VecDeque<SyncMessage>,
 }
 
 impl<T> PublicationOutcome<T> {
@@ -1511,14 +1514,15 @@ impl<T> PublicationOutcome<T> {
     }
 
     /// Split the logical result from the publications awaiting persistence.
-    pub fn into_parts(self) -> (T, Vec<PublishedTransaction>) {
-        (self.value, self.publications)
+    pub fn into_parts(self) -> (T, Vec<PublishedTransaction>, VecDeque<SyncMessage>) {
+        (self.value, self.publications, self.post_settlement_work)
     }
 
     pub(crate) fn settled(value: T) -> Self {
         Self {
             value,
             publications: Vec::new(),
+            post_settlement_work: VecDeque::new(),
         }
     }
 
@@ -1526,6 +1530,19 @@ impl<T> PublicationOutcome<T> {
         Self {
             value,
             publications: vec![publication],
+            post_settlement_work: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn published_then(
+        value: T,
+        publication: PublishedTransaction,
+        work: SyncMessage,
+    ) -> Self {
+        Self {
+            value,
+            publications: vec![publication],
+            post_settlement_work: VecDeque::from([work]),
         }
     }
 }
@@ -1538,6 +1555,8 @@ impl<T> PublicationOutcome<Vec<T>> {
     pub(crate) fn append_outcome(&mut self, mut other: Self) {
         self.value.append(&mut other.value);
         self.publications.append(&mut other.publications);
+        self.post_settlement_work
+            .append(&mut other.post_settlement_work);
     }
 }
 
