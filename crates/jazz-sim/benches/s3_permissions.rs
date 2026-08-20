@@ -28,6 +28,10 @@ use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::time::TxTime;
 use jazz::tx::{BranchLineage, DeletionEvent, DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::TransportError;
+use jazz_sim::fixture::{
+    apply_sync_message_settled, commit_mergeable_unit_settled, ingest_commit_unit_settled,
+    settle_outcome,
+};
 use jazz_sim::{
     DeterministicDriver, DriverContext, NodeRole, PeerProfile, ThreadedDriver, Topology,
     bench_profile, emit_json_line, metadata_fields, profiling,
@@ -924,7 +928,7 @@ fn revoke_phase_db(
             break;
         }
         core.tick().unwrap();
-        client.db.tick().unwrap();
+        block_on(client.db.tick()).unwrap();
         drain_db_subscription(client);
         after = visible_rows_db_client(client);
     }
@@ -981,16 +985,11 @@ fn revoke_phase(
     oracle.memberships.remove(&membership);
     let query_start = Instant::now();
     hydrate_edge_policy(ctx, core, edge);
-    let core_update = edge.core_peer.query_update(core, shape, binding).unwrap();
+    let core_update = block_on(edge.core_peer.query_update(core, shape, binding)).unwrap();
     ctx.send("core", &edge.name, core_update);
     let delivered_to_edge = ctx.recv(&edge.name);
-    edge.node
-        .apply_sync_message(delivered_to_edge.message)
-        .unwrap();
-    let update = client
-        .peer
-        .query_update(&mut edge.node, shape, binding)
-        .unwrap();
+    apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
+    let update = block_on(client.peer.query_update(&mut edge.node, shape, binding)).unwrap();
     let query_update_us = query_start.elapsed().as_micros() as u64;
     let removed = match &update {
         SyncMessage::ViewUpdate {
@@ -1050,17 +1049,12 @@ fn forbidden_write_phase(
         resource_cells(9_000),
         900_000,
     );
-    let core_update = edge.core_peer.query_update(core, shape, binding).unwrap();
+    let core_update = block_on(edge.core_peer.query_update(core, shape, binding)).unwrap();
     ctx.send("core", &edge.name, core_update);
     let delivered_to_edge = ctx.recv(&edge.name);
-    edge.node
-        .apply_sync_message(delivered_to_edge.message)
-        .unwrap();
+    apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
     hydrate_edge_policy(ctx, core, edge);
-    let update = spy
-        .peer
-        .query_update(&mut edge.node, shape, binding)
-        .unwrap();
+    let update = block_on(spy.peer.query_update(&mut edge.node, shape, binding)).unwrap();
     let forbidden = result_rows(&update).len() as u64;
     ctx.send(&edge.name, &spy.name, update);
     let delivered = ctx.recv(&spy.name);
@@ -1077,17 +1071,12 @@ fn forbidden_write_phase(
             resource_cells(config.resources() + tick),
             900_010 + tick as u64,
         );
-        let core_update = edge.core_peer.query_update(core, shape, binding).unwrap();
+        let core_update = block_on(edge.core_peer.query_update(core, shape, binding)).unwrap();
         ctx.send("core", &edge.name, core_update);
         let delivered_to_edge = ctx.recv(&edge.name);
-        edge.node
-            .apply_sync_message(delivered_to_edge.message)
-            .unwrap();
+        apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
         hydrate_edge_policy(ctx, core, edge);
-        let update = spy
-            .peer
-            .query_update(&mut edge.node, shape, binding)
-            .unwrap();
+        let update = block_on(spy.peer.query_update(&mut edge.node, shape, binding)).unwrap();
         if !result_rows(&update).is_empty() {
             return forbidden + result_rows(&update).len() as u64;
         }
@@ -1160,10 +1149,7 @@ fn run_block_tree_variant(config: &Config, profile: PeerProfile) -> BlockTreeSum
     }
     let grant_core_us = grant_cpu.elapsed().as_micros() as u64;
     core.reset_storage_read_metrics();
-    let grant_update = simple
-        .peer
-        .query_update(&mut core, &shape, &binding)
-        .unwrap();
+    let grant_update = block_on(simple.peer.query_update(&mut core, &shape, &binding)).unwrap();
     let grant_view_reads = core.take_storage_read_metrics();
     let grant_rows = result_rows(&grant_update)
         .iter()
@@ -1171,7 +1157,7 @@ fn run_block_tree_variant(config: &Config, profile: PeerProfile) -> BlockTreeSum
         .count();
     ctx.send("core", "simple", grant_update);
     let delivered = ctx.recv("simple");
-    simple.node.apply_sync_message(delivered.message).unwrap();
+    apply_sync_message_settled(&mut simple.node, delivered.message).unwrap();
     let grant_appearance_us = (ctx.now_ms() - grant_start) * 1_000;
     assert_eq!(grant_rows, grant_subtree.len());
 
@@ -1192,10 +1178,7 @@ fn run_block_tree_variant(config: &Config, profile: PeerProfile) -> BlockTreeSum
     }
     let revoke_core_us = revoke_cpu.elapsed().as_micros() as u64;
     core.reset_storage_read_metrics();
-    let revoke_update = simple
-        .peer
-        .query_update(&mut core, &shape, &binding)
-        .unwrap();
+    let revoke_update = block_on(simple.peer.query_update(&mut core, &shape, &binding)).unwrap();
     let revoke_view_reads = core.take_storage_read_metrics();
     let revoke_rows = result_rows(&revoke_update)
         .iter()
@@ -1203,7 +1186,7 @@ fn run_block_tree_variant(config: &Config, profile: PeerProfile) -> BlockTreeSum
         .count();
     ctx.send("core", "simple", revoke_update);
     let delivered = ctx.recv("simple");
-    simple.node.apply_sync_message(delivered.message).unwrap();
+    apply_sync_message_settled(&mut simple.node, delivered.message).unwrap();
     let revoke_disappearance_us = (ctx.now_ms() - revoke_start) * 1_000;
     assert_eq!(revoke_rows, revoke_subtree.len());
 
@@ -1226,13 +1209,10 @@ fn run_block_tree_variant(config: &Config, profile: PeerProfile) -> BlockTreeSum
             false,
             4_000_000 + idx as u64,
         );
-        let update = simple
-            .peer
-            .query_update(&mut core, &shape, &binding)
-            .unwrap();
+        let update = block_on(simple.peer.query_update(&mut core, &shape, &binding)).unwrap();
         ctx.send("core", "simple", update);
         let delivered = ctx.recv("simple");
-        simple.node.apply_sync_message(delivered.message).unwrap();
+        apply_sync_message_settled(&mut simple.node, delivered.message).unwrap();
         burst_samples.push(start.elapsed().as_micros() as u64);
     }
 
@@ -1303,10 +1283,7 @@ fn run_block_tree_cold_headline(config: &Config, profile: PeerProfile) -> BlockT
     let server_start = Instant::now();
     let rehydrate_start = Instant::now();
     core.reset_storage_read_metrics();
-    let update = cold
-        .peer
-        .rehydrate_query(&mut core, &shape, &binding)
-        .unwrap();
+    let update = block_on(cold.peer.rehydrate_query(&mut core, &shape, &binding)).unwrap();
     let server_view_reads = core.take_storage_read_metrics();
     let server_rehydrate_query_us = rehydrate_start.elapsed().as_micros() as u64;
     emit_headline_progress(
@@ -1352,7 +1329,7 @@ fn run_block_tree_cold_headline(config: &Config, profile: PeerProfile) -> BlockT
     );
     let apply_start = Instant::now();
     ensure_client_subscription_registered(&mut cold, &shape, &binding);
-    cold.node.apply_sync_message(delivered.message).unwrap();
+    apply_sync_message_settled(&mut cold.node, delivered.message).unwrap();
     let client_apply_sync_us = apply_start.elapsed().as_micros() as u64;
     let client_storage_writes = cold
         .node
@@ -1630,8 +1607,7 @@ fn flush_headline_versions(
         branch_merge: None,
     };
     let chunk = std::mem::take(versions);
-    core.ingest_commit_unit(tx, chunk, u64::MAX)
-        .expect("bulk headline fixture ingest");
+    ingest_commit_unit_settled(core, tx, chunk, u64::MAX).expect("bulk headline fixture ingest");
     *tx_seq += 1;
 }
 
@@ -1837,9 +1813,9 @@ fn hydrate_db(core: &CoreDb, client: &mut DbClient, query: &Query) -> HydrateSum
     let start = Instant::now();
     let prepared = client.db.prepare_query(query).unwrap();
     let mut watch = block_on(client.db.subscribe(&prepared, ReadOpts::default())).unwrap();
-    client.db.tick().unwrap();
+    block_on(client.db.tick()).unwrap();
     core.tick().unwrap();
-    client.db.tick().unwrap();
+    block_on(client.db.tick()).unwrap();
     let opened = block_on(watch.next_event()).expect("db subscription opens");
     apply_db_subscription_event(&mut client.visible_rows, opened);
     while let Some(event) = watch.try_next_event() {
@@ -1860,7 +1836,7 @@ fn hydrate_db(core: &CoreDb, client: &mut DbClient, query: &Query) -> HydrateSum
 fn drive_db_round_trip(core: &CoreDb, client: &mut DbClient) {
     for _ in 0..3 {
         core.tick().unwrap();
-        client.db.tick().unwrap();
+        block_on(client.db.tick()).unwrap();
         drain_db_subscription(client);
     }
 }
@@ -1910,22 +1886,14 @@ fn hydrate(
 ) -> HydrateSummary {
     let start = ctx.now_ms();
     core.reset_storage_read_metrics();
-    let core_update = edge
-        .core_peer
-        .rehydrate_query(core, shape, binding)
-        .unwrap();
+    let core_update = block_on(edge.core_peer.rehydrate_query(core, shape, binding)).unwrap();
     let core_read_metrics = core.take_storage_read_metrics();
     ctx.send("core", &edge.name, core_update);
     let delivered_to_edge = ctx.recv(&edge.name);
-    edge.node
-        .apply_sync_message(delivered_to_edge.message)
-        .unwrap();
+    apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
     hydrate_edge_policy(ctx, core, edge);
     edge.node.reset_storage_read_metrics();
-    let update = client
-        .peer
-        .rehydrate_query(&mut edge.node, shape, binding)
-        .unwrap();
+    let update = block_on(client.peer.rehydrate_query(&mut edge.node, shape, binding)).unwrap();
     let view_read_metrics = edge.node.take_storage_read_metrics();
     let bytes = view_update_bytes(&update);
     let floor_bytes = bytes_floor(&update);
@@ -1953,7 +1921,7 @@ fn hydrate_direct(
 ) -> HydrateSummary {
     let start = ctx.now_ms();
     core.reset_storage_read_metrics();
-    let update = client.peer.rehydrate_query(core, shape, binding).unwrap();
+    let update = block_on(client.peer.rehydrate_query(core, shape, binding)).unwrap();
     let view_read_metrics = core.take_storage_read_metrics();
     let bytes = view_update_bytes(&update);
     let floor_bytes = bytes_floor(&update);
@@ -1981,16 +1949,11 @@ fn deliver_update(
     binding: &Binding,
 ) {
     hydrate_edge_policy(ctx, core, edge);
-    let core_update = edge.core_peer.query_update(core, shape, binding).unwrap();
+    let core_update = block_on(edge.core_peer.query_update(core, shape, binding)).unwrap();
     ctx.send("core", &edge.name, core_update);
     let delivered_to_edge = ctx.recv(&edge.name);
-    edge.node
-        .apply_sync_message(delivered_to_edge.message)
-        .unwrap();
-    let update = client
-        .peer
-        .rehydrate_query(&mut edge.node, shape, binding)
-        .unwrap();
+    apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
+    let update = block_on(client.peer.rehydrate_query(&mut edge.node, shape, binding)).unwrap();
     ctx.send(&edge.name, &client.name, update);
     let delivered = ctx.recv(&client.name);
     ensure_client_subscription_registered(client, shape, binding);
@@ -2019,7 +1982,7 @@ fn apply_client_update(client: &mut Client, message: SyncMessage) {
             }
         }
     }
-    client.node.apply_sync_message(message).unwrap();
+    apply_sync_message_settled(&mut client.node, message).unwrap();
 }
 
 fn ensure_client_subscription_registered(
@@ -2036,28 +1999,30 @@ fn ensure_client_subscription_registered(
     if !client.registered_subscriptions.insert(subscription) {
         return;
     }
-    client
-        .node
-        .apply_sync_message(SyncMessage::RegisterShape {
+    apply_sync_message_settled(
+        &mut client.node,
+        SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
             ast: ShapeAst::from_validated(shape),
             opts: opts.clone(),
-        })
-        .expect("client registers query shape before view updates");
+        },
+    )
+    .expect("client registers query shape before view updates");
     let values = shape
         .params()
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    client
-        .node
-        .apply_sync_message(SyncMessage::Subscribe(Subscribe {
+    apply_sync_message_settled(
+        &mut client.node,
+        SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
             subscription,
             values,
             known_state: None,
-        }))
-        .expect("client registers query binding before view updates");
+        }),
+    )
+    .expect("client registers query binding before view updates");
 }
 
 fn seed_fixture(
@@ -2452,17 +2417,17 @@ fn commit_global(
     cells: BTreeMap<String, Value>,
     now_ms: u64,
 ) {
-    let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
-            MergeableCommit::new(table, row_uuid, now_ms)
-                .made_by(made_by)
-                .cells(cells),
-        )
-        .unwrap();
+    let (_tx_id, unit) = commit_mergeable_unit_settled(
+        writer,
+        MergeableCommit::new(table, row_uuid, now_ms)
+            .made_by(made_by)
+            .cells(cells),
+    )
+    .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         unreachable!();
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX).unwrap();
+    ingest_commit_unit_settled(core, tx, versions, u64::MAX).unwrap();
     ctx.record_counter("s3_commits", 1);
 }
 
@@ -2474,17 +2439,17 @@ fn delete_global(
     row_uuid: RowUuid,
     now_ms: u64,
 ) {
-    let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
-            MergeableCommit::new(table, row_uuid, now_ms)
-                .made_by(AuthorId::SYSTEM)
-                .deletion(DeletionEvent::Deleted),
-        )
-        .unwrap();
+    let (_tx_id, unit) = commit_mergeable_unit_settled(
+        writer,
+        MergeableCommit::new(table, row_uuid, now_ms)
+            .made_by(AuthorId::SYSTEM)
+            .deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         unreachable!();
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX).unwrap();
+    ingest_commit_unit_settled(core, tx, versions, u64::MAX).unwrap();
     ctx.record_counter("s3_deletes", 1);
 }
 
@@ -2498,14 +2463,13 @@ fn edge_acceptance_phase(
 ) -> EdgeAcceptanceSummary {
     let mut acceptance_latency = Histogram::new(3).unwrap();
     let start = ctx.now_ms();
-    let (_tx_id, unit) = client
-        .node
-        .commit_mergeable_unit(
-            MergeableCommit::new(RESOURCES, resource, 950_000)
-                .made_by(AuthorId(writer.0))
-                .cells(resource_cells(950_000)),
-        )
-        .unwrap();
+    let (_tx_id, unit) = commit_mergeable_unit_settled(
+        &mut client.node,
+        MergeableCommit::new(RESOURCES, resource, 950_000)
+            .made_by(AuthorId(writer.0))
+            .cells(resource_cells(950_000)),
+    )
+    .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         unreachable!();
     };
@@ -2521,10 +2485,14 @@ fn edge_acceptance_phase(
     let SyncMessage::CommitUnit { tx, versions } = delivered_to_edge.message else {
         unreachable!();
     };
-    let first = client
-        .peer
-        .ingest_edge_mergeable_commit_unit(&mut edge.node, tx.clone(), versions, u64::MAX)
-        .unwrap();
+    let outcome = block_on(client.peer.ingest_edge_mergeable_commit_unit(
+        &mut edge.node,
+        tx.clone(),
+        versions,
+        u64::MAX,
+    ))
+    .unwrap();
+    let first = settle_outcome(&mut edge.node, outcome).unwrap();
     assert!(
         first.is_empty(),
         "edge write should wait for permission scope"
@@ -2532,23 +2500,23 @@ fn edge_acceptance_phase(
 
     let (scope_shape, scope_binding) = resource_subscription(&schema());
     let mut core_to_edge_scope = PeerState::edge_client(AuthorId(writer.0));
-    let scope_update = core_to_edge_scope
-        .rehydrate_query(core, &scope_shape, &scope_binding)
-        .unwrap();
+    let scope_update =
+        block_on(core_to_edge_scope.rehydrate_query(core, &scope_shape, &scope_binding)).unwrap();
     let hydration_bytes = view_update_bytes(&scope_update);
     let hydration_floor_bytes = bytes_floor(&scope_update);
     let hydration_rows = result_rows(&scope_update).len();
     ctx.send("core", &edge.name, scope_update);
     let delivered_scope = ctx.recv(&edge.name);
-    edge.node
-        .apply_sync_message(delivered_scope.message)
-        .unwrap();
+    apply_sync_message_settled(&mut edge.node, delivered_scope.message).unwrap();
 
     let scope_subscriptions_before_drain = client.peer.edge_scope_subscription_count();
-    let fates = client
-        .peer
-        .drain_deferred_edge_fates(&mut edge.node, u64::MAX)
-        .unwrap();
+    let outcome = block_on(
+        client
+            .peer
+            .drain_deferred_edge_fates(&mut edge.node, u64::MAX),
+    )
+    .unwrap();
+    let fates = settle_outcome(&mut edge.node, outcome).unwrap();
     let scope_subscriptions_after_drain = client.peer.edge_scope_subscription_count();
     assert_eq!(scope_subscriptions_before_drain, 1);
     assert_eq!(scope_subscriptions_after_drain, 0);
@@ -2565,7 +2533,7 @@ fn edge_acceptance_phase(
         "edge must accept the permissioned mergeable write"
     );
     assert_eq!(
-        edge.node.transaction_state(tx.tx_id).unwrap(),
+        block_on(edge.node.transaction_state(tx.tx_id)).unwrap(),
         (Fate::Accepted, None, DurabilityTier::Edge)
     );
     acceptance_latency
@@ -2611,13 +2579,10 @@ fn hydrate_edge_policy(
     edge: &mut EdgeRoute,
 ) {
     for table in [ACCESS, MEMBERSHIPS] {
-        let update = edge
-            .policy_peer
-            .rehydrate_current_rows(core, table)
-            .unwrap();
+        let update = block_on(edge.policy_peer.rehydrate_current_rows(core, table)).unwrap();
         ctx.send("core", &edge.name, update);
         let delivered = ctx.recv(&edge.name);
-        edge.node.apply_sync_message(delivered.message).unwrap();
+        apply_sync_message_settled(&mut edge.node, delivered.message).unwrap();
     }
 }
 
@@ -2657,7 +2622,7 @@ fn open_core_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = NodeState::new_history_complete(node_uuid, schema, storage).unwrap();
+    let node = block_on(NodeState::new_history_complete(node_uuid, schema, storage)).unwrap();
     (
         dir,
         CoreDb {
@@ -2675,7 +2640,7 @@ impl CoreDb {
     }
 
     fn tick(&self) -> Result<(), jazz::db::Error> {
-        self.server.tick().map(|_| ())
+        block_on(self.server.tick()).map(|_| ())
     }
 }
 
@@ -2712,39 +2677,43 @@ fn open_node(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).unwrap();
+    let node = block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
     (dir, node)
 }
 
 fn seed_db(core: &CoreDb, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
     let node = core.server.node();
-    let tx_id = node
-        .borrow_mut()
-        .commit_mergeable(
+    let mut node = block_on(node.lock());
+    let tx_id = block_on(
+        node.commit_mergeable(
             MergeableCommit::new(table, row, core.next_now_ms())
                 .made_by(AuthorId::SYSTEM)
                 .cells(cells),
-        )
-        .unwrap();
-    node.borrow_mut()
-        .finalize_local_mergeable_commit(tx_id)
-        .unwrap();
+        ),
+    )
+    .unwrap();
+    let tx_id = block_on(node.persist_and_settle_transaction(tx_id)).unwrap();
+    let outcome = block_on(node.finalize_local_mergeable_commit(tx_id)).unwrap();
+    settle_outcome(&mut node, outcome).unwrap();
+    drop(node);
     core.server.mark_subscriber_connections_dirty_for_test();
 }
 
 fn delete_db(core: &CoreDb, table: &str, row: RowUuid) {
     let node = core.server.node();
-    let tx_id = node
-        .borrow_mut()
-        .commit_mergeable(
+    let mut node = block_on(node.lock());
+    let tx_id = block_on(
+        node.commit_mergeable(
             MergeableCommit::new(table, row, core.next_now_ms())
                 .made_by(AuthorId::SYSTEM)
                 .deletion(DeletionEvent::Deleted),
-        )
-        .unwrap();
-    node.borrow_mut()
-        .finalize_local_mergeable_commit(tx_id)
-        .unwrap();
+        ),
+    )
+    .unwrap();
+    let tx_id = block_on(node.persist_and_settle_transaction(tx_id)).unwrap();
+    let outcome = block_on(node.finalize_local_mergeable_commit(tx_id)).unwrap();
+    settle_outcome(&mut node, outcome).unwrap();
+    drop(node);
     core.server.mark_subscriber_connections_dirty_for_test();
 }
 
@@ -2760,17 +2729,14 @@ impl OracleState {
         let _ = config;
         let resources = fixture.resources.iter().copied().collect::<BTreeSet<_>>();
         let mut memberships = BTreeMap::new();
-        for row in core
-            .current_rows(MEMBERSHIPS, DurabilityTier::Global)
-            .unwrap()
-        {
+        for row in block_on(core.current_rows(MEMBERSHIPS, DurabilityTier::Global)).unwrap() {
             let member = cell_uuid(&row, MEMBERSHIPS, "member");
             let parent = cell_uuid(&row, MEMBERSHIPS, "parent");
             let only_admins = cell_bool(&row, MEMBERSHIPS, "onlyAdmins");
             memberships.insert(row.row_uuid(), (member, parent, only_admins));
         }
         let mut access = BTreeMap::new();
-        for row in core.current_rows(ACCESS, DurabilityTier::Global).unwrap() {
+        for row in block_on(core.current_rows(ACCESS, DurabilityTier::Global)).unwrap() {
             let resource = cell_uuid(&row, ACCESS, "resource");
             let team = cell_uuid(&row, ACCESS, "team");
             let admins_only = cell_bool(&row, ACCESS, "adminsOnly");
@@ -2856,7 +2822,7 @@ fn visible_rows(
     shape: &ValidatedQuery,
     binding: &Binding,
 ) -> BTreeSet<RowUuid> {
-    node.query_rows(shape, binding, DurabilityTier::Edge)
+    block_on(node.query_rows(shape, binding, DurabilityTier::Edge))
         .unwrap()
         .into_iter()
         .map(|row| row.row_uuid())

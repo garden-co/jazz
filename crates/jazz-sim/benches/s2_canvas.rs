@@ -20,6 +20,10 @@ use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::time::GlobalSeq;
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_sim::distributions::Lcg;
+use jazz_sim::fixture::{
+    apply_sync_message_settled, commit_mergeable_unit_settled, ingest_commit_unit_settled,
+    settle_outcome,
+};
 use jazz_sim::view_accounting::{bytes_floor, view_update_bytes};
 use jazz_sim::{
     DeterministicDriver, DriverContext, Metrics, NodeRole, PeerProfile, SimulatorTransportCodec,
@@ -300,10 +304,8 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
             {
                 commit = commit.parents(vec![parent]);
             }
-            let (tx_id, unit) = participants[active_idx]
-                .node
-                .commit_mergeable_unit(commit)
-                .unwrap();
+            let (tx_id, unit) =
+                commit_mergeable_unit_settled(&mut participants[active_idx].node, commit).unwrap();
             let SyncMessage::CommitUnit { tx, versions } = unit else {
                 unreachable!();
             };
@@ -321,10 +323,15 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
             };
             let edge_start = ctx.now_ms();
             let active = &mut participants[active_idx];
-            let updates = active
-                .peer
-                .ingest_edge_mergeable_commit_unit(&mut active.edge.node, tx, versions, u64::MAX)
-                .expect("edge ingest");
+            let outcome = block_on(active.peer.ingest_edge_mergeable_commit_unit(
+                &mut active.edge.node,
+                tx,
+                versions,
+                u64::MAX,
+            ))
+            .expect("edge ingest");
+            let updates =
+                settle_outcome(&mut active.edge.node, outcome).expect("settle edge ingest");
             edge_acceptance
                 .record((ctx.now_ms() - edge_start) * 1_000)
                 .unwrap();
@@ -338,7 +345,7 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
                         tx_id: seen,
                         fate: Fate::Accepted,
                         ..
-                    } if *seen == tx_id
+                    } if seen == &tx_id
                 )
             });
             let mut edge_commit = MergeableCommit::new(SHAPES, row_uuid, 20_000 + commits as u64)
@@ -348,7 +355,7 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
                 edge_commit = edge_commit.parents(vec![parent]);
             }
             let (_edge_tx_id, edge_unit) =
-                active.edge.node.commit_mergeable_unit(edge_commit).unwrap();
+                commit_mergeable_unit_settled(&mut active.edge.node, edge_commit).unwrap();
             let SyncMessage::CommitUnit { tx, versions } = edge_unit else {
                 unreachable!();
             };
@@ -362,8 +369,7 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
                 unreachable!();
             };
             let core_start = Instant::now();
-            core.ingest_commit_unit(tx, versions, u64::MAX)
-                .expect("core ingest");
+            ingest_commit_unit_settled(&mut core, tx, versions, u64::MAX).expect("core ingest");
             core_tick
                 .record(core_start.elapsed().as_micros() as u64)
                 .unwrap();
@@ -372,26 +378,27 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
             pending_receives.clear();
             for (idx, participant) in participants.iter_mut().enumerate() {
                 let emit_start = Instant::now();
-                let core_update = participant
-                    .edge
-                    .core_peer
-                    .query_update(&mut core, &shape, &binding)
-                    .expect("edge update");
+                let core_update = block_on(
+                    participant
+                        .edge
+                        .core_peer
+                        .query_update(&mut core, &shape, &binding),
+                )
+                .expect("edge update");
                 edge_hydration_bytes += view_update_bytes(&core_update);
                 edge_hydration_floor_bytes += bytes_floor(&core_update);
                 edge_hydration_rows += result_output_count(&core_update, SHAPES);
                 ctx.send("core", &participant.edge.name, core_update);
                 let delivered_to_edge = ctx.recv(&participant.edge.name);
-                participant
-                    .edge
-                    .node
-                    .apply_sync_message(delivered_to_edge.message)
+                apply_sync_message_settled(&mut participant.edge.node, delivered_to_edge.message)
                     .expect("edge apply");
                 hydrate_edge_policy(ctx, &mut core, &mut participant.edge);
-                let update = participant
-                    .peer
-                    .query_update(&mut participant.edge.node, &shape, &binding)
-                    .expect("participant update");
+                let update = block_on(participant.peer.query_update(
+                    &mut participant.edge.node,
+                    &shape,
+                    &binding,
+                ))
+                .expect("participant update");
                 let emit_elapsed = emit_start.elapsed().as_micros() as u64;
                 emission_construct.record(emit_elapsed).unwrap();
                 bytes_total += view_update_bytes(&update);
@@ -408,9 +415,7 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
                 let participant = &mut participants[idx];
                 debug_assert_eq!(delivered.to, participant.name);
                 let apply_start = Instant::now();
-                participant
-                    .node
-                    .apply_sync_message(delivered.message)
+                apply_sync_message_settled(&mut participant.node, delivered.message)
                     .expect("participant apply");
                 delivered_to_applied
                     .record(apply_start.elapsed().as_micros() as u64)
@@ -427,33 +432,32 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
         }
     }
     for participant in &mut participants {
-        let core_update = participant
-            .edge
-            .core_peer
-            .rehydrate_query(&mut core, &shape, &binding)
-            .expect("final edge rehydrate");
+        let core_update = block_on(
+            participant
+                .edge
+                .core_peer
+                .rehydrate_query(&mut core, &shape, &binding),
+        )
+        .expect("final edge rehydrate");
         edge_hydration_bytes += view_update_bytes(&core_update);
         edge_hydration_floor_bytes += bytes_floor(&core_update);
         edge_hydration_rows += result_output_count(&core_update, SHAPES);
         ctx.send("core", &participant.edge.name, core_update);
         let delivered_to_edge = ctx.recv(&participant.edge.name);
-        participant
-            .edge
-            .node
-            .apply_sync_message(delivered_to_edge.message)
+        apply_sync_message_settled(&mut participant.edge.node, delivered_to_edge.message)
             .expect("final edge apply");
         hydrate_edge_policy(ctx, &mut core, &mut participant.edge);
-        let update = participant
-            .peer
-            .rehydrate_query(&mut participant.edge.node, &shape, &binding)
-            .expect("final participant rehydrate");
+        let update = block_on(participant.peer.rehydrate_query(
+            &mut participant.edge.node,
+            &shape,
+            &binding,
+        ))
+        .expect("final participant rehydrate");
         bytes_total += view_update_bytes(&update);
         floor_bytes += bytes_floor(&update);
         ctx.send(&participant.edge.name, &participant.name, update);
         let delivered = ctx.recv(&participant.name);
-        participant
-            .node
-            .apply_sync_message(delivered.message)
+        apply_sync_message_settled(&mut participant.node, delivered.message)
             .expect("final participant apply");
     }
     let expected = shape_state(&mut core);
@@ -696,24 +700,24 @@ fn run_concurrent_live(
             format!("p{participant_idx}"),
             false,
             tiers.read_tier,
+            node(20 + participant_idx as u8),
             dir,
             reader_node,
         ));
     }
 
     let mut initial_core_peer = PeerState::client_link(participant_author(0));
-    let invited_core_update = initial_core_peer
-        .rehydrate_query(&mut core, &shape, &binding)
-        .expect("invited core rehydrate");
-    edge_node
-        .apply_sync_message(invited_core_update)
+    let invited_core_update =
+        block_on(initial_core_peer.rehydrate_query(&mut core, &shape, &binding))
+            .expect("invited core rehydrate");
+    apply_sync_message_settled(&mut edge_node, invited_core_update)
         .expect("edge apply invited initial");
     let mut writer_initial_edge_peer = PeerState::client_link(participant_author(0));
-    let writer_initial_update = writer_initial_edge_peer
-        .rehydrate_query(&mut edge_node, &shape, &binding)
-        .expect("writer initial edge rehydrate");
+    let writer_initial_update =
+        block_on(writer_initial_edge_peer.rehydrate_query(&mut edge_node, &shape, &binding))
+            .expect("writer initial edge rehydrate");
     for (_, node) in &mut writer_nodes {
-        node.apply_sync_message(writer_initial_update.clone())
+        apply_sync_message_settled(node, writer_initial_update.clone())
             .expect("writer initial apply");
     }
 
@@ -721,25 +725,30 @@ fn run_concurrent_live(
     let mut reader_edge_peer_states = Vec::with_capacity(config.passive);
     for position in &passive_reader_positions {
         let mut core_peer = PeerState::client_link(participant_author(0));
-        let _ = core_peer
-            .rehydrate_query(&mut core, &shape, &binding)
+        let _ = block_on(core_peer.rehydrate_query(&mut core, &shape, &binding))
             .expect("core reader initial rehydrate");
         reader_core_peers.push(ReaderCorePeer { peer: core_peer });
 
         let mut edge_peer = PeerState::client_link(participant_author(0));
-        let reader_initial_update = edge_peer
-            .rehydrate_query(&mut edge_node, &shape, &binding)
-            .expect("edge reader initial rehydrate");
-        let (_, _, _, _, node) = &mut reader_nodes[*position];
-        node.apply_sync_message(reader_initial_update)
-            .expect("reader initial apply");
+        let reader_initial_update =
+            block_on(edge_peer.rehydrate_query(&mut edge_node, &shape, &binding))
+                .expect("edge reader initial rehydrate");
+        let (_, _, _, _, _, node) = &mut reader_nodes[*position];
+        apply_sync_message_settled(node, reader_initial_update).expect("reader initial apply");
         reader_edge_peer_states.push(edge_peer);
     }
 
     let (spy_dir, mut spy_node) = open_node(node(90), schema.clone());
     apply_binding(&mut spy_node, &shape, &binding);
     assert!(rows(&mut spy_node, &shape, &binding).is_empty());
-    reader_nodes.push(("spy".to_owned(), true, tiers.read_tier, spy_dir, spy_node));
+    reader_nodes.push((
+        "spy".to_owned(),
+        true,
+        tiers.read_tier,
+        node(90),
+        spy_dir,
+        spy_node,
+    ));
 
     let (edge_tx, edge_rx) = mpsc::channel::<EdgeInbound>();
     let (core_tx, core_rx) = mpsc::channel::<CoreInbound>();
@@ -751,7 +760,9 @@ fn run_concurrent_live(
         thread::yield_now();
     }
 
-    for (reader_idx, (name, is_spy, read_tier, dir, node)) in reader_nodes.into_iter().enumerate() {
+    for (reader_idx, (name, is_spy, read_tier, node_uuid, dir, node)) in
+        reader_nodes.into_iter().enumerate()
+    {
         let (reader_tx, reader_rx) = mpsc::channel::<ReaderInbound>();
         if !is_spy {
             reader_edge_peers.push(ReaderEdgePeer {
@@ -764,7 +775,11 @@ fn run_concurrent_live(
         reader_txs.push(reader_tx);
         let reader_shape = shape.clone();
         let reader_binding = binding.clone();
+        let reader_schema = schema.clone();
+        drop(node);
         reader_handles.push(thread::spawn(move || {
+            let mut node = reopen_node(&dir, node_uuid, reader_schema);
+            apply_binding(&mut node, &reader_shape, &reader_binding);
             run_reader_actor(ReaderActorArgs {
                 name,
                 is_spy,
@@ -790,11 +805,15 @@ fn run_concurrent_live(
 
     let edge_shape = shape.clone();
     let edge_binding = binding.clone();
+    drop(edge_node);
     let edge_handle = thread::spawn({
         let core_tx = core_tx.clone();
         let writer_fate_txs = writer_fate_txs.clone();
         let transport_metrics = Arc::clone(&transport_metrics);
+        let edge_schema = schema.clone();
         move || {
+            let mut edge_node = reopen_node(&edge_dir, node(240), edge_schema);
+            apply_binding(&mut edge_node, &edge_shape, &edge_binding);
             run_edge_actor(
                 edge_dir,
                 edge_node,
@@ -817,11 +836,15 @@ fn run_concurrent_live(
 
     let core_shape = shape.clone();
     let core_binding = binding.clone();
+    drop(core);
     let core_handle = thread::spawn({
         let edge_tx = edge_tx.clone();
         let writer_fate_txs = writer_fate_txs.clone();
         let transport_metrics = Arc::clone(&transport_metrics);
+        let core_schema = schema.clone();
         move || {
+            let mut core = reopen_node(&core_dir, node(250), core_schema);
+            apply_core_binding(&mut core, &core_shape, &core_binding);
             run_core_actor(
                 core_dir,
                 core,
@@ -842,14 +865,20 @@ fn run_concurrent_live(
 
     let start = Instant::now();
     let mut writer_handles = Vec::with_capacity(config.active);
-    for (writer_idx, ((dir, node), items)) in writer_nodes.into_iter().zip(workload).enumerate() {
+    for (writer_idx, ((dir, writer_node), items)) in
+        writer_nodes.into_iter().zip(workload).enumerate()
+    {
         let tx = edge_tx.clone();
         let fate_rx = writer_fate_rxs.remove(0);
         let transport_metrics = Arc::clone(&transport_metrics);
         let writer_shape = shape.clone();
         let writer_binding = binding.clone();
+        let writer_schema = schema.clone();
+        drop(writer_node);
         let write_wait_tier = writer_write_wait_tiers[writer_idx];
         writer_handles.push(thread::spawn(move || {
+            let mut node = reopen_node(&dir, node(20 + writer_idx as u8), writer_schema);
+            apply_binding(&mut node, &writer_shape, &writer_binding);
             run_writer_actor(
                 writer_idx,
                 dir,
@@ -980,7 +1009,8 @@ fn run_writer_actor(
         if let Some(parent) = current_content_parent(&mut node, row_uuid) {
             commit = commit.parents(vec![parent]);
         }
-        let (tx_id, unit) = node.commit_mergeable_unit(commit).expect("writer commit");
+        let (tx_id, unit) =
+            commit_mergeable_unit_settled(&mut node, commit).expect("writer commit");
         local_commit_visibility_us
             .record(intent.elapsed().as_micros() as u64)
             .expect("local visibility sample");
@@ -1122,13 +1152,20 @@ fn run_edge_actor(
                 let start = Instant::now();
                 let writer_peer = writer_peers.get_mut(&writer_idx).expect("writer edge peer");
                 let now_ms = epoch.elapsed().as_millis() as u64;
-                let mut updates = writer_peer
-                    .ingest_edge_mergeable_commit_unit(&mut edge_node, tx, versions, now_ms)
-                    .expect("edge ingest");
+                let outcome = block_on(writer_peer.ingest_edge_mergeable_commit_unit(
+                    &mut edge_node,
+                    tx,
+                    versions,
+                    now_ms,
+                ))
+                .expect("edge ingest");
+                let mut updates =
+                    settle_outcome(&mut edge_node, outcome).expect("settle edge ingest");
+                let outcome =
+                    block_on(writer_peer.drain_deferred_edge_fates(&mut edge_node, now_ms))
+                        .expect("drain deferred edge fate after ingest");
                 updates.extend(
-                    writer_peer
-                        .drain_deferred_edge_fates(&mut edge_node, now_ms)
-                        .expect("drain deferred edge fate after ingest"),
+                    settle_outcome(&mut edge_node, outcome).expect("settle deferred edge fates"),
                 );
                 edge_acceptance
                     .record(start.elapsed().as_micros() as u64)
@@ -1170,16 +1207,19 @@ fn run_edge_actor(
                 edge_hydration_bytes += view_update_bytes(&message);
                 edge_hydration_floor_bytes += bytes_floor(&message);
                 edge_hydration_rows += result_output_count(&message, SHAPES);
-                edge_node
-                    .apply_sync_message(message)
+                apply_sync_message_settled(&mut edge_node, message)
                     .expect("edge apply core update");
                 let now_ms = epoch.elapsed().as_millis() as u64;
                 for writer_idx in 0..writer_count {
-                    let drained = writer_peers
-                        .get_mut(&writer_idx)
-                        .expect("writer edge peer")
-                        .drain_deferred_edge_fates(&mut edge_node, now_ms)
-                        .expect("drain deferred edge fates");
+                    let outcome = block_on(
+                        writer_peers
+                            .get_mut(&writer_idx)
+                            .expect("writer edge peer")
+                            .drain_deferred_edge_fates(&mut edge_node, now_ms),
+                    )
+                    .expect("drain deferred edge fates");
+                    let drained = settle_outcome(&mut edge_node, outcome)
+                        .expect("settle deferred edge fates");
                     for update in drained {
                         let tx_id = fate_tx_id(&update);
                         if edge_fate_update_accepted(writer_idx, &update, &writer_fate_txs)
@@ -1205,15 +1245,19 @@ fn run_edge_actor(
                     &core_tx,
                 );
                 let update = if final_rehydrate {
-                    reader_peers[reader_idx]
-                        .peer
-                        .rehydrate_query(&mut edge_node, &shape, &binding)
-                        .expect("edge reader final rehydrate")
+                    block_on(reader_peers[reader_idx].peer.rehydrate_query(
+                        &mut edge_node,
+                        &shape,
+                        &binding,
+                    ))
+                    .expect("edge reader final rehydrate")
                 } else {
-                    reader_peers[reader_idx]
-                        .peer
-                        .query_update(&mut edge_node, &shape, &binding)
-                        .expect("edge reader query update")
+                    block_on(reader_peers[reader_idx].peer.query_update(
+                        &mut edge_node,
+                        &shape,
+                        &binding,
+                    ))
+                    .expect("edge reader query update")
                 };
                 bytes_total += view_update_bytes(&update);
                 bytes_floor_total += bytes_floor(&update);
@@ -1276,9 +1320,13 @@ fn run_core_actor(
                     unreachable!("edge sends commit units");
                 };
                 let start = Instant::now();
-                let updates = core
-                    .ingest_commit_unit(tx, versions, epoch.elapsed().as_millis() as u64)
-                    .expect("core ingest");
+                let updates = ingest_commit_unit_settled(
+                    &mut core,
+                    tx,
+                    versions,
+                    epoch.elapsed().as_millis() as u64,
+                )
+                .expect("core ingest");
                 core_tick
                     .record(start.elapsed().as_micros() as u64)
                     .expect("core tick sample");
@@ -1288,9 +1336,7 @@ fn run_core_actor(
                     }
                 }
                 for (reader_idx, reader) in reader_peers.iter_mut().enumerate() {
-                    let update = reader
-                        .peer
-                        .query_update(&mut core, &shape, &binding)
+                    let update = block_on(reader.peer.query_update(&mut core, &shape, &binding))
                         .expect("core reader query update");
                     let _ = edge_tx.send(EdgeInbound::CoreUpdate {
                         reader_idx,
@@ -1302,9 +1348,7 @@ fn run_core_actor(
             }
             CoreInbound::Done => {
                 for (reader_idx, reader) in reader_peers.iter_mut().enumerate() {
-                    let update = reader
-                        .peer
-                        .rehydrate_query(&mut core, &shape, &binding)
+                    let update = block_on(reader.peer.rehydrate_query(&mut core, &shape, &binding))
                         .expect("core final reader rehydrate");
                     let _ = edge_tx.send(EdgeInbound::CoreUpdate {
                         reader_idx,
@@ -1354,8 +1398,7 @@ fn run_reader_actor(args: ReaderActorArgs) -> ReaderResult {
             } => {
                 park_until(deliver_at);
                 let update_tx_ids = observed_shape_tx_ids(&message, read_tier);
-                node.apply_sync_message(*message)
-                    .expect("reader apply update");
+                apply_sync_message_settled(&mut node, *message).expect("reader apply update");
                 let now_ms = epoch.elapsed().as_millis() as u64;
                 for tx_id in update_tx_ids {
                     if !observed_tx_ids.insert(tx_id) {
@@ -1406,12 +1449,9 @@ fn hydrate_edge_policy_direct(
     edge_node: &mut NodeState<RocksDbStorage>,
     policy_peer: &mut PeerState,
 ) {
-    let update = policy_peer
-        .rehydrate_current_rows(core, INVITES)
-        .expect("edge policy rehydrate");
-    edge_node
-        .apply_sync_message(update)
-        .expect("edge policy apply");
+    let update =
+        block_on(policy_peer.rehydrate_current_rows(core, INVITES)).expect("edge policy rehydrate");
+    apply_sync_message_settled(edge_node, update).expect("edge policy apply");
 }
 
 fn apply_core_binding(
@@ -1419,27 +1459,33 @@ fn apply_core_binding(
     shape: &ValidatedQuery,
     binding: &Binding,
 ) {
-    core.apply_sync_message(SyncMessage::RegisterShape {
-        shape_id: shape.shape_id(),
-        ast: ShapeAst::from_validated(shape),
-        opts: RegisterShapeOptions::default(),
-    })
+    apply_sync_message_settled(
+        core,
+        SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(shape),
+            opts: RegisterShapeOptions::default(),
+        },
+    )
     .unwrap();
     let values = shape
         .params()
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    core.apply_sync_message(SyncMessage::Subscribe(Subscribe {
-        shape_id: shape.shape_id(),
-        subscription: SubscriptionKey {
+    apply_sync_message_settled(
+        core,
+        SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: RegisterShapeOptions::default().read_view_key(),
-        },
-        values,
-        known_state: None,
-    }))
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions::default().read_view_key(),
+            },
+            values,
+            known_state: None,
+        }),
+    )
     .unwrap();
 }
 
@@ -1637,8 +1683,7 @@ fn await_write_tier(
             SyncMessage::FateUpdate { tx_id: seen, .. } => *seen == tx_id,
             _ => false,
         };
-        node.apply_sync_message(update.message)
-            .expect("writer apply fate update");
+        apply_sync_message_settled(node, update.message).expect("writer apply fate update");
         if matches_tier {
             return;
         }
@@ -1708,25 +1753,27 @@ fn run_historical_loads(
             if let Some(parent) = current_content_parent(&mut writer, row_uuid) {
                 commit = commit.parents(vec![parent]);
             }
-            let (_tx_id, unit) = writer.commit_mergeable_unit(commit).unwrap();
+            let (_tx_id, unit) = commit_mergeable_unit_settled(&mut writer, commit).unwrap();
             let SyncMessage::CommitUnit { tx, versions } = unit else {
                 unreachable!();
             };
             let tx_id = tx.tx_id;
-            let updates = core
-                .ingest_commit_unit(tx, versions, u64::MAX)
-                .expect("core ingest");
+            let updates =
+                ingest_commit_unit_settled(&mut core, tx, versions, u64::MAX).expect("core ingest");
             for update in updates {
-                writer.apply_sync_message(update).unwrap();
+                apply_sync_message_settled(&mut writer, update).unwrap();
             }
             commits += 1;
             expected.insert(row_uuid, (x.to_bits(), y.to_bits()));
 
             while next_cut < cut_targets.len() && commits >= cut_targets[next_cut].1 {
                 let (percent, _) = cut_targets[next_cut];
-                let position = core.transaction_record(tx_id).unwrap().global_seq.unwrap();
+                let position = block_on(core.transaction_record(tx_id))
+                    .unwrap()
+                    .global_seq
+                    .unwrap();
                 let start = Instant::now();
-                let rows = match core.at(position).read(&shape, &binding) {
+                let rows = match block_on(core.at(position).read(&shape, &binding)) {
                     Ok(rows) => rows,
                     Err(error) => {
                         if is_known_historical_implicit_include_coverage_gap(&error) {
@@ -1771,29 +1818,26 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
     let canvas = canvas_id();
     let (_dir, db) = open_db(node(70), participant_author(0), schema.clone());
 
-    let canvas_write = db
-        .insert_with_id(CANVASES, canvas, canvas_cells())
-        .expect("db canvas insert");
+    let canvas_write =
+        block_on(db.insert_with_id(CANVASES, canvas, canvas_cells())).expect("db canvas insert");
     block_on(canvas_write.wait(DurabilityTier::Local)).expect("db canvas local wait");
     for idx in 0..(config.active + config.passive) {
-        let invite = db
-            .insert_with_id(
-                INVITES,
-                row(10_000 + idx),
-                BTreeMap::from([
-                    ("canvas".to_owned(), Value::Uuid(canvas.0)),
-                    ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
-                ]),
-            )
-            .expect("db invite insert");
+        let invite = block_on(db.insert_with_id(
+            INVITES,
+            row(10_000 + idx),
+            BTreeMap::from([
+                ("canvas".to_owned(), Value::Uuid(canvas.0)),
+                ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
+            ]),
+        ))
+        .expect("db invite insert");
         block_on(invite.wait(DurabilityTier::Local)).expect("db invite local wait");
     }
 
     let mut shape_rows = Vec::with_capacity(config.shapes);
     let mut expected = BTreeMap::new();
     for idx in 0..config.shapes {
-        let write = db
-            .insert(SHAPES, shape_cells(canvas, idx, idx as f64, idx as f64))
+        let write = block_on(db.insert(SHAPES, shape_cells(canvas, idx, idx as f64, idx as f64)))
             .expect("db shape insert");
         let row_uuid = write.row_uuid();
         block_on(write.wait(DurabilityTier::Local)).expect("db shape local wait");
@@ -1848,7 +1892,7 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
                 ("y".to_owned(), Value::F64(y)),
             ]);
             let start = Instant::now();
-            let write = db.update(SHAPES, row_uuid, patch).expect("db shape update");
+            let write = block_on(db.update(SHAPES, row_uuid, patch)).expect("db shape update");
             block_on(write.wait(DurabilityTier::Local)).expect("db update local wait");
             write_latencies.push(start.elapsed().as_micros() as u64);
             expected.insert(row_uuid, (x.to_bits(), y.to_bits()));
@@ -1921,11 +1965,11 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
         if let Some(parent) = current_content_parent(&mut participant.node, row_uuid) {
             commit = commit.parents(vec![parent]);
         }
-        let (_tx_id, unit) = participant.node.commit_mergeable_unit(commit).unwrap();
+        let (_tx_id, unit) = commit_mergeable_unit_settled(&mut participant.node, commit).unwrap();
         let SyncMessage::CommitUnit { tx, versions } = unit else {
             unreachable!();
         };
-        core.ingest_commit_unit(tx, versions, u64::MAX).unwrap();
+        ingest_commit_unit_settled(&mut core, tx, versions, u64::MAX).unwrap();
         if idx == 5 {
             drop(core);
             let cfs = schema.column_families();
@@ -1933,33 +1977,30 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
             let storage =
                 RocksDbStorage::open_with_durability(core_dir.path(), &refs, Durability::WalNoSync)
                     .unwrap();
-            core = NodeState::new(node(250), schema.clone(), storage).unwrap();
+            core = block_on(NodeState::new(node(250), schema.clone(), storage)).unwrap();
         }
     }
-    let core_update = disconnected
-        .edge
-        .core_peer
-        .rehydrate_query(&mut core, &shape, &binding)
-        .expect("edge catch up rehydrate");
+    let core_update = block_on(
+        disconnected
+            .edge
+            .core_peer
+            .rehydrate_query(&mut core, &shape, &binding),
+    )
+    .expect("edge catch up rehydrate");
     ctx.send("core", &disconnected.edge.name, core_update);
     let delivered_to_edge = ctx.recv(&disconnected.edge.name);
-    disconnected
-        .edge
-        .node
-        .apply_sync_message(delivered_to_edge.message)
-        .unwrap();
+    apply_sync_message_settled(&mut disconnected.edge.node, delivered_to_edge.message).unwrap();
     hydrate_edge_policy(ctx, &mut core, &mut disconnected.edge);
-    let update = disconnected
-        .peer
-        .rehydrate_query(&mut disconnected.edge.node, &shape, &binding)
-        .expect("catch up rehydrate");
+    let update = block_on(disconnected.peer.rehydrate_query(
+        &mut disconnected.edge.node,
+        &shape,
+        &binding,
+    ))
+    .expect("catch up rehydrate");
     catchup_bytes += view_update_bytes(&update);
     ctx.send(&disconnected.edge.name, &disconnected.name, update);
     let delivered = ctx.recv(&disconnected.name);
-    disconnected
-        .node
-        .apply_sync_message(delivered.message)
-        .unwrap();
+    apply_sync_message_settled(&mut disconnected.node, delivered.message).unwrap();
     assert_eq!(shape_state(&mut disconnected.node), shape_state(&mut core));
     assert!(rows(&mut spy.node, &shape, &binding).is_empty());
     FailureSummary {
@@ -2131,17 +2172,17 @@ fn commit_global_at(
     cells: BTreeMap<String, Value>,
     made_at: u64,
 ) {
-    let (tx_id, unit) = writer
-        .commit_mergeable_unit(
-            MergeableCommit::new(table, row_uuid, made_at)
-                .made_by(made_by)
-                .cells(cells),
-        )
-        .unwrap();
+    let (tx_id, unit) = commit_mergeable_unit_settled(
+        writer,
+        MergeableCommit::new(table, row_uuid, made_at)
+            .made_by(made_by)
+            .cells(cells),
+    )
+    .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         unreachable!();
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX).unwrap();
+    ingest_commit_unit_settled(core, tx, versions, u64::MAX).unwrap();
     let _ = tx_id;
     ctx.record_counter("s2_fixture_rows", 1);
 }
@@ -2170,29 +2211,26 @@ fn hydrate(
     register_binding(ctx, core, &participant.edge.name, shape, binding);
     apply_binding(&mut participant.edge.node, shape, binding);
     apply_binding(&mut participant.node, shape, binding);
-    let core_update = participant
-        .edge
-        .core_peer
-        .rehydrate_query(core, shape, binding)
-        .unwrap();
+    let core_update = block_on(
+        participant
+            .edge
+            .core_peer
+            .rehydrate_query(core, shape, binding),
+    )
+    .unwrap();
     ctx.send("core", &participant.edge.name, core_update);
     let delivered_to_edge = ctx.recv(&participant.edge.name);
-    participant
-        .edge
-        .node
-        .apply_sync_message(delivered_to_edge.message)
-        .unwrap();
+    apply_sync_message_settled(&mut participant.edge.node, delivered_to_edge.message).unwrap();
     hydrate_edge_policy(ctx, core, &mut participant.edge);
-    let update = participant
-        .peer
-        .rehydrate_query(&mut participant.edge.node, shape, binding)
-        .unwrap();
+    let update = block_on(participant.peer.rehydrate_query(
+        &mut participant.edge.node,
+        shape,
+        binding,
+    ))
+    .unwrap();
     ctx.send(&participant.edge.name, &participant.name, update);
     let delivered = ctx.recv(&participant.name);
-    participant
-        .node
-        .apply_sync_message(delivered.message)
-        .unwrap();
+    apply_sync_message_settled(&mut participant.node, delivered.message).unwrap();
 }
 
 fn hydrate_edge_policy(
@@ -2200,37 +2238,40 @@ fn hydrate_edge_policy(
     core: &mut NodeState<RocksDbStorage>,
     edge: &mut EdgeRoute,
 ) {
-    let update = edge
-        .policy_peer
-        .rehydrate_current_rows(core, INVITES)
-        .unwrap();
+    let update = block_on(edge.policy_peer.rehydrate_current_rows(core, INVITES)).unwrap();
     ctx.send("core", &edge.name, update);
     let delivered = ctx.recv(&edge.name);
-    edge.node.apply_sync_message(delivered.message).unwrap();
+    apply_sync_message_settled(&mut edge.node, delivered.message).unwrap();
 }
 
 fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, binding: &Binding) {
-    node.apply_sync_message(SyncMessage::RegisterShape {
-        shape_id: shape.shape_id(),
-        ast: ShapeAst::from_validated(shape),
-        opts: RegisterShapeOptions::default(),
-    })
+    apply_sync_message_settled(
+        node,
+        SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(shape),
+            opts: RegisterShapeOptions::default(),
+        },
+    )
     .unwrap();
     let values = shape
         .params()
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    node.apply_sync_message(SyncMessage::Subscribe(Subscribe {
-        shape_id: shape.shape_id(),
-        subscription: SubscriptionKey {
+    apply_sync_message_settled(
+        node,
+        SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: RegisterShapeOptions::default().read_view_key(),
-        },
-        values,
-        known_state: None,
-    }))
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions::default().read_view_key(),
+            },
+            values,
+            known_state: None,
+        }),
+    )
     .unwrap();
 }
 
@@ -2241,27 +2282,33 @@ fn register_binding(
     shape: &ValidatedQuery,
     binding: &Binding,
 ) {
-    core.apply_sync_message(SyncMessage::RegisterShape {
-        shape_id: shape.shape_id(),
-        ast: ShapeAst::from_validated(shape),
-        opts: RegisterShapeOptions::default(),
-    })
+    apply_sync_message_settled(
+        core,
+        SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(shape),
+            opts: RegisterShapeOptions::default(),
+        },
+    )
     .unwrap();
     let values = shape
         .params()
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    core.apply_sync_message(SyncMessage::Subscribe(Subscribe {
-        shape_id: shape.shape_id(),
-        subscription: SubscriptionKey {
+    apply_sync_message_settled(
+        core,
+        SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: RegisterShapeOptions::default().read_view_key(),
-        },
-        values,
-        known_state: None,
-    }))
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions::default().read_view_key(),
+            },
+            values,
+            known_state: None,
+        }),
+    )
     .unwrap();
     ctx.record_counter(&format!("s2_registered_{client}"), 1);
 }
@@ -2313,8 +2360,20 @@ fn open_node(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).unwrap();
+    let node = block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
     (dir, node)
+}
+
+fn reopen_node(
+    dir: &tempfile::TempDir,
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> NodeState<RocksDbStorage> {
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    block_on(NodeState::new(node_uuid, schema, storage)).unwrap()
 }
 
 fn open_db(
@@ -2353,7 +2412,7 @@ fn open_history_complete_node(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = NodeState::new_history_complete(node_uuid, schema, storage).unwrap();
+    let node = block_on(NodeState::new_history_complete(node_uuid, schema, storage)).unwrap();
     (dir, node)
 }
 
@@ -2362,7 +2421,7 @@ fn rows(
     shape: &ValidatedQuery,
     binding: &Binding,
 ) -> Vec<RowUuid> {
-    node.query_rows(shape, binding, DurabilityTier::Global)
+    block_on(node.query_rows(shape, binding, DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .map(|row| row.row_uuid())
@@ -2438,7 +2497,7 @@ fn shape_state(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, (u64, 
         .into_iter()
         .find(|table| table.name == SHAPES)
         .unwrap();
-    node.current_rows(SHAPES, DurabilityTier::Global)
+    block_on(node.current_rows(SHAPES, DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .map(|row| {
@@ -2459,7 +2518,7 @@ fn current_content_parent(
     node: &mut NodeState<RocksDbStorage>,
     row_uuid: RowUuid,
 ) -> Option<jazz::tx::TxId> {
-    node.row_history(SHAPES, row_uuid)
+    block_on(node.row_history(SHAPES, row_uuid))
         .ok()?
         .into_iter()
         .find(|entry| {
@@ -2474,11 +2533,11 @@ fn merge_counters(core: &mut NodeState<RocksDbStorage>, shapes: usize) -> (usize
     let mut merges = 0;
     let mut merges_of_merges = 0;
     for idx in 0..shapes {
-        for entry in core.row_history(SHAPES, shape_row(idx)).unwrap() {
+        for entry in block_on(core.row_history(SHAPES, shape_row(idx))).unwrap() {
             if entry.parents().len() > 1 && entry.made_by() == AuthorId::SYSTEM {
                 merges += 1;
                 if entry.parents().iter().any(|parent| {
-                    core.transaction_record(*parent)
+                    block_on(core.transaction_record(*parent))
                         .is_some_and(|record| record.made_by == AuthorId::SYSTEM)
                 }) {
                     merges_of_merges += 1;
@@ -2491,7 +2550,7 @@ fn merge_counters(core: &mut NodeState<RocksDbStorage>, shapes: usize) -> (usize
 
 fn assert_merges_are_concurrent(core: &mut NodeState<RocksDbStorage>, shapes: usize) {
     for idx in 0..shapes {
-        let history = core.row_history(SHAPES, shape_row(idx)).unwrap();
+        let history = block_on(core.row_history(SHAPES, shape_row(idx))).unwrap();
         let parents_by_tx = history
             .iter()
             .map(|entry| (entry.tx_id(), entry.parents()))
