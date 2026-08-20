@@ -65,6 +65,9 @@ These remain compiled until their production dependency is removed:
 | `single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads` | `INV-BVIEW-9` | port | `branch_view_one_shot_uses_effective_source` |
 | `branch_commit_rejects_unadmitted_authored_schema_without_persistence` | `INV-BVIEW-16` | replace | `branch_key_commit_rejects_unadmitted_schema_atomically` |
 | `dynamic_edge_bootstrap_rejects_branch_creation_without_residue` | no core lifecycle | retire | remove branch-creation case from bootstrap surface |
+| `fallback_replay_of_preselection_branch_view_cannot_settle` | legacy metadata parking | retire | branch views carry no metadata admission stream |
+| `parked_branch_opening_is_not_cleared_by_unrelated_applied_view` | legacy metadata parking | retire | branch views carry no metadata admission stream |
+| wire fixtures `branch_metadata_root_open` / `fetch_branch_metadata` | legacy metadata protocol | retire | branch selectors travel only in ordinary read options |
 | `catalogue_arrival_drains_branch_relay_into_branch_partition` | `INV-BVIEW-3` | replace | `catalogue_arrival_drains_branch_keyed_history` |
 | `parked_branch_ingress_role_keeps_authority_precedence_in_both_orders` | `INV-BVIEW-16` | replace | `parked_branch_key_ingress_preserves_authority_precedence` |
 | `lowered_write_policy_covers_branch_metadata_gate` | no core metadata | retire | ordinary reference-policy lowering coverage |

@@ -7,7 +7,7 @@ use jazz::binding_codec::{
 };
 use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::protocol::{
-    BranchMetadata, CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
+    CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
     PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
     SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
@@ -172,24 +172,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     );
 
     vec![
-        (
-            "branch_metadata_root_open",
-            "BranchMetadata",
-            SyncMessage::BranchMetadata(BranchMetadata {
-                branch_id: BranchId::from_bytes([0x42; 16]),
-                created_by: AuthorId::from_bytes([0x43; 16]),
-                parent: None,
-                base: None,
-                open: true,
-            }),
-        ),
-        (
-            "fetch_branch_metadata",
-            "FetchBranchMetadata",
-            SyncMessage::FetchBranchMetadata {
-                branches: vec![BranchId::from_bytes([0x42; 16])],
-            },
-        ),
         (
             "session_claims_role_editor",
             "SessionClaims",
