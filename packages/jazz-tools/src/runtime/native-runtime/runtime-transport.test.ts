@@ -299,6 +299,53 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(dbTicks).toBe(1);
   });
 
+  it("serializes asynchronous db ticks and preserves a wake received while suspended", async () => {
+    let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let releaseFirstTick!: () => void;
+    let dbTicks = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+              schedulerCallback = callback;
+            },
+            tick: () => {
+              dbTicks += 1;
+              if (dbTicks === 1) {
+                return new Promise<void>((resolve) => {
+                  releaseFirstTick = resolve;
+                });
+              }
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    schedulerCallback?.("immediate");
+    await Promise.resolve();
+    expect(dbTicks).toBe(1);
+
+    schedulerCallback?.("immediate");
+    await Promise.resolve();
+    expect(dbTicks).toBe(1);
+
+    releaseFirstTick();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(dbTicks).toBe(2);
+    runtime.close();
+  });
+
   it("stages an already-arrived websocket frame group before one native transport tick", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {

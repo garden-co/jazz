@@ -44,7 +44,7 @@ export class BrowserWorkerTransportPump {
     this.scheduled = true;
     queueMicrotask(() => {
       this.scheduled = false;
-      this.pump();
+      void this.pump();
     });
   }
 
@@ -55,13 +55,13 @@ export class BrowserWorkerTransportPump {
     this.transport.close();
   }
 
-  private pump(): void {
+  private async pump(): Promise<void> {
     if (this.closed || this.running) return;
     this.running = true;
     let exhausted = true;
     try {
       for (let round = 0; round < 32; round += 1) {
-        const work = this.transport.tick();
+        const work = await this.transport.tick();
         const frames = normalizeTransportFrames(this.transport.recvWireFrames());
         if (frames.length > 0) this.sendFrames(frames);
         if (work === 0 && frames.length === 0) {

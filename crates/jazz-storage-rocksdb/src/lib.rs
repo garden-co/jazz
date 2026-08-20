@@ -771,11 +771,24 @@ fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
     use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
         CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile, RocksDbStorage,
         any_available, rocksdb_class_profile, sum_available,
     };
+
+    fn ready<F: Future>(future: F) -> F::Output {
+        let mut future = pin!(future);
+        let mut cx = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("RocksDB storage operation unexpectedly suspended"),
+        }
+    }
 
     #[test]
     fn class_cfs_select_storage_physics_profiles() {
@@ -823,10 +836,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
-        storage.set("records", b"a", b"one").unwrap();
+        ready(storage.set("records".into(), b"a".to_vec(), b"one".to_vec())).unwrap();
         assert!(
-            storage
-                .approximate_class_bytes("records")
+            ready(storage.approximate_class_bytes("records".into()))
                 .unwrap()
                 .is_some()
         );
@@ -839,8 +851,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["left", "right"]).unwrap();
         let before = storage.metrics().unwrap();
-        storage.set("left", b"a", &vec![7; 32 * 1024]).unwrap();
-        storage.set("right", b"b", &vec![9; 32 * 1024]).unwrap();
+        ready(storage.set("left".into(), b"a".to_vec(), vec![7; 32 * 1024])).unwrap();
+        ready(storage.set("right".into(), b"b".to_vec(), vec![9; 32 * 1024])).unwrap();
         let after = storage.metrics().unwrap();
 
         assert!(

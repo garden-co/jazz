@@ -239,9 +239,14 @@ where
             .commit_mergeable_open(open_tx_id, || self.next_now_ms())
             .await?;
         let tx_id = published.tx_id;
-        self.finish_publication_outcome(PublicationOutcome::published((), published))
-            .await?;
-        self.finalize_local_commit(tx_id)?;
+        if self.node.defer_local_persistence.get() {
+            self.refresh_subscriptions().await?;
+            self.node.queue_local_publication(published, None);
+        } else {
+            self.finish_publication_outcome(PublicationOutcome::published((), published))
+                .await?;
+            self.finalize_local_commit(tx_id)?;
+        }
         Ok(tx_id)
     }
 
@@ -471,9 +476,14 @@ where
             .commit_exclusive(open_tx_id, self.identity.author, self.next_now_ms())
             .await?;
         let tx_id = published.tx_id;
-        self.finish_publication_outcome(PublicationOutcome::published((), published))
-            .await?;
-        self.finalize_local_exclusive_unit(tx_id, unit)?;
+        if self.node.defer_local_persistence.get() {
+            self.refresh_subscriptions().await?;
+            self.node.queue_local_publication(published, Some(unit));
+        } else {
+            self.finish_publication_outcome(PublicationOutcome::published((), published))
+                .await?;
+            self.node.queue_pending_upload(tx_id, Some(unit));
+        }
         Ok(tx_id)
     }
 
