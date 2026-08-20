@@ -57,6 +57,167 @@ where
     Ok((value, changed))
 }
 
+/// Dispatch one admitted subscriber message into node ingest.
+///
+/// This is deliberately one boxed suspension boundary at the peer/control-plane
+/// seam. `PeerConnection::tick` otherwise contains the complete futures for
+/// every message variant inline, and authority policy evaluation can exhaust a
+/// normal test-thread stack before doing any recursive work.
+fn dispatch_admitted_subscriber_message<'a, S>(
+    node: &'a SharedNodeState<S>,
+    peer: &'a mut PeerState,
+    local_receiver: bool,
+    ingest_context: CommitUnitIngestContext,
+    admitted_upstream_authority: &'a Rc<RefCell<Option<AuthorityContext>>>,
+    edge_fate_routes: &'a EdgeFateRoutes,
+    local_fate_routes: &'a LocalFateRoutes,
+    downstream_fates: &'a PendingDownstreamFates,
+    message: SyncMessage,
+) -> Pin<Box<dyn Future<Output = Result<PublicationOutcome<Vec<SyncMessage>>, Error>> + 'a>>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    Box::pin(async move {
+        match message {
+            SyncMessage::CommitUnit { tx, versions } if local_receiver => {
+                let tx_id = tx.tx_id;
+                register_local_fate_route(local_fate_routes, tx_id, downstream_fates);
+                node.lock()
+                    .await
+                    .ingest_relay_commit_unit(tx, versions)
+                    .await?;
+                Ok(PublicationOutcome::settled(Vec::new()))
+            }
+            SyncMessage::CommitUnit { tx, versions }
+                if ingest_context.edge_authority
+                    && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+            {
+                if tx.kind != TxKind::Mergeable {
+                    node.lock()
+                        .await
+                        .ingest_relay_commit_unit(tx, versions)
+                        .await?;
+                    return Ok(PublicationOutcome::settled(Vec::new()));
+                }
+
+                let tx_id = tx.tx_id;
+                let route_registered =
+                    if let Some(authority) = *admitted_upstream_authority.borrow() {
+                        let mut routes = edge_fate_routes.borrow_mut();
+                        prune_edge_fate_routes(&mut routes, Some(authority));
+                        let route_count = routes.values().map(Vec::len).sum::<usize>();
+                        let pending = routes.get(&tx_id);
+                        let already_routed = pending.is_some_and(|pending| {
+                            pending.iter().any(|route| {
+                                route
+                                    .authority
+                                    .is_some_and(|route| route.same_admitted_link(authority))
+                                    && route
+                                        .queue
+                                        .upgrade()
+                                        .is_some_and(|queue| Rc::ptr_eq(&queue, downstream_fates))
+                            })
+                        });
+                        if already_routed {
+                            true
+                        } else if route_count < MAX_EDGE_FATE_ROUTES {
+                            let pending = routes.entry(tx_id).or_default();
+                            if pending.len() < MAX_EDGE_FATE_ROUTES_PER_TX {
+                                pending.push(EdgeFateRoute {
+                                    authority: Some(authority),
+                                    queue: Rc::downgrade(downstream_fates),
+                                });
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        let mut routes = edge_fate_routes.borrow_mut();
+                        prune_edge_fate_routes(&mut routes, None);
+                        let already_routed = routes.get(&tx_id).is_some_and(|pending| {
+                            pending.iter().any(|route| {
+                                route.authority.is_none()
+                                    && route
+                                        .queue
+                                        .upgrade()
+                                        .is_some_and(|queue| Rc::ptr_eq(&queue, downstream_fates))
+                            })
+                        });
+                        let route_count = routes.values().map(Vec::len).sum::<usize>();
+                        if already_routed {
+                            true
+                        } else if route_count >= MAX_EDGE_FATE_ROUTES {
+                            false
+                        } else {
+                            let pending = routes.entry(tx_id).or_default();
+                            if pending.len() >= MAX_EDGE_FATE_ROUTES_PER_TX {
+                                false
+                            } else {
+                                pending.push(EdgeFateRoute {
+                                    authority: None,
+                                    queue: Rc::downgrade(downstream_fates),
+                                });
+                                true
+                            }
+                        }
+                    };
+
+                if !route_registered {
+                    return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
+                        tx_id,
+                        fate: Fate::Rejected(RejectionReason::MalformedCommit(
+                            "no admitted authority route".to_owned(),
+                        )),
+                        global_seq: None,
+                        durability: None,
+                    }]));
+                }
+
+                node.lock()
+                    .await
+                    .ingest_relay_commit_unit(tx, versions)
+                    .await?;
+                Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
+                    tx_id,
+                    fate: Fate::Accepted,
+                    global_seq: None,
+                    durability: Some(DurabilityTier::Edge),
+                }]))
+            }
+            SyncMessage::CommitUnit { tx, versions }
+                if tx.kind == TxKind::Mergeable
+                    && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+            {
+                {
+                    let mut node = node.lock().await;
+                    peer.prove_terminal_commit_authorization(
+                        &mut node,
+                        ingest_context.identity,
+                        &versions,
+                    )
+                    .await?;
+                }
+                Ok(node
+                    .lock()
+                    .await
+                    .apply_sync_message_with_ingest_context(
+                        SyncMessage::CommitUnit { tx, versions },
+                        Some(ingest_context),
+                    )
+                    .await?)
+            }
+            other => Ok(node
+                .lock()
+                .await
+                .apply_sync_message_with_ingest_context(other, Some(ingest_context))
+                .await?),
+        }
+    })
+}
+
 /// A live link between this `Db` and one peer, owned by the `Db`.
 ///
 /// Two link shapes — a client/backend attached to an upstream, or a server
@@ -2430,6 +2591,7 @@ where
                             // binding), plus the write-upload path: any
                             // responses (e.g. fate updates) flow back to the
                             // subscriber.
+/* Superseded inline subscriber dispatch retained only while replaying the refactor.
                             let outcome = match other {
                                 SyncMessage::CommitUnit { tx, versions } if *local_receiver => {
                                     let tx_id = tx.tx_id;
@@ -2614,6 +2776,19 @@ where
                                         .await?
                                 }
                             };
+*/
+                            let outcome = dispatch_admitted_subscriber_message(
+                                &self.node,
+                                peer,
+                                *local_receiver,
+                                *ingest_context,
+                                &self.admitted_upstream_authority,
+                                &self.edge_fate_routes,
+                                &self.local_fate_routes,
+                                &self.downstream_fates,
+                                other,
+                            )
+                            .await?;
                             let (responses, changed) = finish_peer_publication_outcome(
                                 &self.node,
                                 &self.subscriptions,
