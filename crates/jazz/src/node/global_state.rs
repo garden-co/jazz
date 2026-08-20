@@ -206,7 +206,7 @@ where
         tx_id: TxId,
         versions: &[VersionRow],
     ) -> Result<Vec<VersionRow>, Error> {
-        let mut updates = BTreeMap::<(String, RowUuid, VersionLayer), VersionRow>::new();
+        let mut updates = BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), VersionRow>::new();
         let version_made_at = self
             .transaction_made_at(tx_id)?
             .ok_or(Error::MissingTransaction(tx_id))?;
@@ -216,9 +216,10 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "global version schema alias must exist",
                 ))?;
-            let previous_current = self.query_global_layer_winner_in_schema(
+            let previous_current = self.query_global_layer_winner_in_schema_and_branch(
                 authored_schema,
                 &version.table,
+                version.branch_key(),
                 version.row_uuid(),
                 version.layer(),
             )?;
@@ -241,6 +242,7 @@ where
                 updates.insert(
                     (
                         version.table().to_owned(),
+                        version.branch_key().clone(),
                         version.row_uuid(),
                         version.layer(),
                     ),

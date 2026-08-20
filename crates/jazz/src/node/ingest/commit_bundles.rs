@@ -999,7 +999,7 @@ where
                 continue;
             }
             let mut unique_versions = BTreeMap::<
-                (String, RowUuid, crate::ids::SchemaVersionId, bool),
+                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
                 &VersionRecord,
             >::new();
             let mut duplicate_conflict = false;
@@ -1007,6 +1007,7 @@ where
                 for version in bundle.versions {
                     let key = (
                         version.table().to_owned(),
+                        version.branch_key().clone(),
                         version.row_uuid(),
                         version.schema_version(),
                         version.deletion().is_some(),
@@ -1098,7 +1099,7 @@ where
             );
 
             let mut unique_versions = BTreeMap::<
-                (String, RowUuid, crate::ids::SchemaVersionId, bool),
+                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
                 &VersionRecord,
             >::new();
             for bundle in &tx_bundles {
@@ -1106,6 +1107,7 @@ where
                     unique_versions
                         .entry((
                             version.table().to_owned(),
+                            version.branch_key().clone(),
                             version.row_uuid(),
                             version.schema_version(),
                             version.deletion().is_some(),

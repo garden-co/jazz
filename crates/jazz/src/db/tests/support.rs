@@ -1736,6 +1736,53 @@ impl CoreDb {
         })
     }
 
+    pub(super) fn insert_with_id_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<RocksDbStorage>, Error> {
+        let node = self.server.node();
+        let tx_id = node.borrow_mut().commit_mergeable(
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(self.author)
+                .branch(branch)
+                .cells(cells),
+        )?;
+        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        self.server.mark_subscriber_connections_dirty();
+        Ok(WriteHandle {
+            node: Rc::downgrade(&node),
+            row_uuid: row,
+            tx_id,
+            local_tier: DurabilityTier::Global,
+        })
+    }
+
+    pub(super) fn insert_same_row_in_branches(
+        &self,
+        table: &str,
+        row: RowUuid,
+        entries: impl IntoIterator<Item = (BranchSelector, RowCells)>,
+    ) -> Result<TxId, Error> {
+        let now_ms = self.next_now_ms();
+        let commits = entries
+            .into_iter()
+            .map(|(branch, cells)| {
+                MergeableCommit::new(table, row, now_ms)
+                    .made_by(self.author)
+                    .branch(branch)
+                    .cells(cells)
+            })
+            .collect();
+        let node = self.server.node();
+        let tx_id = node.borrow_mut().commit_mergeable_many(commits)?;
+        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        self.server.mark_subscriber_connections_dirty();
+        Ok(tx_id)
+    }
+
     pub(super) fn insert_attributed(
         &self,
         made_by: AuthorId,

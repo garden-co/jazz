@@ -1195,13 +1195,34 @@ fn decode_typed_terminal_record(
                         })
                 })
                 .transpose()?;
-            let member = RealRowMemberEntry::current_content((
+            let branch_or_prefix = schema
+                .branch_or_prefix_field
+                .as_deref()
+                .map(|field| match record.get_idx(field_idx(record, field)?)? {
+                    Value::Uuid(value) => Ok(value.as_bytes().to_vec()),
+                    Value::Bytes(value) => Ok(value),
+                    Value::Nullable(Some(value)) => match *value {
+                        Value::Uuid(value) => Ok(value.as_bytes().to_vec()),
+                        Value::Bytes(value) => Ok(value),
+                        _ => Err(super::Error::InvalidStoredValue(
+                            "result branch discriminator must be UUID or bytes",
+                        )),
+                    },
+                    Value::Nullable(None) => Ok(Vec::new()),
+                    _ => Err(super::Error::InvalidStoredValue(
+                        "result branch discriminator must be UUID or bytes",
+                    )),
+                })
+                .transpose()?
+                .filter(|bytes| !bytes.is_empty());
+            let mut member = RealRowMemberEntry::current_content((
                 table.name.clone().into(),
                 row_uuid,
                 TxId::new(tx_time, tx_node),
             ))
             .with_occurrence_id(occurrence_id)
             .with_settle_position(settle_position);
+            member.branch_or_prefix = branch_or_prefix;
             let member: ResultMemberEntry = match flat_join_digest {
                 Some(digest) => member.with_row_digest(digest),
                 None => member,

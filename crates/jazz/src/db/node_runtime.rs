@@ -1905,12 +1905,9 @@ where
                         } else if preserve_local_overlay {
                             (state_ref.snapshot.clone(), previous_source)
                         } else if remote_settled_tier.is_some() {
-                            let previous = state_ref.snapshot.clone();
-                            if previous.root_count == 0
-                                && previous.edges.is_empty()
-                                && node
-                                    .borrow()
-                                    .has_settled_result_set(authoritative_reset_binding_view)
+                            if node
+                                .borrow()
+                                .has_settled_result_set(authoritative_reset_binding_view)
                             {
                                 let authoritative_snapshot = {
                                     let mut node_ref = node.borrow_mut();

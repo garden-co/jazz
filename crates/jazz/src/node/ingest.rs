@@ -87,9 +87,12 @@ fn commit_unit_write_count_matches(tx: &Transaction, version_count: usize) -> bo
     usize::try_from(tx.n_total_writes) == Ok(version_count)
 }
 
-fn view_version_key_for_ingest(version: &VersionRecord) -> (String, RowUuid, VersionLayer) {
+fn view_version_key_for_ingest(
+    version: &VersionRecord,
+) -> (String, BranchKey, RowUuid, VersionLayer) {
     (
         version.table().to_owned(),
+        version.branch_key().clone(),
         version.row_uuid(),
         VersionLayer::for_record(version),
     )

@@ -38,7 +38,11 @@ where
                 .current_row_from_aggregate_result_payload(query, member, payload)
                 .map(Some);
         }
-        if (query.flat_join.is_some() || member.as_row().is_none())
+        if (member
+            .as_real_row()
+            .is_some_and(|row| row.row_digest.is_some())
+            || query.flat_join.is_some()
+            || member.as_row().is_none())
             && let Some(payload) = result_payloads.get(member)
         {
             let Some(table_name) = member.table_name() else {
@@ -122,18 +126,35 @@ where
         let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Err(Error::MissingTransaction(tx_id));
         };
-        let Some(version) = self.query_version_by_alias(
+        let version = self.query_version_by_alias(
             table_name,
             row_uuid,
             VersionLayer::Content,
             tx_id.time,
             tx_node_alias,
-        )?
-        else {
-            if self.query_transaction(tx_id)?.is_some() {
-                return Ok(None);
+        )?;
+        let version = if let Some(version) = version {
+            version
+        } else {
+            // A row result member names the immutable witness by
+            // `(table,row,tx)` while branch identity travels on the bundled
+            // version itself. The legacy point lookup above addresses the
+            // shared/default branch; fall back to the transaction bundle so a
+            // branch-keyed witness can be materialized after selected delivery.
+            let versions = self.query_versions_for_tx(tx_id)?;
+            if let Some(version) = self.maintained_witness_for_result_member(
+                &versions,
+                self.catalogue.current_schema_version_id,
+                table_name,
+                row_uuid,
+            )? {
+                version.clone()
+            } else {
+                if self.query_transaction(tx_id)?.is_some() {
+                    return Ok(None);
+                }
+                return Err(Error::MissingTransaction(tx_id));
             }
-            return Err(Error::MissingTransaction(tx_id));
         };
         let mut row = self.current_row_from_materialized_version(&table, &version)?;
         if let Some(columns) = projection {
@@ -470,12 +491,15 @@ where
         // version across a rename.  Payloads and application rows, however,
         // are interpreted in this subscription's read schema.
         let table = self.table(local.result_table.as_str())?.clone();
-        if local.result_query.flat_join.is_some() {
+        if member
+            .as_real_row()
+            .is_some_and(|row| row.row_digest.is_some())
+        {
             let payload = local
                 .result_payloads
                 .get(member)
                 .ok_or(Error::InvalidStoredValue(
-                    "flat joined result member is missing its tuple payload",
+                    "payload-bearing result member is missing its row payload",
                 ))?;
             return self
                 .current_row_from_result_payload(&table, payload)
@@ -774,7 +798,7 @@ where
         )
     }
 
-    fn current_row_from_result_payload(
+    pub(super) fn current_row_from_result_payload(
         &mut self,
         table: &TableSchema,
         payload: &ResultMemberPayloadEntry,

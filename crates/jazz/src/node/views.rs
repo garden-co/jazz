@@ -107,9 +107,12 @@ fn version_bundle_refs_for_carriers<'a>(
     Ok(refs)
 }
 
-fn version_bundle_record_key(version: &VersionRecord) -> (String, RowUuid, SchemaVersionId, bool) {
+fn version_bundle_record_key(
+    version: &VersionRecord,
+) -> (String, BranchKey, RowUuid, SchemaVersionId, bool) {
     (
         version.table().to_owned(),
+        version.branch_key().clone(),
         version.row_uuid(),
         version.schema_version(),
         version.deletion().is_some(),
@@ -1651,9 +1654,10 @@ where
     }
 }
 
-fn view_version_key(version: &VersionRecord) -> (String, RowUuid, VersionLayer) {
+fn view_version_key(version: &VersionRecord) -> (String, BranchKey, RowUuid, VersionLayer) {
     (
         version.table().to_owned(),
+        version.branch_key().clone(),
         version.row_uuid(),
         VersionLayer::for_record(version),
     )

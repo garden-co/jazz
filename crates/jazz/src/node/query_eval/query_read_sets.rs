@@ -202,11 +202,10 @@ pub(super) fn query_read_set_for_read_view(
     // the subscription facade instead.
     let settled_binding_view = (!aggregate_query).then_some(settled_binding_view).flatten();
     if settled_binding_view.is_some() {
-        if !read_view.is_default() {
-            return Err(Error::QueryCapability(
-                "settled binding view sources do not support non-default read_view yet".to_owned(),
-            ));
-        }
+        // Settled rows are already the authority's effective result for the
+        // exact BindingViewKey, whose identity includes the normalized read
+        // view. Reapplying branch selection locally would incorrectly treat
+        // those effective rows as raw per-branch history.
         return Ok(current_query_read_set(
             shape,
             read_schema,

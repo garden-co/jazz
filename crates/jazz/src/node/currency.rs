@@ -158,6 +158,23 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
+        self.query_global_layer_winner_in_schema_and_branch(
+            schema_version,
+            table,
+            &BranchKey::default(),
+            row_uuid,
+            layer,
+        )
+    }
+
+    pub(super) fn query_global_layer_winner_in_schema_and_branch(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<VersionRow>, Error> {
         let current_table = self.physical_current_table_for_schema(
             schema_version,
             table,
@@ -167,7 +184,7 @@ where
         let raw = self.database.primary_key_get_raw(
             &current_table,
             &[
-                Value::Bytes(BranchKey::default().canonical_bytes()),
+                Value::Bytes(branch_key.canonical_bytes()),
                 Value::Uuid(row_uuid.0),
             ],
         )?;
@@ -178,9 +195,10 @@ where
         let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
         let tx_node_alias =
             NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
-        self.query_version_by_alias_in_schema(
+        self.query_version_by_alias_in_branch(
             schema_version,
             table,
+            branch_key,
             row_uuid,
             layer,
             tx_time,
@@ -911,36 +929,6 @@ where
             }
         }
         Ok(None)
-    }
-
-    /// Resolve an exact historical witness through the schema that authored
-    /// its table literal. Shared deletion history is keyed by physical table,
-    /// so an old `todos` witness must not construct its prefix via renamed
-    /// current `tasks` schema state.
-    pub(super) fn query_version_by_alias_in_schema(
-        &mut self,
-        schema_version: SchemaVersionId,
-        table: &str,
-        row_uuid: RowUuid,
-        layer: VersionLayer,
-        tx_time: TxTime,
-        tx_node_alias: NodeAlias,
-    ) -> Result<Option<VersionRow>, Error> {
-        let storage_table = match layer {
-            VersionLayer::Content => physical_history_table_name(
-                self.physical_table_id_for_schema(schema_version, table)?,
-            ),
-            VersionLayer::Deletion => SHARED_DELETION_HISTORY_TABLE.to_owned(),
-        };
-        self.query_version_by_alias_with_storage_in_schema(
-            schema_version,
-            table,
-            &storage_table,
-            &BranchKey::default(),
-            row_uuid,
-            tx_time,
-            tx_node_alias,
-        )
     }
 
     pub(super) fn query_version_by_alias_in_branch(

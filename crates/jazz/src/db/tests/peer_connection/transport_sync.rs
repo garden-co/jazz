@@ -2,6 +2,32 @@
 
 use super::*;
 
+fn branch_sync_schema() -> JazzSchema {
+    let dimension = crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x31; 16]));
+    JazzSchema::new_with_branch_dimensions(
+        [crate::schema::BranchDimensionSchema::new(
+            dimension,
+            "branch",
+            ColumnType::Uuid,
+            Value::Uuid(uuid::Uuid::nil()),
+        )],
+        [TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("branch_id", ColumnType::Uuid),
+                ColumnSchema::new("title", ColumnType::String),
+            ],
+        )
+        .with_branch_dimension("branch_id", dimension)
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public())],
+    )
+}
+
+fn branch_sync_selector(byte: u8) -> BranchSelector {
+    BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+}
+
 #[test]
 fn db_sync_surface_round_trips_subscription_to_client() {
     let schema = schema();
@@ -86,5 +112,246 @@ fn large_logical_snapshot_crosses_byte_peer_transport_and_settles() {
     panic!(
         "large logical snapshot subscription did not settle; currently visible rows={}",
         rows.len()
+    );
+}
+
+#[test]
+fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() {
+    let schema = branch_sync_schema();
+    let client_author = AuthorId::from_bytes([0x32; 16]);
+    let server = open_core(0x33, AuthorId::SYSTEM, &schema);
+    let client = open_db(0x34, client_author, &schema);
+    let base = branch_sync_selector(0x35);
+    let sibling = branch_sync_selector(0x36);
+    let head = branch_sync_selector(0x3b);
+    let selected_row = RowUuid::from_bytes([0x37; 16]);
+    let sibling_row = RowUuid::from_bytes([0x38; 16]);
+    server
+        .insert_with_id_in_branch(
+            "todos",
+            base.clone(),
+            selected_row,
+            BTreeMap::from([("title".to_owned(), Value::String("selected".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id_in_branch(
+            "todos",
+            sibling.clone(),
+            sibling_row,
+            BTreeMap::from([("title".to_owned(), Value::String("sibling".to_owned()))]),
+        )
+        .unwrap();
+
+    let (client_transport, server_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let opts = global_subscribe_opts()
+        .branch_view(head.clone(), Some(BranchViewBase::Current(base.clone())));
+    let mut subscription = prepared_subscribe(&client, &query, opts.clone()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+
+    let mut snapshot = RelationSnapshot::default();
+    for _ in 0..10 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+        if snapshot.rows.len() == 1 {
+            break;
+        }
+    }
+    assert_eq!(row_ids(&snapshot.rows), vec![selected_row]);
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[0], "branch_id"),
+        Some(head.dimensions["branch"].decode().unwrap()),
+        "an inherited base row must project the requested head coordinate"
+    );
+
+    let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
+    assert!(server.server.detach_connection(&subscriber));
+    assert!(client.detach_connection(&upstream));
+    let (client_transport, server_transport) = duplex();
+    let _resumed_upstream = client.connect_upstream(client_transport);
+    let resumed = server.accept_subscriber_with_resume(server_transport, client_author, cursor);
+    for _ in 0..10 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(row_ids(&snapshot.rows), vec![selected_row]);
+
+    server
+        .insert_with_id_in_branch(
+            "todos",
+            sibling,
+            RowUuid::from_bytes([0x39; 16]),
+            BTreeMap::from([("title".to_owned(), Value::String("hidden".to_owned()))]),
+        )
+        .unwrap();
+    let added_after_resume = RowUuid::from_bytes([0x3a; 16]);
+    server
+        .insert_with_id_in_branch(
+            "todos",
+            base,
+            added_after_resume,
+            BTreeMap::from([("title".to_owned(), Value::String("visible".to_owned()))]),
+        )
+        .unwrap();
+    for _ in 0..10 {
+        server.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+        if snapshot.rows.len() == 2 {
+            break;
+        }
+    }
+    assert_eq!(
+        row_ids(&snapshot.rows),
+        vec![selected_row, added_after_resume]
+    );
+
+    drop(subscription);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let served = match &resumed.borrow().link {
+        ConnectionLink::Subscriber { served, .. } => served.len(),
+        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+    };
+    assert_eq!(served, 0, "unsubscribe must release the exact branch view");
+}
+
+#[test]
+fn branch_view_subscriptions_disambiguate_same_row_and_tx_by_branch() {
+    let schema = branch_sync_schema();
+    let client_author = AuthorId::from_bytes([0x41; 16]);
+    let server = open_core(0x42, AuthorId::SYSTEM, &schema);
+    let client = open_db(0x43, client_author, &schema);
+    let left = branch_sync_selector(0x44);
+    let right = branch_sync_selector(0x45);
+    let row = RowUuid::from_bytes([0x46; 16]);
+    server
+        .insert_same_row_in_branches(
+            "todos",
+            row,
+            [
+                (
+                    left.clone(),
+                    BTreeMap::from([("title".to_owned(), Value::String("left".to_owned()))]),
+                ),
+                (
+                    right.clone(),
+                    BTreeMap::from([("title".to_owned(), Value::String("right".to_owned()))]),
+                ),
+            ],
+        )
+        .unwrap();
+    let query = Query::from("todos");
+    for (branch, title) in [(&left, "left"), (&right, "right")] {
+        let read_view = crate::protocol::ReadViewSpec::branch_view(branch.clone(), None);
+        let shape = query.validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let rows = server
+            .node()
+            .borrow_mut()
+            .query_relation_snapshot_for_serving_in_read_view(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                client_author,
+                &read_view,
+            )
+            .unwrap()
+            .rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].cell(&schema.tables[0], "title"),
+            Some(Value::String(title.to_owned()))
+        );
+    }
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut left_subscription = prepared_subscribe(
+        &client,
+        &query,
+        global_subscribe_opts().branch_view(left.clone(), None),
+    )
+    .unwrap();
+    let mut right_subscription = prepared_subscribe(
+        &client,
+        &query,
+        global_subscribe_opts().branch_view(right.clone(), None),
+    )
+    .unwrap();
+    assert!(opened_rows(block_on(left_subscription.next_raw()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(right_subscription.next_raw()).unwrap()).is_empty());
+
+    let mut left_snapshot = RelationSnapshot::default();
+    let mut right_snapshot = RelationSnapshot::default();
+    for _ in 0..20 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = left_subscription.try_next_event() {
+            assert!(
+                !matches!(
+                    event,
+                    SubscriptionEvent::Rejected { .. } | SubscriptionEvent::Closed
+                ),
+                "left branch subscription failed: {event:?}"
+            );
+            apply_subscription_event(&mut left_snapshot, event);
+        }
+        while let Some(event) = right_subscription.try_next_event() {
+            assert!(
+                !matches!(
+                    event,
+                    SubscriptionEvent::Rejected { .. } | SubscriptionEvent::Closed
+                ),
+                "right branch subscription failed: {event:?}"
+            );
+            apply_subscription_event(&mut right_snapshot, event);
+        }
+        if left_snapshot.rows.len() == 1 && right_snapshot.rows.len() == 1 {
+            break;
+        }
+    }
+
+    let served = match &subscriber.borrow().link {
+        ConnectionLink::Subscriber { served, .. } => served.len(),
+        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+    };
+    assert_eq!(
+        served, 2,
+        "both branch views must remain independently served"
+    );
+    let table = &schema.tables[0];
+    assert_eq!(row_ids(&left_snapshot.rows), vec![row]);
+    assert_eq!(row_ids(&right_snapshot.rows), vec![row]);
+    assert_eq!(
+        left_snapshot.rows[0].cell(table, "title"),
+        Some(Value::String("left".to_owned()))
+    );
+    assert_eq!(
+        right_snapshot.rows[0].cell(table, "title"),
+        Some(Value::String("right".to_owned()))
+    );
+    assert_eq!(
+        left_snapshot.rows[0].cell(table, "branch_id"),
+        Some(left.dimensions["branch"].decode().unwrap())
+    );
+    assert_eq!(
+        right_snapshot.rows[0].cell(table, "branch_id"),
+        Some(right.dimensions["branch"].decode().unwrap())
     );
 }

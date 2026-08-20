@@ -1492,8 +1492,36 @@ where
                     })
             }));
         }
+        let result_payloads = matches!(rows, SettledBindingRows::ResultMembers)
+            .then(|| {
+                self.query
+                    .settled_program_facts
+                    .get(&binding_view)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|fact| {
+                        let ProgramFactEntry::ResultPayload(payload) = fact else {
+                            return None;
+                        };
+                        payload
+                            .member
+                            .as_row()
+                            .map(|(table, row, tx)| ((table.to_string(), row, tx), payload.clone()))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
         let mut rows = Vec::with_capacity(row_entries.len());
         for ((canonical_table, row_uuid, tx_id), relation_version) in row_entries {
+            if let Some(payload) = result_payloads.get(&(canonical_table.clone(), row_uuid, tx_id))
+            {
+                let output_table = self.table_in_schema(table, read_schema)?.clone();
+                let row = self.current_row_from_result_payload(&output_table, payload)?;
+                if row.table() == table {
+                    rows.push(row);
+                }
+                continue;
+            }
             let version = if let Some(version_ref) = relation_version {
                 self.resolve_relation_edge_version(&canonical_table, row_uuid, &version_ref)?
             } else {
@@ -1502,14 +1530,26 @@ where
                     .get(&tx_id.node)
                     .copied()
                     .ok_or(Error::MissingTransaction(tx_id))?;
-                self.query_version_by_alias(
+                let shared = self.query_version_by_alias(
                     &canonical_table,
                     row_uuid,
                     VersionLayer::Content,
                     tx_id.time,
                     tx_node_alias,
-                )?
-                .ok_or(Error::MissingTransaction(tx_id))?
+                )?;
+                if let Some(version) = shared {
+                    version
+                } else {
+                    let versions = self.query_versions_for_tx(tx_id)?;
+                    self.maintained_witness_for_result_member(
+                        &versions,
+                        read_schema,
+                        &canonical_table,
+                        row_uuid,
+                    )?
+                    .cloned()
+                    .ok_or(Error::MissingTransaction(tx_id))?
+                }
             };
             if let Some(row) = self.projected_current_row_from_materialized_version_in_read_schema(
                 read_schema,

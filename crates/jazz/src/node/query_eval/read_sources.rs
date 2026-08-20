@@ -118,6 +118,7 @@ where
                                 metadata,
                             },
                             routing_fields: BTreeSet::new(),
+                            requires_result_payload: true,
                             content_version: None,
                             deletion_register: None,
                         });
@@ -277,6 +278,7 @@ where
                     metadata: BTreeMap::new(),
                 },
                 routing_fields: BTreeSet::new(),
+                requires_result_payload: false,
                 content_version: None,
                 deletion_register: None,
             });
@@ -344,6 +346,7 @@ where
                         metadata: BTreeMap::new(),
                     },
                     routing_fields: BTreeSet::new(),
+                    requires_result_payload: false,
                     content_version: None,
                     deletion_register: None,
                 });
@@ -487,6 +490,7 @@ where
                         metadata,
                     },
                     routing_fields,
+                    requires_result_payload: true,
                     content_version,
                     deletion_register,
                 });
@@ -642,6 +646,7 @@ where
                         metadata,
                     },
                     routing_fields,
+                    requires_result_payload: true,
                     content_version: request
                         .requirements
                         .metadata
@@ -1076,6 +1081,7 @@ where
                 metadata,
             },
             routing_fields,
+            requires_result_payload: false,
             content_version,
             deletion_register,
         })

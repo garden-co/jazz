@@ -1233,8 +1233,9 @@ fn fact_output_with_terminal(
             let occurrence_id_fields = result_occurrence_id_fields(plan, source, resolved_sources)?;
             let occurrence_union_arm_fields =
                 result_occurrence_union_arm_fields(plan, source, resolved_sources)?;
-            let payload_fields = flat_join_payload_fields(plan);
-            let settle_position_field = payload_fields
+            let flat_join_payload = flat_join_payload_fields(plan);
+            let payload_fields = result_payload_fields(plan, source);
+            let settle_position_field = flat_join_payload
                 .is_empty()
                 .then(|| settle_position_field(&source.row_shape))
                 .flatten();
@@ -1381,6 +1382,32 @@ pub(super) fn flat_join_payload_fields(plan: &AnalyzedQueryPlan) -> Vec<TypedOut
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn result_payload_fields(
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+) -> Vec<TypedOutputField> {
+    let flat_join = flat_join_payload_fields(plan);
+    if !flat_join.is_empty() || !source.requires_result_payload {
+        return flat_join;
+    }
+    let hidden = hidden_source_fields(&source.row_shape);
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| {
+            let name = field.name.as_ref()?;
+            (!hidden.contains(name) && !source.routing_fields.contains(name)).then(|| {
+                TypedOutputField {
+                    name: name.clone(),
+                    ty: field.value_type.clone(),
+                }
+            })
+        })
+        .collect()
 }
 
 fn projected_multisource_terminal(
@@ -1538,12 +1565,13 @@ fn fact_terminal_graph(
             occurrence_fields.extend(
                 result_occurrence_union_arm_fields(plan, source, resolved_sources)?.into_values(),
             );
+            let flat_join_payload = flat_join_payload_fields(plan);
             Ok(graph.project_fields(result_membership_fields(
                 source,
                 routing_param_fields,
-                &flat_join_payload_fields(plan),
+                &result_payload_fields(plan, source),
                 &occurrence_fields,
-                flat_join_payload_fields(plan).is_empty(),
+                flat_join_payload.is_empty(),
             )?))
         }
         ProgramFactKey::VersionWitnesses => {
