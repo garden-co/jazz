@@ -605,7 +605,7 @@ impl<'a> EvaluationSession<'a> {
             EvaluationWorkQueue::new(roots.iter().copied()).discover_hydration(&runtime.graph)?;
         let mut storage_requests = StorageRequests::new();
         for request in work_queue.requests().cloned().collect::<Vec<_>>() {
-            storage_requests.request(request, &storage);
+            storage_requests.request(request, &storage, &runtime.schema);
         }
         // Installed operator state is root-scoped. Recursive child scopes are
         // scratch state and are cleared before an evaluation is installed.
@@ -1065,7 +1065,7 @@ impl IvmRuntime {
             self.recursive_recompute_storage_dependencies(&negative_tables, has_negative_bindings)?;
         let mut storage_requests = StorageRequests::new();
         for request in recursive_storage_dependencies.keys().cloned() {
-            storage_requests.request(request, &storage);
+            storage_requests.request(request, &storage, &self.schema);
         }
         let evaluation_inputs =
             (!recursive_storage_dependencies.is_empty()).then(EvaluationInputs::default);
@@ -1211,24 +1211,7 @@ impl IvmRuntime {
                             Some(StaticScanBounds::Range { .. }) => None,
                         }
                     }
-                    OpType::IndexSource(source) => match persisted_index_scan_bounds(
-                        &source.table,
-                        &source.index,
-                        source.scan.as_ref(),
-                    )? {
-                        StaticScanBounds::Prefix(prefix) => Some(StorageRequestKey::ScanPrefix {
-                            family: "indices".to_owned(),
-                            prefix,
-                        }),
-                        StaticScanBounds::Range { start, end } if start < end => {
-                            Some(StorageRequestKey::ScanRange {
-                                family: "indices".to_owned(),
-                                start,
-                                end,
-                            })
-                        }
-                        StaticScanBounds::Range { .. } => None,
-                    },
+                    OpType::IndexSource(source) => NodeState::index_source_request(source)?,
                     _ => None,
                 };
                 if let Some(request) = request {

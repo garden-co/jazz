@@ -72,8 +72,11 @@ weighted-delta flow as every downstream operator.
 
 - **Table source** (`GraphBuilder::Table`) — introduces a table's committed rows
   as deltas into the graph (ch. 2, ch. 4).
-- **Index** (`GraphBuilder::Index`, `IndexByOp`) — exposes an indexed view of a
-  source; its durable persistence is ch. 2, its tick participation ch. 4.
+- **Index** (`GraphBuilder::Index`, `IndexByOp`) — either exposes encoded index
+  entries or, with a named row projection, introduces the referenced table
+  rows selected by that index. The latter is still one source node, not a
+  caller-materialized inline snapshot; its durable persistence is ch. 2, its
+  tick participation ch. 4, and staged hydration is ch. 8.
 - **Binding source** (`BindingSourceOp`) — provides the parameter-as-data
   weighted record set of a prepared shape; defined in ch. 5.
 - **Frontier source** (`FrontierSourceOp`) — provides the recursion entry point;

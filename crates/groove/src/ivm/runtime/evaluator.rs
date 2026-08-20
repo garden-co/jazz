@@ -630,6 +630,8 @@ impl TickEvaluator<'_> {
                 {
                     NodeState::update_index_source_from_inputs(
                         input,
+                        self.schema,
+                        self.variant_projections,
                         &output_desc,
                         self.evaluation_inputs
                             .as_deref_mut()
