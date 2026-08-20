@@ -994,9 +994,12 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         fs::create_dir_all(&tmp_cache).expect("create temporary customer seed cache");
         {
             let storage = open_storage(&tmp_cache, schema);
-            let state =
-                jazz::node::NodeState::new_history_complete(node(1), schema.clone(), storage)
-                    .unwrap();
+            let state = block_on(jazz::node::NodeState::new_history_complete(
+                node(1),
+                schema.clone(),
+                storage,
+            ))
+            .unwrap();
             let core = Node::new(state);
             write_seed_plan(&core, &plan);
         }
@@ -1008,8 +1011,12 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     let core_dir = tempfile::tempdir().unwrap();
     copy_dir_contents(&cache_dir, core_dir.path()).expect("copy cached customer seed store");
     let storage = open_storage(core_dir.path(), schema);
-    let state =
-        jazz::node::NodeState::new_history_complete(node(1), schema.clone(), storage).unwrap();
+    let state = block_on(jazz::node::NodeState::new_history_complete(
+        node(1),
+        schema.clone(),
+        storage,
+    ))
+    .unwrap();
     let core = Node::new(state);
 
     Seeded {
@@ -1488,7 +1495,7 @@ fn run_connect_and_subscribe(
         let core_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let core_tick_start = Instant::now();
-        seeded.core.tick().unwrap();
+        block_on(seeded.core.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.core_tick_ns += core_tick_start.elapsed().as_nanos() as u64;
@@ -1506,7 +1513,7 @@ fn run_connect_and_subscribe(
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let relay_tick_start = Instant::now();
-        relay.db.tick().unwrap();
+        block_on(relay.db.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.relay_tick_ns += relay_tick_start.elapsed().as_nanos() as u64;
@@ -1524,7 +1531,7 @@ fn run_connect_and_subscribe(
         let client_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let client_tick_start = Instant::now();
-        client.db.tick().unwrap();
+        block_on(client.db.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.client_tick_ns += client_tick_start.elapsed().as_nanos() as u64;
@@ -1559,7 +1566,7 @@ fn run_connect_and_subscribe(
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let relay_tick_start = Instant::now();
-        relay.db.tick().unwrap();
+        block_on(relay.db.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.relay_tick_ns += relay_tick_start.elapsed().as_nanos() as u64;
@@ -1573,7 +1580,7 @@ fn run_connect_and_subscribe(
         let core_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let core_tick_start = Instant::now();
-        seeded.core.tick().unwrap();
+        block_on(seeded.core.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.core_tick_ns += core_tick_start.elapsed().as_nanos() as u64;
@@ -1605,9 +1612,7 @@ fn run_connect_and_subscribe(
         .map(|sub| sub.rows.len())
         .sum::<usize>();
     if label == "warm_prime" {
-        relay
-            .db
-            .flush_for_test()
+        block_on(relay.db.flush_for_test())
             .expect("warm-prime relay state should flush before reopen");
     }
     let expected_rows = expected.values().sum::<usize>();
@@ -1647,10 +1652,12 @@ fn run_connect_and_subscribe(
     let client_sync_metrics = client.db.sync_metrics_for_test();
     let relay_runtime_stats = relay.db.runtime_stats_for_test();
     let client_runtime_stats = client.db.runtime_stats_for_test();
-    let core_runtime_stats = seeded.core.runtime_stats_for_test();
-    let core_encoded_storage_bytes = seeded.core.encoded_storage_bytes_for_test().unwrap();
-    let relay_encoded_storage_bytes = relay.db.encoded_storage_bytes_for_test().unwrap();
-    let client_encoded_storage_bytes = client.db.encoded_storage_bytes_for_test().unwrap();
+    let core_runtime_stats = block_on(seeded.core.runtime_stats_for_test());
+    let core_encoded_storage_bytes =
+        block_on(seeded.core.encoded_storage_bytes_for_test()).unwrap();
+    let relay_encoded_storage_bytes = block_on(relay.db.encoded_storage_bytes_for_test()).unwrap();
+    let client_encoded_storage_bytes =
+        block_on(client.db.encoded_storage_bytes_for_test()).unwrap();
     let encoded_storage_bytes =
         core_encoded_storage_bytes + relay_encoded_storage_bytes + client_encoded_storage_bytes;
     let peak_rss_bytes = peak_rss_bytes();
@@ -1870,17 +1877,14 @@ fn subscription_tables() -> Vec<String> {
 
 fn seed_db(core: &Node<RocksDbStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
     let node = core.node();
-    let tx_id = node
-        .borrow_mut()
-        .commit_mergeable(
-            MergeableCommit::new(table, row, next_seed_time())
-                .made_by(AuthorId::SYSTEM)
-                .cells(cells),
-        )
-        .unwrap();
-    node.borrow_mut()
-        .finalize_local_mergeable_commit(tx_id)
-        .unwrap();
+    let mut node = block_on(node.lock());
+    jazz_sim::fixture::commit_mergeable_unit_settled(
+        &mut node,
+        MergeableCommit::new(table, row, next_seed_time())
+            .made_by(AuthorId::SYSTEM)
+            .cells(cells),
+    )
+    .unwrap();
 }
 
 fn open_db_node(

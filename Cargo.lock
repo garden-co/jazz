@@ -2076,6 +2076,7 @@ dependencies = [
  "automerge",
  "backtrace",
  "diamond-types",
+ "futures",
  "hdrhistogram",
  "jazz",
  "jazz-benchmark-guard",

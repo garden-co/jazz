@@ -12,6 +12,10 @@ use jazz::time::TxTime;
 use jazz::tools::OpenTransactionId;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, Transaction};
+use jazz_sim::fixture::{
+    apply_sync_message_settled, commit_exclusive_settled, commit_mergeable_unit_settled,
+    ingest_commit_unit_settled,
+};
 use jazz_sim::{emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Map, Value as JsonValue, json};
@@ -117,8 +121,7 @@ fn run_domination(config: &Config) {
         let mut hist = NsHist::new();
         for _ in 0..config.iterations {
             let start = Instant::now();
-            let rows = core
-                .current_rows(TABLE, DurabilityTier::Local)
+            let rows = jazz::db::block_on(core.current_rows(TABLE, DurabilityTier::Local))
                 .expect("current rows");
             black_box(rows.len());
             hist.record(start.elapsed());
@@ -157,8 +160,7 @@ fn run_deletion_register(config: &Config) {
     let mut hist = NsHist::new();
     for _ in 0..config.iterations {
         let start = Instant::now();
-        let rows = core
-            .current_rows(TABLE, DurabilityTier::Local)
+        let rows = jazz::db::block_on(core.current_rows(TABLE, DurabilityTier::Local))
             .expect("current rows");
         black_box(rows.len());
         hist.record(start.elapsed());
@@ -250,8 +252,7 @@ fn run_commit_unit(config: &Config) {
             bytes += commit_unit_bytes(&unit);
 
             let start = Instant::now();
-            let [fate] = core
-                .ingest_commit_unit(tx, versions, 100_000 + iter as u64)
+            let [fate] = ingest_commit_unit_settled(&mut core, tx, versions, 100_000 + iter as u64)
                 .expect("ingest commit unit")
                 .try_into()
                 .expect("one fate");
@@ -286,12 +287,11 @@ fn run_read_set_capture(config: &Config) {
 
     let mut row_hist = NsHist::new();
     let tx = OpenTransactionId::new();
-    node_.open_exclusive(tx).expect("open tx");
+    jazz::db::block_on(node_.open_exclusive(tx)).expect("open tx");
     for idx in 0..config.iterations {
         let start = Instant::now();
-        let _ = node_
-            .tx_read(tx, TABLE, row(idx % 64))
-            .expect("tx read capture");
+        let _ =
+            jazz::db::block_on(node_.tx_read(tx, TABLE, row(idx % 64))).expect("tx read capture");
         row_hist.record(start.elapsed());
     }
     node_.abandon_tx(tx).expect("abandon");
@@ -300,11 +300,10 @@ fn run_read_set_capture(config: &Config) {
     let mut predicate_hist = NsHist::new();
     for _ in 0..config.iterations {
         let tx = OpenTransactionId::new();
-        node_.open_exclusive(tx).expect("open tx");
+        jazz::db::block_on(node_.open_exclusive(tx)).expect("open tx");
         let start = Instant::now();
-        let rows = node_
-            .tx_current_rows(tx, TABLE)
-            .expect("tx current rows capture");
+        let rows =
+            jazz::db::block_on(node_.tx_current_rows(tx, TABLE)).expect("tx current rows capture");
         black_box(rows.len());
         predicate_hist.record(start.elapsed());
         node_.abandon_tx(tx).expect("abandon");
@@ -317,44 +316,42 @@ fn run_validation_entries(config: &Config) {
     let (client_dir, mut client) = open_node(node(216), schema());
     let (_core_dir, _client_dir) = (core_dir, client_dir);
     for idx in 0..64 {
-        let unit = client
-            .commit_mergeable_unit(
-                MergeableCommit::new(TABLE, row(idx), 1_000 + idx as u64)
-                    .made_by(AuthorId::SYSTEM)
-                    .cells(cells(&format!("seed-{idx}"))),
-            )
-            .expect("seed unit")
-            .1;
+        let unit = commit_mergeable_unit_settled(
+            &mut client,
+            MergeableCommit::new(TABLE, row(idx), 1_000 + idx as u64)
+                .made_by(AuthorId::SYSTEM)
+                .cells(cells(&format!("seed-{idx}"))),
+        )
+        .expect("seed unit")
+        .1;
         let fate = core_ingest(&mut core, &unit);
-        client.apply_sync_message(fate).expect("apply seed fate");
+        apply_sync_message_settled(&mut client, fate).expect("apply seed fate");
     }
 
     let mut row_hist = NsHist::new();
     for idx in 0..config.iterations {
         let tx = OpenTransactionId::new();
-        client.open_exclusive(tx).expect("open tx");
-        let _ = client.tx_read(tx, TABLE, row(idx % 64)).expect("tx read");
-        client
-            .tx_write(
-                tx,
-                TABLE,
-                row(40_000 + idx),
-                cells(&format!("rowval-{idx}")),
-                None,
-            )
-            .expect("tx write");
-        let (_tx_id, unit) = client
-            .commit_exclusive(tx, AuthorId::SYSTEM, 10_000 + idx as u64)
-            .expect("commit exclusive");
+        jazz::db::block_on(client.open_exclusive(tx)).expect("open tx");
+        let _ = jazz::db::block_on(client.tx_read(tx, TABLE, row(idx % 64))).expect("tx read");
+        jazz::db::block_on(client.tx_write(
+            tx,
+            TABLE,
+            row(40_000 + idx),
+            cells(&format!("rowval-{idx}")),
+            None,
+        ))
+        .expect("tx write");
+        let (_tx_id, unit) =
+            commit_exclusive_settled(&mut client, tx, AuthorId::SYSTEM, 10_000 + idx as u64)
+                .expect("commit exclusive");
         let (tx, versions) = commit_parts(&unit);
         let start = Instant::now();
-        let [fate] = core
-            .ingest_commit_unit(tx, versions, 20_000 + idx as u64)
+        let [fate] = ingest_commit_unit_settled(&mut core, tx, versions, 20_000 + idx as u64)
             .expect("core ingest")
             .try_into()
             .expect("one fate");
         row_hist.record(start.elapsed());
-        client.apply_sync_message(fate.clone()).expect("apply fate");
+        apply_sync_message_settled(&mut client, fate.clone()).expect("apply fate");
         assert_accepted(&fate);
     }
     emit_hist(
@@ -367,28 +364,26 @@ fn run_validation_entries(config: &Config) {
     let mut predicate_hist = NsHist::new();
     for idx in 0..config.iterations {
         let tx = OpenTransactionId::new();
-        client.open_exclusive(tx).expect("open tx");
-        let _ = client.tx_current_rows(tx, TABLE).expect("tx current rows");
-        client
-            .tx_write(
-                tx,
-                TABLE,
-                row(80_000 + idx),
-                cells(&format!("predval-{idx}")),
-                None,
-            )
-            .expect("tx write");
-        let (_tx_id, unit) = client
-            .commit_exclusive(tx, AuthorId::SYSTEM, 100_000 + idx as u64)
-            .expect("commit exclusive");
+        jazz::db::block_on(client.open_exclusive(tx)).expect("open tx");
+        let _ = jazz::db::block_on(client.tx_current_rows(tx, TABLE)).expect("tx current rows");
+        jazz::db::block_on(client.tx_write(
+            tx,
+            TABLE,
+            row(80_000 + idx),
+            cells(&format!("predval-{idx}")),
+            None,
+        ))
+        .expect("tx write");
+        let (_tx_id, unit) =
+            commit_exclusive_settled(&mut client, tx, AuthorId::SYSTEM, 100_000 + idx as u64)
+                .expect("commit exclusive");
         let (tx, versions) = commit_parts(&unit);
         let start = Instant::now();
-        let fates = core
-            .ingest_commit_unit(tx, versions, 200_000 + idx as u64)
+        let fates = ingest_commit_unit_settled(&mut core, tx, versions, 200_000 + idx as u64)
             .expect("core ingest");
         predicate_hist.record(start.elapsed());
         for fate in fates {
-            client.apply_sync_message(fate.clone()).expect("apply fate");
+            apply_sync_message_settled(&mut client, fate.clone()).expect("apply fate");
             assert_accepted(&fate);
         }
     }
@@ -402,13 +397,13 @@ fn run_validation_entries(config: &Config) {
 
 fn seed_local_rows(node_: &mut NodeState<RocksDbStorage>, rows: usize) {
     for idx in 0..rows {
-        let _ = node_
-            .commit_mergeable_unit(
-                MergeableCommit::new(TABLE, row(idx), 1_000 + idx as u64)
-                    .made_by(AuthorId::SYSTEM)
-                    .cells(cells(&format!("seed-{idx}"))),
-            )
-            .expect("seed local");
+        let _ = commit_mergeable_unit_settled(
+            node_,
+            MergeableCommit::new(TABLE, row(idx), 1_000 + idx as u64)
+                .made_by(AuthorId::SYSTEM)
+                .cells(cells(&format!("seed-{idx}"))),
+        )
+        .expect("seed local");
     }
 }
 
@@ -419,15 +414,15 @@ fn commit_unit(
     parents: Vec<jazz::tx::TxId>,
 ) -> SyncMessage {
     let (_dir, mut node_) = open_node(node_uuid, schema());
-    node_
-        .commit_mergeable_unit(
-            MergeableCommit::new(TABLE, row_uuid, 1_000 + idx)
-                .made_by(AuthorId::SYSTEM)
-                .parents(parents)
-                .cells(cells(&format!("v-{idx}"))),
-        )
-        .expect("commit unit")
-        .1
+    commit_mergeable_unit_settled(
+        &mut node_,
+        MergeableCommit::new(TABLE, row_uuid, 1_000 + idx)
+            .made_by(AuthorId::SYSTEM)
+            .parents(parents)
+            .cells(cells(&format!("v-{idx}"))),
+    )
+    .expect("commit unit")
+    .1
 }
 
 fn commit_deletion_unit(
@@ -437,29 +432,29 @@ fn commit_deletion_unit(
     deletion: DeletionEvent,
 ) -> SyncMessage {
     let (_dir, mut node_) = open_node(node_uuid, schema());
-    node_
-        .commit_mergeable_unit(
-            MergeableCommit::new(TABLE, row_uuid, 2_000 + idx)
-                .made_by(AuthorId::SYSTEM)
-                .deletion(deletion),
-        )
-        .expect("deletion unit")
-        .1
+    commit_mergeable_unit_settled(
+        &mut node_,
+        MergeableCommit::new(TABLE, row_uuid, 2_000 + idx)
+            .made_by(AuthorId::SYSTEM)
+            .deletion(deletion),
+    )
+    .expect("deletion unit")
+    .1
 }
 
 fn core_ingest(core: &mut NodeState<RocksDbStorage>, unit: &SyncMessage) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
-    let [fate] = core
-        .ingest_commit_unit(
-            tx.clone(),
-            versions.clone(),
-            tx.tx_id.physical_ms() + SKEW_TOLERANCE_MS,
-        )
-        .expect("core ingest")
-        .try_into()
-        .expect("one fate update");
+    let [fate] = ingest_commit_unit_settled(
+        core,
+        tx.clone(),
+        versions.clone(),
+        tx.tx_id.physical_ms() + SKEW_TOLERANCE_MS,
+    )
+    .expect("core ingest")
+    .try_into()
+    .expect("one fate update");
     fate
 }
 
@@ -528,7 +523,7 @@ fn open_node_at(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open_with_durability(path, &refs, Durability::WalNoSync)
         .expect("open rocksdb");
-    NodeState::new(node_uuid, schema, storage).expect("node")
+    jazz::db::block_on(NodeState::new(node_uuid, schema, storage)).expect("node")
 }
 
 fn cells(title: &str) -> BTreeMap<String, Value> {
