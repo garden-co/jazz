@@ -176,10 +176,14 @@ impl Drop for CatalogueKvStorage {
 }
 
 fn run_catalogue_storage(storage: BoxedStorage, commands: mpsc::Receiver<CatalogueStorageCommand>) {
+    let mut storage = Some(storage);
     while let Ok(command) = commands.recv() {
+        let active_storage = storage
+            .as_ref()
+            .expect("catalogue storage is present until close");
         match command {
             CatalogueStorageCommand::Scan(reply) => {
-                let _ = reply.send(scan_entries(&storage));
+                let _ = reply.send(scan_entries(active_storage));
             }
             CatalogueStorageCommand::Upsert(entry, reply) => {
                 let result = entry
@@ -188,7 +192,7 @@ fn run_catalogue_storage(storage: BoxedStorage, commands: mpsc::Receiver<Catalog
                         CatalogueStorageError::IoError(format!("encode catalogue entry: {error}"))
                     })
                     .and_then(|bytes| {
-                        jazz::db::block_on(storage.set(
+                        jazz::db::block_on(active_storage.set(
                             CatalogueKvStorage::COLUMN_FAMILY.to_owned(),
                             CatalogueKvStorage::entry_key(entry.object_id),
                             bytes,
@@ -198,12 +202,17 @@ fn run_catalogue_storage(storage: BoxedStorage, commands: mpsc::Receiver<Catalog
                 let _ = reply.send(result);
             }
             CatalogueStorageCommand::Flush(reply) => {
-                let result =
-                    jazz::db::block_on(storage.flush_write_boundary()).map_err(storage_error);
+                let result = jazz::db::block_on(active_storage.flush_write_boundary())
+                    .map_err(storage_error);
                 let _ = reply.send(result);
             }
             CatalogueStorageCommand::Close(reply) => {
-                let result = jazz::db::block_on(storage.close()).map_err(storage_error);
+                let owned_storage = storage.take().expect("catalogue storage closes once");
+                let result = jazz::db::block_on(owned_storage.close()).map_err(storage_error);
+                // `close()` flushes the backend, but the boxed owner may retain
+                // process-level resources (notably RocksDB's lock) until drop.
+                // Release those before acknowledging the synchronous boundary.
+                drop(owned_storage);
                 let _ = reply.send(result);
                 break;
             }
