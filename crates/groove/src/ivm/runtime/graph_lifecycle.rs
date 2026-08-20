@@ -2,6 +2,32 @@
 
 use super::*;
 
+/// Owns unretained graph additions until an operation promotes them by adding
+/// retainers. Cancellation or failure eagerly collects only ephemeral nodes;
+/// hash-equal nodes retained by unrelated live operations remain installed.
+pub(super) struct EphemeralGraphInstall<'a> {
+    runtime: &'a mut IvmRuntime,
+}
+
+impl<'a> EphemeralGraphInstall<'a> {
+    pub(super) fn new(runtime: &'a mut IvmRuntime) -> Self {
+        Self { runtime }
+    }
+
+    pub(super) fn runtime(&mut self) -> &mut IvmRuntime {
+        self.runtime
+    }
+}
+
+impl Drop for EphemeralGraphInstall<'_> {
+    fn drop(&mut self) {
+        for node in self.runtime.gc_ephemeral_nodes(0) {
+            self.runtime.remove_node_runtime(node);
+        }
+        self.runtime.prune_unreferenced_arrangements();
+    }
+}
+
 impl IvmRuntime {
     pub fn retained_node_ids(&self) -> HashSet<NodeId> {
         let mut retained = HashSet::new();

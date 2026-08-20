@@ -1249,7 +1249,7 @@ impl IvmRuntime {
         })
     }
 
-    fn bump_input_frontiers(
+    pub(super) fn bump_input_frontiers(
         &mut self,
         table_deltas: &[TableDelta],
         binding_deltas: &[BindingDelta],
@@ -1383,7 +1383,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.hydration_roots_owned(roots, OwnedStorage::new(Rc::new(storage)), mode)
+        self.hydration_roots_owned(roots, OwnedStorage::new(Rc::new(storage)), mode, None)
             .await
     }
 
@@ -1392,9 +1392,10 @@ impl IvmRuntime {
         roots: impl IntoIterator<Item = NodeId>,
         owned_storage: OwnedStorage<'a>,
         mode: HydrationMode,
+        binding_snapshots: Option<HashMap<String, RecordDeltas>>,
     ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
-        let binding_snapshots = self.binding_snapshot_deltas();
+        let binding_snapshots = binding_snapshots.unwrap_or_else(|| self.binding_snapshot_deltas());
         let mut metrics = TickMetrics::default();
         if roots.is_empty() {
             return Err(IvmRuntimeError::UnsupportedOperator);
@@ -1430,6 +1431,20 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        self.hydration_snapshots_with_binding_snapshots(outputs, storage, mode, None)
+            .await
+    }
+
+    async fn hydration_snapshots_with_binding_snapshots<S>(
+        &mut self,
+        outputs: &BTreeMap<String, CompiledNode>,
+        storage: &S,
+        mode: HydrationMode,
+        binding_snapshots: Option<HashMap<String, RecordDeltas>>,
+    ) -> Result<MultisinkDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
         let mut seen_roots = HashSet::new();
         let roots = outputs
             .values()
@@ -1437,7 +1452,14 @@ impl IvmRuntime {
             .flatten()
             .filter(|root| seen_roots.insert(*root))
             .collect::<Vec<_>>();
-        let hydrated = self.hydration_roots(roots, storage, mode).await?;
+        let hydrated = self
+            .hydration_roots_owned(
+                roots,
+                OwnedStorage::new(Rc::new(storage)),
+                mode,
+                binding_snapshots,
+            )
+            .await?;
         let mut sinks = BTreeMap::new();
         for (sink, output) in outputs {
             let ordering = match output.root_ordering_node {
@@ -1477,6 +1499,41 @@ impl IvmRuntime {
     {
         self.hydration_snapshots(outputs, storage, HydrationMode::Subscription)
             .await
+    }
+
+    pub(super) async fn hydration_snapshots_for_subscription_with_binding<S>(
+        &mut self,
+        outputs: &BTreeMap<String, CompiledNode>,
+        storage: &S,
+        binding: &BindingDelta,
+    ) -> Result<MultisinkDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let mut snapshots = self.binding_snapshot_deltas();
+        let snapshot = snapshots
+            .entry(binding.shape.clone())
+            .or_insert_with(|| RecordDeltas {
+                descriptor: binding.descriptor,
+                deltas: Vec::new(),
+            });
+        for delta in &binding.deltas {
+            if delta.weight > 0
+                && !snapshot
+                    .deltas
+                    .iter()
+                    .any(|existing| existing.record == delta.record)
+            {
+                snapshot.deltas.push(delta.clone());
+            }
+        }
+        self.hydration_snapshots_with_binding_snapshots(
+            outputs,
+            storage,
+            HydrationMode::Subscription,
+            Some(snapshots),
+        )
+        .await
     }
 
     fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {

@@ -739,7 +739,7 @@ impl IvmRuntime {
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
         }
-        let mut query = EphemeralQuery::new(self);
+        let mut query = super::graph_lifecycle::EphemeralGraphInstall::new(self);
         let runtime = query.runtime();
         runtime.logical_nodes_requested += count_builder_nodes(&graph) as u64;
         let CompiledNode {
@@ -783,7 +783,7 @@ impl IvmRuntime {
                 return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(sink.clone()));
             }
         }
-        let mut query = EphemeralQuery::new(self);
+        let mut query = super::graph_lifecycle::EphemeralGraphInstall::new(self);
         let runtime = query.runtime();
         runtime.logical_nodes_requested += sinks
             .iter()
@@ -796,31 +796,6 @@ impl IvmRuntime {
         runtime
             .hydration_snapshots(&outputs, storage, HydrationMode::Ordinary)
             .await
-    }
-}
-
-/// Ensures a cancellable one-shot evaluation cannot strand ephemeral graph
-/// nodes while leaving shared live-subscription nodes untouched.
-struct EphemeralQuery<'a> {
-    runtime: &'a mut IvmRuntime,
-}
-
-impl<'a> EphemeralQuery<'a> {
-    fn new(runtime: &'a mut IvmRuntime) -> Self {
-        Self { runtime }
-    }
-
-    fn runtime(&mut self) -> &mut IvmRuntime {
-        self.runtime
-    }
-}
-
-impl Drop for EphemeralQuery<'_> {
-    fn drop(&mut self) {
-        for node in self.runtime.gc_ephemeral_nodes(0) {
-            self.runtime.remove_node_runtime(node);
-        }
-        self.runtime.prune_unreferenced_arrangements();
     }
 }
 

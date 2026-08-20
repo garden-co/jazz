@@ -1905,10 +1905,7 @@ impl IvmRuntime {
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
-        let mut staged = self.clone();
-        let subscription = staged.subscribe_staged(sinks, storage).await?;
-        *self = staged;
-        Ok(subscription)
+        self.subscribe_staged(sinks, storage).await
     }
 
     async fn subscribe_staged<S>(
@@ -1935,15 +1932,6 @@ impl IvmRuntime {
         {
             return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(sink.clone()));
         }
-        self.logical_nodes_requested += sinks
-            .iter()
-            .map(|(_, graph)| count_builder_nodes(graph))
-            .sum::<usize>() as u64;
-        let mut outputs = BTreeMap::new();
-        for (sink, graph) in sinks {
-            let compiled = self.add_dedup_graph(&graph)?;
-            outputs.insert(sink, compiled);
-        }
         let subscription_id = self.next_subscription_id();
         let (sender, receiver) = mpsc::channel();
         let waiter = Arc::new(Mutex::new(None));
@@ -1952,16 +1940,32 @@ impl IvmRuntime {
             waiter: Arc::clone(&waiter),
         };
         let receiver_liveness = Arc::new(());
-        // Installation is not published until hydration succeeds. A dropped
-        // or failed future therefore leaves no live subscription or retainer;
-        // the hydration evaluation session independently guarantees that its
-        // staged IVM state is also discarded.
-        let initial = self
-            .hydration_snapshots_for_subscription(&outputs, storage)
-            .await?;
-        for output in outputs.values() {
-            self.retain_as_subscription(subscription_id, output.node);
-        }
+        // Compilation may add nodes to the shared hash-consed graph, while
+        // hydration keeps its mutable evaluator state operation-local. The
+        // ephemeral guard collects only unretained additions if hydration is
+        // cancelled or fails. On success, adding the subscription retainers
+        // before releasing the guard atomically promotes those additions into
+        // live graph state without cloning unrelated runtime state.
+        let (outputs, initial) = {
+            let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
+            let runtime = install.runtime();
+            runtime.logical_nodes_requested += sinks
+                .iter()
+                .map(|(_, graph)| count_builder_nodes(graph))
+                .sum::<usize>() as u64;
+            let mut outputs = BTreeMap::new();
+            for (sink, graph) in sinks {
+                let compiled = runtime.add_dedup_graph(&graph)?;
+                outputs.insert(sink, compiled);
+            }
+            let initial = runtime
+                .hydration_snapshots_for_subscription(&outputs, storage)
+                .await?;
+            for output in outputs.values() {
+                runtime.retain_as_subscription(subscription_id, output.node);
+            }
+            (outputs, initial)
+        };
         self.multisink_subscriptions.insert(
             subscription_id,
             MultisinkSubscriptionState {
@@ -2100,16 +2104,8 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        // Binding changes several coupled runtime structures before its
-        // initial hydration can complete. Keep those changes in an operation-
-        // local runtime generation so cancellation is equivalent to never
-        // starting the bind.
-        let mut staged = self.clone();
-        let subscription = staged
-            .bind_shape_with_public_fields_staged(shape_id, binding_values, public_fields, storage)
-            .await?;
-        *self = staged;
-        Ok(subscription)
+        self.bind_shape_with_public_fields_staged(shape_id, binding_values, public_fields, storage)
+            .await
     }
 
     async fn bind_shape_with_public_fields_staged<S>(
@@ -2130,46 +2126,41 @@ impl IvmRuntime {
             .clone();
         let binding_record = shape.binding_descriptor.create(binding_values)?;
         let binding_key = BindingKey(binding_record);
-        let mut outputs = BTreeMap::new();
-        self.logical_nodes_requested += shape
-            .terminals
-            .values()
-            .map(|terminal| count_builder_nodes(&terminal.terminal.graph) + 2)
-            .sum::<usize>() as u64;
-        for (sink, terminal) in &shape.terminals {
-            let mut terminal = terminal.terminal.clone();
-            if let Some(fields) = public_fields.get(sink) {
-                terminal.public_fields = fields.clone();
-            }
-            let graph = bound_routed_multisink_graph(&terminal, binding_values);
-            let output = self.add_dedup_graph(&graph)?;
-            outputs.insert(sink.clone(), output);
-        }
         let subscription_id = self.next_subscription_id();
-        for output in outputs.values() {
-            self.retain_as_subscription(subscription_id, output.node);
-        }
-        let binding_delta = match self.add_binding_ref(shape_id, binding_key.clone()) {
-            Ok(delta) => delta,
-            Err(error) => {
-                self.remove_multisink_retainers(subscription_id, &outputs);
-                return Err(error);
+        let (outputs, initial) = {
+            let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
+            let runtime = install.runtime();
+            runtime.logical_nodes_requested += shape
+                .terminals
+                .values()
+                .map(|terminal| count_builder_nodes(&terminal.terminal.graph) + 2)
+                .sum::<usize>() as u64;
+            let mut outputs = BTreeMap::new();
+            for (sink, terminal) in &shape.terminals {
+                let mut terminal = terminal.terminal.clone();
+                if let Some(fields) = public_fields.get(sink) {
+                    terminal.public_fields = fields.clone();
+                }
+                let graph = bound_routed_multisink_graph(&terminal, binding_values);
+                let output = runtime.add_dedup_graph(&graph)?;
+                outputs.insert(sink.clone(), output);
             }
-        };
-        if !binding_delta.deltas.is_empty()
-            && let Err(error) = self
-                .tick_with_params(
-                    Vec::new(),
-                    vec![binding_delta],
-                    OwnedStorage::new(Rc::new(storage)),
-                    None,
+            let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
+            let initial = runtime
+                .hydration_snapshots_for_subscription_with_binding(
+                    &outputs,
+                    storage,
+                    &binding_delta,
                 )
-                .await
-        {
-            self.remove_multisink_retainers(subscription_id, &outputs);
-            let _ = self.remove_binding_ref(shape_id, &binding_key);
-            return Err(error);
-        }
+                .await?;
+            let installed_delta = runtime.add_binding_ref(shape_id, binding_key.clone())?;
+            debug_assert_eq!(installed_delta.deltas, binding_delta.deltas);
+            runtime.bump_input_frontiers(&[], std::slice::from_ref(&installed_delta));
+            for output in outputs.values() {
+                runtime.retain_as_subscription(subscription_id, output.node);
+            }
+            (outputs, initial)
+        };
         let (sender, receiver) = mpsc::channel();
         let waiter = Arc::new(Mutex::new(None));
         let sender = SubscriptionSender {
@@ -2191,16 +2182,6 @@ impl IvmRuntime {
             },
         );
         self.index_subscription_outputs(subscription_id, &outputs);
-        let initial = match self
-            .hydration_snapshots_for_subscription(&outputs, storage)
-            .await
-        {
-            Ok(initial) => initial,
-            Err(error) => {
-                self.unsubscribe(subscription_id);
-                return Err(error);
-            }
-        };
         Ok(MultisinkSubscription {
             id: subscription_id,
             initial: Mutex::new(Some(initial)),
@@ -2754,6 +2735,30 @@ impl IvmRuntime {
     ) -> Result<BindingDelta, IvmRuntimeError> {
         let shape = self.binding_source_shape_name(shape_id)?;
         self.add_binding_ref_for_shape(&shape, binding)
+    }
+
+    fn provisional_binding_delta(
+        &self,
+        shape_id: PreparedShapeId,
+        binding: &BindingKey,
+    ) -> Result<BindingDelta, IvmRuntimeError> {
+        let shape = self.binding_source_shape_name(shape_id)?;
+        let source = self
+            .binding_sources
+            .get(&shape)
+            .ok_or_else(|| IvmRuntimeError::BindingSourceNotFound(shape.clone()))?;
+        Ok(BindingDelta {
+            shape,
+            descriptor: source.descriptor,
+            deltas: if source.refcounts.contains_key(binding) {
+                Vec::new()
+            } else {
+                vec![RecordDelta {
+                    record: binding.0.clone().into(),
+                    weight: 1,
+                }]
+            },
+        })
     }
 
     fn add_binding_ref_for_shape(
