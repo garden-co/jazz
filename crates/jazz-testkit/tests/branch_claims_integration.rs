@@ -2,7 +2,6 @@ use jazz_testkit as support;
 
 use std::time::Duration;
 
-use jazz::ids::RowUuid;
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
 use jazz::tools::{
