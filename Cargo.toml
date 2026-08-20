@@ -27,7 +27,11 @@ members = [
   # "examples/docs/todo-server-rs",
   "dev/benchmarks/storage/bench-core",
 ]
-exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]
+exclude = [
+  "crates/jazz-rn/rust",
+  "examples/todo-server-rs",
+  "examples/docs/todo-server-rs",
+]
 
 [workspace.dependencies]
 groove = { path = "crates/groove", default-features = false }

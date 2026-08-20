@@ -145,18 +145,16 @@ export default function Page(): React.JSX.Element {
   const betterAuth = useBetterAuthJWT();
   const { secret: localFirstSecret, isLoading: localFirstLoading } = useLocalFirstAuth();
 
-  const secret = !betterAuth.jwt ? (localFirstSecret ?? undefined) : undefined;
-
-  const config = React.useMemo(
-    (): DbConfig => ({
+  const config = React.useMemo((): DbConfig => {
+    const shared = {
       appId,
       env: "dev" as const,
       serverUrl,
-      jwtToken: betterAuth.jwt ?? undefined,
-      secret,
-    }),
-    [betterAuth.jwt, secret],
-  );
+    };
+    return betterAuth.jwt
+      ? { ...shared, jwtToken: betterAuth.jwt }
+      : { ...shared, secret: localFirstSecret ?? undefined };
+  }, [betterAuth.jwt, localFirstSecret]);
 
   if (betterAuth.isLoading || (!betterAuth.jwt && localFirstLoading)) {
     return <p className="loading-state">Loading auth credentials...</p>;
