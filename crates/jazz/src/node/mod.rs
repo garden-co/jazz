@@ -743,6 +743,10 @@ struct QueryServing {
     /// updates. Attachments capture the current receipt and require a later
     /// one; this remains logical binding-view state, never a wire nonce.
     applied_view_update_generations: BTreeMap<BindingViewKey, u64>,
+    /// Monotonically increasing generations for authoritative result-membership
+    /// changes. Maintained local views use this to avoid reconciling optimistic
+    /// membership against progress-only authoritative updates.
+    applied_result_membership_generations: BTreeMap<BindingViewKey, u64>,
     /// Subscriber-side settled result-member/completeness state by canonical query binding/view.
     settled_result_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
     /// Point index for settled real-row output occurrences.

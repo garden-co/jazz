@@ -531,6 +531,7 @@ where
                 registered_shapes: BTreeMap::new(),
                 registered_bindings: BTreeMap::new(),
                 applied_view_update_generations: BTreeMap::new(),
+                applied_result_membership_generations: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
                 settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),

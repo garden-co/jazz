@@ -255,6 +255,7 @@ where
             local,
             authoritative_binding_view,
             &BTreeSet::new(),
+            &BTreeSet::new(),
         )
         .map(|(update, _)| update)
     }
@@ -264,12 +265,14 @@ where
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
         preserved_row_keys: &BTreeSet<(String, RowUuid)>,
+        preserved_absent_row_keys: &BTreeSet<(String, RowUuid)>,
     ) -> Result<(Option<LocalMaintainedViewSubscriptionUpdate>, bool), Error> {
         let (transitions, suppressed_authoritative_change) = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
                 authoritative_binding_view,
                 preserved_row_keys,
+                preserved_absent_row_keys,
             )?;
         let Some(transitions) = transitions else {
             return Ok((None, suppressed_authoritative_change));
@@ -286,6 +289,7 @@ where
         let (Some(transitions), _) = self.drain_local_maintained_view_subscription_transitions(
             local,
             authoritative_binding_view,
+            &BTreeSet::new(),
             &BTreeSet::new(),
         )?
         else {
@@ -322,7 +326,7 @@ where
             })
             .unwrap_or_default();
         local.authoritative_result_generation =
-            self.applied_view_update_generation(binding_view_key);
+            self.applied_result_membership_generation(binding_view_key);
         local.authoritative_reconciliation_deferred = false;
         local.deferred_authoritative_row_keys.clear();
         local.program_facts = self
@@ -369,7 +373,7 @@ where
         binding_view_key: BindingViewKey,
     ) {
         local.authoritative_result_generation =
-            self.applied_view_update_generation(binding_view_key);
+            self.applied_result_membership_generation(binding_view_key);
     }
 
     pub(crate) fn defer_local_maintained_authority_reconciliation(
@@ -403,7 +407,7 @@ where
         binding_view_key: BindingViewKey,
     ) -> bool {
         local.authoritative_reconciliation_deferred
-            || self.applied_view_update_generation(binding_view_key)
+            || self.applied_result_membership_generation(binding_view_key)
                 != local.authoritative_result_generation
     }
 
@@ -412,6 +416,7 @@ where
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
         preserved_row_keys: &BTreeSet<(String, RowUuid)>,
+        preserved_absent_row_keys: &BTreeSet<(String, RowUuid)>,
     ) -> Result<
         (
             Option<super::maintained_subscription_view::ResultTransitions>,
@@ -509,18 +514,53 @@ where
         let mut suppressed_authoritative_change = false;
         let mut suppressed_authoritative_row_keys = BTreeSet::new();
         if let Some(binding_view) = authoritative_binding_view {
-            let authoritative_generation = self.applied_view_update_generation(binding_view);
+            let authoritative_generation = self.applied_result_membership_generation(binding_view);
             // Local optimistic changes can advance the maintained graph
             // without any newer serving-peer membership decision. Keep them
             // visible until an authoritative generation advances.
             if authoritative_generation != local.authoritative_result_generation
                 || local.authoritative_reconciliation_deferred
             {
-                let mut protected_row_keys = preserved_row_keys.clone();
+                let mut protected_addition_row_keys = preserved_row_keys.clone();
                 if authoritative_generation == local.authoritative_result_generation {
-                    protected_row_keys
+                    protected_addition_row_keys
                         .extend(local.deferred_authoritative_row_keys.iter().cloned());
                 }
+                let mut protected_removal_row_keys = protected_addition_row_keys.clone();
+                protected_removal_row_keys
+                    .retain(|row_key| !preserved_absent_row_keys.contains(row_key));
+                let authoritative_settled_through =
+                    self.settled_through_for_binding_view(binding_view);
+                // A single-source member's settle position establishes whether
+                // this authority frontier could have decided its membership.
+                // A flat tuple has several source versions but only one carried
+                // settle position, so it cannot safely protect the whole tuple;
+                // those use the explicit/deferred row-key path above.
+                let unsettled_present_row_keys = local
+                    .result_set
+                    .iter()
+                    .filter_map(|member| {
+                        let row = member.as_real_row()?;
+                        let row_key = (row.table.to_string(), row.row_uuid);
+                        if preserved_absent_row_keys.contains(&row_key) {
+                            return None;
+                        }
+                        let occurrence = member.output_occurrence_id()?;
+                        if !occurrence.joined_sources().is_empty() {
+                            return None;
+                        }
+                        let is_ahead_of_authority =
+                            match (row.settle_position, authoritative_settled_through) {
+                                (Some(position), Some(settled_through)) => {
+                                    position > settled_through
+                                }
+                                (Some(_), None) | (None, _) => true,
+                            };
+                        is_ahead_of_authority.then_some(row_key)
+                    })
+                    .collect::<BTreeSet<_>>();
+                protected_addition_row_keys.extend(unsettled_present_row_keys.iter().cloned());
+                protected_removal_row_keys.extend(unsettled_present_row_keys);
                 let remote_members = self
                     .query
                     .settled_result_sets
@@ -549,7 +589,7 @@ where
                 // even though none of its locally-visible source facts changed.
                 for entry in remote_members.difference(&local.result_set) {
                     if let Some(row_key) =
-                        result_member_matching_row_key(entry, &protected_row_keys)
+                        result_member_matching_row_key(entry, &protected_addition_row_keys)
                     {
                         suppressed_authoritative_change = true;
                         suppressed_authoritative_row_keys.insert(row_key);
@@ -594,7 +634,7 @@ where
                 }
                 for entry in local.result_set.difference(&remote_members) {
                     if let Some(row_key) =
-                        result_member_matching_row_key(entry, &protected_row_keys)
+                        result_member_matching_row_key(entry, &protected_removal_row_keys)
                     {
                         suppressed_authoritative_change = true;
                         suppressed_authoritative_row_keys.insert(row_key);

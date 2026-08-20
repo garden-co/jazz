@@ -259,21 +259,6 @@ where
         &mut self,
         author: AuthorId,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids_for_author(author, true)
-    }
-
-    pub(crate) fn unresolved_transaction_ids_for_author(
-        &mut self,
-        author: AuthorId,
-    ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids_for_author(author, false)
-    }
-
-    fn below_global_transaction_ids_for_author(
-        &mut self,
-        author: AuthorId,
-        include_accepted: bool,
-    ) -> Result<Vec<TxId>, Error> {
         let mut candidates = Vec::new();
         for raw in self.database.index_scan_raw(
             "jazz_transactions",
@@ -283,7 +268,7 @@ where
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
             if AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?) != author
-                || !(fate == 0 || (include_accepted && fate == 1))
+                || !matches!(fate, 0 | 1)
                 || durability_from_discriminant(
                     record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
                 )? >= DurabilityTier::Global
@@ -296,6 +281,65 @@ where
             ));
         }
         let mut tx_ids = Vec::with_capacity(candidates.len());
+        for (alias, time) in candidates {
+            let Some(node) = self.resolve_node_alias(alias)? else {
+                continue;
+            };
+            tx_ids.push(TxId::new(time, node));
+        }
+        tx_ids.sort();
+        tx_ids.dedup();
+        Ok(tx_ids)
+    }
+
+    /// Return locally visible transactions by `author` that a binding view at
+    /// `settled_through` cannot yet have incorporated. This includes both
+    /// unsequenced transactions and globally sequenced transactions beyond the
+    /// view frontier so deleted rows retain causal provenance after their
+    /// current result member disappears.
+    pub(crate) fn transaction_ids_ahead_of_settled_through_for_author(
+        &mut self,
+        author: AuthorId,
+        settled_through: Option<GlobalSeq>,
+    ) -> Result<Vec<TxId>, Error> {
+        let mut tx_ids = self.pending_transaction_ids_for_author(author)?;
+        let first_global_seq = match settled_through {
+            Some(GlobalSeq(u64::MAX)) => return Ok(tx_ids),
+            Some(GlobalSeq(position)) => position + 1,
+            None => 0,
+        };
+        let first_key = Value::Nullable(Some(Box::new(Value::U64(first_global_seq))));
+        let last_key = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
+        let mut sequenced = if first_global_seq < u64::MAX {
+            self.database.index_scan_range_raw(
+                "jazz_transactions",
+                "by_global_seq",
+                std::slice::from_ref(&first_key),
+                std::slice::from_ref(&last_key),
+            )?
+        } else {
+            Vec::new()
+        };
+        sequenced.extend(self.database.index_scan_raw(
+            "jazz_transactions",
+            "by_global_seq",
+            std::slice::from_ref(&last_key),
+        )?);
+
+        let mut candidates = Vec::new();
+        for raw in sequenced {
+            let record = raw.record();
+            let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
+            if AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?) != author
+                || !matches!(fate, 0 | 1)
+            {
+                continue;
+            }
+            candidates.push((
+                NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?),
+                TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+            ));
+        }
         for (alias, time) in candidates {
             let Some(node) = self.resolve_node_alias(alias)? else {
                 continue;

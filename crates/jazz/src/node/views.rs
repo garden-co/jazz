@@ -918,6 +918,12 @@ where
                             if matches!(payload.member, ResultMemberEntry::Synthetic { .. })
                     )
                 });
+        // Maintained local views only reconcile optimistic membership when the
+        // authority actually changed result membership. ViewUpdate also carries
+        // payload and settlement progress, so receiving one does not by itself
+        // mean the authority made a newer membership decision.
+        let authoritative_membership_changed =
+            reset_result_set || !result_member_adds.is_empty() || !result_member_removes.is_empty();
         let version_bundle_refs =
             version_bundle_refs_for_carriers(&version_bundles, &version_carriers)?;
         let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
@@ -1185,12 +1191,20 @@ where
                 .pending_opening_binding_views
                 .remove(&binding_view_key);
         }
-        let generation = self
+        let view_update_generation = self
             .query
             .applied_view_update_generations
             .entry(binding_view_key)
             .or_default();
-        *generation = generation.wrapping_add(1);
+        *view_update_generation = view_update_generation.wrapping_add(1);
+        if authoritative_membership_changed {
+            let membership_generation = self
+                .query
+                .applied_result_membership_generations
+                .entry(binding_view_key)
+                .or_default();
+            *membership_generation = membership_generation.wrapping_add(1);
+        }
         Ok(())
     }
 

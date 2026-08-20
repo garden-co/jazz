@@ -1026,28 +1026,39 @@ where
     }
 }
 
-fn optimistic_transaction_row_keys_for_query<S>(
+fn unsettled_transaction_row_keys_for_query<S>(
     node: &Rc<RefCell<NodeState<S>>>,
-    cache: &mut BTreeMap<AuthorId, BTreeSet<(String, RowUuid)>>,
+    cache: &mut BTreeMap<(AuthorId, Option<GlobalSeq>), BTreeSet<(String, RowUuid)>>,
     shape: &ValidatedQuery,
+    binding: &Binding,
     author: AuthorId,
-) -> Result<BTreeSet<(String, RowUuid)>, Error>
+    binding_view: BindingViewKey,
+) -> Result<(BTreeSet<(String, RowUuid)>, BTreeSet<(String, RowUuid)>), Error>
 where
     S: OrderedKvStorage,
 {
-    let row_keys = match cache.entry(author) {
+    let settled_through = node.borrow().settled_through_for_binding_view(binding_view);
+    let row_keys = match cache.entry((author, settled_through)) {
         std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
         std::collections::btree_map::Entry::Vacant(entry) => {
             let transactions = node
                 .borrow_mut()
-                .unresolved_transaction_ids_for_author(author)?;
+                .transaction_ids_ahead_of_settled_through_for_author(author, settled_through)?;
             let row_keys = node.borrow_mut().transaction_row_keys(&transactions)?;
             entry.insert(row_keys)
         }
     };
-    Ok(node
+    let row_keys = node
         .borrow()
-        .transaction_row_keys_for_query(shape, row_keys))
+        .transaction_row_keys_for_query(shape, row_keys);
+    let present_row_keys = node
+        .borrow_mut()
+        .query_rows_for_client(shape, binding, DurabilityTier::Local, author)?
+        .into_iter()
+        .map(|row| (row.table().to_owned(), row.row_uuid()))
+        .collect::<BTreeSet<_>>();
+    let absent_row_keys = row_keys.difference(&present_row_keys).cloned().collect();
+    Ok((row_keys, absent_row_keys))
 }
 
 /// Re-evaluate every live subscription against the node and push a delta event
@@ -1198,22 +1209,28 @@ where
                         .then_some(settled_binding_view)
                 });
             let authoritative_binding_view = pending_binding_view.unwrap_or(settled_binding_view);
-            let local_overlay_row_keys = if authorization_mode
+            let (local_overlay_row_keys, local_overlay_absent_row_keys) = if authorization_mode
                 == QueryAuthorizationMode::ClientLocal
                 && read_tier == DurabilityTier::Local
-                && remote_read_tier.is_some_and(|tier| tier >= DurabilityTier::Edge)
+                // The browser main thread reconciles against its Local-tier
+                // durable worker before the worker relays authority receipts.
+                // Protect unsettled rows at that handoff as well as on a
+                // direct Edge/Global connection.
+                && remote_read_tier.is_some()
                 && node.borrow().authored_commit_durability() == DurabilityTier::None
                 && active_authority_view_receipts.borrow().is_some()
                 && supports_pending_overlay_reconciliation(shape.query())
             {
-                optimistic_transaction_row_keys_for_query(
+                unsettled_transaction_row_keys_for_query(
                     node,
                     &mut optimistic_row_keys_by_author,
                     &shape,
+                    &binding,
                     author,
+                    authoritative_binding_view,
                 )?
             } else {
-                BTreeSet::new()
+                (BTreeSet::new(), BTreeSet::new())
             };
             let has_conflicting_local_overlay = {
                 let state_ref = state.borrow();
@@ -1267,6 +1284,7 @@ where
                             maintained,
                             Some(binding_view),
                             &local_overlay_row_keys,
+                            &local_overlay_absent_row_keys,
                         )?;
                     debug_assert!(suppressed);
                     if let Some(update) = update {
@@ -1443,24 +1461,29 @@ where
                                 authoritative_reset_binding_view,
                             )
                         });
-                    let local_overlay_row_keys = if authorization_mode
-                        == QueryAuthorizationMode::ClientLocal
-                        && read_tier == DurabilityTier::Local
-                        && remote_read_tier.is_some_and(|tier| tier >= DurabilityTier::Edge)
-                        && node.borrow().authored_commit_durability() == DurabilityTier::None
-                        && active_authority_view_receipts.borrow().is_some()
-                        && supports_pending_overlay_reconciliation(shape.query())
-                        && authority_reconciliation_due
-                    {
-                        optimistic_transaction_row_keys_for_query(
-                            node,
-                            &mut optimistic_row_keys_by_author,
-                            &shape,
-                            author,
-                        )?
-                    } else {
-                        BTreeSet::new()
-                    };
+                    let (local_overlay_row_keys, local_overlay_absent_row_keys) =
+                        if authorization_mode == QueryAuthorizationMode::ClientLocal
+                            && read_tier == DurabilityTier::Local
+                            // A Local-tier browser worker can advance the view
+                            // generation before its maintained membership contains
+                            // the main thread's unsettled optimistic row.
+                            && remote_read_tier.is_some()
+                            && node.borrow().authored_commit_durability() == DurabilityTier::None
+                            && active_authority_view_receipts.borrow().is_some()
+                            && supports_pending_overlay_reconciliation(shape.query())
+                            && authority_reconciliation_due
+                        {
+                            unsettled_transaction_row_keys_for_query(
+                                node,
+                                &mut optimistic_row_keys_by_author,
+                                &shape,
+                                &binding,
+                                author,
+                                authoritative_reset_binding_view,
+                            )?
+                        } else {
+                            (BTreeSet::new(), BTreeSet::new())
+                        };
                     let has_conflicting_local_overlay =
                         maintained_subscription.as_ref().is_some_and(|maintained| {
                             node.borrow()
@@ -1733,6 +1756,7 @@ where
                                         maintained,
                                         authoritative_binding_view,
                                         &local_overlay_row_keys,
+                                        &local_overlay_absent_row_keys,
                                     ) {
                                     Ok(update) => update,
                                     Err(crate::node::Error::MissingTransaction(_)) => {

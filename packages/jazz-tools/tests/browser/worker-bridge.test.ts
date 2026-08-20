@@ -2217,6 +2217,170 @@ describe("Worker Bridge with OPFS", () => {
     unsubscribe();
   });
 
+  it("does not retract a synced insert when two clients share a persistent database", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("synced-insert-shared-worker");
+    const dbName = uniqueDbName("synced-insert-shared-worker");
+    const secret = generateAuthSecret();
+    const config = {
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      secret,
+      driver: { type: "persistent" as const, dbName },
+    };
+    const remoteSeeder = track(
+      await createDb({
+        ...config,
+        driver: { type: "persistent", dbName: uniqueDbName("synced-insert-remote-seed") },
+      }),
+    );
+    const existingTitles = Array.from({ length: 10 }, (_, index) => `Existing ${index + 1}`);
+    for (const title of existingTitles) {
+      await remoteSeeder.insert(todos, { title, done: false }).wait({ tier: "global" });
+    }
+    await remoteSeeder.shutdown();
+    untrack(remoteSeeder);
+
+    const host = track(await createDb(config));
+    const hostSnapshots: Todo[][] = [];
+    const unsubscribeHost = trackSubscription(
+      host.subscribeAll(allTodos, (delta) => {
+        hostSnapshots.push([...(delta.all ?? [])]);
+      }),
+    );
+
+    await waitForCondition(
+      async () => (hostSnapshots[hostSnapshots.length - 1] ?? []).length === existingTitles.length,
+      15000,
+      "The first client should receive its settled rows before the second client opens",
+    );
+
+    await waitForCondition(
+      async () => getTabRole(host) === "leader",
+      12000,
+      "The first client should become broker leader before the second client opens",
+    );
+
+    const secondClient = track(await createDb(config));
+    await waitForLeaderAndFollower(host, secondClient);
+    const unsubscribeSecondClient = trackSubscription(
+      secondClient.subscribeAll(projects.orderBy("id", "asc").limit(101), () => {}, {
+        propagation: "local-only",
+      }),
+    );
+
+    for (const title of ["Synced host first", "Synced host second", "Synced host third"]) {
+      const firstNewSnapshot = hostSnapshots.length;
+      await host.insert(todos, { title, done: false }).wait({ tier: "local" });
+      await waitForCondition(
+        async () =>
+          (hostSnapshots[hostSnapshots.length - 1] ?? []).some((row) => row.title === title),
+        8000,
+        `The optimistic host snapshot should include ${title}`,
+      );
+      await sleep(750);
+
+      const snapshotsAfterInsert = hostSnapshots
+        .slice(firstNewSnapshot)
+        .map((rows) => rows.map((row) => row.title));
+      const firstSnapshotWithInsert = snapshotsAfterInsert.findIndex((titles) =>
+        titles.includes(title),
+      );
+      expect(firstSnapshotWithInsert).toBeGreaterThanOrEqual(0);
+      expect(
+        snapshotsAfterInsert
+          .slice(firstSnapshotWithInsert)
+          .every((snapshotTitles) => snapshotTitles.includes(title)),
+        `Host retracted ${title}; snapshots=${JSON.stringify(snapshotsAfterInsert)}`,
+      ).toBe(true);
+    }
+
+    unsubscribeSecondClient();
+    unsubscribeHost();
+  }, 90000);
+
+  it("does not resurrect an Edge-accepted delete when two clients share a persistent database", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("synced-delete-shared-worker");
+    const dbName = uniqueDbName("synced-delete-shared-worker");
+    const secret = generateAuthSecret();
+    const config = {
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      secret,
+      driver: { type: "persistent" as const, dbName },
+    };
+    const host = track(await createDb(config));
+    const hostSnapshots: Todo[][] = [];
+    const unsubscribeHost = trackSubscription(
+      host.subscribeAll(todos.orderBy("title"), (delta) => {
+        hostSnapshots.push([...(delta.all ?? [])]);
+      }),
+    );
+
+    await waitForCondition(
+      async () => getTabRole(host) === "leader",
+      12000,
+      "The first client should become broker leader before the second client opens",
+    );
+
+    const secondClient = track(await createDb(config));
+    await waitForLeaderAndFollower(host, secondClient);
+    const unsubscribeSecondClient = trackSubscription(
+      secondClient.subscribeAll(projects.orderBy("id", "asc").limit(101), () => {}, {
+        propagation: "local-only",
+      }),
+    );
+
+    const first = await host
+      .insert(todos, { title: "Keep after delete", done: false })
+      .wait({ tier: "edge" });
+    const second = await host
+      .insert(todos, { title: "Delete after second client opens", done: false })
+      .wait({ tier: "edge" });
+    await host.update(todos, first.id, { done: true }).wait({ tier: "edge" });
+    await waitForCondition(
+      async () => {
+        const rows = hostSnapshots[hostSnapshots.length - 1] ?? [];
+        return (
+          rows.length === 2 &&
+          rows.some((row) => row.id === first.id && row.done) &&
+          rows.some((row) => row.id === second.id)
+        );
+      },
+      8000,
+      "The host subscription should publish both rows before the delete",
+    );
+
+    const firstNewSnapshot = hostSnapshots.length;
+    await host.delete(todos, second.id).wait({ tier: "edge" });
+    await waitForCondition(
+      async () =>
+        hostSnapshots
+          .slice(firstNewSnapshot)
+          .some((rows) => rows.length === 1 && rows[0]?.id === first.id && rows[0].done),
+      8000,
+      "The host subscription should publish the accepted delete",
+    );
+    await sleep(750);
+
+    const snapshotsAfterDelete = hostSnapshots
+      .slice(firstNewSnapshot)
+      .map((rows) => rows.map((row) => row.id));
+    const firstSnapshotWithoutDeletedRow = snapshotsAfterDelete.findIndex(
+      (rowIds) => !rowIds.includes(second.id),
+    );
+    expect(firstSnapshotWithoutDeletedRow).toBeGreaterThanOrEqual(0);
+    expect(
+      snapshotsAfterDelete
+        .slice(firstSnapshotWithoutDeletedRow)
+        .every((rowIds) => !rowIds.includes(second.id)),
+      `Host resurrected the deleted row; snapshots=${JSON.stringify(snapshotsAfterDelete)}`,
+    ).toBe(true);
+    expect(await host.one(todos.where({ id: second.id }), { tier: "edge" })).toBeNull();
+
+    unsubscribeSecondClient();
+    unsubscribeHost();
+  }, 90000);
+
   it("syncs a follower opened after the leader is already ready", async () => {
     const dbName = uniqueDbName("late-follower-route");
     const leader = track(

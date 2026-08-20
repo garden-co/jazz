@@ -238,6 +238,17 @@ where
             .unwrap_or_default()
     }
 
+    pub(crate) fn applied_result_membership_generation(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> u64 {
+        self.query
+            .applied_result_membership_generations
+            .get(&binding_view_key)
+            .copied()
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(crate) fn reset_subscription_snapshot_for_link_call_count(&mut self) {
         SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS.with(|calls| calls.set(0));
