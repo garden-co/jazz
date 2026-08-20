@@ -41,8 +41,7 @@ const previousWebSocket = globalThis.WebSocket;
 
 function decodeSchemaSource(bytes: Uint8Array) {
   return JSON.parse(new TextDecoder().decode(bytes)) as {
-    format_version: number;
-    tables: Array<{ name: string; schema: WasmSchema[string] }>;
+    tables: WasmSchema;
   };
 }
 
@@ -84,16 +83,12 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
 
     expect(decodeSchemaSource(schemaBytes)).toMatchObject({
-      format_version: 1,
-      tables: [
-        {
-          name: "counters",
-          schema: {
-            indexed_columns: ["title", "done"],
-            columns: [{ name: "count", merge_strategy: "Counter" }, {}, {}],
-          },
+      tables: {
+        counters: {
+          indexed_columns: ["title", "done"],
+          columns: [{ name: "count", merge_strategy: "Counter" }, {}, {}],
         },
-      ],
+      },
     });
   });
 
@@ -110,7 +105,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         ],
       },
     });
-    expect(decodeSchemaSource(encoded).tables[0]?.schema.columns[0]?.merge_strategy).toBe("GSet");
+    expect(decodeSchemaSource(encoded).tables.docs?.columns[0]?.merge_strategy).toBe("GSet");
   });
 
   it("resolves connect only after the owned native transport has pumped", async () => {
@@ -1668,7 +1663,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
     });
-    expect(decodeSchemaSource(encoded).tables[0]?.schema.policies?.select?.using).toEqual({
+    expect(decodeSchemaSource(encoded).tables.metrics?.policies?.select?.using).toEqual({
       type: "And",
       exprs: [
         {

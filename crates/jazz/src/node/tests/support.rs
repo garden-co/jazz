@@ -107,7 +107,7 @@ where
 }
 
 fn compile_public_test_schema(source: &PublicSchema) -> JazzSchema {
-    crate::tools::public_schema_convert::convert_public_schema(source)
+    crate::schema::JazzSchema::new(source)
         .expect("node-test public schema compiles")
 }
 
@@ -120,15 +120,17 @@ fn empty_public_test_schema() -> JazzSchema {
 }
 
 fn build_public_test_schema_with_branch_policies(
-    builder: PublicSchemaBuilder,
+    mut builder: PublicSchemaBuilder,
     branch_read_policy: Option<PublicPolicyExpr>,
     branch_write_policy: Option<PublicPolicyExpr>,
 ) -> JazzSchema {
-    let mut source = crate::schema::SourceSchema::new(&builder.build());
-    source.branch_read_policy = branch_read_policy;
-    source.branch_write_policy = branch_write_policy;
-    crate::tools::public_schema_convert::convert_source_schema(&source)
-        .expect("node-test public schema with branch policies compiles")
+    if let Some(policy) = branch_read_policy {
+        builder = builder.branch_read_policy(policy);
+    }
+    if let Some(policy) = branch_write_policy {
+        builder = builder.branch_write_policy(policy);
+    }
+    build_public_test_schema(builder)
 }
 
 fn public_all_policies() -> PublicTablePolicies {

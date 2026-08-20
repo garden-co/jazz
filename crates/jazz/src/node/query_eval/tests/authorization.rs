@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
-    let schema = JazzSchema::new([
+    let schema = RuntimeSchema::new([
         TableSchema::new(
             "uuid_owners",
             [ColumnSchema::new("owner", ColumnType::Uuid)],
@@ -49,7 +49,7 @@ fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
     );
     assert!(
         query
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap()
             .params()
             .contains_key(&uuid_slot),
@@ -181,7 +181,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     );
     let client_shape = Query::from("chats")
         .filter(eq(col("id"), param("id")))
-        .validate(&schema)
+        .validate_runtime(&schema)
         .unwrap();
     let client_binding = client_shape
         .bind(BTreeMap::from([(
@@ -495,7 +495,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .filter(eq(col("chatId"), param("chat_id")))
         .array_subquery(ArraySubquery::new("sender", "profiles", "id", "senderId"))
         .order_by("createdAt", OrderDirection::Asc)
-        .validate(&schema)
+        .validate_runtime(&schema)
         .expect("validate normal-member message query");
     let message_binding = message_shape
         .bind(BTreeMap::from([(
@@ -544,7 +544,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .expect("normal client applies its accepted membership before querying messages");
     let simple_message_shape = Query::from("messages")
         .filter(eq(col("chatId"), param("chat_id")))
-        .validate(&schema)
+        .validate_runtime(&schema)
         .expect("validate normal-member message query without include");
     let simple_message_binding = simple_message_shape
         .bind(BTreeMap::from([(
@@ -801,7 +801,7 @@ fn missing_policy_relation_seed_claim_fails_closed_without_breaking_prepared_bin
         3,
     );
 
-    let shape = Query::from("resources").validate(&schema).unwrap();
+    let shape = Query::from("resources").validate_runtime(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let missing_rows = node
         .query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
@@ -1064,7 +1064,7 @@ fn branch_program_tier_filter_preserves_claim_policy_fields() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let shape = Query::from("rooms").validate(&schema).unwrap();
+    let shape = Query::from("rooms").validate_runtime(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let rows = node
         .query_rows_on_branch_query_engine(branch_id, &shape, &binding, identity)
@@ -1156,7 +1156,7 @@ fn policy_claim_array_string_ids_bind_as_uuid_array() {
             Value::Array(vec![Value::String(alice.0.to_string())]),
         )]),
     );
-    let shape = Query::from("issues").validate(&schema).unwrap();
+    let shape = Query::from("issues").validate_runtime(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let visible = node
         .query_rows_for_link(&shape, &binding, DurabilityTier::Local, reader)
@@ -1190,7 +1190,7 @@ fn prepared_policy_plan_is_recompiled_after_same_identity_claim_revision_changes
     commit_issue(&mut node, 2, "open", bob);
 
     let identity = author(0x84);
-    let shape = Query::from("issues").validate(&schema).unwrap();
+    let shape = Query::from("issues").validate_runtime(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let visible_for = |node: &mut NodeState<RocksDbStorage>| {
         node.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)
@@ -1230,7 +1230,7 @@ fn production_policy_union_labels_survive_reorder_and_unrelated_insertion() {
     fn labels(node: &NodeState<RocksDbStorage>, branches: &[&str]) -> BTreeSet<String> {
         let mut query = Query::from("issues");
         query.policy_branches = branches.iter().map(|state| branch(state)).collect();
-        let shape = query.validate(&schema()).unwrap();
+        let shape = query.validate_runtime(&schema()).unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
         let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
         normalized

@@ -175,7 +175,7 @@ fn decode_current_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> 
     let schema_version = data[0];
     let table_count = read_u32(data, &mut offset)?;
 
-    let mut schema = HashMap::new();
+    let mut schema = Schema::new();
     for _ in 0..table_count {
         let (name, table_schema) = decode_table_entry(data, &mut offset, schema_version)?;
         schema.insert(name, table_schema);

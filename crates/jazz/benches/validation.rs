@@ -2,18 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::time::{Duration, Instant};
 
+mod schema_fixture;
 mod support;
 
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::{SyncMessage, VersionRecord};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
 use jazz::time::GlobalSeq;
 use jazz::tools::OpenTransactionId;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_counters};
@@ -519,14 +520,15 @@ impl Rng {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        TABLE,
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
+    let owner = schema_fixture::session_column("owner", "sub");
+    schema_fixture::compile(
+        SchemaBuilder::new().table(
+            TableSchemaBuilder::new(TABLE)
+                .column("title", ColumnType::Text)
+                .column("owner", ColumnType::Uuid)
+                .policies(schema_fixture::write_operations(owner)),
+        ),
     )
-    .with_write_policy(Policy::owner_only(TABLE, "owner"))])
 }
 
 fn open_node(

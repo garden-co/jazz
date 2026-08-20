@@ -11,7 +11,7 @@ use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query};
-use jazz::schema::{JazzSchema, Policy};
+use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType as PublicColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -480,7 +480,7 @@ fn client_subscription_skips_policy_only_compile_validation_but_identity_subscri
             .iter_mut()
             .find(|table| table.name == "items")
             .expect("items table")
-            .read_policy = Policy::shape(Query::from("items").include("profile"));
+            .read_policy = Some(Query::from("items").include("profile"));
     });
     let prepared = db
         .prepare_query(&Query::from("items"))

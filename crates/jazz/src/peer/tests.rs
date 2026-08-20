@@ -820,7 +820,7 @@ fn priority_schema() -> JazzSchema {
 }
 
 fn public_peer_schema(builder: PublicSchemaBuilder) -> JazzSchema {
-    crate::tools::public_schema_convert::convert_public_schema(&builder.build())
+    crate::schema::JazzSchema::new(&builder.build())
         .expect("peer-test public schema compiles")
 }
 

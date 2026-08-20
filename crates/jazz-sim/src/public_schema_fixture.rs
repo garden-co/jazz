@@ -9,8 +9,7 @@ use jazz::tools::public_schema::{
 
 /// Compile a developer-authored schema while retaining its persistable source.
 pub fn compile_public_schema(source: Schema) -> JazzSchema {
-    jazz::tools::public_schema_convert::convert_public_schema(&source)
-        .expect("simulation public schema compiles")
+    jazz::schema::JazzSchema::new(&source).expect("simulation public schema compiles")
 }
 
 /// Apply the same policy expression to every table operation.

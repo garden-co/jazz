@@ -566,7 +566,9 @@ mod tests {
             .await
             .expect("schema body");
         let schema_json: Value = serde_json::from_slice(&schema_body).expect("schema json");
-        let expected_schema_json = serde_json::to_value(schema).expect("expected schema json");
+        let expected_schema_json =
+            serde_json::to_value(schema.iter().collect::<std::collections::BTreeMap<_, _>>())
+                .expect("expected schema json");
         assert_eq!(schema_json["schema"], expected_schema_json);
         assert!(schema_json.get("publishedAt").is_some());
 
@@ -1381,9 +1383,8 @@ mod tests {
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
         publish_schema_for_test(&app, v2).await;
-        let runtime_v1 = jazz::tools::public_schema_convert::convert_public_schema(&v1)
-            .expect("convert source schema");
-        let runtime_v2 = jazz::tools::public_schema_convert::convert_public_schema(
+        let runtime_v1 = jazz::schema::JazzSchema::new(&v1).expect("convert source schema");
+        let runtime_v2 = jazz::schema::JazzSchema::new(
             &state
                 .catalogue
                 .known_schema(&state.catalogue_store, &v2_hash)
@@ -1632,9 +1633,8 @@ mod tests {
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
         publish_schema_for_test(&app, v2).await;
-        let runtime_v1 = jazz::tools::public_schema_convert::convert_public_schema(&v1)
-            .expect("convert source schema");
-        let runtime_v2 = jazz::tools::public_schema_convert::convert_public_schema(
+        let runtime_v1 = jazz::schema::JazzSchema::new(&v1).expect("convert source schema");
+        let runtime_v2 = jazz::schema::JazzSchema::new(
             &state
                 .catalogue
                 .known_schema(&state.catalogue_store, &v2_hash)

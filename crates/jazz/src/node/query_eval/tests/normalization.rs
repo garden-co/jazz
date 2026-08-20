@@ -76,7 +76,7 @@ fn declared_id_order_and_aggregate_lower_as_source_fields() {
 
     let ordered = Query::from("things")
         .order_by("id", OrderDirection::Asc)
-        .validate(&schema)
+        .validate_runtime(&schema)
         .unwrap();
     let ordered = node
         .normalized_row_set_shape(&ordered, &ordered.bind(BTreeMap::new()).unwrap())
@@ -91,7 +91,7 @@ fn declared_id_order_and_aggregate_lower_as_source_fields() {
     let grouped = Query::from("things")
         .count()
         .group_by("id")
-        .validate(&schema)
+        .validate_runtime(&schema)
         .unwrap();
     let grouped = node
         .normalized_row_set_shape(&grouped, &grouped.bind(BTreeMap::new()).unwrap())
@@ -109,7 +109,7 @@ fn declared_id_order_and_aggregate_lower_as_source_fields() {
 /// select the authored field while legacy tables keep their physical row id.
 #[test]
 fn source_key_resolution_distinguishes_declared_and_physical_ids() {
-    let schema = JazzSchema::new([
+    let schema = RuntimeSchema::new([
         TableSchema::new("declared", [ColumnSchema::new("id", ColumnType::Uuid)]),
         TableSchema::new("legacy", [ColumnSchema::new("label", ColumnType::String)]),
     ]);
@@ -134,7 +134,7 @@ fn source_key_resolution_distinguishes_declared_and_physical_ids() {
 /// while FlatJoin's explicit `_id` alias remains the physical UUID row key.
 #[test]
 fn declared_id_join_types_and_flat_join_physical_alias_validate() {
-    let schema = JazzSchema::new([
+    let schema = RuntimeSchema::new([
         TableSchema::new("parents", [ColumnSchema::new("id", ColumnType::String)]),
         TableSchema::new("children", [ColumnSchema::new("parent", ColumnType::Uuid)])
             .with_reference("parent", "parents"),
@@ -142,12 +142,12 @@ fn declared_id_join_types_and_flat_join_physical_alias_validate() {
     assert!(
         Query::from("parents")
             .join_via_column("children", "parent", "id", [])
-            .validate(&schema)
+            .validate_runtime(&schema)
             .is_err()
     );
 
     let flat = Query::from("parents").flat_join("children", "parents._id", "children.parent");
-    assert!(flat.validate(&schema).is_ok());
+    assert!(flat.validate_runtime(&schema).is_ok());
 }
 
 /// Lookup and reachability policies must reject declared ID joins whose
@@ -155,7 +155,7 @@ fn declared_id_join_types_and_flat_join_physical_alias_validate() {
 /// remains valid.
 #[test]
 fn declared_id_lookup_and_reachable_types_validate() {
-    let lookup_schema = JazzSchema::new([
+    let lookup_schema = RuntimeSchema::new([
         TableSchema::new("roots", [ColumnSchema::new("lookup", ColumnType::Uuid)])
             .with_reference("lookup", "lookups"),
         TableSchema::new("lookups", [ColumnSchema::new("id", ColumnType::String)]),
@@ -174,12 +174,12 @@ fn declared_id_lookup_and_reachable_types_validate() {
                 },
                 [],
             )
-            .validate(&lookup_schema)
+            .validate_runtime(&lookup_schema)
             .is_err()
     );
 
     let reachable_schema = |root_id_type| {
-        JazzSchema::new([
+        RuntimeSchema::new([
             TableSchema::new("roots", [ColumnSchema::new("id", root_id_type)]),
             TableSchema::new(
                 "access",
@@ -216,12 +216,12 @@ fn declared_id_lookup_and_reachable_types_validate() {
     };
     assert!(
         reachable()
-            .validate(&reachable_schema(ColumnType::Uuid))
+            .validate_runtime(&reachable_schema(ColumnType::Uuid))
             .is_err()
     );
     assert!(
         reachable()
-            .validate(&reachable_schema(ColumnType::String))
+            .validate_runtime(&reachable_schema(ColumnType::String))
             .is_ok()
     );
 }
@@ -232,7 +232,7 @@ fn declared_id_lookup_and_reachable_types_validate() {
 #[test]
 fn reachable_self_seed_id_requires_non_nullable_uuid() {
     let schema = |team_id_type| {
-        JazzSchema::new([
+        RuntimeSchema::new([
             TableSchema::new("roots", [ColumnSchema::new("label", ColumnType::String)]),
             TableSchema::new(
                 "access",
@@ -276,11 +276,15 @@ fn reachable_self_seed_id_requires_non_nullable_uuid() {
             .seeded_by("teams", "identity", "sub", "id")
     };
 
-    assert!(query().validate(&schema(ColumnType::Uuid)).is_ok());
-    assert!(query().validate(&schema(ColumnType::String)).is_err());
+    assert!(query().validate_runtime(&schema(ColumnType::Uuid)).is_ok());
     assert!(
         query()
-            .validate(&schema(ColumnType::Uuid.nullable()))
+            .validate_runtime(&schema(ColumnType::String))
+            .is_err()
+    );
+    assert!(
+        query()
+            .validate_runtime(&schema(ColumnType::Uuid.nullable()))
             .is_err()
     );
 }
@@ -336,7 +340,7 @@ fn aggregate_query_normalizes_to_query_engine_aggregate_node() {
     let shape = Query::from("issues")
         .filter(eq(col("state"), lit("open")))
         .count()
-        .validate(&schema())
+        .validate_runtime(&schema())
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
@@ -357,7 +361,7 @@ fn join_via_nested_joins_normalize_as_parent_projection_gate() {
         .unwrap();
     let shape = Query::from("issues")
         .join_via_with_nested_joins("issue_members", "issue", [], [nested])
-        .validate(&schema())
+        .validate_runtime(&schema())
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
@@ -399,7 +403,7 @@ fn join_via_source_lookup_normalizes_as_lookup_bridge_projection() {
             },
             [],
         )
-        .validate(&schema())
+        .validate_runtime(&schema())
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();

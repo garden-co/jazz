@@ -16,8 +16,7 @@ use jazz_server::loopback::websocket::{LoopbackWebSocketServer, LoopbackWebSocke
 
 fn empty_runtime_schema() -> JazzSchema {
     let source = jazz::tools::public_schema::SchemaBuilder::new().build();
-    jazz::tools::public_schema_convert::convert_public_schema(&source)
-        .expect("the empty public schema is valid")
+    jazz::schema::JazzSchema::new(&source).expect("the empty public schema is valid")
 }
 
 fn start_loopback_server(

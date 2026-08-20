@@ -654,8 +654,7 @@ impl RecordingScheduler {
 }
 
 pub(super) fn compile_public_db_test_schema(source: &PublicSchema) -> JazzSchema {
-    crate::tools::public_schema_convert::convert_public_schema(source)
-        .expect("db-test public schema compiles")
+    crate::schema::JazzSchema::new(source).expect("db-test public schema compiles")
 }
 
 pub(super) fn build_public_db_test_schema(builder: PublicSchemaBuilder) -> JazzSchema {
@@ -663,15 +662,17 @@ pub(super) fn build_public_db_test_schema(builder: PublicSchemaBuilder) -> JazzS
 }
 
 pub(super) fn build_public_db_test_schema_with_branch_policies(
-    builder: PublicSchemaBuilder,
+    mut builder: PublicSchemaBuilder,
     branch_read_policy: Option<PublicPolicyExpr>,
     branch_write_policy: Option<PublicPolicyExpr>,
 ) -> JazzSchema {
-    let mut source = crate::schema::SourceSchema::new(&builder.build());
-    source.branch_read_policy = branch_read_policy;
-    source.branch_write_policy = branch_write_policy;
-    crate::tools::public_schema_convert::convert_source_schema(&source)
-        .expect("db-test public schema with branch policies compiles")
+    if let Some(policy) = branch_read_policy {
+        builder = builder.branch_read_policy(policy);
+    }
+    if let Some(policy) = branch_write_policy {
+        builder = builder.branch_write_policy(policy);
+    }
+    build_public_db_test_schema(builder)
 }
 
 pub(super) fn public_session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {

@@ -276,10 +276,8 @@ impl SchemaViewId {
     }
 
     fn for_schema(schema: &JazzSchema) -> Self {
-        let bytes = schema.source().map_or_else(
-            || format!("{schema:?}").into_bytes(),
-            |source| serde_json::to_vec(source).expect("schema source always serializes"),
-        );
+        let bytes =
+            serde_json::to_vec(schema.public_schema()).expect("public schema always serializes");
         Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
     }
 }
@@ -1064,8 +1062,7 @@ pub mod doctest_support {
                     .column("done", ColumnType::Boolean),
             )
             .build();
-        crate::tools::public_schema_convert::convert_public_schema(&source)
-            .expect("Db doctest public schema compiles")
+        crate::schema::JazzSchema::new(&source).expect("Db doctest public schema compiles")
     }
 
     /// Open a fresh Db over in-memory storage.

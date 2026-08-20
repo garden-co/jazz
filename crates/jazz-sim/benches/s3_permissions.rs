@@ -2922,9 +2922,10 @@ fn bytes_floor(update: &SyncMessage) -> u64 {
 
 fn cell_uuid(row: &jazz::node::CurrentRow, table: &str, column: &str) -> RowUuid {
     let table = schema()
-        .tables
-        .into_iter()
+        .tables()
+        .iter()
         .find(|candidate| candidate.name == table)
+        .cloned()
         .unwrap();
     match row.cell(&table, column).unwrap() {
         Value::Uuid(uuid) => RowUuid(uuid),
@@ -2934,9 +2935,10 @@ fn cell_uuid(row: &jazz::node::CurrentRow, table: &str, column: &str) -> RowUuid
 
 fn cell_bool(row: &jazz::node::CurrentRow, table: &str, column: &str) -> bool {
     let table = schema()
-        .tables
-        .into_iter()
+        .tables()
+        .iter()
         .find(|candidate| candidate.name == table)
+        .cloned()
         .unwrap();
     match row.cell(&table, column).unwrap() {
         Value::Bool(value) => value,

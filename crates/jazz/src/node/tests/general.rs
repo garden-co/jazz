@@ -52,8 +52,13 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema-source.json");
         let source: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let source = serde_json::from_value(source["mergedSchema"].clone()).unwrap();
-        crate::tools::public_schema_convert::convert_public_schema(&source).unwrap()
+        let source = serde_json::from_value::<std::collections::BTreeMap<_, _>>(
+            source["mergedSchema"].clone(),
+        )
+        .unwrap()
+        .into_iter()
+        .collect();
+        crate::schema::JazzSchema::new(&source).unwrap()
     }
 
     fn sample_value(column_type: &groove::schema::ColumnType, seed: u8) -> Value {

@@ -298,7 +298,7 @@ impl ShellDb {
         storage_factory: Option<&dyn StorageFactory>,
         row_id_seed: Option<u64>,
     ) -> ShellResult<Self> {
-        let schema = JazzSchema::new([]);
+        let schema = JazzSchema::empty();
         match storage_config {
             StorageConfig::InMemory => {
                 let refs = schema.column_families();
@@ -1993,7 +1993,7 @@ mod tests {
     };
 
     fn public_schema(builder: PublicSchemaBuilder) -> JazzSchema {
-        crate::tools::public_schema_convert::convert_public_schema(&builder.build())
+        crate::schema::JazzSchema::new(&builder.build())
             .expect("serving test public schema compiles")
     }
 

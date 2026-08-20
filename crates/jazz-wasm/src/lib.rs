@@ -3040,7 +3040,7 @@ mod dynamic_schema_view_tests {
                     ),
             )
             .build();
-        let schema = jazz::tools::public_schema_convert::convert_public_schema(&source)
+        let schema = jazz::schema::JazzSchema::new(&source)
             .expect("WASM transaction fixture public schema compiles");
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();

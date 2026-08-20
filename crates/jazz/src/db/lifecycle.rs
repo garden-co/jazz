@@ -130,7 +130,7 @@ where
     pub(crate) async fn open_catalogue_uninitialized_edge(
         config: DbConfig<S>,
     ) -> Result<Self, Error> {
-        let bootstrap_schema = JazzSchema::new([]);
+        let bootstrap_schema = JazzSchema::empty();
         let schema_version_id = bootstrap_schema.version_id();
         let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
             SchemaViewId::for_schema(&bootstrap_schema),
@@ -288,7 +288,7 @@ where
     /// having opened the runtime with that schema originally; later schemas
     /// still arrive through ordinary catalogue lineage publication.
     fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
-        let empty_schema = JazzSchema::new([]);
+        let empty_schema = JazzSchema::empty();
         let empty_id = empty_schema.version_id();
         let target_id = schema.version_id();
         let (source, catalogue_seq, bootstrap_current) = {
@@ -718,7 +718,10 @@ where
     /// lowered state; the mutation is never persisted or published.
     #[cfg(feature = "testing")]
     #[doc(hidden)]
-    pub fn mutate_current_compiled_schema_for_test(&self, mutate: impl FnOnce(&mut JazzSchema)) {
+    pub fn mutate_current_compiled_schema_for_test(
+        &self,
+        mutate: impl FnOnce(&mut crate::schema::RuntimeSchema),
+    ) {
         self.node
             .node
             .borrow_mut()

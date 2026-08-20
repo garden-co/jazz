@@ -1,15 +1,16 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+mod schema_fixture;
 mod support;
 
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use support::{
@@ -176,10 +177,10 @@ fn pending_sizes() -> Vec<usize> {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        TABLE,
-        [ColumnSchema::new("title", ColumnType::String)],
-    )])
+    schema_fixture::compile(
+        SchemaBuilder::new()
+            .table(TableSchemaBuilder::new(TABLE).column("title", ColumnType::Text)),
+    )
 }
 
 fn open_node(

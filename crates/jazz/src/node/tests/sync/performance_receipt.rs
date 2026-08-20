@@ -5,8 +5,13 @@ fn policy_graph_perf_schema_fixture() -> JazzSchema {
         .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema-source.json");
     let source: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    let source = serde_json::from_value(source["mergedSchema"].clone()).unwrap();
-    crate::tools::public_schema_convert::convert_public_schema(&source).unwrap()
+    let source = serde_json::from_value::<std::collections::BTreeMap<_, _>>(
+        source["mergedSchema"].clone(),
+    )
+    .unwrap()
+    .into_iter()
+    .collect();
+    crate::schema::JazzSchema::new(&source).unwrap()
 }
 
 fn policy_graph_uuid(kind: u8, idx: u32) -> uuid::Uuid {

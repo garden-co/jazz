@@ -10,7 +10,7 @@ use crate::query::{
     PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
-    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, SourceSchema,
+    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
     TableSchema as CoreTableSchema, WritePolicies,
 };
 
@@ -30,7 +30,7 @@ const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[doc(hidden)]
+/// Error produced while compiling a developer-authored schema for the runtime.
 pub struct SchemaConversionError {
     path: String,
     message: String,
@@ -53,65 +53,35 @@ impl fmt::Display for SchemaConversionError {
 
 impl std::error::Error for SchemaConversionError {}
 
-#[doc(hidden)]
-pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
-    convert_source_schema(&SourceSchema::new(schema))
-}
-
-/// Decode and compile the source-level JSON schema used by native bindings.
-pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
-    let source: SourceSchema = serde_json::from_slice(bytes)
-        .map_err(|error| format!("decode public schema source: {error}"))?;
-    convert_source_schema(&source).map_err(|error| format!("compile public schema source: {error}"))
-}
-
-/// Compile a durable source schema into the engine's in-memory form.
-pub fn convert_source_schema(source: &SourceSchema) -> Result<JazzSchema, SchemaConversionError> {
-    if source.format_version != 1 {
-        return Err(SchemaConversionError::new(
-            "$",
-            format!(
-                "unsupported public schema source format version {}",
-                source.format_version
-            ),
-        ));
-    }
-    if source
-        .tables
-        .windows(2)
-        .any(|pair| pair[0].name.as_str() >= pair[1].name.as_str())
-    {
-        return Err(SchemaConversionError::new(
-            "$.tables",
-            "public schema source tables must be uniquely sorted by name",
-        ));
-    }
-    let schema = source.public_schema();
-    let mut tables = schema.iter().collect::<Vec<_>>();
-    tables.sort_by_key(|(name, _)| name.as_str());
-    let mut converted = tables
-        .into_iter()
-        .map(|(name, table)| convert_table(&schema, name, table))
+pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
+    let mut converted = schema
+        .iter()
+        .map(|(name, table)| convert_table(schema, name, table))
         .collect::<Result<Vec<_>, _>>()?;
-    coerce_typed_literals(&schema, &mut converted);
+    coerce_typed_literals(schema, &mut converted);
     validate_converted_schema(&converted)?;
-    let branch_read_policy = convert_optional_branch_policy(
-        &schema,
-        "branch_read_policy",
-        source.branch_read_policy.as_ref(),
-    )?;
+    let branch_read_policy =
+        convert_optional_branch_policy(schema, "branch_read_policy", schema.branch_read_policy())?;
     let branch_write_policy = convert_optional_branch_policy(
-        &schema,
+        schema,
         "branch_write_policy",
-        source.branch_write_policy.as_ref(),
+        schema.branch_write_policy(),
     )?;
-    Ok(JazzSchema {
-        tables: converted,
-        branch_read_policy,
-        branch_write_policy,
-        source: None,
-    }
-    .with_source(source.clone()))
+    Ok(JazzSchema::from_runtime(
+        schema.clone(),
+        RuntimeSchema {
+            tables: converted,
+            branch_read_policy,
+            branch_write_policy,
+        },
+    ))
+}
+
+/// Decode and compile the public JSON schema used by native bindings.
+pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
+    let schema: Schema =
+        serde_json::from_slice(bytes).map_err(|error| format!("decode public schema: {error}"))?;
+    convert_public_schema(&schema).map_err(|error| format!("compile public schema: {error}"))
 }
 
 fn convert_optional_branch_policy(
@@ -136,15 +106,14 @@ fn convert_optional_branch_policy(
 }
 
 fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
-    let schema = JazzSchema {
+    let schema = RuntimeSchema {
         tables: tables.to_vec(),
         branch_read_policy: None,
         branch_write_policy: None,
-        source: None,
     };
     for table in tables {
         if let Some(policy) = &table.read_policy {
-            policy.validate(&schema).map_err(|error| {
+            policy.validate_runtime(&schema).map_err(|error| {
                 err(
                     format!("$.{}.policies.select.using", table.name),
                     format!("converted read policy is invalid: {error:?}"),
@@ -152,7 +121,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             })?;
         }
         for (label, policy) in table.write_policies.iter() {
-            policy.validate(&schema).map_err(|error| {
+            policy.validate_runtime(&schema).map_err(|error| {
                 err(
                     format!("$.{}.policies.{label}", table.name),
                     format!("converted write policy is invalid: {error:?}"),
@@ -2517,39 +2486,35 @@ mod tests {
                 .expect("read policy graph perf fixture source");
         let source: serde_json::Value =
             serde_json::from_str(&source).expect("parse policy graph perf fixture source");
-        serde_json::from_value(source["mergedSchema"].clone())
-            .expect("decode policy graph perf public schema fixture")
+        let tables: BTreeMap<TableName, TableSchema> =
+            serde_json::from_value(source["mergedSchema"].clone())
+                .expect("decode policy graph perf public schema fixture");
+        tables.into_iter().collect()
     }
 
     #[test]
     fn converts_policy_graph_perf_source_deterministically() {
         let source = policy_graph_perf_fixture_schema();
         let converted = convert_public_schema(&source).expect("convert policy graph schema");
-        let recompiled = convert_source_schema(
-            converted
-                .source()
-                .expect("public conversion retains source"),
-        )
-        .expect("retained source recompiles");
+        let recompiled = convert_public_schema(converted.public_schema())
+            .expect("retained public schema recompiles");
 
         assert_eq!(converted, recompiled);
         assert_eq!(converted.version_id(), recompiled.version_id());
-        assert_eq!(
-            SourceSchema::new(&source),
-            converted.source().unwrap().clone()
-        );
+        assert_eq!(&source, converted.public_schema());
     }
 
     #[test]
     fn compiles_branch_policy_source() {
-        let mut source = SourceSchema::new(&SchemaBuilder::new().build());
-        source.branch_read_policy = Some(PolicyExpr::Cmp {
-            column: "created_by".to_owned(),
-            op: CmpOp::Eq,
-            value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
-        });
+        let source = SchemaBuilder::new()
+            .branch_read_policy(PolicyExpr::Cmp {
+                column: "created_by".to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+            })
+            .build();
 
-        let compiled = convert_source_schema(&source).expect("compile branch policy source");
+        let compiled = convert_public_schema(&source).expect("compile branch policy source");
         assert_eq!(
             compiled
                 .branch_read_policy
@@ -2558,7 +2523,7 @@ mod tests {
                 .table,
             "jazz_branches"
         );
-        assert!(compiled.source().is_some());
+        assert_eq!(compiled.public_schema(), &source);
     }
 
     #[test]
@@ -2606,6 +2571,7 @@ mod tests {
             .build();
         let integer_table = convert_public_schema(&integer_schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "todos")
@@ -2630,6 +2596,7 @@ mod tests {
             .build();
         let integer_array_table = convert_public_schema(&integer_array_schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "todos")
@@ -2661,6 +2628,7 @@ mod tests {
             .build();
         let numeric_default_table = convert_public_schema(&numeric_default_schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "numeric_defaults")
@@ -2696,6 +2664,7 @@ mod tests {
         .collect();
         let default_table = convert_public_schema(&default_schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "todos")
@@ -2748,6 +2717,7 @@ mod tests {
             .build();
         let table = convert_public_schema(&schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "events")
@@ -2905,6 +2875,7 @@ mod tests {
             .build();
         let table = convert_public_schema(&schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "metrics")
@@ -2990,6 +2961,7 @@ mod tests {
 
         let table = convert_public_schema(&schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "events")
@@ -3023,6 +2995,7 @@ mod tests {
 
         let table = convert_public_schema(&schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "todos")

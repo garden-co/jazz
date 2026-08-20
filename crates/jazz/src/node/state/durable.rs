@@ -86,10 +86,10 @@ where
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn mutate_current_schema_for_testing(
         &mut self,
-        mutate: impl FnOnce(&mut JazzSchema),
+        mutate: impl FnOnce(&mut crate::schema::RuntimeSchema),
     ) {
         let mut schema = self.catalogue.schema.clone();
-        mutate(&mut schema);
+        mutate(schema.runtime_mut_for_testing());
         self.catalogue.schema = schema.clone();
         self.catalogue
             .catalogue_schemas

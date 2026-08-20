@@ -326,7 +326,7 @@ impl ServerBuilder {
             return Ok(None);
         };
         let storage_config = storage_config?;
-        let schema = jazz::tools::public_schema_convert::convert_public_schema(&schema)
+        let schema = jazz::schema::JazzSchema::new(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         Ok(Some(
             crate::server::ServerRuntimeHandle::start_with_storage_config(
@@ -783,8 +783,7 @@ mod tests {
             )
             .build();
         let evolved_runtime =
-            jazz::tools::public_schema_convert::convert_public_schema(&evolved_source)
-                .expect("evolved public schema compiles");
+            jazz::schema::JazzSchema::new(&evolved_source).expect("evolved public schema compiles");
         let evolved = jazz::protocol::SchemaVersion::new(evolved_runtime);
         let mut evolved_snapshot = snapshot;
         evolved_snapshot.schemas.push(evolved.clone());

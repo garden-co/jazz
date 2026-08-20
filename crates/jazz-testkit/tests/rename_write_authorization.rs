@@ -65,8 +65,7 @@ fn v2_schema() -> JazzSchema {
 }
 
 fn compile_public_schema(builder: SchemaBuilder) -> JazzSchema {
-    jazz::tools::public_schema_convert::convert_public_schema(&builder.build())
-        .expect("test public schema compiles")
+    jazz::schema::JazzSchema::new(&builder.build()).expect("test public schema compiles")
 }
 
 fn owner_policy() -> PolicyExpr {

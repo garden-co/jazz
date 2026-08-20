@@ -4,12 +4,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use jazz::groove::records::Value as CoreValue;
 use jazz::protocol::{LensOp as CoreLensOp, MigrationLens, TableLens};
+use jazz::schema::JazzSchema;
 
 use jazz::tools::public_schema::{Schema, SchemaHash, TableName, Value};
 use jazz::tools::schema_lens::{Lens, LensOp};
 
 use super::{ServerRuntimeHandle, ServerState};
-use jazz::tools::public_schema_convert;
 
 /// Publish newly admitted catalogue entries into the active runtime shell.
 ///
@@ -33,7 +33,7 @@ pub(crate) async fn publish_runtime_catalogue(
         .map(|schema| (SchemaHash::compute(&schema), schema))
         .collect::<HashMap<_, _>>();
     for schema in schemas {
-        let runtime_schema = public_schema_convert::convert_public_schema(schema)
+        let runtime_schema = JazzSchema::new(schema)
             .map_err(|error| format!("convert catalogue schema for runtime: {error}"))?;
         runtime_shell(state, &mut shell, runtime_schema)?;
     }
@@ -60,9 +60,9 @@ pub(crate) async fn publish_runtime_catalogue(
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let initial_schema = public_schema_convert::convert_public_schema(&source_schema)
+        let initial_schema = JazzSchema::new(&source_schema)
             .map_err(|error| format!("convert lens source schema for runtime: {error}"))?;
-        let target_runtime = public_schema_convert::convert_public_schema(&target_schema)
+        let target_runtime = JazzSchema::new(&target_schema)
             .map_err(|error| format!("convert lens target schema: {error}"))?;
         let runtime_shell = runtime_shell(state, &mut shell, initial_schema)?;
         runtime_shell
@@ -79,7 +79,7 @@ pub(crate) async fn publish_runtime_catalogue(
         return Ok(());
     };
     let mut schema = known_schema(state, &supplied_schemas, permissions.head.schema_hash)?;
-    let structural_runtime = public_schema_convert::convert_public_schema(&schema)
+    let structural_runtime = JazzSchema::new(&schema)
         .map_err(|error| format!("convert permissions lineage source schema: {error}"))?;
     let lineage_source = structural_runtime.version_id();
     let runtime_shell = runtime_shell(state, &mut shell, structural_runtime)?;
@@ -136,10 +136,10 @@ fn known_schema(
 }
 
 fn convert_lens(lens: &Lens, source: &Schema, target: &Schema) -> Result<MigrationLens, String> {
-    let source_runtime = public_schema_convert::convert_public_schema(source)
-        .map_err(|error| format!("convert lens source schema: {error}"))?;
-    let target_runtime = public_schema_convert::convert_public_schema(target)
-        .map_err(|error| format!("convert lens target schema: {error}"))?;
+    let source_runtime =
+        JazzSchema::new(source).map_err(|error| format!("convert lens source schema: {error}"))?;
+    let target_runtime =
+        JazzSchema::new(target).map_err(|error| format!("convert lens target schema: {error}"))?;
 
     let renamed_tables = lens
         .forward

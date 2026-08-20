@@ -2467,38 +2467,35 @@ pub const SCHEMA_LINEAGE_PUBLICATION_NAMESPACE: uuid::Uuid =
 /// Namespace used for semantic read-view UUIDv5 ids.
 pub const READ_VIEW_NAMESPACE: uuid::Uuid = uuid::uuid!("1a87cf70-f8f0-5ae7-a574-1f9b5e4517f1");
 
-/// Compiled in-memory schema version whose durable/wire form is source-only.
+/// Compiled in-memory schema version whose durable/wire form is the public schema.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SchemaVersion {
     /// Content-addressed id, equal to `schema.version_id()`.
     pub id: SchemaVersionId,
-    /// Compiled runtime schema. Serialization emits its retained
-    /// [`crate::schema::SourceSchema`] instead.
+    /// Compiled runtime schema. Serialization emits its retained public schema.
     pub schema: JazzSchema,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct SchemaVersionWire {
     id: SchemaVersionId,
-    /// Canonical public schema and PolicyExpr source encoded as JSON so public
+    /// Canonical public schema and PolicyExpr values encoded as JSON so public
     /// Value remains portable across both JSON storage and postcard transport
     /// serializers.
-    source_json: Vec<u8>,
+    public_schema_json: Vec<u8>,
 }
 
-fn durable_schema_source_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
-    let source = schema.source().ok_or_else(|| {
-        "cannot persist a compiled schema without its public schema source".to_owned()
-    })?;
-    let recompiled = crate::tools::public_schema_convert::convert_source_schema(source)
+fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
+    let public_schema = schema.public_schema();
+    let recompiled = crate::tools::public_schema_convert::convert_public_schema(public_schema)
         .map_err(|error| error.to_string())?;
     if recompiled != *schema {
-        return Err("compiled schema no longer matches its retained source".to_owned());
+        return Err("compiled schema no longer matches its retained public schema".to_owned());
     }
-    serde_json::to_vec(source).map_err(|error| error.to_string())
+    serde_json::to_vec(public_schema).map_err(|error| error.to_string())
 }
 
-fn compile_schema_source_json(bytes: &[u8]) -> Result<JazzSchema, String> {
+fn compile_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     crate::tools::public_schema_convert::decode_public_schema_json(bytes)
 }
 
@@ -2507,11 +2504,11 @@ impl serde::Serialize for SchemaVersion {
     where
         S: serde::Serializer,
     {
-        let source_json =
-            durable_schema_source_json(&self.schema).map_err(serde::ser::Error::custom)?;
+        let public_schema_json =
+            durable_public_schema_json(&self.schema).map_err(serde::ser::Error::custom)?;
         let wire = SchemaVersionWire {
             id: self.id,
-            source_json,
+            public_schema_json,
         };
         wire.serialize(serializer)
     }
@@ -2522,8 +2519,12 @@ impl<'de> serde::Deserialize<'de> for SchemaVersion {
     where
         D: serde::Deserializer<'de>,
     {
-        let SchemaVersionWire { id, source_json } = SchemaVersionWire::deserialize(deserializer)?;
-        let schema = compile_schema_source_json(&source_json).map_err(serde::de::Error::custom)?;
+        let SchemaVersionWire {
+            id,
+            public_schema_json,
+        } = SchemaVersionWire::deserialize(deserializer)?;
+        let schema =
+            compile_public_schema_json(&public_schema_json).map_err(serde::de::Error::custom)?;
         // Keep identity validation at catalogue admission/open, where callers
         // receive the established domain error rather than a codec error.
         Ok(Self { id, schema })
@@ -2990,14 +2991,15 @@ mod tests {
                     .policies(TablePolicies::new().with_select(PolicyExpr::True)),
             )
             .build();
-        let compiled = crate::tools::public_schema_convert::convert_public_schema(&source)
-            .expect("source schema compiles");
+        let compiled = crate::schema::JazzSchema::new(&source).expect("source schema compiles");
         let version = SchemaVersion::new(compiled);
 
         let stored = serde_json::to_string(&version).expect("source schema serializes");
-        let SchemaVersionWire { source_json, .. } =
-            serde_json::from_str(&stored).expect("decode stored schema envelope");
-        let stored_source = String::from_utf8(source_json).expect("source JSON is UTF-8");
+        let SchemaVersionWire {
+            public_schema_json, ..
+        } = serde_json::from_str(&stored).expect("decode stored schema envelope");
+        let stored_source =
+            String::from_utf8(public_schema_json).expect("public schema JSON is UTF-8");
         assert!(stored_source.contains("\"policies\""));
         assert!(stored_source.contains("\"type\":\"True\""));
         assert!(!stored_source.contains("read_policy"));
@@ -3007,21 +3009,9 @@ mod tests {
         let decoded: SchemaVersion =
             postcard::from_bytes(&bytes).expect("source schema recompiles on decode");
         assert_eq!(decoded, version);
-        assert!(decoded.schema.source().is_some());
-    }
-
-    #[test]
-    fn durable_schema_source_rejects_a_source_less_compiled_schema() {
-        let version = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-            "todos",
-            [ColumnSchema::new("title", ColumnType::String)],
-        )]));
-
-        let error = durable_schema_source_json(&version.schema)
-            .expect_err("compiled schemas must never become a production durable representation");
-        assert!(
-            error.contains("without its public schema source"),
-            "unexpected serialization error: {error}"
+        assert_eq!(
+            decoded.schema.public_schema(),
+            version.schema.public_schema()
         );
     }
 

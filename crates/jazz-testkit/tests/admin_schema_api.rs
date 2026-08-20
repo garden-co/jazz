@@ -16,9 +16,8 @@ fn identity() -> DbIdentity {
 }
 
 fn server_config() -> InMemoryServerShellConfig {
-    let schema =
-        jazz::tools::public_schema_convert::convert_public_schema(&SchemaBuilder::new().build())
-            .expect("empty public schema compiles");
+    let schema = jazz::schema::JazzSchema::new(&SchemaBuilder::new().build())
+        .expect("empty public schema compiles");
     InMemoryServerShellConfig::new(schema, identity())
 }
 

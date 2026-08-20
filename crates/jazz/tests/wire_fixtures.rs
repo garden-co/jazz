@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::{RecordDescriptor, Value, ValueType};
-use groove::schema::ColumnType;
 use jazz::binding_codec::{
     RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
 };
@@ -18,7 +17,7 @@ use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
     lit,
 };
-use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
 use jazz::time::{GlobalSeq, TxTime};
 use jazz::tools::{
     ColumnType as PublicColumnType, ObjectId, ResultKey, SchemaBuilder, TableSchemaBuilder,
@@ -127,8 +126,7 @@ fn compiled_todos_schema(columns: &[&str]) -> JazzSchema {
             table.column(column, PublicColumnType::Text)
         });
     let source = SchemaBuilder::new().table(table).build();
-    jazz::tools::public_schema_convert::convert_public_schema(&source)
-        .expect("wire fixture source schema compiles")
+    jazz::schema::JazzSchema::new(&source).expect("wire fixture source schema compiles")
 }
 
 fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
@@ -483,7 +481,8 @@ fn mixed_version_carriers(
     schema_version: SchemaVersionId,
     author: AuthorId,
 ) -> Vec<VersionCarrier> {
-    let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+    let schema = compiled_todos_schema(&["title"]);
+    let table = &schema.tables()[0];
     let node = NodeUuid::from_bytes([0x88; 16]);
     let bundles = (0..4)
         .map(|index| {
@@ -505,7 +504,7 @@ fn mixed_version_carriers(
                 },
                 versions: vec![
                     VersionRecord::from_cells(
-                        &table,
+                        table,
                         schema_version,
                         RowUuid::from_bytes([0x90 + index as u8; 16]),
                         Vec::new(),

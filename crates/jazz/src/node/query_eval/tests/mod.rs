@@ -282,7 +282,7 @@ fn owner_policy_schema() -> JazzSchema {
 }
 
 fn public_query_eval_schema(builder: PublicSchemaBuilder) -> JazzSchema {
-    crate::tools::public_schema_convert::convert_public_schema(&builder.build())
+    crate::schema::JazzSchema::new(&builder.build())
         .expect("query-eval test public schema compiles")
 }
 
@@ -808,7 +808,7 @@ fn commit_global_member(
 /// separate discriminator assertion pins the internal relation terminal so
 /// a base root and overlay target cannot silently lose their correlation
 /// witness while still returning an empty array.
-fn recursive_shape(schema: &JazzSchema) -> ValidatedQuery {
+fn recursive_shape(schema: &RuntimeSchema) -> ValidatedQuery {
     Query::from("resources")
         .reachable_via(
             "resourceAccess",
@@ -820,6 +820,6 @@ fn recursive_shape(schema: &JazzSchema) -> ValidatedQuery {
             "parent",
             [eq(col("onlyAdmins"), lit(false))],
         )
-        .validate(schema)
+        .validate_runtime(schema)
         .unwrap()
 }

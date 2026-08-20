@@ -4,8 +4,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{PolicyExpr, Schema, TablePolicies};
 
 pub fn compile_schema(source: &Schema) -> JazzSchema {
-    jazz::tools::public_schema_convert::convert_public_schema(source)
-        .expect("integration-test public schema compiles")
+    jazz::schema::JazzSchema::new(source).expect("integration-test public schema compiles")
 }
 
 pub fn allow_all_policies() -> TablePolicies {

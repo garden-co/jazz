@@ -146,8 +146,8 @@ fn publish_empty_schema_and_wait_for_live_core(bound_port_file: &Path, data_dir:
 }
 
 fn schema_hex(schema: &JazzSchema) -> String {
-    serde_json::to_vec(schema.source().expect("test schema has public source"))
-        .expect("encode schema source")
+    serde_json::to_vec(schema.public_schema())
+        .expect("encode public schema")
         .into_iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
@@ -161,7 +161,7 @@ fn todos_schema() -> JazzSchema {
                 .column("done", PublicColumnType::Boolean),
         )
         .build();
-    jazz::tools::public_schema_convert::convert_public_schema(&source).unwrap()
+    jazz::schema::JazzSchema::new(&source).unwrap()
 }
 
 fn structured_schema() -> JazzSchema {
@@ -173,12 +173,11 @@ fn structured_schema() -> JazzSchema {
                 .column("owner_id", PublicColumnType::Uuid),
         )
         .build();
-    jazz::tools::public_schema_convert::convert_public_schema(&source).unwrap()
+    jazz::schema::JazzSchema::new(&source).unwrap()
 }
 
 fn empty_schema() -> JazzSchema {
-    jazz::tools::public_schema_convert::convert_public_schema(&PublicSchemaBuilder::new().build())
-        .unwrap()
+    jazz::schema::JazzSchema::new(&PublicSchemaBuilder::new().build()).unwrap()
 }
 
 fn identity_for_subject(node: u8, subject: &str) -> DbIdentity {

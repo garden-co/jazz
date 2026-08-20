@@ -572,10 +572,12 @@ fn policy_graph_schema_fixture(fixture: &Fixture) -> JazzSchema {
         &fs::read(fixture.schema_path()).expect("read policy graph schema source fixture"),
     )
     .expect("decode policy graph schema source document");
-    let schema: Schema = serde_json::from_value(source["mergedSchema"].clone())
-        .expect("decode policy graph public schema");
-    jazz::tools::public_schema_convert::convert_public_schema(&schema)
-        .expect("compile policy graph public schema")
+    let schema =
+        serde_json::from_value::<std::collections::BTreeMap<_, _>>(source["mergedSchema"].clone())
+            .expect("decode policy graph public schema")
+            .into_iter()
+            .collect::<Schema>();
+    jazz::schema::JazzSchema::new(&schema).expect("compile policy graph public schema")
 }
 
 fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {

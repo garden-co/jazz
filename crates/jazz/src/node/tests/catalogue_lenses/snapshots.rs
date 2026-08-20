@@ -46,7 +46,7 @@ fn trusted_snapshot_carries_policy_source_and_edge_recompiles_it_after_reopen() 
                 ),
         )
         .build();
-    let compiled = crate::tools::public_schema_convert::convert_public_schema(&public)
+    let compiled = crate::schema::JazzSchema::new(&public)
         .expect("compile authority source");
     let (_authority_dir, authority) = open_node_with_schema(node(0x33), compiled.clone());
     let snapshot = authority.catalogue_snapshot().expect("authority snapshot");
@@ -81,7 +81,10 @@ fn trusted_snapshot_carries_policy_source_and_edge_recompiles_it_after_reopen() 
     let reopened = NodeState::new_catalogue_uninitialized(node(0x34), storage)
         .expect("reopen edge from persisted source");
     assert_eq!(reopened.try_current_schema().unwrap(), &compiled);
-    assert!(reopened.try_current_schema().unwrap().source().is_some());
+    assert_eq!(
+        reopened.try_current_schema().unwrap().public_schema(),
+        compiled.public_schema()
+    );
 }
 
 #[test]

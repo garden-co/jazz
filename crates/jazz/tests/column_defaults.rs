@@ -63,10 +63,11 @@ fn cells(values: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<St
 
 fn stored_row(db: &Db<MemoryStorage>, row_id: RowUuid) -> BTreeMap<String, Value> {
     let table = schema()
-        .tables
-        .into_iter()
+        .tables()
+        .iter()
         .find(|table| table.name == "events")
-        .expect("events table");
+        .expect("events table")
+        .clone();
     let prepared = db
         .prepare_query(&db.table("events"))
         .expect("prepare query");

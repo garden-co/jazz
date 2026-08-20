@@ -284,7 +284,7 @@ fn bind_scope_claim_operand(
 
 pub(super) fn disambiguate_policy_claim_params(
     query: &mut JazzQuery,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     binding_values: &mut BTreeMap<String, Value>,
 ) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
     disambiguate_policy_claim_params_with_outer_slots(
@@ -303,11 +303,11 @@ pub(super) fn disambiguate_policy_claim_params(
 /// aliases, so a claim cannot cross a type boundary through source reuse.
 pub(super) fn disambiguate_policy_claim_params_with_outer_slots(
     query: &mut JazzQuery,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     binding_values: &mut BTreeMap<String, Value>,
     outer_slots: &BTreeMap<String, ProgramClaimParam>,
 ) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
-    let shape = query.validate(schema)?;
+    let shape = query.validate_runtime(schema)?;
     let mut aliases = BTreeMap::new();
     let mut claims = BTreeMap::new();
     for (name, ty) in shape.params() {
@@ -508,7 +508,7 @@ pub(super) fn binding_claim_params_cache_key(
 pub(super) fn bind_query_params_with_mode(
     shape: &ValidatedQuery,
     binding: &Binding,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     mode: ParamBindingMode,
 ) -> Result<ValidatedQuery, Error> {
     let mut query = shape.query().clone();
@@ -657,7 +657,7 @@ pub(super) fn bind_query_params_with_mode(
 fn bind_flat_join_predicate(
     predicate: Predicate,
     binding: &Binding,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     mode: ParamBindingMode,
     root_scope: &str,
     source_tables: &BTreeMap<String, String>,
@@ -706,7 +706,7 @@ fn bind_flat_join_predicate(
 fn bind_array_subquery_filter_literals(
     mut subquery: ArraySubquery,
     binding: &Binding,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     mode: ParamBindingMode,
 ) -> Result<ArraySubquery, Error> {
     let source = bind_source_for_table(&subquery.table);
@@ -726,7 +726,7 @@ fn bind_array_subquery_filter_literals(
 pub(super) fn inline_snapshot_bind_filter_literals(
     shape: &ValidatedQuery,
     binding: &Binding,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
 ) -> Result<ValidatedQuery, Error> {
     bind_query_params_with_mode(
         shape,
@@ -800,7 +800,7 @@ pub(super) fn normalized_source_tables(shape: &NormalizedRowSetShape) -> BTreeSe
 }
 
 pub(super) fn collect_reachable_seed_claim_params(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     query: &JazzQuery,
     params: &mut BTreeMap<String, ProgramClaimParam>,
 ) -> Result<(), Error> {
@@ -992,7 +992,7 @@ fn collect_claim_field_param_authoritative(
 fn bind_query_predicate(
     predicate: Predicate,
     binding: &Binding,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     mode: ParamBindingMode,
 ) -> Result<Predicate, Error> {
@@ -1097,7 +1097,7 @@ fn bind_query_predicate(
 fn bind_reachable_seed_filters(
     reachable: &mut crate::query::ReachableVia,
     binding: &Binding,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     mode: ParamBindingMode,
 ) -> Result<(), Error> {
     if let Some(seed) = &mut reachable.seed {
@@ -1113,7 +1113,7 @@ fn bind_reachable_seed_filters(
 fn bind_join_filter_literals(
     mut join: JoinVia,
     binding: &Binding,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     mode: ParamBindingMode,
 ) -> Result<JoinVia, Error> {
     let source = bind_source_for_table(&join.table);
@@ -1134,7 +1134,7 @@ fn bind_binary_predicate(
     left: Operand,
     right: Operand,
     binding: &Binding,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     mode: ParamBindingMode,
     build: impl FnOnce(Operand, Operand) -> Predicate,

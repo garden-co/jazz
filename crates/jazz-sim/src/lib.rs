@@ -1049,7 +1049,7 @@ pub fn run_echo_threaded(seed: u64, rounds: u64, profile: PeerProfile) -> RunRep
 }
 
 fn empty_schema() -> JazzSchema {
-    JazzSchema::new([])
+    JazzSchema::empty()
 }
 
 #[derive(Clone, Debug)]

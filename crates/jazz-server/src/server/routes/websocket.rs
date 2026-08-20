@@ -1183,8 +1183,7 @@ mod tests {
                     .policies(public_table_policies()),
             )
             .build();
-        jazz::tools::public_schema_convert::convert_public_schema(&source)
-            .expect("websocket public schema compiles")
+        jazz::schema::JazzSchema::new(&source).expect("websocket public schema compiles")
     }
 
     fn compiled_table(schema: &JazzSchema, table: &str) -> TableSchema {
@@ -1213,7 +1212,7 @@ mod tests {
                         ))),
                 )
                 .build();
-        jazz::tools::public_schema_convert::convert_public_schema(&source)
+        jazz::schema::JazzSchema::new(&source)
             .expect("websocket private docs public schema compiles")
     }
 

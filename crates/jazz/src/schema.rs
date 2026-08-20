@@ -7,6 +7,7 @@
 //! In the layer map it is the schema bridge from Jazz concepts to groove tables.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Deref;
 
 use groove::records::{
     RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
@@ -19,65 +20,12 @@ use groove::schema::{
 use groove::storage::StorageLayout;
 
 use crate::ids::SchemaVersionId;
-use crate::query::{Query, claim, col, eq};
-use crate::tools::public_schema::{PolicyExpr, Schema as PublicSchema, TableName};
+use crate::query::Query;
+#[cfg(test)]
+use crate::query::{claim, col, eq};
+use crate::tools::public_schema::Schema as PublicSchema;
 
-/// Canonically ordered, developer-authored schema source.
-///
-/// This is the durable schema representation. [`JazzSchema`] is compiled from
-/// it and remains an in-memory engine value.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct SourceSchema {
-    /// Source codec version. This versions the AST envelope, not policy
-    /// lowering behavior.
-    pub format_version: u8,
-    /// Application tables sorted by name for deterministic persistence and
-    /// content hashing.
-    pub tables: Vec<SourceTableSchema>,
-    /// Source policy for branch metadata reads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch_read_policy: Option<PolicyExpr>,
-    /// Source policy for branch metadata writes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch_write_policy: Option<PolicyExpr>,
-}
-
-/// One named table in a [`SourceSchema`].
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct SourceTableSchema {
-    /// Logical table name.
-    pub name: TableName,
-    /// Public structural schema and policy expressions.
-    pub schema: crate::tools::public_schema::TableSchema,
-}
-
-impl SourceSchema {
-    /// Canonicalize a public schema for persistence.
-    pub fn new(schema: &PublicSchema) -> Self {
-        let mut tables = schema
-            .iter()
-            .map(|(name, schema)| SourceTableSchema {
-                name: *name,
-                schema: schema.clone(),
-            })
-            .collect::<Vec<_>>();
-        tables.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
-        Self {
-            format_version: 1,
-            tables,
-            branch_read_policy: None,
-            branch_write_policy: None,
-        }
-    }
-
-    /// Reconstruct the ordinary public schema map used by the compiler.
-    pub fn public_schema(&self) -> PublicSchema {
-        self.tables
-            .iter()
-            .map(|table| (table.name, table.schema.clone()))
-            .collect()
-    }
-}
+pub use crate::tools::public_schema_convert::SchemaConversionError;
 
 /// Namespace used for schema-version UUIDv5 ids.
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
@@ -99,9 +47,77 @@ pub const STORAGE_CONSISTENCY_MARKERS_STORE: &str = "jazz_storage_consistency_ma
 /// ordinary accepted writes. It is storage metadata, never wire or app data.
 pub const MERGE_HEADS_TABLE: &str = "jazz_merge_heads";
 
-/// Complete logical Jazz schema.
+/// Source-backed Jazz schema accepted by public database APIs.
+///
+/// The developer-authored source is retained for durable catalogue
+/// publication while [`RuntimeSchema`] is the derived, in-memory engine form.
 #[derive(Clone, Debug)]
 pub struct JazzSchema {
+    public_schema: PublicSchema,
+    runtime: RuntimeSchema,
+}
+
+impl PartialEq for JazzSchema {
+    fn eq(&self, other: &Self) -> bool {
+        self.runtime == other.runtime
+    }
+}
+
+impl JazzSchema {
+    /// Construct an empty source-backed schema.
+    pub fn empty() -> Self {
+        Self::new(&PublicSchema::new()).expect("empty public schema always compiles")
+    }
+
+    /// Compile a developer-authored public schema and retain its durable source.
+    pub fn new(schema: &PublicSchema) -> Result<Self, SchemaConversionError> {
+        crate::tools::public_schema_convert::convert_public_schema(schema)
+    }
+
+    /// Return the developer-authored public schema retained for persistence.
+    pub fn public_schema(&self) -> &PublicSchema {
+        &self.public_schema
+    }
+
+    /// Return the compiled application tables used by the runtime.
+    pub fn tables(&self) -> &[TableSchema] {
+        &self.runtime.tables
+    }
+
+    pub(crate) fn from_runtime(public_schema: PublicSchema, runtime: RuntimeSchema) -> Self {
+        Self {
+            public_schema,
+            runtime,
+        }
+    }
+
+    pub(crate) fn runtime(&self) -> &RuntimeSchema {
+        &self.runtime
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn runtime_mut_for_testing(&mut self) -> &mut RuntimeSchema {
+        &mut self.runtime
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_runtime(self) -> RuntimeSchema {
+        self.runtime
+    }
+}
+
+impl Deref for JazzSchema {
+    type Target = RuntimeSchema;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+/// Compiled logical schema used internally by the Jazz engine.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct RuntimeSchema {
     /// Application tables in the schema.
     pub tables: Vec<TableSchema>,
     /// Read policy for branch metadata rows. `None` means branch metadata is
@@ -110,12 +126,9 @@ pub struct JazzSchema {
     /// Write policy for branch metadata rows. `None` means branch metadata is
     /// public for writes.
     pub branch_write_policy: Option<Query>,
-    /// Developer-authored source retained only so catalogue publication can
-    /// persist it instead of this lowered representation.
-    pub(crate) source: Option<SourceSchema>,
 }
 
-impl PartialEq for JazzSchema {
+impl PartialEq for RuntimeSchema {
     fn eq(&self, other: &Self) -> bool {
         self.tables == other.tables
             && self.branch_read_policy == other.branch_read_policy
@@ -123,46 +136,19 @@ impl PartialEq for JazzSchema {
     }
 }
 
-impl JazzSchema {
-    /// Construct a schema from application tables.
-    pub fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
+impl RuntimeSchema {
+    /// Construct a compiled schema from already-lowered application tables.
+    #[cfg(test)]
+    pub(crate) fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
         Self {
             tables: tables.into_iter().collect(),
             branch_read_policy: None,
             branch_write_policy: None,
-            source: None,
         }
         .validated()
     }
 
-    /// Attach the developer-authored source from which this runtime schema was
-    /// compiled.
-    pub(crate) fn with_source(mut self, source: SourceSchema) -> Self {
-        self.source = Some(source);
-        self.validated()
-    }
-
-    /// Return the developer-authored source, when this schema entered through
-    /// a public API boundary.
-    #[doc(hidden)]
-    pub fn source(&self) -> Option<&SourceSchema> {
-        self.source.as_ref()
-    }
-
-    /// Set the read policy for branch metadata rows.
-    pub fn with_branch_read_policy(mut self, read_policy: impl Into<Option<Query>>) -> Self {
-        self.branch_read_policy = read_policy.into();
-        self.source = None;
-        self.validated()
-    }
-
-    /// Set the write policy for branch metadata rows.
-    pub fn with_branch_write_policy(mut self, write_policy: impl Into<Option<Query>>) -> Self {
-        self.branch_write_policy = write_policy.into();
-        self.source = None;
-        self.validated()
-    }
-
+    #[cfg(test)]
     fn validated(self) -> Self {
         for table in &self.tables {
             for (column_name, strategy) in &table.merge_strategies {
@@ -198,7 +184,7 @@ impl JazzSchema {
             }
             if let Some(policy) = &table.read_policy {
                 assert_eq!(policy.table, table.name, "read policy table must match");
-                policy.validate(&self).unwrap_or_else(|error| {
+                policy.validate_runtime(&self).unwrap_or_else(|error| {
                     panic!("valid read policy shape for {}: {error:?}", table.name)
                 });
             }
@@ -208,7 +194,7 @@ impl JazzSchema {
                     "{label} write policy table must match"
                 );
                 policy
-                    .validate(&self)
+                    .validate_runtime(&self)
                     .unwrap_or_else(|_| panic!("valid {label} write policy shape"));
             }
         }
@@ -218,7 +204,7 @@ impl JazzSchema {
                 "branch read policy table must be jazz_branches"
             );
             policy
-                .validate(&self)
+                .validate_runtime(&self)
                 .expect("valid branch read policy shape");
         }
         if let Some(policy) = &self.branch_write_policy {
@@ -227,7 +213,7 @@ impl JazzSchema {
                 "branch write policy table must be jazz_branches"
             );
             policy
-                .validate(&self)
+                .validate_runtime(&self)
                 .expect("valid branch write policy shape");
         }
         self
@@ -392,6 +378,7 @@ pub enum MergeStrategy {
     GSet,
 }
 
+#[cfg(test)]
 fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
     matches!(
         column_type,
@@ -404,6 +391,7 @@ fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
     )
 }
 
+#[cfg(test)]
 fn is_gset_column_type(column_type: &GrooveColumnType) -> bool {
     matches!(column_type, GrooveColumnType::Array(_))
 }
@@ -518,6 +506,7 @@ impl WritePolicies {
 }
 
 /// Application table whose rows are stored as immutable history versions.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct TableSchema {
     /// Logical table name.
@@ -541,7 +530,7 @@ pub struct TableSchema {
 
 impl TableSchema {
     /// Construct a public/read-anyone table.
-    pub fn new(
+    pub(crate) fn new(
         name: impl Into<String>,
         columns: impl IntoIterator<Item = impl Into<ColumnSchema>>,
     ) -> Self {
@@ -557,7 +546,8 @@ impl TableSchema {
     }
 
     /// Mark a user column as referencing another Jazz table.
-    pub fn with_reference(
+    #[cfg(test)]
+    pub(crate) fn with_reference(
         mut self,
         column: impl Into<String>,
         target_table: impl Into<String>,
@@ -566,24 +556,9 @@ impl TableSchema {
         self
     }
 
-    /// Mark a user column as indexed on the global-current content table.
-    pub fn with_indexed_column(mut self, column: impl Into<String>) -> Self {
-        self.indexed_columns.insert(column.into());
-        self
-    }
-
-    /// Mark user columns as indexed on the global-current content table.
-    pub fn with_indexed_columns(
-        mut self,
-        columns: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        self.indexed_columns
-            .extend(columns.into_iter().map(Into::into));
-        self
-    }
-
     /// Set a user column's merge strategy.
-    pub fn with_column_merge_strategy(
+    #[cfg(test)]
+    pub(crate) fn with_column_merge_strategy(
         mut self,
         column: impl Into<String>,
         strategy: MergeStrategy,
@@ -601,19 +576,22 @@ impl TableSchema {
     }
 
     /// Set the table read policy.
-    pub fn with_read_policy(mut self, read_policy: impl Into<Option<Query>>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_read_policy(mut self, read_policy: impl Into<Option<Query>>) -> Self {
         self.read_policy = read_policy.into();
         self
     }
 
     /// Set the table write policy.
-    pub fn with_write_policy(mut self, write_policy: impl Into<Option<Query>>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_write_policy(mut self, write_policy: impl Into<Option<Query>>) -> Self {
         self.write_policies = WritePolicies::legacy(write_policy.into());
         self
     }
 
     /// Set operation-specific write policies.
-    pub fn with_write_policies(mut self, write_policies: WritePolicies) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_write_policies(mut self, write_policies: WritePolicies) -> Self {
         self.write_policies = write_policies;
         self
     }
@@ -1080,22 +1058,14 @@ fn pending_edges_table() -> GrooveTableSchema {
 }
 
 /// Policy-shape constructors.
-pub struct Policy;
+#[cfg(test)]
+pub(crate) struct Policy;
 
+#[cfg(test)]
 impl Policy {
-    /// Public/no policy.
-    pub fn public() -> Option<Query> {
-        None
-    }
-
     /// Owner-only policy equivalent to `column == claim("sub")`.
-    pub fn owner_only(table: impl Into<String>, column: impl Into<String>) -> Option<Query> {
+    pub(crate) fn owner_only(table: impl Into<String>, column: impl Into<String>) -> Option<Query> {
         Some(Query::from(table).filter(eq(col(column), claim("sub"))))
-    }
-
-    /// Use an explicit policy shape.
-    pub fn shape(query: Query) -> Option<Query> {
-        Some(query)
     }
 }
 
@@ -1202,7 +1172,7 @@ fn transactions_table() -> GrooveTableSchema {
     .with_index(GrooveIndexSchema::new("by_global_seq", ["global_seq"]))
 }
 
-fn canonical_schema_bytes(schema: &JazzSchema) -> Vec<u8> {
+fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
     put_str(&mut bytes, "jazz-schema-v0");
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
@@ -1345,7 +1315,7 @@ mod tests {
 
     #[test]
     fn logical_history_descriptor_has_composite_primary_key() {
-        let schema = JazzSchema::new([TableSchema::new(
+        let schema = RuntimeSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("title", ColumnType::String)],
         )]);
@@ -1378,15 +1348,15 @@ mod tests {
 
     #[test]
     fn schema_version_id_is_stable_and_content_addressed() {
-        let schema_a = JazzSchema::new([TableSchema::new(
+        let schema_a = RuntimeSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("title", ColumnType::String)],
         )]);
-        let schema_b = JazzSchema::new([TableSchema::new(
+        let schema_b = RuntimeSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("title", ColumnType::String)],
         )]);
-        let schema_c = JazzSchema::new([TableSchema::new(
+        let schema_c = RuntimeSchema::new([TableSchema::new(
             "todos",
             [
                 ColumnSchema::new("title", ColumnType::String),
@@ -1401,11 +1371,11 @@ mod tests {
 
     #[test]
     fn counter_merge_strategy_changes_schema_identity() {
-        let lww = JazzSchema::new([TableSchema::new(
+        let lww = RuntimeSchema::new([TableSchema::new(
             "counters",
             [ColumnSchema::new("count", ColumnType::U64)],
         )]);
-        let counter = JazzSchema::new([TableSchema::new(
+        let counter = RuntimeSchema::new([TableSchema::new(
             "counters",
             [ColumnSchema::new("count", ColumnType::U64)],
         )
@@ -1417,7 +1387,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "counter merge strategy requires a non-nullable integer column")]
     fn counter_merge_strategy_rejects_string_columns() {
-        JazzSchema::new([TableSchema::new(
+        RuntimeSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("title", ColumnType::String)],
         )
@@ -1427,7 +1397,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "merge strategy declared for unknown column todos.missing")]
     fn merge_strategy_rejects_unknown_user_column() {
-        JazzSchema::new([TableSchema::new(
+        RuntimeSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("title", ColumnType::String)],
         )
@@ -1437,7 +1407,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "counter merge strategy requires a non-nullable integer column")]
     fn counter_merge_strategy_rejects_nullable_integer_columns() {
-        JazzSchema::new([TableSchema::new(
+        RuntimeSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("count", ColumnType::U64.nullable())],
         )
@@ -1447,7 +1417,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "read policy table must match")]
     fn read_policy_must_name_attached_table() {
-        JazzSchema::new([TableSchema::new(
+        RuntimeSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("owner", ColumnType::Uuid)],
         )
@@ -1457,7 +1427,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "write policy table must match")]
     fn write_policy_must_name_attached_table() {
-        JazzSchema::new([TableSchema::new(
+        RuntimeSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("owner", ColumnType::Uuid)],
         )
@@ -1467,7 +1437,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "valid read policy shape")]
     fn read_policy_validates_against_complete_schema() {
-        JazzSchema::new([TableSchema::new(
+        RuntimeSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("owner", ColumnType::Uuid)],
         )
@@ -1554,7 +1524,7 @@ mod tests {
 
     #[test]
     fn storage_lowering_declares_system_columns_by_shape() {
-        let schema = JazzSchema::new([TableSchema::new(
+        let schema = RuntimeSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("title", ColumnType::String)],
         )]);

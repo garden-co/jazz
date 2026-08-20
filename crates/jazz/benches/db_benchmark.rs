@@ -7,17 +7,22 @@
 
 use std::collections::BTreeMap;
 
+mod schema_fixture;
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz::db::{
     Db, DbConfig, DbIdentity, PermissionAdvice, ReadOpts, SeededRowIdSource, SubscriptionEvent,
     block_on,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::public_schema::RelValueRef;
+use jazz::tools::{
+    ColumnType, ObjectId, SchemaBuilder, TablePolicies, TableSchemaBuilder, Value as PublicValue,
+};
 use jazz::tx::DurabilityTier;
 
 type DirectDb = Db<MemoryStorage>;
@@ -28,87 +33,53 @@ const USER_TEAM: RowUuid = RowUuid(uuid::uuid!("00000000-0000-0000-0000-00000000
 const PARENT_TEAM: RowUuid = RowUuid(uuid::uuid!("00000000-0000-0000-0000-0000000000d4"));
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "documents",
-        [
-            ColumnSchema::new("folder", ColumnType::Uuid),
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("content", ColumnType::String),
-            ColumnSchema::new("author", ColumnType::Uuid),
-            ColumnSchema::new("created_at", ColumnType::U64),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
+    schema_fixture::compile(SchemaBuilder::new().table(documents_table()))
 }
 
 fn owner_write_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "documents",
-        [
-            ColumnSchema::new("folder", ColumnType::Uuid),
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("content", ColumnType::String),
-            ColumnSchema::new("author", ColumnType::Uuid),
-            ColumnSchema::new("created_at", ColumnType::U64),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
+    let author = schema_fixture::session_column("author", "sub");
+    schema_fixture::compile(
+        SchemaBuilder::new()
+            .table(documents_table().policies(schema_fixture::write_operations(author))),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::owner_only("documents", "author"))])
 }
 
 fn reachable_policy_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "team_edges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "document_access",
-            [
-                ColumnSchema::new("document", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("document", "documents")
-        .with_reference("team", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "documents",
-            [
-                ColumnSchema::new("folder", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("content", ColumnType::String),
-                ColumnSchema::new("author", ColumnType::Uuid),
-                ColumnSchema::new("created_at", ColumnType::U64),
-                ColumnSchema::new("done", ColumnType::Bool),
-            ],
-        )
-        .with_read_policy(Policy::shape(Query::from("documents").reachable_via(
-            "document_access",
-            "document",
-            "team",
-            lit(Value::Uuid(USER_TEAM.0)),
-            "team_edges",
-            "member",
-            "parent",
-            [],
-        )))
-        .with_write_policy(Policy::public()),
-    ])
+    let reachable = schema_fixture::reachable_access(
+        "document_access",
+        "document",
+        "team",
+        "teams",
+        "team_edges",
+        "member",
+        "parent",
+        RelValueRef::Literal(PublicValue::Uuid(ObjectId::from_uuid(USER_TEAM.0))),
+    );
+    schema_fixture::compile(
+        SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("teams").column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("team_edges")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams"),
+            )
+            .table(
+                TableSchemaBuilder::new("document_access")
+                    .fk_column("document", "documents")
+                    .fk_column("team", "teams"),
+            )
+            .table(documents_table().policies(TablePolicies::new().with_select(reachable))),
+    )
+}
+
+fn documents_table() -> TableSchemaBuilder {
+    TableSchemaBuilder::new("documents")
+        .column("folder", ColumnType::Uuid)
+        .column("title", ColumnType::Text)
+        .column("content", ColumnType::Text)
+        .column("author", ColumnType::Uuid)
+        .column("created_at", ColumnType::Timestamp)
+        .column("done", ColumnType::Boolean)
 }
 
 fn open_db(seed: u64) -> DirectDb {

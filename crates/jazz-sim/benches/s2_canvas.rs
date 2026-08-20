@@ -2435,10 +2435,11 @@ fn db_rows_state(schema: &JazzSchema, rows: Vec<CurrentRow>) -> BTreeMap<RowUuid
 
 fn shape_state(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, (u64, u64)> {
     let table = schema()
-        .tables
-        .into_iter()
+        .tables()
+        .iter()
         .find(|table| table.name == SHAPES)
-        .unwrap();
+        .unwrap()
+        .clone();
     node.current_rows(SHAPES, DurabilityTier::Global)
         .unwrap()
         .into_iter()

@@ -8,7 +8,6 @@ use jazz::tools::public_schema::{
     RowDescriptor as PublicRowDescriptor, Schema as PublicSchema, TableName as PublicTableName,
     TableSchema as PublicTableSchema,
 };
-use jazz::tools::public_schema_convert::convert_public_schema;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +48,7 @@ pub(crate) fn convert_admin_schema(
             convert_table(&table_name, table_value)?,
         );
     }
-    convert_public_schema(&source)
+    JazzSchema::new(&source)
         .map_err(|error| err("$", format!("public schema conversion failed: {error}")))
 }
 

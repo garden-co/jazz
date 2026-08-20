@@ -44,7 +44,7 @@ fn compile_permission_scope_policy(
     mut query: JazzQuery,
     claims: Option<&BTreeMap<String, Value>>,
     claim_values: &BTreeMap<String, Value>,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
 ) -> Result<(ValidatedQuery, Binding), Error> {
     query.filters = query
         .filters
@@ -81,7 +81,7 @@ fn compile_permission_scope_policy(
         .collect();
     let mut values = BTreeMap::new();
     bind_scope_claim_operands(&mut query, claim_values, &mut values);
-    let shape = query.validate(schema)?;
+    let shape = query.validate_runtime(schema)?;
     coerce_binding_values_for_shape(&shape, &mut values);
     let binding = shape.bind(values)?;
     Ok((shape, binding))
@@ -1367,7 +1367,7 @@ mod authorization_scope_compiler_tests {
     use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
     fn public_schema(builder: PublicSchemaBuilder) -> JazzSchema {
-        crate::tools::public_schema_convert::convert_public_schema(&builder.build())
+        crate::schema::JazzSchema::new(&builder.build())
             .expect("authorization-scope test public schema compiles")
     }
 

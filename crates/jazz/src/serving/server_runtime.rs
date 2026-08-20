@@ -483,8 +483,8 @@ impl ServerRuntimeHandle {
         let activity_tx = self.inner.activity_tx.clone();
         let result = self
             .run(move |shell| {
-                let schema = crate::tools::public_schema_convert::convert_public_schema(&schema)
-                    .map_err(|error| error.to_string())?;
+                let schema =
+                    crate::schema::JazzSchema::new(&schema).map_err(|error| error.to_string())?;
                 shell
                     .publish_permissions_schema(schema, lineage_source)
                     .map_err(|error| error.to_string())

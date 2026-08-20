@@ -11,17 +11,21 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, InitialSyncFlushCadence, Node, ReadOpts, SeededRowIdSource,
     SubscriptionEvent, SubscriptionStream, Transport,
 };
-use jazz::groove::records::{ScalarEnumSchema, Value};
-use jazz::groove::schema::{ColumnSchema, ColumnType};
+use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::MergeableCommit;
 use jazz::protocol::{SubscriptionKey, SyncMessage};
-use jazz::query::{Query, col, eq, lit};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::query::Query;
+use jazz::schema::JazzSchema;
+use jazz::tools::{
+    ColumnType as PublicColumnType, Operation, PolicyExpr, SchemaBuilder, TablePolicies,
+    TableSchemaBuilder, Value as PublicValue,
+};
 use jazz::wire::{
     FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireCompression, WireStreamDecoder,
     WireStreamEncoder, compress_sync_payload, current_wire_features,
 };
+use jazz_sim::public_schema_fixture::{compile_public_schema, seeded_recursive_access_policy};
 use jazz_sim::{emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
@@ -839,164 +843,135 @@ fn duplex_counted() -> CountedDuplex {
 }
 
 fn schema() -> JazzSchema {
-    let mut tables = Vec::with_capacity(5);
-    tables.push(TableSchema::new(
-        ORG,
-        [
-            ColumnSchema::new("label", ColumnType::String),
-            ColumnSchema::new("created_at", ColumnType::U64),
-            ColumnSchema::new("settings", ColumnType::String),
-        ],
-    ));
-    tables.push(
-        TableSchema::new(
-            GROUP,
-            [
-                ColumnSchema::new("org_id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("description", ColumnType::String.nullable()),
-                ColumnSchema::new("archived", ColumnType::Bool),
-                ColumnSchema::new("sort", ColumnType::U64),
-            ],
+    let mut schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new(ORG)
+                .column("label", PublicColumnType::Text)
+                .column("created_at", PublicColumnType::Timestamp)
+                .column("settings", PublicColumnType::Text),
         )
-        .with_reference("org_id", ORG),
-    );
-    tables.push(
-        TableSchema::new(
-            GROUP_ACCESS,
-            [
-                ColumnSchema::new("group_id", ColumnType::Uuid),
-                ColumnSchema::new("user_id", ColumnType::Uuid),
-                ColumnSchema::new("role", role_type("group_access_role")),
-            ],
+        .table(
+            TableSchemaBuilder::new(GROUP)
+                .fk_column("org_id", ORG)
+                .column("label", PublicColumnType::Text)
+                .nullable_column("description", PublicColumnType::Text)
+                .column("archived", PublicColumnType::Boolean)
+                .column("sort", PublicColumnType::Timestamp),
         )
-        .with_reference("group_id", GROUP),
-    );
-    tables.push(
-        TableSchema::new(
-            GROUP_ENTRY,
-            [
-                ColumnSchema::new("member_id", ColumnType::Uuid),
-                ColumnSchema::new("target_id", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-                ColumnSchema::new("date_added", ColumnType::U64),
-            ],
+        .table(
+            TableSchemaBuilder::new(GROUP_ACCESS)
+                .fk_column("group_id", GROUP)
+                .column("user_id", PublicColumnType::Uuid)
+                .column("role", public_role_type("group_access_role")),
         )
-        .with_reference("member_id", GROUP)
-        .with_reference("target_id", GROUP),
-    );
-    tables.push(
-        TableSchema::new(
-            PROFILE,
-            [
-                ColumnSchema::new("group_id", ColumnType::Uuid),
-                ColumnSchema::new("email", ColumnType::String),
-                ColumnSchema::new("display", ColumnType::String),
-                ColumnSchema::new("last_login", ColumnType::U64.nullable()),
-                ColumnSchema::new("prefs", ColumnType::String),
-            ],
+        .table(
+            TableSchemaBuilder::new(GROUP_ENTRY)
+                .fk_column("member_id", GROUP)
+                .fk_column("target_id", GROUP)
+                .column("administrator", PublicColumnType::Boolean)
+                .column("date_added", PublicColumnType::Timestamp),
         )
-        .with_reference("group_id", GROUP),
-    );
+        .table(
+            TableSchemaBuilder::new(PROFILE)
+                .fk_column("group_id", GROUP)
+                .column("email", PublicColumnType::Text)
+                .column("display", PublicColumnType::Text)
+                .nullable_column("last_login", PublicColumnType::Timestamp)
+                .column("prefs", PublicColumnType::Text),
+        );
 
     let mut child_slot = 0;
     for spec in RESOURCE_SPECS {
-        let policy = resource_policy(spec.table, &spec.access_table());
-        tables.push(
-            TableSchema::new(spec.table, resource_columns())
-                .with_reference("org_id", ORG)
-                .with_reference("created_by", GROUP)
-                .with_reference("updated_by", GROUP)
-                .with_read_policy(policy),
-        );
-        tables.push(
-            TableSchema::new(
-                spec.access_table(),
-                [
-                    ColumnSchema::new("resource", ColumnType::Uuid),
-                    ColumnSchema::new("team", ColumnType::Uuid),
-                    ColumnSchema::new("grant_role", role_type(&format!("{}_role", spec.table))),
-                    ColumnSchema::new("administrator", ColumnType::Bool),
-                ],
-            )
-            .with_reference("resource", spec.table)
-            .with_reference("team", GROUP),
+        let access_table = spec.access_table();
+        let policy = resource_policy(&access_table);
+        schema = schema
+            .table(resource_table(spec.table).policies(TablePolicies::new().with_select(policy)));
+        schema = schema.table(
+            TableSchemaBuilder::new(&access_table)
+                .fk_column("resource", spec.table)
+                .fk_column("team", GROUP)
+                .column(
+                    "grant_role",
+                    public_role_type(&format!("{}_role", spec.table)),
+                )
+                .column("administrator", PublicColumnType::Boolean),
         );
         if spec.child_rows.is_some() {
             let table = spec.child_table(child_slot);
             child_slot += 1;
-            tables.push(
-                TableSchema::new(
-                    &table,
-                    [
-                        ColumnSchema::new("parent_id", ColumnType::Uuid),
-                        ColumnSchema::new("label", ColumnType::String),
-                        ColumnSchema::new("value_text", ColumnType::String),
-                        ColumnSchema::new("value_json", ColumnType::String),
-                        ColumnSchema::new("sort", ColumnType::U64),
-                    ],
-                )
-                .with_reference("parent_id", spec.table)
-                .with_read_policy(Policy::shape(
-                    Query::from(table.as_str()).inherits("parent_id"),
-                )),
+            schema = schema.table(
+                TableSchemaBuilder::new(&table)
+                    .fk_column("parent_id", spec.table)
+                    .column("label", PublicColumnType::Text)
+                    .column("value_text", PublicColumnType::Text)
+                    .column("value_json", PublicColumnType::Text)
+                    .column("sort", PublicColumnType::Timestamp)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Inherits {
+                        operation: Operation::Select,
+                        via_column: "parent_id".to_owned(),
+                        max_depth: None,
+                    })),
             );
         }
     }
     while child_slot < CHILD_TABLES {
         let table = format!("empty_child_{child_slot}");
-        tables.push(TableSchema::new(
-            &table,
-            [
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("value_text", ColumnType::String),
-                ColumnSchema::new("value_json", ColumnType::String),
-                ColumnSchema::new("sort", ColumnType::U64),
-            ],
-        ));
+        schema = schema.table(
+            TableSchemaBuilder::new(&table)
+                .column("parent_id", PublicColumnType::Uuid)
+                .column("label", PublicColumnType::Text)
+                .column("value_text", PublicColumnType::Text)
+                .column("value_json", PublicColumnType::Text)
+                .column("sort", PublicColumnType::Timestamp),
+        );
         child_slot += 1;
     }
-    JazzSchema::new(tables)
+    compile_public_schema(schema.build())
 }
 
-fn resource_columns() -> [ColumnSchema; 13] {
-    [
-        ColumnSchema::new("org_id", ColumnType::Uuid),
-        ColumnSchema::new("created_by", ColumnType::Uuid),
-        ColumnSchema::new("updated_by", ColumnType::Uuid),
-        ColumnSchema::new("archived", ColumnType::Bool),
-        ColumnSchema::new("label", ColumnType::String),
-        ColumnSchema::new("date_created", ColumnType::U64),
-        ColumnSchema::new("date_updated", ColumnType::U64),
-        ColumnSchema::new("col_text_a", ColumnType::String.nullable()),
-        ColumnSchema::new("col_text_b", ColumnType::String.nullable()),
-        ColumnSchema::new("col_float", ColumnType::F64.nullable()),
-        ColumnSchema::new("col_int", ColumnType::U64.nullable()),
-        ColumnSchema::new("col_json", ColumnType::String.nullable()),
-        ColumnSchema::new("col_tags", ColumnType::String.nullable()),
-    ]
+fn resource_table(table: &str) -> TableSchemaBuilder {
+    TableSchemaBuilder::new(table)
+        .fk_column("org_id", ORG)
+        .fk_column("created_by", GROUP)
+        .fk_column("updated_by", GROUP)
+        .column("archived", PublicColumnType::Boolean)
+        .column("label", PublicColumnType::Text)
+        .column("date_created", PublicColumnType::Timestamp)
+        .column("date_updated", PublicColumnType::Timestamp)
+        .nullable_column("col_text_a", PublicColumnType::Text)
+        .nullable_column("col_text_b", PublicColumnType::Text)
+        .nullable_column("col_float", PublicColumnType::Double)
+        .nullable_column("col_int", PublicColumnType::Timestamp)
+        .nullable_column("col_json", PublicColumnType::Text)
+        .nullable_column("col_tags", PublicColumnType::Text)
 }
 
-fn role_type(name: &str) -> ColumnType {
-    ColumnType::EnumTag(ScalarEnumSchema::new(name, ["viewer", "editor", "manager"]).unwrap())
+fn public_role_type(name: &str) -> PublicColumnType {
+    PublicColumnType::ScalarEnum {
+        name: name.to_owned(),
+        variants: vec![
+            "viewer".to_owned(),
+            "editor".to_owned(),
+            "manager".to_owned(),
+        ],
+    }
 }
 
-fn resource_policy(table: &str, access_table: &str) -> Option<Query> {
-    Policy::shape(
-        Query::from(table)
-            .reachable_via_with_access_filters(
-                access_table,
-                "resource",
-                "team",
-                lit("relation-seeded"),
-                [eq(col("administrator"), lit(false))],
-                GROUP_ENTRY,
-                "member_id",
-                "target_id",
-                [eq(col("administrator"), lit(false))],
-            )
-            .seeded_by(GROUP_ACCESS, "user_id", "sub", "group_id"),
+fn resource_policy(access_table: &str) -> PolicyExpr {
+    seeded_recursive_access_policy(
+        access_table,
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        GROUP,
+        GROUP_ENTRY,
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        GROUP_ACCESS,
+        "user_id",
+        &["sub"],
+        "group_id",
     )
 }
 

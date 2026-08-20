@@ -46,8 +46,7 @@ fn row(tag: u8) -> RowUuid {
 }
 
 fn compile_schema(source: &PublicSchema) -> JazzSchema {
-    jazz::tools::public_schema_convert::convert_public_schema(source)
-        .expect("prepared claim routing source schema compiles")
+    jazz::schema::JazzSchema::new(source).expect("prepared claim routing source schema compiles")
 }
 
 fn allow_all_policies() -> TablePolicies {
@@ -315,10 +314,7 @@ fn policy_proof_cycle_schema() -> JazzSchema {
 }
 
 fn evolved_schema() -> JazzSchema {
-    let mut source = schema()
-        .source()
-        .expect("schema retains public source")
-        .public_schema();
+    let mut source = schema().public_schema().clone();
     source
         .get_mut(&DOCUMENTS.into())
         .expect("documents table")
@@ -350,10 +346,7 @@ fn public_join_schema() -> JazzSchema {
 }
 
 fn evolved_public_join_schema() -> JazzSchema {
-    let mut source = public_join_schema()
-        .source()
-        .expect("schema retains public source")
-        .public_schema();
+    let mut source = public_join_schema().public_schema().clone();
     source
         .get_mut(&DOCUMENTS.into())
         .expect("documents table")

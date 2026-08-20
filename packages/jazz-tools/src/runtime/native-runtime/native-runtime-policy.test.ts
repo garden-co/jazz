@@ -5,8 +5,7 @@ import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { encodeSchema } from "./schema-codec.js";
 
 type EncodedSchemaSource = {
-  format_version: number;
-  tables: Array<{ name: string; schema: WasmSchema[string] }>;
+  tables: WasmSchema;
 };
 
 function decode(bytes: Uint8Array): EncodedSchemaSource {
@@ -47,10 +46,7 @@ describe("NativeRuntimeAdapter policy source encoding", () => {
     });
 
     const source = decode(encoded);
-    expect(source.format_version).toBe(1);
-    expect(
-      source.tables.find((table) => table.name === "documents")?.schema.policies?.select?.using,
-    ).toEqual(policy);
+    expect(source.tables.documents?.policies?.select?.using).toEqual(policy);
     expect(new TextDecoder().decode(encoded)).not.toContain('"policy_branches"');
   });
 
@@ -63,7 +59,7 @@ describe("NativeRuntimeAdapter policy source encoding", () => {
       }),
     );
 
-    expect(source.tables.map((table) => table.name)).toEqual(["alpha", "middle", "zebra"]);
+    expect(Object.keys(source.tables)).toEqual(["alpha", "middle", "zebra"]);
   });
 
   it("normalizes host-only default values without changing their AST tags", () => {
@@ -88,7 +84,7 @@ describe("NativeRuntimeAdapter policy source encoding", () => {
       }),
     );
 
-    expect(source.tables[0]?.schema.columns.map((column) => column.default)).toEqual([
+    expect(source.tables.values?.columns.map((column) => column.default)).toEqual([
       { type: "BigInt", value: "9007199254740993" },
       { type: "Bytea", value: [1, 2, 255] },
     ]);

@@ -8,7 +8,7 @@ fn unsupported_policy_predicates_deny_instead_of_allowing() {
             .column("owner", PublicColumnType::Uuid),
     ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
-    core.catalogue.schema.tables[0].read_policy =
+    core.catalogue.schema.runtime_mut_for_testing().tables[0].read_policy =
         Some(Query::from("todos").filter(not(contains(col("title"), lit("a")))));
     let tx = core
         .commit_mergeable(
@@ -39,7 +39,7 @@ fn unresolved_policy_operands_deny_instead_of_allowing() {
         ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
-    core.catalogue.schema.tables[0].read_policy =
+    core.catalogue.schema.runtime_mut_for_testing().tables[0].read_policy =
         Some(Query::from("todos").filter(eq(col("title"), claim("missing"))));
     let tx = core
         .commit_mergeable(MergeableCommit::new("todos", row(0x84), 10).cells(title_cells("z")))
