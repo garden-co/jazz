@@ -13,7 +13,7 @@ full details.
 
 | Concept            | React / Expo                     | Vue                               | Svelte                          | Solid                         |
 | ------------------ | -------------------------------- | --------------------------------- | ------------------------------- | ----------------------------- |
-| Provider           | `<JazzProvider config={config}>` | `<JazzProvider :config="config">` | `<JazzSvelteProvider {config}>` | `<JazzProvider client={...}>` |
+| Provider           | `<JazzProvider config={config}>` | `<JazzProvider :config="config">` | `<JazzSvelteProvider {config}>` | `<JazzProvider config={...}>` |
 | Query subscription | `useAll(query)`                  | `useAll(query)`                   | `new QuerySubscription(query)`  | `useAll(() => ({ query }))`   |
 | DB access          | `useDb()`                        | `useDb()`                         | `getDb()`                       | `useDb()`                     |
 | Session            | `useSession()`                   | `useSession()`                    | `getSession()`                  | `useSession()`                |
@@ -24,6 +24,9 @@ full details.
 Wrap your app in a provider to make the database available to every component.
 Svelte callers that create their own client can use `JazzSvelteClientProvider`
 instead; it accepts a client or client promise and leaves shutdown to the caller.
+
+In Solid, use `JazzClientProvider` instead when you already own a client created with
+`createSolidJazzClient`. `JazzClientProvider` does not shut down caller-owned clients.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
