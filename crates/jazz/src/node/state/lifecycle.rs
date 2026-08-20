@@ -569,6 +569,7 @@ database.finish_persistence(persisted)?;
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
+            pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
             ahead_current_keys: BTreeSet::new(),
             ahead_current_rows: BTreeSet::new(),

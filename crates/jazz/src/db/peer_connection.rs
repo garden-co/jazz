@@ -29,11 +29,11 @@ where
                     .await?;
             let mut persisted = Vec::with_capacity(publications.len());
             for publication in &publications {
-                persisted.push(publication.persist().await);
+                persisted.push((publication.tx_id(), publication.persist().await));
             }
             let mut state = node.lock().await;
-            for persistence in persisted {
-                state.settle_published_transaction(persistence)?;
+            for (tx_id, persistence) in persisted {
+                state.settle_published_transaction(tx_id, persistence)?;
             }
         }
         let Some(message) = post_settlement_work.pop_front() else {
@@ -1770,11 +1770,11 @@ where
                         .await?;
                         let mut persisted = Vec::with_capacity(publications.len());
                         for publication in &publications {
-                            persisted.push(publication.persist().await);
+                            persisted.push((publication.tx_id(), publication.persist().await));
                         }
                         let mut node = self.node.lock().await;
-                        for persistence in persisted {
-                            node.settle_published_transaction(persistence)?;
+                        for (tx_id, persistence) in persisted {
+                            node.settle_published_transaction(tx_id, persistence)?;
                         }
                         drop(node);
                         stats.remote_sync_applied += 1;

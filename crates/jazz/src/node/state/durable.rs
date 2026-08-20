@@ -225,9 +225,14 @@ where
         &mut self,
         tx_id: TxId,
     ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)> {
-        self.transaction_record(tx_id)
-            .await
-            .map(|record| (record.fate, record.global_time, record.durability))
+        self.transaction_record(tx_id).await.map(|record| {
+            let durability = if self.pending_persistence.contains(&tx_id) {
+                DurabilityTier::None
+            } else {
+                record.durability
+            };
+            (record.fate, record.global_time, durability)
+        })
     }
 
     /// Return the durable audit record for a transaction, including rejected

@@ -1748,11 +1748,11 @@ where
                     self.refresh_subscriptions().await?;
                     let mut persisted = Vec::with_capacity(publications.len());
                     for publication in &publications {
-                        persisted.push(publication.persist().await);
+                        persisted.push((publication.tx_id(), publication.persist().await));
                     }
                     let mut node = self.node.node.lock().await;
-                    for persistence in persisted {
-                        node.settle_published_transaction(persistence)?;
+                    for (tx_id, persistence) in persisted {
+                        node.settle_published_transaction(tx_id, persistence)?;
                     }
                 }
                 let Some(message) = post_settlement_work.pop_front() else {

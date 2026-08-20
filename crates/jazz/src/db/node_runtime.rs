@@ -181,7 +181,7 @@ where
             self.node
                 .lock()
                 .await
-                .settle_published_transaction(persistence)?;
+                .settle_published_transaction(tx_id, persistence)?;
             let settled = self
                 .pending_local_publications
                 .borrow_mut()
