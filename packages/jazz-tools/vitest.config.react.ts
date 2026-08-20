@@ -12,6 +12,6 @@ export default defineConfig({
   test: {
     environment: "happy-dom",
     include: ["src/**/*.test.tsx"],
-    exclude: ["node_modules/**"],
+    exclude: ["node_modules/**", "src/solid/**"],
   },
 });

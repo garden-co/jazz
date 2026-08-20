@@ -316,7 +316,12 @@ where
                     .map_err(transport_error)?;
             }
             for subscription in subscribers {
-                let update = retarget_view_update(update.clone(), subscription);
+                let mut update = retarget_view_update(update.clone(), subscription);
+                stamp_view_update_authorization_progress_from(
+                    peer,
+                    maintained_subscription,
+                    &mut update,
+                );
                 let prior_scope = scope_purposes.get(&subscription).cloned();
                 let refreshed_scope = prior_scope.as_ref().and_then(|prior| {
                     refresh_authorized_scope_purpose(
@@ -489,7 +494,12 @@ where
                 )?
             };
             for subscription in subscribers {
-                let update = retarget_view_update(update.clone(), subscription);
+                let mut update = retarget_view_update(update.clone(), subscription);
+                stamp_view_update_authorization_progress_from(
+                    peer,
+                    group_subscription,
+                    &mut update,
+                );
                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
                 let prior_scope = scope_purposes.get(&subscription).cloned();
                 let refreshed_scope = prior_scope.as_ref().and_then(|prior| {
@@ -2017,7 +2027,7 @@ where
                                     binding_id: binding.binding_id(),
                                     read_view: upstream_opts.read_view_key(),
                                 });
-                            let update = if !permissions_ready {
+                            let mut update = if !permissions_ready {
                                 Some(SyncMessage::ViewUpdate {
                                     subscription,
                                     settled_through: self.node.borrow().applied_global_watermark(),
@@ -2121,6 +2131,13 @@ where
                                 ));
                                 Some(update)
                             };
+                            if let Some(update) = &mut update {
+                                stamp_view_update_authorization_progress_from(
+                                    peer,
+                                    group_subscription,
+                                    update,
+                                );
+                            }
                             self.node
                                 .borrow_mut()
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe))?;
@@ -2708,7 +2725,12 @@ where
                                 summarize_sync_message(&update)
                             ));
                             for subscription in group.subscribers.iter().copied() {
-                                let update = retarget_view_update(update.clone(), subscription);
+                                let mut update = retarget_view_update(update.clone(), subscription);
+                                stamp_view_update_authorization_progress_from(
+                                    peer,
+                                    group_subscription,
+                                    &mut update,
+                                );
                                 let receipt =
                                     scope_purposes.get(&subscription).and_then(|purpose| {
                                         aggregate_authorization_scope_receipt_for_view(
@@ -3700,8 +3722,9 @@ where
         ..
     } = &mut message
     {
-        peer_payload_inventory.authorization_progress =
-            Some(peer.authorization_progress_for_subscription(*subscription));
+        peer_payload_inventory
+            .authorization_progress
+            .get_or_insert_with(|| peer.authorization_progress_for_subscription(*subscription));
     }
     #[cfg(feature = "sync-autopsy")]
     sync_autopsy::record(format!(
@@ -3765,6 +3788,28 @@ fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
         SyncMessage::ViewUpdate { subscription, .. } => Some(*subscription),
         _ => None,
     }
+}
+
+fn stamp_view_update_authorization_progress_from(
+    peer: &PeerState,
+    source_subscription: SubscriptionKey,
+    message: &mut SyncMessage,
+) {
+    let SyncMessage::ViewUpdate {
+        subscription,
+        peer_payload_inventory,
+        ..
+    } = message
+    else {
+        return;
+    };
+    let source_progress = peer.authorization_progress_for_subscription(source_subscription);
+    if source_subscription != *subscription
+        && source_progress == peer.authorization_progress_for_subscription(*subscription)
+    {
+        return;
+    }
+    peer_payload_inventory.authorization_progress = Some(source_progress);
 }
 
 fn retarget_view_update(mut message: SyncMessage, target: SubscriptionKey) -> SyncMessage {

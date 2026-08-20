@@ -227,6 +227,11 @@ pub fn admit_static_bearer_with_claims(
         }
     }
     let subject = subject.into();
+    if !crate::tools::identity::principal_is_nonempty(&subject) {
+        return Err(AuthAdmissionError::InvalidHandshake(
+            "sub must be non-empty".to_owned(),
+        ));
+    }
     Ok(AdmittedSession {
         author: author_id_from_subject(&subject),
         subject,
@@ -251,7 +256,7 @@ pub fn admit_bearer_jwt(
     validation.required_spec_claims.insert("exp".to_owned());
     validation.required_spec_claims.insert("sub".to_owned());
     let decoded = decode::<JwtClaims>(token, &key, &validation).map_err(jwt_error)?;
-    if decoded.claims.sub.is_empty() {
+    if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
     let subject = decoded.claims.sub;
@@ -298,7 +303,7 @@ pub fn admit_local_first_jwt(
         validation.validate_aud = false;
     }
     let decoded = decode::<LocalFirstJwtClaims>(token, &key, &validation).map_err(jwt_error)?;
-    if decoded.claims.sub.is_empty() {
+    if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
     if let Some(expected_audience) = config.expected_audience.as_deref() {
@@ -441,20 +446,7 @@ fn json_claim_to_policy_claim(
 
 /// Deterministically map an auth subject to a Jazz author id.
 pub fn author_id_from_subject(subject: &str) -> AuthorId {
-    if let Ok(uuid) = uuid::Uuid::parse_str(subject.trim()) {
-        return AuthorId::from_bytes(*uuid.as_bytes());
-    }
-    let mut lanes = [0xcbf29ce484222325_u64, 0x84222325cbf29ce4_u64];
-    for (index, byte) in subject.as_bytes().iter().copied().enumerate() {
-        let lane = index & 1;
-        lanes[lane] ^= u64::from(byte);
-        lanes[lane] = lanes[lane].wrapping_mul(0x100000001b3);
-        lanes[lane] ^= (index as u64).rotate_left((byte & 31).into());
-    }
-    let mut bytes = [0_u8; 16];
-    bytes[..8].copy_from_slice(&lanes[0].to_be_bytes());
-    bytes[8..].copy_from_slice(&lanes[1].to_be_bytes());
-    AuthorId::from_bytes(bytes)
+    crate::tools::identity::author_id_from_principal(subject)
 }
 
 /// Extract a bearer token from an `Authorization` header value.

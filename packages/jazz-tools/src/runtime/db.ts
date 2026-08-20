@@ -1047,8 +1047,8 @@ export class Db {
     return this.connection.getCurrentClient();
   }
 
-  protected async ensureReady(tier?: DurabilityTier): Promise<void> {
-    await this.connection.ensureReady(tier);
+  protected async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
+    await this.connection.ensureReady(tier, signal);
   }
 
   private wrapWriteWait<T>(result: MutationResult<T>): MutationResult<T> {
@@ -1615,6 +1615,7 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     let subId: number | null = null;
     let unsubscribed = false;
+    const readyAbort = new AbortController();
     const startNativeSubscription = () => {
       if (unsubscribed || subId !== null) return;
       subId = client.subscribe(
@@ -1641,10 +1642,10 @@ export class Db {
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(queryOptions.tier)
+      void this.ensureReady(queryOptions.tier, readyAbort.signal)
         .then(startNativeSubscription)
         .catch((error: unknown) => {
-          if (unsubscribed) return;
+          if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
           setTimeout(() => {
             throw error;
           }, 0);
@@ -1654,6 +1655,11 @@ export class Db {
     }
     if (
       this.config.serverUrl &&
+      // `edge` and `global` promise that their first callback is the worker's
+      // authority-tier snapshot.  A browser worker cannot establish that
+      // snapshot until its server transport is ready, so never race it with a
+      // main-thread local-storage seed (including after Db.disconnect()).
+      !this.connection.shouldDeferSubscriptionStart(queryOptions.tier) &&
       queryOptions.propagation !== "local-only" &&
       queryOptions.tier !== "global" &&
       !queryUsesRelationTraversal(builtQuery)
@@ -1679,6 +1685,7 @@ export class Db {
     // Return unsubscribe function
     return () => {
       unsubscribed = true;
+      readyAbort.abort();
       this.unregisterActiveQuerySubscriptionTrace(traceId);
       if (subId !== null) {
         client.unsubscribe(subId);

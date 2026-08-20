@@ -68,6 +68,41 @@ describe("client session resolution", () => {
     });
   });
 
+  it("preserves exact nonblank JWT subject bytes and rejects whitespace-only subjects", () => {
+    const spaced = resolveClientSessionSync({
+      appId: "app-jwt-spaced-subject",
+      jwtToken: makeJwt({ sub: " alice " }),
+    });
+    const plain = resolveClientSessionSync({
+      appId: "app-jwt-plain-subject",
+      jwtToken: makeJwt({ sub: "alice" }),
+    });
+
+    expect(spaced?.user_id).toBe(" alice ");
+    expect(spaced?.claims.subject).toBe(" alice ");
+    expect(spaced?.user_id).not.toBe(plain?.user_id);
+    for (const subject of [" ", "\t", "\n", "\v", "\f", "\r", " \t\n\v\f\r "]) {
+      expect(
+        resolveClientSessionSync({
+          appId: "app-jwt-whitespace-subject",
+          jwtToken: makeJwt({ sub: subject }),
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("preserves Unicode whitespace in a usable subject", () => {
+    for (const subject of ["\u0085", "\uFEFF", "\u0085provider", "provider\uFEFF"]) {
+      const session = resolveClientSessionSync({
+        appId: "app-jwt-unicode-subject",
+        jwtToken: makeJwt({ sub: subject }),
+      });
+
+      expect(session?.user_id).toBe(subject);
+      expect(session?.claims.subject).toBe(subject);
+    }
+  });
+
   it("accepts a JWT with only a sub claim", () => {
     const jwt = makeJwt({
       sub: "user-subject",

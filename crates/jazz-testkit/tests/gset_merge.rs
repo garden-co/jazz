@@ -75,27 +75,23 @@ async fn merge_concurrently(
     second: &JazzClient,
     second_value: Value,
 ) {
-    let first_batch = first
+    let first_tx = first
         .update(doc_id, vec![(column.to_string(), first_value)])
         .expect("first replica writes");
-    first
-        .wait_for_transaction(
-            first_batch.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("first write settles at the server before the second is sent");
+    support::wait_for_edge_txs(
+        &first,
+        &[first_tx.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
-    let second_batch = second
+    let second_tx = second
         .update(doc_id, vec![(column.to_string(), second_value)])
         .expect("second replica writes");
-    second
-        .wait_for_transaction(
-            second_batch.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("second write settles at the server");
+    support::wait_for_edge_txs(
+        &second,
+        &[second_tx.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 }
 
 /// Wait until both replicas report `doc_id`'s column as `expected`.
@@ -490,16 +486,14 @@ async fn later_writes_cannot_remove_existing_elements_impl() {
     let (doc_id, _, _) = alice
         .insert("docs", doc_values("no-remove", &["keep"]))
         .expect("alice creates doc");
-    let remove_batch = alice
+    let remove_tx = alice
         .update(doc_id, vec![("tags".to_string(), tags_value(&[]))])
         .expect("attempted removal writes a version");
-    alice
-        .wait_for_transaction(
-            remove_batch.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("attempted removal settles");
+    support::wait_for_edge_txs(
+        &alice,
+        &[remove_tx.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let query = jazz::query::Query::from("docs");
     wait_for_query(

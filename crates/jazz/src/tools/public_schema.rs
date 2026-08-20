@@ -11,8 +11,8 @@ pub use crate::tools::public_api::session::{AuthMode, Session, WriteContext};
 pub use crate::tools::public_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
     OperationPolicy, OrderedRowDelta, QueryResult, QueryResultField, Row, RowDelta, RowDescriptor,
-    Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, Value, permissions,
-    policy_expr,
+    Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, TableSchemaBuilder,
+    Value, permissions, policy_expr,
 };
 pub use crate::tools::transaction::{OpenTransactionId, TransactionId};
 

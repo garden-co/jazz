@@ -9,18 +9,18 @@
 
 <!-- #region context-setup-svelte-runtime-sources -->
 <script lang="ts">
-  import { JazzSvelteProvider, createJazzClient } from "jazz-tools/svelte";
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
 
-  const client = createJazzClient({
+  const config = {
     appId: "my-app",
     serverUrl: "https://my-jazz-server.example.com",
     runtimeSources: {
       baseUrl: "/assets/jazz/",
     },
-  });
+  };
 </script>
 
-<JazzSvelteProvider {client}>
+<JazzSvelteProvider {config}>
   {#snippet children()}
     <YourApp />
   {/snippet}

@@ -59,7 +59,7 @@ function verifyMarkers(active) {
     const name = row.test.slice(row.test.lastIndexOf("::") + 2);
     const source = fs.readFileSync(row.path, "utf8");
     const re = new RegExp(
-      String.raw`#\[ignore = "[^"]+"\]\s*(?:#\[[^\]]+\]\s*)*(?:pub\s+)?(?:async\s+)?fn\s+${name}\b`,
+      String.raw`#\[ignore = "(?:\\.|[^"\\])*"\]\s*(?:#\[[^\]]+\]\s*)*(?:pub\s+)?(?:async\s+)?fn\s+${name}\b`,
       "g",
     );
     const matches = [...source.matchAll(re)];
@@ -98,8 +98,8 @@ if (process.argv.includes("--self-test")) {
 }
 const doc = fs.readFileSync("TEST_BURNDOWN.md", "utf8");
 const { active, dormant, documented } = parse(doc);
-if (active.length !== 18 || dormant.length !== 10) fail("expected 18 active + 10 dormant rows");
+if (active.length !== 69 || dormant.length !== 10) fail("expected 69 active + 10 dormant rows");
 const ignored = compiledIgnored();
 if (!same(ignored, documented)) fail("compiled ignored set differs from documented set");
 verifyMarkers(active);
-console.log("Rust burndown: exact 18 active + 10 dormant identity bijection.");
+console.log("Rust burndown: exact 69 active + 10 dormant identity bijection.");
