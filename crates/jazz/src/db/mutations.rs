@@ -1730,19 +1730,40 @@ where
     ) -> Result<T, Error> {
         let PublicationOutcome {
             value,
-            publications,
+            mut publications,
+            mut post_settlement_work,
         } = outcome;
-        if publications.is_empty() {
-            return Ok(value);
-        }
-        self.refresh_subscriptions().await?;
-        let mut persisted = Vec::with_capacity(publications.len());
-        for publication in &publications {
-            persisted.push(publication.persist().await);
-        }
-        let mut node = self.node.node.lock().await;
-        for persistence in persisted {
-            node.settle_published_transaction(persistence)?;
+        loop {
+            if !publications.is_empty() {
+                self.refresh_subscriptions().await?;
+                let mut persisted = Vec::with_capacity(publications.len());
+                for publication in &publications {
+                    persisted.push(publication.persist().await);
+                }
+                let mut node = self.node.node.lock().await;
+                for persistence in persisted {
+                    node.settle_published_transaction(persistence)?;
+                }
+            }
+            let Some(message) = post_settlement_work.pop_front() else {
+                break;
+            };
+            let mut outcome = self
+                .node
+                .node
+                .lock()
+                .await
+                .apply_sync_message_with_ingest_context(
+                    message,
+                    Some(CommitUnitIngestContext {
+                        identity: AuthorId::SYSTEM,
+                        trust: CommitUnitTrust::TrustedBackend,
+                        edge_authority: false,
+                    }),
+                )
+                .await?;
+            publications = outcome.publications;
+            post_settlement_work.append(&mut outcome.post_settlement_work);
         }
         Ok(value)
     }

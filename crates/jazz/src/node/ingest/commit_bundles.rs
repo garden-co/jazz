@@ -232,6 +232,7 @@ where
         Ok(PublicationOutcome {
             value: (),
             publications: merges.publications,
+            post_settlement_work: merges.post_settlement_work,
         })
     }
 
@@ -283,6 +284,7 @@ where
         Ok(PublicationOutcome {
             value: Fate::Accepted,
             publications: merges.publications,
+            post_settlement_work: merges.post_settlement_work,
         })
     }
 

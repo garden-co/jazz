@@ -158,8 +158,25 @@ where
             .cells(cells);
         let publication = self.commit_mergeable_at(merge_commit, made_at).await?;
         let merge_tx = publication.tx_id;
-        let unit = self.commit_unit_for(merge_tx).await?;
-        Ok(PublicationOutcome::published(vec![unit], publication))
+        let unit = self.resident_commit_unit(Transaction {
+            tx_id: merge_tx,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorId::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            target_lineage: BranchLineage::Root,
+            branch_merge: None,
+        })?;
+        Ok(PublicationOutcome::published_then(
+            Vec::new(),
+            publication,
+            unit,
+        ))
     }
 
     async fn merge_cells_for_heads(

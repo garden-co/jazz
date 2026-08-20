@@ -150,6 +150,7 @@ where
         Ok(PublicationOutcome {
             value: (),
             publications: drained.publications,
+            post_settlement_work: drained.post_settlement_work,
         })
     }
 
