@@ -116,6 +116,134 @@ fn indexed_branch_view_masks_base_before_applying_the_predicate() {
     );
 }
 
+#[test]
+fn branch_view_join_projects_dimension_subsets_and_shared_tables() {
+    let workspace_dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x81; 16]));
+    let branch_dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x82; 16]));
+    let schema = JazzSchema::new_with_branch_dimensions(
+        [
+            BranchDimensionSchema::new(
+                workspace_dimension,
+                "workspace",
+                ColumnType::Uuid,
+                Value::Uuid(uuid::Uuid::nil()),
+            ),
+            BranchDimensionSchema::new(
+                branch_dimension,
+                "branch",
+                ColumnType::Uuid,
+                Value::Uuid(uuid::Uuid::nil()),
+            ),
+        ],
+        [
+            TableSchema::new(
+                "workspaces",
+                [ColumnSchema::new("name", ColumnType::String)],
+            ),
+            TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+            TableSchema::new(
+                "memberships",
+                [
+                    ColumnSchema::new("workspace_id", ColumnType::Uuid),
+                    ColumnSchema::new("role", ColumnType::String),
+                ],
+            )
+            .with_reference("workspace_id", "workspaces")
+            .with_branch_dimension("workspace_id", workspace_dimension),
+            TableSchema::new(
+                "documents",
+                [
+                    ColumnSchema::new("workspace_id", ColumnType::Uuid),
+                    ColumnSchema::new("branch_id", ColumnType::Uuid),
+                    ColumnSchema::new("owner", ColumnType::Uuid),
+                    ColumnSchema::new("title", ColumnType::String),
+                ],
+            )
+            .with_reference("workspace_id", "workspaces")
+            .with_reference("owner", "users")
+            .with_branch_dimension("workspace_id", workspace_dimension)
+            .with_branch_dimension("branch_id", branch_dimension),
+        ],
+    );
+    let families = schema.column_families();
+    let db = block_on(Db::open(
+        DbConfig::new(
+            schema,
+            MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x83; 16]),
+                author: AuthorId::SYSTEM,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(3)),
+    ))
+    .unwrap();
+    let workspace = uuid::Uuid::from_bytes([0x84; 16]);
+    let branch = uuid::Uuid::from_bytes([0x85; 16]);
+    let owner = RowUuid::from_bytes([0x86; 16]);
+    db.insert_with_id(
+        "workspaces",
+        RowUuid(workspace),
+        BTreeMap::from([("name".to_owned(), Value::String("shared".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "users",
+        owner,
+        BTreeMap::from([("name".to_owned(), Value::String("shared".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id_in_branch(
+        "memberships",
+        BranchSelector::new([("workspace", Value::Uuid(workspace))]),
+        RowUuid::from_bytes([0x87; 16]),
+        BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+    )
+    .unwrap();
+    let document = RowUuid::from_bytes([0x88; 16]);
+    db.insert_with_id_in_branch(
+        "documents",
+        BranchSelector::new([
+            ("workspace", Value::Uuid(workspace)),
+            ("branch", Value::Uuid(branch)),
+        ]),
+        document,
+        BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(owner.0)),
+            ("title".to_owned(), Value::String("draft".to_owned())),
+        ]),
+    )
+    .unwrap();
+
+    let query = db
+        .prepare_query(
+            &Query::from("documents")
+                .join_via_row_id("users", "owner", [])
+                .join_via_column(
+                    "memberships",
+                    "workspace_id",
+                    "workspace_id",
+                    [eq(col("role"), jazz::query::lit("editor"))],
+                ),
+        )
+        .unwrap();
+    let rows = block_on(db.all(
+        &query,
+        ReadOpts::default().branch_view(
+            BranchSelector::new([
+                ("workspace", Value::Uuid(workspace)),
+                ("branch", Value::Uuid(branch)),
+            ]),
+            None,
+        ),
+    ))
+    .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![document]
+    );
+}
+
 fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
     let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x74; 16]));
     let branch_policy = Policy::shape(Query::from("todos").join_via_row_id(
@@ -298,6 +426,79 @@ fn one_mergeable_transaction_can_atomically_write_multiple_branches() {
         right_rows[0].cell(table, "title"),
         Some(Value::String("right".to_owned()))
     );
+}
+
+#[test]
+fn sibling_branch_view_subscriptions_isolate_first_writes() {
+    let (db, _schema) = open_db();
+    let left = selector(0x89);
+    let right = selector(0x8a);
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut left_stream = block_on(db.subscribe(
+        &prepared,
+        ReadOpts::default().branch_view(left.clone(), None),
+    ))
+    .unwrap();
+    let mut right_stream = block_on(db.subscribe(
+        &prepared,
+        ReadOpts::default().branch_view(right.clone(), None),
+    ))
+    .unwrap();
+    assert!(matches!(
+        block_on(left_stream.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: true, ref added, .. } if added.is_empty()
+    ));
+    assert!(matches!(
+        block_on(right_stream.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: true, ref added, .. } if added.is_empty()
+    ));
+
+    let row = RowUuid::from_bytes([0x8b; 16]);
+    db.insert_with_id_in_branch(
+        "todos",
+        left,
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("left".to_owned()))]),
+    )
+    .unwrap();
+    assert!(matches!(
+        block_on(left_stream.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: false, ref added, .. }
+            if added.iter().any(|candidate| candidate.row_uuid() == row)
+    ));
+    assert!(
+        right_stream.try_next_event().is_none(),
+        "a sibling branch key must not receive the first-write delta"
+    );
+
+    db.insert_with_id_in_branch(
+        "todos",
+        right,
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("right".to_owned()))]),
+    )
+    .unwrap();
+    assert!(matches!(
+        block_on(right_stream.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: false, ref added, .. }
+            if added.iter().any(|candidate| candidate.row_uuid() == row)
+    ));
+    assert!(left_stream.try_next_event().is_none());
+
+    db.delete_in_branch("todos", selector(0x89), row).unwrap();
+    assert!(matches!(
+        block_on(left_stream.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: false, ref removed, .. }
+            if removed.iter().any(|candidate| candidate.row_uuid == row)
+    ));
+    assert!(right_stream.try_next_event().is_none());
+    db.restore_in_branch("todos", selector(0x89), row).unwrap();
+    assert!(matches!(
+        block_on(left_stream.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: false, ref added, .. }
+            if added.iter().any(|candidate| candidate.row_uuid() == row)
+    ));
+    assert!(right_stream.try_next_event().is_none());
 }
 
 #[test]
