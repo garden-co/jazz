@@ -327,6 +327,20 @@ impl RuntimeSchema {
                 "branch dimensions must be non-nullable"
             );
             assert!(
+                matches!(
+                    dimension.column_type,
+                    GrooveColumnType::Uuid
+                        | GrooveColumnType::U8
+                        | GrooveColumnType::U16
+                        | GrooveColumnType::U32
+                        | GrooveColumnType::U64
+                        | GrooveColumnType::I32
+                        | GrooveColumnType::I64
+                        | GrooveColumnType::EnumTag(_)
+                ),
+                "branch dimensions require UUID, stable enum, or fixed-width integer values"
+            );
+            assert!(
                 RecordDescriptor::new([("value", dimension.column_type.clone())])
                     .create(std::slice::from_ref(&dimension.migration_default))
                     .is_ok(),
@@ -1550,6 +1564,24 @@ fn rejected_transactions_table() -> GrooveTableSchema {
 mod tests {
     use super::*;
     use groove::schema::ColumnType;
+
+    #[test]
+    #[should_panic(expected = "branch dimensions require UUID")]
+    fn variable_width_branch_dimensions_are_rejected() {
+        let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x30; 16]));
+        let _ = JazzSchema::new_with_branch_dimensions(
+            [BranchDimensionSchema::new(
+                dimension,
+                "branch",
+                ColumnType::String,
+                Value::String("main".to_owned()),
+            )],
+            [
+                TableSchema::new("todos", [ColumnSchema::new("branch", ColumnType::String)])
+                    .with_branch_dimension("branch", dimension),
+            ],
+        );
+    }
 
     #[test]
     fn added_branch_dimension_reads_older_keys_at_its_default() {
