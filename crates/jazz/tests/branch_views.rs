@@ -144,3 +144,53 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
     db.delete_in_branch("todos", head, row).unwrap();
     assert!(block_on(db.all(&prepared, opts)).unwrap().is_empty());
 }
+
+#[test]
+fn inherited_delete_is_a_head_register_and_can_be_restored() {
+    let (db, schema) = open_db();
+    let row = RowUuid::from_bytes([0x67; 16]);
+    let base = selector(0x68);
+    let head = selector(0x69);
+    db.insert_with_id_in_branch(
+        "todos",
+        base.clone(),
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
+    )
+    .unwrap();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let opts = ReadOpts {
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base)),
+            },
+            ..ReadViewSpec::default()
+        },
+        ..ReadOpts::default()
+    };
+
+    db.delete_in_branch_view(
+        "todos",
+        head.clone(),
+        match &opts.read_view.source {
+            ReadViewSourceSpec::BranchView { base, .. } => base.clone(),
+            _ => unreachable!(),
+        },
+        row,
+    )
+    .unwrap();
+    assert!(
+        block_on(db.all(&prepared, opts.clone()))
+            .unwrap()
+            .is_empty()
+    );
+
+    db.restore_in_branch("todos", head, row).unwrap();
+    let rows = block_on(db.all(&prepared, opts)).unwrap();
+    let table = &schema.tables[0];
+    assert_eq!(
+        rows[0].cell(table, "title"),
+        Some(Value::String("base".to_owned()))
+    );
+}

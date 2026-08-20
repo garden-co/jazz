@@ -431,29 +431,9 @@ where
     ) -> Result<QueryProgram, Error> {
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
-        let maintained_result_membership = request
-            .output
-            .facts
-            .contains(&ProgramFactKey::ResultMembership);
-        let client_local_branch_at_local = request.authorization_mode
-            == QueryAuthorizationMode::ClientLocal
-            && request.reads.primary.sources.values().any(|source| {
-                matches!(
-                    source,
-                    SourceExpr::VisibleCurrent {
-                        data: DataSource::Branch(_),
-                        tier: DurabilityTier::Local,
-                        ..
-                    }
-                )
-            });
-        let prepare_branch_subscription_sources = maintained_result_membership
-            && (request.authorization_mode == QueryAuthorizationMode::TrustedServing
-                || client_local_branch_at_local);
         let mut resolver = CurrentQuerySourceResolver {
             node: self,
             read_view: &read_view,
-            prepare_branch_subscription_sources,
             inline_sources,
             access_paths,
             current_projection_targets: BTreeMap::new(),

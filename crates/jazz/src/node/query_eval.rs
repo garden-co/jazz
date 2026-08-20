@@ -2178,60 +2178,6 @@ where
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn query_relation_branch_discriminators_for_test(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-        read_view: &ReadViewSpec,
-    ) -> Result<Vec<(Option<uuid::Uuid>, Option<uuid::Uuid>)>, Error> {
-        let program = self.compile_current_query_program_for_read_view_in_authorization_mode(
-            shape,
-            binding,
-            tier,
-            identity,
-            CurrentQueryProgramOutput::RelationSnapshot,
-            read_view,
-            QueryAuthorizationMode::ClientLocal,
-        )?;
-        let snapshots = self
-            .database
-            .query_graphs(lowered_program_sinks(&program))
-            .map_err(Error::Groove)?;
-        let Some(edges) = snapshots.get("maintained.relation_edges") else {
-            return Ok(Vec::new());
-        };
-        let decode =
-            |record: &BorrowedRecord<'_>, field: &str| -> Result<Option<uuid::Uuid>, Error> {
-                let index = required_field_idx(&edges.descriptor, field)?;
-                match record.get_idx(index)? {
-                    Value::Uuid(value) => Ok(Some(value)),
-                    Value::Nullable(Some(value)) => match *value {
-                        Value::Uuid(value) => Ok(Some(value)),
-                        _ => Err(Error::InvalidStoredValue(
-                            "branch discriminator must be UUID",
-                        )),
-                    },
-                    Value::Nullable(None) => Ok(None),
-                    _ => Err(Error::InvalidStoredValue(
-                        "branch discriminator must be UUID",
-                    )),
-                }
-            };
-        edges
-            .iter()
-            .filter(|(_, weight)| *weight > 0)
-            .map(|(record, _)| {
-                Ok((
-                    decode(&record, "source_branch_or_prefix")?,
-                    decode(&record, "target_branch_or_prefix")?,
-                ))
-            })
-            .collect()
-    }
-
     pub(crate) fn subscription_snapshot_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,

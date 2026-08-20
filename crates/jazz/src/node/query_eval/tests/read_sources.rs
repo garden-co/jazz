@@ -3,55 +3,6 @@
 use super::*;
 
 #[test]
-fn branch_source_witness_discriminator_tracks_each_row_lineage() {
-    let table = TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]);
-    let row = current_row_from_cells(
-        &table,
-        row(0xf3),
-        &BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
-    )
-    .expect("build projected row");
-    let metadata = BTreeMap::from([(
-        SourceMetadataRequirement::VersionWitnesses,
-        SourceMetadataFields::VersionWitnesses {
-            schema_version_field: "schema_version".to_owned(),
-            tx_time_field: "tx_time".to_owned(),
-            tx_node_field: "tx_node_id".to_owned(),
-            branch_or_prefix_field: Some("branch_id".to_owned()),
-        },
-    )]);
-    let descriptor = current_row_descriptor_with_hidden_source_fields(&table, &metadata);
-    let branch = BranchId::from_bytes([0xf4; 16]);
-    let root_record = inline_branch_current_record(
-        &table,
-        &descriptor,
-        &row,
-        SchemaVersionAlias(1),
-        (TxTime(1), NodeAlias(1)),
-        None,
-    )
-    .expect("encode root/base row in branch view");
-    let overlay_record = inline_branch_current_record(
-        &table,
-        &descriptor,
-        &row,
-        SchemaVersionAlias(1),
-        (TxTime(2), NodeAlias(1)),
-        Some(branch),
-    )
-    .expect("encode branch overlay row");
-    let branch_idx = descriptor.field_index("branch_id").expect("branch field");
-    assert!(matches!(
-        BorrowedRecord::new(&root_record, &descriptor).get_idx(branch_idx),
-        Ok(Value::Nullable(None))
-    ));
-    assert!(matches!(
-        BorrowedRecord::new(&overlay_record, &descriptor).get_idx(branch_idx),
-        Ok(Value::Nullable(Some(value))) if matches!(*value, Value::Uuid(id) if id == branch.0)
-    ));
-}
-
-#[test]
 fn reverse_table_lens_projects_membership_and_content_version_sources() {
     // This is intentionally an internal assertion: the public subscription
     // regression proves the observable row result, while this checks that
@@ -128,7 +79,6 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
     let mut resolver = CurrentQuerySourceResolver {
         node: &mut node,
         read_view: &read_view,
-        prepare_branch_subscription_sources: false,
         inline_sources: BTreeMap::new(),
         access_paths: BTreeMap::new(),
         current_projection_targets: BTreeMap::new(),

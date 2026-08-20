@@ -4,9 +4,6 @@ fn node(byte: u8) -> NodeUuid {
 fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])
 }
-fn branch(byte: u8) -> BranchId {
-    BranchId::from_bytes([byte; 16])
-}
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
         SyncMessage::ViewUpdate {
@@ -615,16 +612,6 @@ fn open_reopen_refusing_node_with_schema(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = ReopenRefusingMemoryStorage::new(&refs);
     NodeState::new(node_uuid, schema, storage).unwrap()
-}
-
-fn open_history_complete_reopen_refusing_node_with_schema(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> NodeState<ReopenRefusingMemoryStorage> {
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = ReopenRefusingMemoryStorage::new(&refs);
-    NodeState::new_history_complete(node_uuid, schema, storage).unwrap()
 }
 
 fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {

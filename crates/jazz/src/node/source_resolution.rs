@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::node::query_engine::BranchViewSourceBase;
-use crate::protocol::{BranchViewBase, SnapshotRef};
+use crate::protocol::{BranchDimensionValue, BranchViewBase, SnapshotRef};
 
 impl<S> NodeState<S>
 where
@@ -74,6 +74,44 @@ where
         base: Option<&BranchViewSourceBase>,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_table = self.table_in_schema(table, read_schema_version)?;
+        let read_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&read_schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "branch view read schema is missing",
+            ))?
+            .schema
+            .clone();
+        let key_matches = |stored: &BranchKey, selected: &BranchKey| {
+            read_table.branch_by.iter().all(|binding| {
+                let dimension = read_schema
+                    .branch_dimensions
+                    .iter()
+                    .find(|dimension| dimension.id == binding.dimension)
+                    .expect("validated branch dimension binding");
+                let selected = selected
+                    .dimensions
+                    .iter()
+                    .find(|(id, _)| *id == binding.dimension)
+                    .map(|(_, value)| value);
+                let stored = stored
+                    .dimensions
+                    .iter()
+                    .find(|(id, _)| *id == binding.dimension)
+                    .map(|(_, value)| value)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        BranchDimensionValue::from(dimension.migration_default.clone())
+                    });
+                selected == Some(&stored)
+            }) && stored.dimensions.iter().all(|(id, _)| {
+                read_table
+                    .branch_by
+                    .iter()
+                    .any(|binding| binding.dimension == *id)
+            })
+        };
         let mut winners = |key: &BranchKey,
                            snapshot: Option<&SnapshotRef>|
          -> Result<
@@ -82,7 +120,10 @@ where
         > {
             let mut content = BTreeMap::new();
             let mut deletions = BTreeMap::new();
-            for version in self.query_table_versions_in_branch(table, key)? {
+            for version in self.query_table_versions(table)? {
+                if !key_matches(version.branch_key(), key) {
+                    continue;
+                }
                 let tx_id = self.version_tx_id(&version)?;
                 let Some(tx) = self.query_transaction(tx_id)? else {
                     continue;

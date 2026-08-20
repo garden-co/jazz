@@ -349,6 +349,27 @@ where
         self.insert_with_id_in_branch(table, head, row, inherited)
     }
 
+    /// Insert or patch one exact branch-keyed incarnation.
+    pub fn upsert_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let exists = self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch(table, &branch, row)?
+            .is_some();
+        if exists {
+            self.update_in_branch(table, branch, row, cells)
+        } else {
+            self.insert_with_id_in_branch(table, branch, row, cells)
+        }
+    }
+
     /// Update a row with an explicit millisecond provenance time.
     pub fn update_at_ms(
         &self,
@@ -652,6 +673,87 @@ where
             BTreeMap::new(),
             parents,
             Some(DeletionEvent::Deleted),
+            None,
+            self.next_now_ms(),
+            branch,
+        )
+    }
+
+    /// Delete a row through a head-over-base view. An inherited base row is
+    /// masked by a deletion register in the head incarnation.
+    pub fn delete_in_branch_view(
+        &self,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+    ) -> Result<WriteHandle<S>, Error> {
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch(table, &head, row)?
+            .is_some()
+        {
+            return self.delete_in_branch(table, head, row);
+        }
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+            .is_none()
+        {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("row is not visible in branch view: {}", row.0),
+            ));
+        }
+        let parent = self
+            .node
+            .node
+            .borrow_mut()
+            .local_deletion_winner_tx_id_in_branch(table, &head, row)?;
+        self.write_mergeable_at_ms_with_authorship_in_branch(
+            self.identity.author,
+            None,
+            table,
+            row,
+            BTreeMap::new(),
+            parent.into_iter().collect(),
+            Some(DeletionEvent::Deleted),
+            None,
+            self.next_now_ms(),
+            head,
+        )
+    }
+
+    /// Restore the deletion register of one exact branch-keyed incarnation.
+    pub fn restore_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+    ) -> Result<WriteHandle<S>, Error> {
+        let parent = self
+            .node
+            .node
+            .borrow_mut()
+            .local_deletion_winner_tx_id_in_branch(table, &branch, row)?
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::NotObserved,
+                    format!("branch deletion not observed: {}", row.0),
+                )
+            })?;
+        self.write_mergeable_at_ms_with_authorship_in_branch(
+            self.identity.author,
+            None,
+            table,
+            row,
+            BTreeMap::new(),
+            vec![parent],
+            Some(DeletionEvent::Restored),
             None,
             self.next_now_ms(),
             branch,

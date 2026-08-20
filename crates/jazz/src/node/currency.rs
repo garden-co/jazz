@@ -271,14 +271,26 @@ where
         for storage_table in
             self.version_storage_sources_for_layer(table, VersionLayer::Deletion)?
         {
+            let schema_version = if self
+                .table_in_schema(table, self.catalogue.current_write_schema.schema)
+                .is_ok()
+            {
+                self.catalogue.current_write_schema.schema
+            } else {
+                self.catalogue.current_schema_version_id
+            };
+            let requested_table_id = self.physical_table_id_for_schema(schema_version, table)?;
             let raws = self
                 .database
-                .primary_key_scan_raw(&storage_table, &self.deletion_storage_prefix(table, None)?)?
+                .primary_key_scan_raw(&storage_table, &[])?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
             for record in raws {
-                let version = self.decode_history_owned_record(table, &storage_table, record)?;
+                let version = self.decode_history_owned_record("", &storage_table, record)?;
+                if self.physical_table_id_for_version(&version)? != requested_table_id {
+                    continue;
+                }
                 let tx_id = self.version_tx_id(&version)?;
                 versions_by_key.insert(
                     (
@@ -300,45 +312,6 @@ where
                 version.layer(),
             )
         });
-        Ok(versions)
-    }
-
-    pub(super) fn query_table_versions_in_branch(
-        &mut self,
-        table: &str,
-        branch_key: &BranchKey,
-    ) -> Result<Vec<VersionRow>, Error> {
-        let mut versions = Vec::new();
-        for storage_table in self.version_storage_sources_for_layer(table, VersionLayer::Content)? {
-            let records = self
-                .database
-                .primary_key_scan_raw(
-                    &storage_table,
-                    &[Value::Bytes(branch_key.canonical_bytes())],
-                )?
-                .into_iter()
-                .map(|raw| raw.owned_record())
-                .collect::<Vec<_>>();
-            for record in records {
-                versions.push(self.decode_history_owned_record(table, &storage_table, record)?);
-            }
-        }
-        for storage_table in
-            self.version_storage_sources_for_layer(table, VersionLayer::Deletion)?
-        {
-            let records = self
-                .database
-                .primary_key_scan_raw(
-                    &storage_table,
-                    &self.deletion_storage_prefix_in_branch(table, branch_key, None)?,
-                )?
-                .into_iter()
-                .map(|raw| raw.owned_record())
-                .collect::<Vec<_>>();
-            for record in records {
-                versions.push(self.decode_history_owned_record(table, &storage_table, record)?);
-            }
-        }
         Ok(versions)
     }
 

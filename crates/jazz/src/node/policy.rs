@@ -528,6 +528,14 @@ where
         table: &TableSchema,
         version: &VersionRecord,
     ) -> Result<Option<CurrentRow>, Error> {
+        let subject_table = if self
+            .table_in_schema(version.table(), self.catalogue.current_write_schema.schema)
+            .is_ok()
+        {
+            version.table()
+        } else {
+            &table.name
+        };
         for parent in version.parents() {
             for parent_version in self.query_versions_for_tx(parent)? {
                 if parent_version.row_uuid() != version.row_uuid()
@@ -565,7 +573,7 @@ where
         }
 
         if let Some(current_version) = self.query_local_layer_winner_in_branch(
-            version.table(),
+            subject_table,
             version.branch_key(),
             version.row_uuid(),
             VersionLayer::Content,
@@ -578,7 +586,7 @@ where
         }
 
         if let Some(current_version) = self.query_global_layer_winner_in_branch(
-            version.table(),
+            subject_table,
             version.branch_key(),
             version.row_uuid(),
             VersionLayer::Content,

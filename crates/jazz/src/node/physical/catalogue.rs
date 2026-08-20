@@ -529,42 +529,6 @@ pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -
     format!("jazz_physical_{}_rejected_versions", table_id.0)
 }
 
-#[allow(dead_code)]
-pub(super) fn physical_branch_history_table_name(
-    table_id: PhysicalTableId,
-    branch_id: BranchId,
-) -> String {
-    format!(
-        "jazz_physical_{}_branch_{}_history",
-        table_id.0,
-        branch_id.0.simple()
-    )
-}
-
-#[allow(dead_code)]
-pub(super) fn physical_branch_register_table_name(
-    table_id: PhysicalTableId,
-    branch_id: BranchId,
-) -> String {
-    format!(
-        "jazz_physical_{}_branch_{}_register",
-        table_id.0,
-        branch_id.0.simple()
-    )
-}
-
-#[allow(dead_code)]
-pub(super) fn physical_branch_version_storage_table_name(
-    table_id: PhysicalTableId,
-    layer: VersionLayer,
-    branch_id: BranchId,
-) -> String {
-    match layer {
-        VersionLayer::Content => physical_branch_history_table_name(table_id, branch_id),
-        VersionLayer::Deletion => physical_branch_register_table_name(table_id, branch_id),
-    }
-}
-
 pub(super) fn physical_current_index_name(column_id: PhysicalColumnId) -> String {
     format!("by_physical_user_{}", column_id.0)
 }

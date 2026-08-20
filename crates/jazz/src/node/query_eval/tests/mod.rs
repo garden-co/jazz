@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use groove::schema::{ColumnSchema, ColumnType};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
-use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid};
+use crate::ids::{AuthorId, NodeUuid, RowUuid};
 use crate::node::query_engine::{CoverageScope, FieldRequirement, ProgramFactOutput};
 use crate::node::{MergeableCommit, NodeState};
 use crate::peer::PeerState;
