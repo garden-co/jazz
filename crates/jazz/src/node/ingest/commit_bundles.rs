@@ -661,9 +661,12 @@ where
                 durability: None,
             }]));
         }
-        if !self
-            .commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)
-            .await?
+        if !Box::pin(self.commit_unit_satisfies_write_policies(
+            &tx,
+            &versions,
+            ingest_context,
+        ))
+        .await?
         {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;

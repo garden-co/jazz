@@ -536,14 +536,13 @@ where
         } else {
             self.current_query_primary_key_access_paths(&policy_shape, &binding)?
         };
-        let program = Box::pin(
-            self.compile_query_program_request_with_inline_sources_and_access_paths(
+        let program = self
+            .compile_query_program_request_with_inline_sources_and_access_paths(
                 request,
                 inline_sources,
                 access_paths,
-            ),
-        )
-        .await?;
+            )
+            .await?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
             .await
     }

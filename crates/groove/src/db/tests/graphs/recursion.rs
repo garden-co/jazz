@@ -3,6 +3,43 @@
 use super::*;
 
 #[futures_test::test]
+async fn deep_recursive_step_evaluates_with_constant_stack() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let seed = GraphBuilder::table("edges").project(["src", "dst"]);
+    let frontier = GraphBuilder::frontier_source(
+        "frontier",
+        RecordDescriptor::new([
+            ("src", ColumnType::U64.clone()),
+            ("dst", ColumnType::U64.clone()),
+        ]),
+    );
+    let edge_pairs = GraphBuilder::table("edges").project(["src", "dst"]);
+    let mut step = GraphBuilder::join(frontier, edge_pairs, ["dst"], ["src"]).project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    for _ in 0..48 {
+        step = step.filter(PredicateExpr::gt("src", Value::U64(0)));
+    }
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::recursive(seed, step, "frontier", 16))
+        .await
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    database.commit_batch(batch).await.unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        vec![(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+}
+
+#[futures_test::test]
 async fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
