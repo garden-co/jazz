@@ -90,11 +90,11 @@ fn stored_row(db: &Db<MemoryStorage>, row_id: RowUuid) -> BTreeMap<String, Value
 fn core_insert_applies_literal_defaults_for_omitted_columns() {
     let db = open_db();
 
-    db.insert_with_id(
+    jazz::block_on(db.insert_with_id(
         "events",
         row(1),
         cells([("title", Value::String("created".to_owned()))]),
-    )
+    ))
     .expect("insert row");
 
     let stored = stored_row(&db, row(1));
@@ -119,14 +119,14 @@ fn core_insert_applies_literal_defaults_for_omitted_columns() {
 fn core_insert_preserves_explicit_null_instead_of_using_default() {
     let db = open_db();
 
-    db.insert_with_id(
+    jazz::block_on(db.insert_with_id(
         "events",
         row(2),
         cells([
             ("title", Value::String("created".to_owned())),
             ("note", Value::Nullable(None)),
         ]),
-    )
+    ))
     .expect("insert row");
 
     let stored = stored_row(&db, row(2));
@@ -138,7 +138,7 @@ fn core_insert_preserves_explicit_null_instead_of_using_default() {
 fn core_insert_keeps_explicit_values_for_defaulted_columns() {
     let db = open_db();
 
-    db.insert_with_id(
+    jazz::block_on(db.insert_with_id(
         "events",
         row(3),
         cells([
@@ -150,7 +150,7 @@ fn core_insert_keeps_explicit_values_for_defaulted_columns() {
                 Value::Nullable(Some(Box::new(Value::String("explicit note".to_owned())))),
             ),
         ]),
-    )
+    ))
     .expect("insert row");
 
     let stored = stored_row(&db, row(3));

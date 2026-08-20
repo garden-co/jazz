@@ -117,9 +117,9 @@ fn prepare_coverage_group_fixture(group_count: usize) -> CoverageGroupFixture {
         .collect::<Vec<_>>();
 
     for _ in 0..100 {
-        client.tick().expect("send coverage groups");
-        server.tick().expect("serve coverage groups");
-        client.tick().expect("receive coverage groups");
+        block_on(client.tick()).expect("send coverage groups");
+        block_on(server.tick()).expect("serve coverage groups");
+        block_on(client.tick()).expect("receive coverage groups");
         if attachments
             .iter()
             .all(|attachment| client.query_attachment_is_covered(attachment))
@@ -158,7 +158,7 @@ impl CoverageGroupFixture {
         self.next_row += 1;
 
         let start = Instant::now();
-        self.server.tick().expect("serve unrelated row change");
+        block_on(self.server.tick()).expect("serve unrelated row change");
         start.elapsed()
     }
 }
