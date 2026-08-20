@@ -110,6 +110,26 @@ where
         ))
     }
 
+    pub(super) fn physical_current_all_branches_source_graph_with_projection_target(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        class: PhysicalCurrentClass,
+        projection_target: impl Into<String>,
+    ) -> Result<GraphBuilder, Error> {
+        let binding = physical_current_binding(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            logical_table,
+            class,
+        )?;
+        Ok(GraphBuilder::variant_source(
+            binding.storage_table,
+            projection_target,
+        ))
+    }
+
     pub(super) fn physical_current_source_scan_graph(
         &self,
         schema_version: SchemaVersionId,

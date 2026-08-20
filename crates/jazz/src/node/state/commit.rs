@@ -303,11 +303,6 @@ where
         }
         self.database.commit_batch(batch)?;
         if invalidates_branch_views {
-            // Branch views currently lower their narrow winner reducer into a
-            // fresh inline source. Invalidate maintained handles so the normal
-            // subscription refresh path recompiles that source after a local
-            // branch-keyed write. The storage-backed incremental reducer will
-            // eventually make this conservative rebuild unnecessary.
             self.groove_runtime_token = next_groove_runtime_token();
         }
         self.cache_tx_versions(tx_id, stored_versions.clone());

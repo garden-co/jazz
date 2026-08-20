@@ -12,6 +12,66 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Return every persisted spelling of a logical branch key that can occur
+    /// across the table's monotone schema history. Older spellings omit later
+    /// dimensions; the current selector has already supplied their immutable
+    /// migration defaults.
+    pub(super) fn equivalent_stored_branch_keys(
+        &self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        selected: &BranchKey,
+    ) -> Result<BTreeSet<BranchKey>, Error> {
+        let table_id = self.physical_table_id_for_schema(read_schema_version, table)?;
+        let selected = selected
+            .dimensions
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
+        let mut keys = BTreeSet::new();
+        for (schema_version, catalogue_schema) in &self.catalogue.catalogue_schemas {
+            let Some(mapping) = self.catalogue.physical_mappings.get(schema_version) else {
+                continue;
+            };
+            let Some((logical_table, _)) = mapping
+                .tables
+                .iter()
+                .find(|(_, mapping)| mapping.table_id == table_id)
+            else {
+                continue;
+            };
+            let Some(table) = catalogue_schema
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == *logical_table)
+            else {
+                continue;
+            };
+            let mut dimensions = table
+                .branch_by
+                .iter()
+                .map(|binding| {
+                    selected
+                        .get(&binding.dimension)
+                        .cloned()
+                        .map(|value| (binding.dimension, value))
+                        .ok_or(Error::InvalidStoredValue(
+                            "selected branch key missing historical table dimension",
+                        ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            dimensions.sort_by_key(|(dimension, _)| *dimension);
+            keys.insert(BranchKey { dimensions });
+        }
+        if keys.is_empty() {
+            keys.insert(BranchKey {
+                dimensions: selected.into_iter().collect(),
+            });
+        }
+        Ok(keys)
+    }
+
     /// Resolve one row through a live head-over-base branch view for mutation helpers.
     pub fn visible_current_cells_in_branch_view(
         &mut self,

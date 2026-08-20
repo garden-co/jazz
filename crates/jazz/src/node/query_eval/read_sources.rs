@@ -6,6 +6,7 @@
 //! rows.
 
 use super::*;
+use crate::node::query_engine::BranchViewSourceBase;
 pub(super) struct CurrentQuerySourceResolver<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
@@ -284,6 +285,135 @@ where
         {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(request, SourceGap::Coverage));
+            }
+            if request.requirements.metadata.is_empty()
+                && base.is_none_or(|base| matches!(base, BranchViewSourceBase::Current(_)))
+            {
+                let head_keys = self
+                    .node
+                    .equivalent_stored_branch_keys(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        head,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let head_content = self.projected_branch_content_source_graph(
+                    request,
+                    &table,
+                    graph_tier.expect("branch view has a current tier"),
+                    &head_keys,
+                )?;
+                let head_deletions = self.projected_branch_deletion_source_graph(
+                    request,
+                    graph_tier.expect("branch view has a current tier"),
+                    &head_keys,
+                )?;
+                let (content, deletions) = match base {
+                    Some(BranchViewSourceBase::Current(base)) if base != head => {
+                        let base_keys = self
+                            .node
+                            .equivalent_stored_branch_keys(
+                                &request.source.table,
+                                self.read_view.read_schema,
+                                base,
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        let base_content = self.projected_branch_content_source_graph(
+                            request,
+                            &table,
+                            graph_tier.expect("branch view has a current tier"),
+                            &base_keys,
+                        )?;
+                        let base_deletions = self.projected_branch_deletion_source_graph(
+                            request,
+                            graph_tier.expect("branch view has a current tier"),
+                            &base_keys,
+                        )?;
+                        (
+                            GraphBuilder::union([
+                                head_content.clone(),
+                                GraphBuilder::anti_join(
+                                    base_content,
+                                    head_content,
+                                    ["row_uuid"],
+                                    ["row_uuid"],
+                                ),
+                            ]),
+                            GraphBuilder::union([
+                                head_deletions.clone(),
+                                GraphBuilder::anti_join(
+                                    base_deletions,
+                                    head_deletions,
+                                    ["row_uuid"],
+                                    ["row_uuid"],
+                                ),
+                            ]),
+                        )
+                    }
+                    _ => (head_content, head_deletions),
+                };
+                let deleted = deletions
+                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                    .project(["row_uuid"]);
+                let graph = GraphBuilder::anti_join(content, deleted, ["row_uuid"], ["row_uuid"])
+                    .project_fields(branch_view_current_source_fields(&table, head).map_err(
+                        |_| source_resolution_error(request, SourceGap::SchemaProjection),
+                    )?);
+                let graph = match &authorization {
+                    SourceAuthorizationRequest::System => graph,
+                    SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
+                    }
+                    | SourceAuthorizationRequest::PolicyProof {
+                        permission_subject,
+                        plan,
+                    } => {
+                        if plan.protected_source.table != table.name
+                            || plan.role != PolicyDecisionRole::Read
+                            || plan.protected_row_field != "row_uuid"
+                        {
+                            return Err(source_resolution_error(request, SourceGap::Coverage));
+                        }
+                        let policy_request = self.node.table_read_policy_authorization_request(
+                            self.read_view.policy_schema,
+                            &table.name,
+                            *permission_subject,
+                            ParamBindingMode::InlineAllReachableSeeds,
+                            graph_tier.expect("branch view has a current tier"),
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
+                        );
+                        let policy_request = policy_request.map(|mut request| {
+                            request.reads.primary = self.read_view.clone();
+                            request
+                        });
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                graph,
+                                &current_row_fields(&table),
+                            )
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
+                            .graph
+                    }
+                };
+                return Ok(ResolvedSource {
+                    table_schema: table.clone(),
+                    graph,
+                    row_shape: SourceRowShape {
+                        source: request.source.clone(),
+                        descriptor: current_row_descriptor(&table),
+                        row_uuid_field: "row_uuid".to_owned(),
+                        metadata: BTreeMap::new(),
+                    },
+                    routing_fields: BTreeSet::new(),
+                    content_version: None,
+                    deletion_register: None,
+                });
             }
             let rows = self
                 .node
@@ -912,6 +1042,109 @@ where
         })
     }
 
+    /// Build the maintained content-winner relation for one logical branch
+    /// key. `stored_keys` includes historical short spellings produced before
+    /// monotone dimension additions; they compete as one logical incarnation.
+    pub(crate) fn projected_branch_content_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        tier: DurabilityTier,
+        stored_keys: &BTreeSet<BranchKey>,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let required_fields = self.current_projection_required_fields(request, table);
+        let (projection_target, physical_fields) = self
+            .node
+            .ensure_physical_current_winner_projection(
+                self.read_view.read_schema,
+                &request.source.table,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let post_winner_fields = self
+            .node
+            .physical_current_post_winner_projection_fields(
+                self.read_view.read_schema,
+                &request.source.table,
+                &required_fields,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let global_unfiltered = self
+            .node
+            .physical_current_all_branches_source_graph_with_projection_target(
+                self.read_view.read_schema,
+                &request.source.table,
+                PhysicalCurrentClass::Global,
+                projection_target.clone(),
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let global = global_unfiltered
+            .filter(branch_key_set_predicate(stored_keys))
+            .project(physical_fields.clone());
+        let content = if tier == DurabilityTier::Global {
+            global
+        } else {
+            let ahead_unfiltered = self
+                .node
+                .physical_current_all_branches_source_graph_with_projection_target(
+                    self.read_view.read_schema,
+                    &request.source.table,
+                    PhysicalCurrentClass::Ahead,
+                    projection_target,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let ahead = ahead_unfiltered.filter(branch_key_set_predicate(stored_keys));
+            let ahead = if tier == DurabilityTier::Edge {
+                edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
+            } else {
+                ahead.project(physical_fields.clone())
+            };
+            GraphBuilder::arg_max_by(
+                GraphBuilder::union([global, ahead]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            )
+            .project(physical_fields)
+        };
+        Ok(content.project_fields(post_winner_fields))
+    }
+
+    /// Build the maintained deletion-register winner relation for one logical
+    /// branch key, normalizing historical short key spellings before winner
+    /// selection.
+    pub(crate) fn projected_branch_deletion_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        tier: DurabilityTier,
+        stored_keys: &BTreeSet<BranchKey>,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let table_id = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let fields = std::iter::once("branch_key".to_owned())
+            .chain(register_storage_field_names())
+            .collect::<Vec<_>>();
+        let global = GraphBuilder::table(physical_register_global_current_table_name(table_id))
+            .filter(branch_key_set_predicate(stored_keys))
+            .project(fields.clone());
+        if tier == DurabilityTier::Global {
+            return Ok(global);
+        }
+        let ahead = GraphBuilder::table(physical_register_ahead_current_table_name(table_id))
+            .filter(branch_key_set_predicate(stored_keys));
+        let ahead = if tier == DurabilityTier::Edge {
+            edge_visible_ahead_current_source_graph(ahead, fields.clone())
+        } else {
+            ahead.project(fields.clone())
+        };
+        Ok(GraphBuilder::arg_max_by(
+            GraphBuilder::union([global, ahead]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+        .project(fields))
+    }
+
     pub(crate) fn projected_content_current_source_graph(
         &mut self,
         request: &SourceRequest,
@@ -1437,6 +1670,15 @@ pub(super) fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<Proj
         .collect()
 }
 
+fn branch_key_set_predicate(keys: &BTreeSet<BranchKey>) -> PredicateExpr {
+    PredicateExpr::Or(
+        keys.iter()
+            .map(|key| PredicateExpr::eq("branch_key", Value::Bytes(key.canonical_bytes())))
+            .collect(),
+    )
+    .canonicalize()
+}
+
 pub(super) fn register_storage_field_names() -> Vec<String> {
     [
         "row_uuid",
@@ -1822,6 +2064,46 @@ fn storage_to_canonical_current_source_fields(
         fields.push(ProjectField::renamed("global_time", "settle_position"));
     }
     fields
+}
+
+fn branch_view_current_source_fields(
+    table: &TableSchema,
+    head: &BranchKey,
+) -> Result<Vec<ProjectField>, Error> {
+    let head_values = head.dimensions.iter().cloned().collect::<BTreeMap<_, _>>();
+    let mut fields = vec![ProjectField::named("row_uuid")];
+    for column in &table.columns {
+        if let Some(binding) = table
+            .branch_by
+            .iter()
+            .find(|binding| binding.column == column.name)
+        {
+            let value = head_values
+                .get(&binding.dimension)
+                .ok_or(Error::InvalidBranchKey(
+                    "head branch key missing projected table dimension".to_owned(),
+                ))?
+                .decode()
+                .map_err(|_| {
+                    Error::InvalidBranchKey("invalid head branch value encoding".to_owned())
+                })?;
+            fields.push(ProjectField::literal(
+                user_column_field(&column.name),
+                value,
+            ));
+        } else {
+            fields.push(ProjectField::named(user_column_field(&column.name)));
+        }
+    }
+    fields.extend([
+        ProjectField::renamed("created_by", "$createdBy"),
+        ProjectField::renamed("created_at", "$createdAt"),
+        ProjectField::renamed("updated_by", "$updatedBy"),
+        ProjectField::renamed("updated_at", "$updatedAt"),
+        ProjectField::named("tx_time"),
+        ProjectField::named("tx_node_id"),
+    ]);
+    Ok(fields)
 }
 
 pub(super) fn current_row_descriptor_with_hidden_source_fields(
