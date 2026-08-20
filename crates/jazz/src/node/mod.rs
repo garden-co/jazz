@@ -552,6 +552,8 @@ pub struct NodeState<S> {
     /// runtime uses `None` because its in-memory preview is not durable until
     /// the dedicated worker acknowledges persistence.
     authored_commit_durability: DurabilityTier,
+    /// Resident transactions whose Groove persistence receipt has not settled.
+    pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
     /// Ahead-current overlay keys for rows whose non-global versions can affect local reads.

@@ -880,6 +880,7 @@ where
         }
         let persistence = self.database.apply_batch(batch).await?;
         self.cache_tx_version_tables(tx_id, transaction_tables);
+        self.pending_persistence.insert(tx_id);
         Ok(PublishedTransaction { tx_id, persistence })
     }
 

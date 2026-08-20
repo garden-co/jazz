@@ -50,6 +50,7 @@ where
         .await?;
         let persistence = self.database.apply_batch(batch).await?;
         self.invalidate_tx_version_table_names_cache(tx_id);
+        self.pending_persistence.insert(tx_id);
         Ok(PublishedTransaction { tx_id, persistence })
     }
 

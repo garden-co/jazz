@@ -320,6 +320,7 @@ where
                 .or_default()
                 .insert(tx_id);
         }
+        self.pending_persistence.insert(tx_id);
         Ok(PublishedTransaction { tx_id, persistence })
     }
 
@@ -364,9 +365,11 @@ where
     /// Settle a completed persistence receipt and release its storage boundary.
     pub fn settle_published_transaction(
         &mut self,
+        tx_id: TxId,
         persistence: PersistedBatch,
     ) -> Result<(), Error> {
         self.database.finish_persistence(persistence)?;
+        self.pending_persistence.remove(&tx_id);
         Ok(())
     }
 
@@ -377,7 +380,7 @@ where
     ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
         let persistence = published.persist().await;
-        self.settle_published_transaction(persistence)?;
+        self.settle_published_transaction(tx_id, persistence)?;
         Ok(tx_id)
     }
 
@@ -393,7 +396,7 @@ where
         loop {
             for publication in publications {
                 let persistence = publication.persist().await;
-                self.settle_published_transaction(persistence)?;
+                self.settle_published_transaction(publication.tx_id(), persistence)?;
             }
             let Some(message) = work.pop_front() else {
                 break;
