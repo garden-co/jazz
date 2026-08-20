@@ -4,7 +4,8 @@ impl Database {
     /// Return decoded records whose explicit schema index exactly matches the
     /// supplied index-column key.
     ///
-    /// The read observes all committed batches. Reads while the caller still
+    /// The read observes all applied resident batches, including publications
+    /// awaiting persistence. Reads while the caller still
     /// holds an uncommitted [`DatabaseBatch`] observe the pre-batch state.
     pub async fn index_get(
         &self,
@@ -26,7 +27,8 @@ impl Database {
     /// Return decoded records whose explicit schema index starts with the
     /// supplied index-column prefix, in persisted index-key order.
     ///
-    /// The read observes all committed batches. Reads while the caller still
+    /// The read observes all applied resident batches, including publications
+    /// awaiting persistence. Reads while the caller still
     /// holds an uncommitted [`DatabaseBatch`] observe the pre-batch state.
     ///
     /// ```rust
@@ -163,14 +165,16 @@ impl Database {
     /// Return decoded records whose primary key starts with the supplied key
     /// prefix, in primary-key order.
     ///
-    /// The read observes all committed batches. Reads while the caller still
+    /// The read observes all applied resident batches, including publications
+    /// awaiting persistence. Reads while the caller still
     /// holds an uncommitted [`DatabaseBatch`] observe the pre-batch state.
     pub async fn primary_key_scan(
         &self,
         table: &str,
         prefix: &[Value],
     ) -> Result<Vec<VariantRecord>, Error> {
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         self.primary_key_scan_with_storage(&storage, table, prefix)
             .await
     }
@@ -196,14 +200,16 @@ impl Database {
     /// Return encoded records whose primary key starts with the supplied key
     /// prefix, in primary-key order.
     ///
-    /// The read observes all committed batches. Reads while the caller still
+    /// The read observes all applied resident batches, including publications
+    /// awaiting persistence. Reads while the caller still
     /// holds an uncommitted [`DatabaseBatch`] observe the pre-batch state.
     pub async fn primary_key_scan_raw(
         &self,
         table: &str,
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         self.primary_key_scan_raw_with_storage(&storage, table, prefix)
             .await
     }
@@ -217,7 +223,8 @@ impl Database {
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
         self.ensure_batch_storage_txn(batch)?;
-        let overlay = StagedWriteOverlay::new(&self.storage, &batch.txn_operations);
+        let resident = self.resident_storage();
+        let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.primary_key_scan_raw_with_storage(&storage, table, prefix)
             .await
@@ -233,7 +240,8 @@ impl Database {
         table: &str,
         key: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         self.primary_key_get_raw_with_storage(&storage, table, key)
             .await
     }
@@ -282,7 +290,8 @@ impl Database {
             .borrow_mut()
             .contains_key(table, &encoded_key);
         if !staged_contains_key {
-            let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+            let resident = self.resident_storage();
+            let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
             let key_descriptor = primary_key_descriptor(primary_key);
             let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
             return store
@@ -292,7 +301,8 @@ impl Database {
                 .transpose();
         }
 
-        let overlay = StagedWriteOverlay::new(&self.storage, &batch.txn_operations);
+        let resident = self.resident_storage();
+        let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         let key_descriptor = primary_key_descriptor(primary_key);
         let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
@@ -452,7 +462,8 @@ impl Database {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut end_key, value)?;
         }
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         let key_descriptor = primary_key_descriptor(primary_key);
         let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
         store
@@ -466,14 +477,16 @@ impl Database {
     /// Return the last encoded record whose primary key starts with the
     /// supplied key prefix.
     ///
-    /// The read observes all committed batches. Reads while the caller still
+    /// The read observes all applied resident batches, including publications
+    /// awaiting persistence. Reads while the caller still
     /// holds an uncommitted [`DatabaseBatch`] observe the pre-batch state.
     pub async fn primary_key_last_raw(
         &self,
         table: &str,
         prefix: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         self.primary_key_last_raw_with_storage(&storage, table, prefix)
             .await
     }
@@ -487,7 +500,8 @@ impl Database {
         prefix: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
         self.ensure_batch_storage_txn(batch)?;
-        let overlay = StagedWriteOverlay::new(&self.storage, &batch.txn_operations);
+        let resident = self.resident_storage();
+        let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.primary_key_last_raw_with_storage(&storage, table, prefix)
             .await
@@ -497,7 +511,8 @@ impl Database {
     /// and whose full primary key is less than or equal to `upper`.
     ///
     /// `upper` must provide the full primary key. The read observes all
-    /// committed batches. Reads while the caller still holds an uncommitted
+    /// applied resident batches, including publications awaiting persistence.
+    /// Reads while the caller still holds an uncommitted
     /// [`DatabaseBatch`] observe the pre-batch state.
     pub async fn primary_key_last_before_or_at_raw(
         &self,
@@ -538,7 +553,8 @@ impl Database {
         if !upper_key.starts_with(&key_prefix) {
             return Ok(None);
         }
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         let key_descriptor = primary_key_descriptor(primary_key);
         let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
         store
@@ -551,7 +567,8 @@ impl Database {
     /// Return encoded records whose explicit schema index exactly matches the
     /// supplied index-column key.
     ///
-    /// The read observes all committed batches. Reads while the caller still
+    /// The read observes all applied resident batches, including publications
+    /// awaiting persistence. Reads while the caller still
     /// holds an uncommitted [`DatabaseBatch`] observe the pre-batch state.
     pub async fn index_get_raw(
         &self,
@@ -573,7 +590,8 @@ impl Database {
     /// Return encoded records whose explicit schema index starts with the
     /// supplied index-column prefix.
     ///
-    /// The read observes all committed batches. Reads while the caller still
+    /// The read observes all applied resident batches, including publications
+    /// awaiting persistence. Reads while the caller still
     /// holds an uncommitted [`DatabaseBatch`] observe the pre-batch state.
     pub async fn index_scan_raw(
         &self,
@@ -581,7 +599,8 @@ impl Database {
         index_name: &str,
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         self.index_scan_raw_with_storage(&storage, table, index_name, prefix)
             .await
     }
@@ -596,7 +615,8 @@ impl Database {
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
         self.ensure_batch_storage_txn(batch)?;
-        let overlay = StagedWriteOverlay::new(&self.storage, &batch.txn_operations);
+        let resident = self.resident_storage();
+        let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.index_scan_raw_with_storage(&storage, table, index_name, prefix)
             .await
@@ -648,7 +668,8 @@ impl Database {
         }
         let storage_prefix = self.persisted_index_scan_prefix(table, index_name, prefix)?;
         let index_descriptor = index_record_descriptor();
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         let Some(raw_entry) = self
             .durable_indices_store_with_storage(&storage, &index_descriptor)
             .last_with_prefix(&storage_prefix)
@@ -665,7 +686,8 @@ impl Database {
 
     /// Return encoded records for an explicit schema index logical-key range.
     ///
-    /// The read observes all committed batches. Reads while the caller still
+    /// The read observes all applied resident batches, including publications
+    /// awaiting persistence. Reads while the caller still
     /// holds an uncommitted [`DatabaseBatch`] observe the pre-batch state.
     pub async fn index_scan_range_raw(
         &self,
@@ -692,7 +714,8 @@ impl Database {
         let start = self.persisted_index_scan_prefix(table, index_name, start)?;
         let end = self.persisted_index_scan_prefix(table, index_name, end)?;
         let index_descriptor = index_record_descriptor();
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         let raw_entries = self
             .durable_indices_store_with_storage(&storage, &index_descriptor)
             .range(&start, &end)

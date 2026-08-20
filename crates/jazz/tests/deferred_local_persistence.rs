@@ -11,6 +11,7 @@ use jazz::ids::{AuthorId, NodeUuid};
 use jazz::row;
 use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
+use jazz_storage_rocksdb::RocksDbStorage;
 
 fn schema() -> JazzSchema {
     JazzSchema::new([
@@ -18,6 +19,34 @@ fn schema() -> JazzSchema {
             .with_read_policy(Policy::public())
             .with_write_policy(Policy::public()),
     ])
+}
+
+#[test]
+fn rocksdb_writes_are_resident_before_the_sync_call_returns() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let directory = tempfile::tempdir().expect("temporary RocksDB directory");
+    let storage = RocksDbStorage::open(directory.path(), &family_refs).expect("open RocksDB");
+    let owner = block_on(Db::open_history_complete(DbConfig::new(
+        JazzSchema::new([]),
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x52; 16]),
+            author: AuthorId::from_bytes([0x62; 16]),
+        },
+    )))
+    .expect("open persistent database");
+    let db = block_on(owner.register_schema_view(schema)).expect("register schema view");
+    db.set_non_durable_client();
+    let row_id = jazz::ids::RowUuid::from_bytes([0; 16]);
+
+    block_on(db.insert_with_id_at_ms("todos", row_id, row! { title: "first" }, 1))
+        .expect("first insert");
+    assert!(
+        block_on(db.insert_with_id_at_ms("todos", row_id, row! { title: "duplicate" }, 2)).is_err(),
+        "a second synchronous write must observe the resident first write",
+    );
 }
 
 #[test]
@@ -44,6 +73,11 @@ fn deferred_persistence_keeps_resident_write_sync_and_local_durability_pending()
     let query = db.prepare_query(&db.table("todos")).expect("prepare query");
     let rows = block_on(db.all(&query, ReadOpts::default())).expect("read resident rows");
     assert_eq!(rows.len(), 1, "the write is immediately query-visible");
+    assert!(
+        block_on(db.insert_with_id("todos", write.row_uuid(), row! { title: "duplicate" },))
+            .is_err(),
+        "resident currency checks must reject a duplicate before persistence",
+    );
     assert!(
         block_on(write.wait(DurabilityTier::Local)).is_err(),
         "local durability must not be reported before persistence settles"

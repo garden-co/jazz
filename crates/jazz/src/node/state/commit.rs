@@ -732,26 +732,30 @@ where
         self.query_rows(&shape, &binding, settled).await
     }
 
-    async fn local_layer_winner_tx_id(
-        &mut self,
-        table: &str,
-        row_uuid: RowUuid,
-        layer: VersionLayer,
-    ) -> Result<Option<TxId>, Error> {
-        self.query_local_layer_winner(table, row_uuid, layer)
-            .await?
-            .as_ref()
-            .map(|version| self.version_tx_id(version))
-            .transpose()
-    }
-
     pub(crate) async fn local_content_winner_tx_id(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
-        self.local_layer_winner_tx_id(table, row_uuid, VersionLayer::Content)
-            .await
+        self.local_content_winner_tx_id_in_schema(
+            self.catalogue.current_write_schema.schema,
+            table,
+            row_uuid,
+        )
+        .await
+    }
+
+    pub(crate) async fn local_content_winner_tx_id_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        Ok(self
+            .local_current_content_row_candidate(&table_schema, row_uuid, schema_version)
+            .await?
+            .map(|(_, (time, node))| TxId::new(time, node)))
     }
 
     pub(crate) async fn local_deletion_winner_tx_id(
@@ -759,8 +763,25 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
-        self.local_layer_winner_tx_id(table, row_uuid, VersionLayer::Deletion)
-            .await
+        self.local_deletion_winner_tx_id_in_schema(
+            self.catalogue.current_write_schema.schema,
+            table,
+            row_uuid,
+        )
+        .await
+    }
+
+    pub(crate) async fn local_deletion_winner_tx_id_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        Ok(self
+            .local_current_deletion_candidate(&table_schema, row_uuid, schema_version)
+            .await?
+            .map(|(_, (time, node))| TxId::new(time, node)))
     }
 
     async fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
