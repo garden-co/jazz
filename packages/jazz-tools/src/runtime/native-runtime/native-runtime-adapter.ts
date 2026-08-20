@@ -1046,7 +1046,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return id;
   }
 
-  commitTransaction(openBatchId: OpenBatchId): Promise<BatchId> {
+  commitTransaction(openBatchId: OpenBatchId): BatchId {
     if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openBatchId);
     const pending = this.pendingTxs.get(openBatchId);
     if (!pending) {
@@ -1058,17 +1058,13 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     let write: Write;
-    try {
-      write = this.db.commitTransaction(openBatchId, pending.kind);
-    } catch (error) {
-      return Promise.reject(error);
-    }
+    write = this.db.commitTransaction(openBatchId, pending.kind);
     this.pendingTxs.delete(openBatchId);
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
-    return Promise.resolve(recordWrite(write, this.writes));
+    return recordWrite(write, this.writes);
   }
 
   async waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
