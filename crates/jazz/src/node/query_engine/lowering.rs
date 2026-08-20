@@ -99,7 +99,12 @@ pub(crate) async fn prepare_and_lower_query_program(
             authorization: source_authorization_for_source(&request, &source)?,
             requirements,
         };
-        let resolved_source = match source_resolver.resolve_source(&source_request).await {
+        // Source preparation is the remaining async compatibility boundary,
+        // and policy proofs may prepare a nested program. Keep that future
+        // off the caller's stack so the pure lowering call graph stays small
+        // while individual snapshot sources are migrated out of this path.
+        let resolved_source = match Box::pin(source_resolver.resolve_source(&source_request)).await
+        {
             Ok(resolved_source) => resolved_source,
             Err(err) => {
                 let mut failure_explain = explain.clone();
