@@ -201,6 +201,39 @@ fn version_parents_cannot_cross_branch_keys() {
 }
 
 #[test]
+fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
+    let schema = branch_view_schema();
+    let (_dir, mut node) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x4a; 16]), schema);
+    let valid_row = row(0x4b);
+    let invalid_row = row(0x4c);
+    let cells = |title: &str| {
+        BTreeMap::from([
+            ("title".to_owned(), v(title)),
+            ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+        ])
+    };
+    let error = node
+        .commit_mergeable_many(vec![
+            MergeableCommit::new("todos", valid_row, 10)
+                .branch(branch_selector(0x4d))
+                .cells(cells("valid")),
+            MergeableCommit::new("todos", invalid_row, 10)
+                .branch(BranchSelector::default())
+                .cells(cells("invalid")),
+        ])
+        .unwrap_err();
+    assert!(matches!(error, Error::InvalidBranchKey(_)));
+    assert!(
+        node.visible_current_cells_in_branch("todos", &branch_selector(0x4d), valid_row)
+            .unwrap()
+            .is_none(),
+        "preflight failure must leave no valid sibling residue"
+    );
+    assert!(node.query_table_versions("todos").unwrap().is_empty());
+}
+
+#[test]
 fn remote_branch_write_does_not_invalidate_live_branch_view_plans() {
     let schema = branch_view_schema();
     let (_writer_dir, mut writer) =
