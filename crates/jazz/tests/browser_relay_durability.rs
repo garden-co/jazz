@@ -1,5 +1,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::future::Future;
 use std::rc::Rc;
 
 use jazz::db::{Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEvent, block_on};
@@ -12,6 +14,17 @@ use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
+
+trait FutureResultExpectExt<T, E>: Future<Output = Result<T, E>> + Sized {
+    fn expect(self, message: &str) -> T
+    where
+        E: Debug,
+    {
+        block_on(self).expect(message)
+    }
+}
+
+impl<F, T, E> FutureResultExpectExt<T, E> for F where F: Future<Output = Result<T, E>> {}
 
 fn schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
