@@ -407,7 +407,7 @@ where
                     })
                     .collect();
                 (
-                    inline_include_deleted_current_graph(&table, rows).map_err(|_| {
+                    inline_snapshot_include_deleted_current_graph(&table, rows).map_err(|_| {
                         source_resolution_error(request, SourceGap::TransactionReadOverlay)
                     })?,
                     include_deleted_current_row_descriptor(&table),
@@ -496,17 +496,9 @@ where
             && self.needs_projected_current_source(&request.source.table)
         {
             let tier = graph_tier.expect("visible current source has a tier");
-            let rows = self
-                .node
-                .include_deleted_current_rows_for_schema(
-                    &request.source.table,
-                    self.read_view.read_schema,
-                    tier,
-                )
-                .await
-                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-            let base = inline_include_deleted_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let base = self
+                .projected_include_deleted_current_source_graph(request, &table, tier)
+                .await?;
             let graph = match &authorization {
                 SourceAuthorizationRequest::System => base.clone(),
                 SourceAuthorizationRequest::PolicyFiltered {
@@ -1412,6 +1404,58 @@ where
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })
+    }
+
+    async fn projected_include_deleted_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        tier: DurabilityTier,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let content = self
+            .projected_content_current_source_graph(request, table, tier, false, false)
+            .await?
+            .project_fields(storage_to_canonical_current_source_fields(
+                table, true, false,
+            ));
+        let deleted_winners = self
+            .projected_deletion_register_current_source_graph(request, tier)?
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+            .project_fields([
+                ProjectField::named("row_uuid"),
+                ProjectField::named("tx_time"),
+                ProjectField::named("tx_node_id"),
+                ProjectField::renamed("updated_by", "$updatedBy"),
+                ProjectField::renamed("updated_at", "$updatedAt"),
+            ]);
+        let undeleted = GraphBuilder::anti_join(
+            content.clone(),
+            deleted_winners.clone(),
+            ["row_uuid"],
+            ["row_uuid"],
+        )
+        .project_fields(
+            current_row_fields(table)
+                .into_iter()
+                .map(ProjectField::named)
+                .chain([ProjectField::literal("__jazz_deleted", Value::Bool(false))]),
+        );
+        let deleted = GraphBuilder::join(content, deleted_winners, ["row_uuid"], ["row_uuid"])
+            .project_fields(
+                current_row_fields(table)
+                    .into_iter()
+                    .map(|field| {
+                        let source = match field.as_str() {
+                            "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
+                                right_field(&field)
+                            }
+                            _ => left_field(&field),
+                        };
+                        ProjectField::renamed(source, field)
+                    })
+                    .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
+            );
+        Ok(GraphBuilder::union([undeleted, deleted]))
     }
 
     pub(crate) fn can_use_bounded_historical_source(&self, table: &str) -> bool {
@@ -2636,7 +2680,7 @@ fn inline_current_record_with_source_metadata(
     Ok(descriptor.create(&values)?)
 }
 
-fn inline_include_deleted_current_graph(
+fn inline_snapshot_include_deleted_current_graph(
     table: &TableSchema,
     rows: Vec<(CurrentRow, bool)>,
 ) -> Result<GraphBuilder, Error> {

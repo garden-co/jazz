@@ -327,7 +327,10 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
-        let Some(row) = self.policy_local_current_subject_row(&table, row_uuid).await? else {
+        let Some(row) = self
+            .policy_local_current_subject_row(&table, row_uuid)
+            .await?
+        else {
             return Ok(false);
         };
         let Some(policy) = table.write_policies.update_using.clone() else {
@@ -347,7 +350,10 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
-        let Some(row) = self.policy_local_current_subject_row(&table, row_uuid).await? else {
+        let Some(row) = self
+            .policy_local_current_subject_row(&table, row_uuid)
+            .await?
+        else {
             return Ok(false);
         };
         let Some(policy) = table.write_policies.delete_using.clone() else {
