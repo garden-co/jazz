@@ -327,12 +327,7 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
-        let Some(row) = self
-            .current_rows(table_name, DurabilityTier::Local)
-            .await?
-            .into_iter()
-            .find(|row| row.row_uuid() == row_uuid)
-        else {
+        let Some(row) = self.policy_local_current_subject_row(&table, row_uuid).await? else {
             return Ok(false);
         };
         let Some(policy) = table.write_policies.update_using.clone() else {
@@ -352,12 +347,7 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
-        let Some(row) = self
-            .current_rows(table_name, DurabilityTier::Local)
-            .await?
-            .into_iter()
-            .find(|row| row.row_uuid() == row_uuid)
-        else {
+        let Some(row) = self.policy_local_current_subject_row(&table, row_uuid).await? else {
             return Ok(false);
         };
         let Some(policy) = table.write_policies.delete_using.clone() else {
@@ -365,6 +355,32 @@ where
         };
         self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
             .await
+    }
+
+    async fn policy_local_current_subject_row(
+        &mut self,
+        table: &TableSchema,
+        row_uuid: RowUuid,
+    ) -> Result<Option<CurrentRow>, Error> {
+        if self
+            .query_local_layer_winner(&table.name, row_uuid, VersionLayer::Deletion)
+            .await?
+            .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
+        {
+            return Ok(None);
+        }
+        let Some(version) = self
+            .query_local_layer_winner(&table.name, row_uuid, VersionLayer::Content)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let (_policy_schema_version, projected_table, cells) =
+            self.policy_projection_for_version_row(&version)?;
+        if projected_table.name != table.name {
+            return Ok(None);
+        }
+        current_row_from_cells(table, row_uuid, &cells).map(Some)
     }
 
     fn policy_projection_for_version_row(
@@ -615,13 +631,20 @@ where
             }
         }
 
-        if let Some(current) = self
-            .current_rows_for_schema(&table.name, policy_schema_version, DurabilityTier::Global)
+        if let Some(current_version) = self
+            .query_global_layer_winner_in_schema(
+                policy_schema_version,
+                &table.name,
+                version.row_uuid(),
+                VersionLayer::Content,
+            )
             .await?
-            .into_iter()
-            .find(|row| row.row_uuid() == version.row_uuid())
         {
-            return Ok(Some(current));
+            let (_policy_schema_version, projected_table, cells) =
+                self.policy_projection_for_version_row(&current_version)?;
+            if projected_table.name == table.name {
+                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+            }
         }
 
         Ok(None)
