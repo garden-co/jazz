@@ -198,7 +198,7 @@ fn relation_query() -> Query {
 
 fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
     let parent = row(1);
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         "parents",
         parent,
         BTreeMap::from([
@@ -208,11 +208,11 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
             ),
             ("ordinal".to_owned(), Value::I32(0)),
         ]),
-    )
+    ))
     .expect("insert parent");
 
     for index in 0..child_rows {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             "children",
             row(1_000 + index as u64),
             BTreeMap::from([
@@ -220,7 +220,7 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
                 ("label".to_owned(), Value::String(format!("child-{index}"))),
                 ("ordinal".to_owned(), Value::I32(index as i32)),
             ]),
-        )
+        ))
         .unwrap_or_else(|err| panic!("insert child {index}: {err}"));
     }
 
@@ -248,9 +248,9 @@ fn drive_until_covered(
     attachment: &jazz::db::QueryAttachment,
 ) {
     for _ in 0..100 {
-        client.tick().expect("tick client");
-        server.tick().expect("tick server");
-        client.tick().expect("tick client after server");
+        block_on(client.tick()).expect("tick client");
+        block_on(server.tick()).expect("tick server");
+        block_on(client.tick()).expect("tick client after server");
         if client.query_attachment_is_covered(attachment) {
             return;
         }
@@ -260,9 +260,9 @@ fn drive_until_covered(
 
 fn drain_until_idle(server: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
     for _ in 0..1_000 {
-        let client_before = client.tick_stats().expect("drain client");
-        let server_stats = server.tick_stats().expect("drain server");
-        let client_after = client.tick_stats().expect("drain client after server");
+        let client_before = block_on(client.tick_stats()).expect("drain client");
+        let server_stats = block_on(server.tick_stats()).expect("drain server");
+        let client_after = block_on(client.tick_stats()).expect("drain client after server");
         if client_before.remote_sync_applied == 0
             && server_stats.remote_sync_applied == 0
             && client_after.remote_sync_applied == 0
@@ -319,7 +319,7 @@ fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
     );
 
     reset_alloc_counter();
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         "children",
         row(10_000_000 + scale as u64),
         BTreeMap::from([
@@ -330,7 +330,7 @@ fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
             ),
             ("ordinal".to_owned(), Value::I32((scale + 1) as i32)),
         ]),
-    )
+    ))
     .expect("insert measured child");
     expect_parent_snapshot(
         block_on(stream.next_event()).expect("measured relation update"),
@@ -394,10 +394,10 @@ fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
             ]),
         )
         .expect("seed post-reset item");
-    server.tick().expect("queue post-reset update");
+    block_on(server.tick()).expect("queue post-reset update");
 
     reset_alloc_counter();
-    client.tick().expect("apply post-reset update");
+    block_on(client.tick()).expect("apply post-reset update");
     let snapshot = stop_alloc_counter();
     let updated_rows = block_on(client.all(&prepared, global_read_opts()))
         .expect("read reset-batch rows after post-reset update");
@@ -439,30 +439,31 @@ fn write_cells(parent: RowUuid, index: usize) -> BTreeMap<String, Value> {
 
 fn seed_rocks_write_fixture(db: &Db<RocksDbStorage>, child_rows: usize) -> RowUuid {
     let parent = row(50_000_000);
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         "parents",
         parent,
         BTreeMap::from([
             ("label".to_owned(), Value::String("write-parent".to_owned())),
             ("ordinal".to_owned(), Value::I32(0)),
         ]),
-    )
+    ))
     .expect("insert write parent");
 
     let mut next = 0usize;
     while next < child_rows {
         let start = next;
         let end = (start + 200).min(child_rows);
-        db.transaction(|tx| {
+        block_on(db.transaction(async |tx| {
             for index in start..end {
                 tx.insert_with_id(
                     "children",
                     row(60_000_000 + index as u64),
                     write_cells(parent, index),
-                )?;
+                )
+                .await?;
             }
             Ok(())
-        })
+        }))
         .unwrap_or_else(|err| panic!("seed rocks write tx {start}..{end}: {err}"));
         next = end;
     }
@@ -476,13 +477,14 @@ fn measure_rocks_write_transaction(existing_rows: usize) -> TxMeasurement {
 
     reset_alloc_counter();
     let started = Instant::now();
-    db.transaction(|tx| {
+    block_on(db.transaction(async |tx| {
         for offset in 0..200 {
             let index = start_index + offset;
-            tx.update("children", row(index as u64), write_cells(parent, index))?;
+            tx.update("children", row(index as u64), write_cells(parent, index))
+                .await?;
         }
         Ok(())
-    })
+    }))
     .expect("measured rocks write transaction");
     let elapsed = started.elapsed();
     let allocs = stop_alloc_counter();
