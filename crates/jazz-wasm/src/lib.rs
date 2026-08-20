@@ -18,7 +18,7 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::groove::storage::OpfsStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::protocol::{PermissionAdviceAction, ReadViewSpec};
+use jazz::protocol::{BranchSelector, BranchViewBase, PermissionAdviceAction, ReadViewSpec};
 use jazz::query::{Query, RelationExpr, RelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::tools::{OpenTransactionId, TransactionId};
@@ -816,6 +816,29 @@ impl WasmDbInner {
         }
     }
 
+    fn insert_with_id_in_branch(
+        &self,
+        table: &str,
+        row_id: RowUuid,
+        cells: RowCells,
+        branch: BranchSelector,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                db.insert_with_id_in_branch(table, branch, row_id, cells)
+                    .map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                db.insert_with_id_in_branch(table, branch, row_id, cells)
+                    .map_err(to_js_error)?,
+            ),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
     fn insert_with_id_for_identity(
         &self,
         identity: AuthorId,
@@ -878,6 +901,36 @@ impl WasmDbInner {
                 match updated_at_ms {
                     Some(now_ms) => db.update_at_ms(table, row_id, patch, now_ms),
                     None => db.update(table, row_id, patch),
+                }
+                .map_err(to_js_error)?,
+            ),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    fn update_in_branch(
+        &self,
+        table: &str,
+        row_id: RowUuid,
+        patch: RowCells,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                match base {
+                    Some(base) => db.update_in_branch_view(table, head, Some(base), row_id, patch),
+                    None => db.update_in_branch(table, head, row_id, patch),
+                }
+                .map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                match base {
+                    Some(base) => db.update_in_branch_view(table, head, Some(base), row_id, patch),
+                    None => db.update_in_branch(table, head, row_id, patch),
                 }
                 .map_err(to_js_error)?,
             ),
@@ -1022,6 +1075,35 @@ impl WasmDbInner {
         }
     }
 
+    fn delete_in_branch(
+        &self,
+        table: &str,
+        row_id: RowUuid,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                match base {
+                    Some(base) => db.delete_in_branch_view(table, head, Some(base), row_id),
+                    None => db.delete_in_branch(table, head, row_id),
+                }
+                .map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                match base {
+                    Some(base) => db.delete_in_branch_view(table, head, Some(base), row_id),
+                    None => db.delete_in_branch(table, head, row_id),
+                }
+                .map_err(to_js_error)?,
+            ),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
     fn delete_for_identity(
         &self,
         identity: AuthorId,
@@ -1085,6 +1167,28 @@ impl WasmDbInner {
                     None => db.restore(table, row_id, cells),
                 }
                 .map_err(to_js_error)?,
+            ),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    fn restore_in_branch(
+        &self,
+        table: &str,
+        row_id: RowUuid,
+        branch: BranchSelector,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                db.restore_in_branch(table, branch, row_id)
+                    .map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                db.restore_in_branch(table, branch, row_id)
+                    .map_err(to_js_error)?,
             ),
             Self::Closed => panic!("WasmDb is closed"),
         }
@@ -1686,6 +1790,23 @@ impl WasmDb {
         )
     }
 
+    #[wasm_bindgen(js_name = insertWithIdEncodedInBranch)]
+    pub fn insert_with_id_encoded_in_branch(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        branch: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        self.inner.insert_with_id_in_branch(
+            &table,
+            row_uuid_from_bytes(&row_id)?,
+            decode_cells(&cells)?,
+            serde_wasm_bindgen::from_value(branch)
+                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
+        )
+    }
+
     #[wasm_bindgen(js_name = insertWithIdEncodedForIdentity)]
     pub fn insert_with_id_encoded_for_identity(
         &self,
@@ -1722,6 +1843,45 @@ impl WasmDb {
             row_id,
             patch,
             updated_at_ms.map(|value| value as u64),
+        )
+    }
+
+    #[wasm_bindgen(js_name = updateEncodedInBranch)]
+    pub fn update_encoded_in_branch(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        head: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        self.inner.update_in_branch(
+            &table,
+            row_uuid_from_bytes(&row_id)?,
+            decode_cells(&patch)?,
+            serde_wasm_bindgen::from_value(head)
+                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
+            None,
+        )
+    }
+
+    #[wasm_bindgen(js_name = updateEncodedInBranchView)]
+    pub fn update_encoded_in_branch_view(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        head: JsValue,
+        base: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        self.inner.update_in_branch(
+            &table,
+            row_uuid_from_bytes(&row_id)?,
+            decode_cells(&patch)?,
+            serde_wasm_bindgen::from_value(head)
+                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
+            Some(serde_wasm_bindgen::from_value(base).map_err(|error| {
+                JsValue::from_str(&format!("invalid branch view base: {error}"))
+            })?),
         )
     }
 
@@ -1812,6 +1972,41 @@ impl WasmDb {
             .delete(&table, row_id, updated_at_ms.map(|value| value as u64))
     }
 
+    #[wasm_bindgen(js_name = deleteInBranch)]
+    pub fn delete_in_branch(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        head: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        self.inner.delete_in_branch(
+            &table,
+            row_uuid_from_bytes(&row_id)?,
+            serde_wasm_bindgen::from_value(head)
+                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
+            None,
+        )
+    }
+
+    #[wasm_bindgen(js_name = deleteInBranchView)]
+    pub fn delete_in_branch_view(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        head: JsValue,
+        base: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        self.inner.delete_in_branch(
+            &table,
+            row_uuid_from_bytes(&row_id)?,
+            serde_wasm_bindgen::from_value(head)
+                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
+            Some(serde_wasm_bindgen::from_value(base).map_err(|error| {
+                JsValue::from_str(&format!("invalid branch view base: {error}"))
+            })?),
+        )
+    }
+
     #[wasm_bindgen(js_name = requestDeletePermissionAdvice)]
     pub fn request_delete_permission_advice(
         &self,
@@ -1858,6 +2053,21 @@ impl WasmDb {
             row_id,
             cells,
             updated_at_ms.map(|value| value as u64),
+        )
+    }
+
+    #[wasm_bindgen(js_name = restoreInBranch)]
+    pub fn restore_in_branch(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        branch: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        self.inner.restore_in_branch(
+            &table,
+            row_uuid_from_bytes(&row_id)?,
+            serde_wasm_bindgen::from_value(branch)
+                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
         )
     }
 
