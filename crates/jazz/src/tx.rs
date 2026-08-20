@@ -6,6 +6,7 @@
 //! are grounded in `jazz/README.md`.
 
 use crate::ids::{AuthorId, NodeUuid, RowUuid};
+use crate::protocol::BranchKey;
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalTime, TxTime};
@@ -39,6 +40,96 @@ pub struct Transaction {
     pub predicate_read_set: Option<Vec<PredicateRead>>,
     /// Optional application metadata attached at commit time.
     pub user_metadata_json: Option<String>,
+}
+
+/// Non-causal evidence attached to an ordinary calculated merge transaction.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ContributionMergeProvenance {
+    /// Exact source branch coordinate read by the calculator.
+    pub source: BranchKey,
+    /// Exact target branch coordinate written by the calculator.
+    pub target: BranchKey,
+    /// Field-grained substitutions emitted by this transaction.
+    pub substitutions: Vec<ContributionSubstitution>,
+}
+
+impl ContributionMergeProvenance {
+    /// Canonicalize and validate locally calculated provenance.
+    pub fn canonical(
+        source: BranchKey,
+        target: BranchKey,
+        mut substitutions: Vec<ContributionSubstitution>,
+    ) -> Result<Self, &'static str> {
+        for substitution in &mut substitutions {
+            substitution.sources.sort();
+            substitution.sources.dedup();
+            if substitution.sources.is_empty() {
+                return Err("contribution substitution requires a source dot");
+            }
+        }
+        substitutions.sort_by(|left, right| left.target.cmp(&right.target));
+        if substitutions
+            .windows(2)
+            .any(|pair| pair[0].target == pair[1].target)
+        {
+            return Err("contribution substitution targets must be unique");
+        }
+        Ok(Self {
+            source,
+            target,
+            substitutions,
+        })
+    }
+}
+
+/// One derived target field and the exact native contribution dots it represents.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ContributionSubstitution {
+    /// Field or register emitted by the target transaction.
+    pub target: ContributionCoordinate,
+    /// Canonically sorted source dots represented by the target field.
+    pub sources: Vec<ContributionDot>,
+}
+
+/// Stable field-grained coordinate within one branch-keyed row incarnation.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct ContributionCoordinate {
+    /// Exact branch key containing the field.
+    pub branch_key: BranchKey,
+    /// Logical table name.
+    pub table: String,
+    /// Global object identity.
+    pub row_uuid: RowUuid,
+    /// Independent content or deletion layer.
+    pub layer: MergeAspect,
+    /// Column, operation, or register identity.
+    pub component: ContributionComponent,
+}
+
+/// Field or strategy-operation identity within one row layer.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum ContributionComponent {
+    /// Ordinary named content column.
+    Column(String),
+    /// Strategy-defined stable operation identity.
+    Operation(Vec<u8>),
+    /// Deletion/restore register.
+    Register,
+}
+
+/// Stable identity of one native contribution.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct ContributionDot {
+    /// Transaction that introduced the native contribution.
+    pub tx_id: TxId,
+    /// Exact branch-keyed field or register introduced by the transaction.
+    pub coordinate: ContributionCoordinate,
 }
 
 /// Deletion register event carried by a row version.
