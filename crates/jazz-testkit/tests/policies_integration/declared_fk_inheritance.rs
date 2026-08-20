@@ -112,7 +112,7 @@ async fn rebac_declared_fk_inheritance_grants_select_access_inner() {
 /// Verifies that declared reverse-FK inheritance can grant UPDATE on a target
 /// row through a visible referencing row.
 #[tokio::test]
-#[ignore = "an inherited-visible row is rejected locally on update with `read policy denied UPSERT`"]
+#[ignore = "the inherited UPDATE is staged locally but never reaches edge-server durability"]
 async fn rebac_declared_fk_inheritance_grants_update_access() {
     tokio::task::LocalSet::new()
         .run_until(rebac_declared_fk_inheritance_grants_update_access_inner())

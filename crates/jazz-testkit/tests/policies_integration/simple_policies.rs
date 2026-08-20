@@ -1635,7 +1635,6 @@ async fn row_level_contains_and_in_list_policies_filter_rows_inner() {
 /// bob ──query write_only─────────────► sees row once it satisfies SELECT
 /// ```
 #[tokio::test]
-#[ignore = "the Rust client rejects UPDATE on a write-authorized but read-hidden row with `read policy denied UPSERT`"]
 async fn read_and_write_policies_remain_independent() {
     tokio::task::LocalSet::new()
         .run_until(read_and_write_policies_remain_independent_inner())
@@ -1808,7 +1807,6 @@ async fn read_and_write_policies_remain_independent_inner() {
 /// alice ──update true→false──────► observer stream (add ✓)
 /// ```
 #[tokio::test]
-#[ignore = "updating a row from visible to hidden is rejected locally with `read policy denied UPSERT` before removal-delta behavior can be tested"]
 async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
     tokio::task::LocalSet::new()
         .run_until(authorized_mutations_emit_visibility_scoped_subscription_deltas_inner())

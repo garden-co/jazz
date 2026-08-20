@@ -336,6 +336,19 @@ impl Backend {
         Ok(self.0.update(table, row_id, cells)?.mergeable_tx_id())
     }
 
+    fn update_for_identity(
+        &self,
+        identity: CoreAuthorId,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: crate::db::RowCells,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        Ok(self
+            .0
+            .update_for_identity(identity, table, row_id, cells)?
+            .mergeable_tx_id())
+    }
+
     fn delete_for_identity(
         &self,
         identity: CoreAuthorId,
@@ -746,7 +759,7 @@ impl ClientDb {
             Some(identity) => {
                 inner
                     .db
-                    .upsert_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()), cells)
+                    .update_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()), cells)
             }
             None => inner.db.update(&table, CoreRowUuid(*row_id.uuid()), cells),
         }

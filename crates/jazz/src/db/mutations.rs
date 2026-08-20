@@ -239,16 +239,13 @@ where
         if patch.is_empty() {
             return self.no_op_update_handle_for_client(table, row, self.identity.author);
         }
-        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_with_authored_columns(
+        self.write_mergeable_patch_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
             row,
-            cells,
-            parent.into_iter().collect(),
-            None,
-            authored_columns,
+            patch,
+            self.next_now_ms(),
         )
     }
 
@@ -263,16 +260,12 @@ where
         if patch.is_empty() {
             return self.no_op_update_handle_for_client(table, row, self.identity.author);
         }
-        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_at_ms_with_authorship(
+        self.write_mergeable_patch_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
             row,
-            cells,
-            parent.into_iter().collect(),
-            None,
-            Some(authored_columns),
+            patch,
             now_ms,
         )
     }
@@ -291,15 +284,13 @@ where
         if patch.is_empty() {
             return self.no_op_update_handle_for_client(table, row, self.identity.author);
         }
-        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_as_session_subject_with_authored_columns(
+        self.write_mergeable_patch_at_ms_with_authorship(
             made_by,
+            Some(self.identity.author),
             table,
             row,
-            cells,
-            parent.into_iter().collect(),
-            None,
-            authored_columns,
+            patch,
+            self.next_now_ms(),
         )
     }
 
@@ -314,18 +305,13 @@ where
         if patch.is_empty() {
             return self.no_op_update_handle_for_identity(table, row, identity);
         }
-        let (cells, parent, authored_columns) =
-            self.merge_existing_cells_for_identity(table, row, patch, identity)?;
-        let parents = parent.into_iter().collect::<Vec<_>>();
-        self.write_mergeable_with_authored_columns(
+        self.write_mergeable_patch_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
             row,
-            cells,
-            parents,
-            None,
-            authored_columns,
+            patch,
+            self.next_now_ms(),
         )
     }
 
@@ -341,18 +327,12 @@ where
         if patch.is_empty() {
             return self.no_op_update_handle_for_identity(table, row, identity);
         }
-        let (cells, parent, authored_columns) =
-            self.merge_existing_cells_for_identity(table, row, patch, identity)?;
-        let parents = parent.into_iter().collect::<Vec<_>>();
-        self.write_mergeable_at_ms_with_authorship(
+        self.write_mergeable_patch_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
             row,
-            cells,
-            parents,
-            None,
-            Some(authored_columns),
+            patch,
             now_ms,
         )
     }
@@ -851,29 +831,6 @@ where
         )
     }
 
-    fn write_mergeable_as_session_subject_with_authored_columns(
-        &self,
-        made_by: AuthorId,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        parents: Vec<TxId>,
-        deletion: Option<DeletionEvent>,
-        authored_columns: BTreeSet<String>,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.check_attribution_allowed(made_by)?;
-        self.write_mergeable_with_authored_columns(
-            made_by,
-            Some(self.identity.author),
-            table,
-            row,
-            cells,
-            parents,
-            deletion,
-            authored_columns,
-        )
-    }
-
     /// Restore a row with an explicit millisecond provenance time.
     pub fn restore_at_ms(
         &self,
@@ -1001,30 +958,6 @@ where
         )
     }
 
-    fn write_mergeable_with_authored_columns(
-        &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        parents: Vec<TxId>,
-        deletion: Option<DeletionEvent>,
-        authored_columns: BTreeSet<String>,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.write_mergeable_at_ms_with_authorship(
-            made_by,
-            permission_subject,
-            table,
-            row,
-            cells,
-            parents,
-            deletion,
-            Some(authored_columns),
-            self.next_now_ms(),
-        )
-    }
-
     fn write_mergeable_at_ms_with_authorship(
         &self,
         made_by: AuthorId,
@@ -1071,6 +1004,61 @@ where
             .commit_mergeable_in_schema(self.schema_version_id, commit)?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    fn write_mergeable_patch_at_ms_with_authorship(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        let is_full_row = self
+            .table_schema(table)?
+            .columns
+            .iter()
+            .all(|column| patch.contains_key(&column.name));
+        self.ensure_row_not_deleted(table, row)?;
+        if !is_full_row && self.local_current_row(table, row)?.is_none() {
+            return Err(read_for_write_denied("partial UPDATE", table));
+        }
+
+        let open_tx_id = OpenTransactionId::new();
+        let staged = {
+            let mut node = self.node.node.borrow_mut();
+            node.open_mergeable(open_tx_id, made_by, permission_subject)
+                .and_then(|()| {
+                    node.tx_patch_mergeable_in_schema(
+                        open_tx_id,
+                        self.schema_version_id,
+                        table,
+                        row,
+                        patch,
+                        Some(now_ms),
+                    )
+                })
+        };
+        if let Err(error) = staged {
+            let _ = self.node.node.borrow_mut().abandon_tx(open_tx_id);
+            return Err(error.into());
+        }
+
+        let tx_id = match self.commit_mergeable_handle(open_tx_id) {
+            Ok(tx_id) => tx_id,
+            Err(error) => {
+                let _ = self.node.node.borrow_mut().abandon_tx(open_tx_id);
+                return Err(error);
+            }
+        };
+        let local_tier = self.write_state(tx_id)?.durability;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.node.node),
             row_uuid: row,

@@ -1683,7 +1683,7 @@ async fn inherited_multiple_folder_paths_compose_with_or_inner() {
 /// Verifies that folder ownership grants UPDATE access to a folder-backed
 /// document when the child row inherits `allowedTo.update(...)` from its parent.
 #[tokio::test]
-#[ignore = "the Rust client rejects the inherited-visible UPDATE with `read policy denied UPSERT on table documents`"]
+#[ignore = "the folder owner's inherited UPDATE is staged locally but never becomes visible to an admin EdgeServer query"]
 async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
     tokio::task::LocalSet::new()
         .run_until(inherited_folder_update_allows_folder_owner_and_blocks_other_users_inner())
