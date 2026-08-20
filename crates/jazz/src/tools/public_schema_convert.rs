@@ -6,8 +6,8 @@ use crate::groove::records::{
 };
 use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
-    InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
-    PolicyBranch, Predicate, Query,
+    FlatJoin, FlatJoinOn, FlatJoinSource, InheritsOperation, JoinCorrelation, JoinSourceLookup,
+    JoinTarget, JoinVia, Operand, PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
@@ -1363,6 +1363,7 @@ struct LoweredRelPredicate {
     predicate: Predicate,
     column: Option<String>,
     value: Option<LoweredRelValue>,
+    scope: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1385,10 +1386,139 @@ struct PendingReachable {
 
 struct LoweredRel {
     table: String,
+    scope: String,
     filters: Vec<LoweredRelPredicate>,
-    joins: Vec<JoinVia>,
+    joins: Vec<LoweredRelJoin>,
     reachable: Vec<crate::query::ReachableVia>,
     pending_reachable: Option<PendingReachable>,
+}
+
+struct LoweredRelJoin {
+    scope: String,
+    join: JoinVia,
+}
+
+impl LoweredRelJoin {
+    fn into_core(self) -> JoinVia {
+        self.join
+    }
+}
+
+fn append_flat_join_source(
+    table: &TableName,
+    path: &str,
+    query: &mut Query,
+    parent_scope: &str,
+    parent_column: &str,
+    relation_table: String,
+    relation_scope: String,
+    relation_column: String,
+    filters: Vec<Predicate>,
+    nested_joins: Vec<LoweredRelJoin>,
+) -> Result<(), SchemaConversionError> {
+    let alias = (relation_scope != relation_table).then(|| relation_scope.clone());
+    query
+        .flat_join
+        .get_or_insert_with(|| FlatJoin {
+            root_alias: None,
+            sources: Vec::new(),
+        })
+        .sources
+        .push(FlatJoinSource {
+            table: relation_table,
+            alias,
+            on: FlatJoinOn {
+                left: format!("{parent_scope}.{parent_column}"),
+                right: format!("{relation_scope}.{relation_column}"),
+            },
+        });
+    query.filters.extend(
+        filters
+            .into_iter()
+            .map(|filter| {
+                crate::query::qualify_flat_join_source_predicate(filter, &relation_scope).map_err(
+                    |error| {
+                        err(
+                            format!("$.{}.{}", table.as_str(), path),
+                            format!("failed to qualify ExistsRel filter: {error}"),
+                        )
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+
+    for nested in nested_joins {
+        let LoweredRelJoin { scope, join } = nested;
+        let JoinVia {
+            table: relation_table,
+            on_column: relation_column,
+            source_column,
+            filters,
+            nested_joins,
+            ..
+        } = join;
+        let Some(parent_column) = source_column else {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), path),
+                "core schema ExistsRel flat join requires a source column",
+            ));
+        };
+        append_flat_join_source(
+            table,
+            path,
+            query,
+            &relation_scope,
+            &parent_column,
+            relation_table,
+            scope,
+            relation_column,
+            filters,
+            nested_joins
+                .into_iter()
+                .map(|join| LoweredRelJoin {
+                    scope: join.table.clone(),
+                    join,
+                })
+                .collect(),
+        )?;
+    }
+    Ok(())
+}
+
+impl LoweredRel {
+    fn push_filter(
+        &mut self,
+        table: &TableName,
+        path: &str,
+        filter: LoweredRelPredicate,
+    ) -> Result<(), SchemaConversionError> {
+        if matches!(
+            filter.value,
+            Some(LoweredRelValue::OuterRow(_) | LoweredRelValue::FrontierRow)
+        ) {
+            self.filters.push(filter);
+            return Ok(());
+        }
+
+        let Some(scope) = filter.scope.as_deref() else {
+            self.filters.push(filter);
+            return Ok(());
+        };
+        if scope == self.scope {
+            self.filters.push(filter);
+            return Ok(());
+        }
+        if let Some(join) = self.joins.iter_mut().find(|join| join.scope == scope) {
+            join.join.filters.push(filter.predicate);
+            return Ok(());
+        }
+
+        Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            format!("core schema ExistsRel predicate references unknown relation scope '{scope}'"),
+        ))
+    }
 }
 
 fn append_exists_rel_policy_clause(
@@ -1415,7 +1545,11 @@ fn append_exists_rel_policy_clause(
             .into_iter()
             .map(|filter| filter.predicate)
             .collect();
-        witness.joins = lowered.joins;
+        witness.joins = lowered
+            .joins
+            .into_iter()
+            .map(LoweredRelJoin::into_core)
+            .collect();
         witness.reachable = lowered.reachable;
         return Ok(query.exists(witness));
     };
@@ -1442,12 +1576,14 @@ fn append_exists_rel_policy_clause(
     for reachable in &mut lowered.reachable {
         if reachable.access_row_column == "__pending_outer_row" {
             reachable.access_row_column = correlation_column.clone();
+            reachable.source_column = (source_column != "id").then_some(source_column.clone());
             reachable.access_filters.extend(remaining_filters.clone());
         }
     }
     if let Some(pending) = lowered.pending_reachable.take() {
         lowered.reachable.push(crate::query::ReachableVia {
             access_table: table.as_str().to_owned(),
+            source_column: None,
             access_row_column: "id".to_owned(),
             access_team_column: source_column.clone(),
             access_team_target: if source_column == "id" {
@@ -1473,17 +1609,108 @@ fn append_exists_rel_policy_clause(
     }
 
     if !lowered.joins.is_empty() {
-        if lowered.joins.len() != 1 {
+        let correlation_scope = correlation.scope.as_deref();
+        query.filters = query
+            .filters
+            .into_iter()
+            .map(|filter| {
+                crate::query::qualify_flat_join_source_predicate(filter, table.as_str()).map_err(
+                    |error| {
+                        err(
+                            format!("$.{}.{}", table.as_str(), path),
+                            format!("failed to qualify ExistsRel root filter: {error}"),
+                        )
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if correlation_scope.is_none() || correlation_scope == Some(lowered.scope.as_str()) {
+            append_flat_join_source(
+                table,
+                path,
+                &mut query,
+                table.as_str(),
+                &source_column,
+                lowered.table,
+                lowered.scope,
+                correlation_column,
+                remaining_filters,
+                lowered.joins,
+            )?;
+            return Ok(query);
+        }
+
+        let Some(join_index) = lowered
+            .joins
+            .iter()
+            .position(|join| Some(join.scope.as_str()) == correlation_scope)
+        else {
             return Err(err(
                 format!("$.{}.{}", table.as_str(), path),
-                "core schema ExistsRel policies support one join chain at the server shell boundary",
+                format!(
+                    "core schema ExistsRel outer correlation references unknown relation scope '{}'",
+                    correlation_scope.unwrap_or_default()
+                ),
+            ));
+        };
+        let correlated = lowered.joins.remove(join_index);
+        if correlated.join.source_lookup.is_some() || !correlated.join.correlated_filters.is_empty()
+        {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), path),
+                "core schema ExistsRel cannot reverse a join with source lookup or additional correlations",
             ));
         }
-        let mut join = lowered.joins.remove(0);
-        join.source_column = Some(source_column);
-        join.on_column = correlation_column;
-        join.filters.extend(remaining_filters);
-        query.joins.push(join);
+        let Some(base_on_column) = correlated.join.source_column.clone() else {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), path),
+                "core schema ExistsRel cannot reverse a join without a source column",
+            ));
+        };
+        let correlated_source_column = correlated.join.on_column.clone();
+        let mut nested_joins = correlated
+            .join
+            .nested_joins
+            .into_iter()
+            .map(|join| LoweredRelJoin {
+                scope: join.table.clone(),
+                join,
+            })
+            .collect::<Vec<_>>();
+        nested_joins.push(LoweredRelJoin {
+            scope: lowered.scope,
+            join: JoinVia {
+                table: lowered.table,
+                on_column: base_on_column.clone(),
+                target: if base_on_column == "id" {
+                    JoinTarget::RowId
+                } else {
+                    JoinTarget::Column
+                },
+                source_column: Some(correlated_source_column),
+                source_lookup: None,
+                correlated_filters: Vec::new(),
+                filters: remaining_filters,
+                nested_joins: lowered
+                    .joins
+                    .into_iter()
+                    .map(LoweredRelJoin::into_core)
+                    .collect(),
+            },
+        });
+        append_flat_join_source(
+            table,
+            path,
+            &mut query,
+            table.as_str(),
+            &source_column,
+            correlated.join.table,
+            correlated.scope,
+            correlation_column,
+            correlated.join.filters,
+            nested_joins,
+        )?;
         return Ok(query);
     }
 
@@ -1505,8 +1732,9 @@ fn lower_exists_rel(
     rel: &RelExpr,
 ) -> Result<LoweredRel, SchemaConversionError> {
     match rel {
-        RelExpr::TableScan { table, .. } => Ok(LoweredRel {
+        RelExpr::TableScan { table, alias } => Ok(LoweredRel {
             table: table.as_str().to_owned(),
+            scope: alias.clone().unwrap_or_else(|| table.as_str().to_owned()),
             filters: Vec::new(),
             joins: Vec::new(),
             reachable: Vec::new(),
@@ -1514,9 +1742,9 @@ fn lower_exists_rel(
         }),
         RelExpr::Filter { input, predicate } => {
             let mut lowered = lower_exists_rel(table, path, input)?;
-            lowered
-                .filters
-                .extend(rel_predicate_to_policy(table, path, predicate)?);
+            for filter in rel_predicate_to_policy(table, path, predicate)? {
+                lowered.push_filter(table, path, filter)?;
+            }
             Ok(lowered)
         }
         RelExpr::Project { input, .. } => lower_exists_rel(table, path, input),
@@ -1552,6 +1780,7 @@ fn lower_exists_rel(
                 }
                 let mut reachable = crate::query::ReachableVia {
                     access_table: right.table,
+                    source_column: None,
                     access_row_column: "__pending_outer_row".to_owned(),
                     access_team_column: on.right.column.clone(),
                     access_team_target: if on.right.column == "id" {
@@ -1577,6 +1806,7 @@ fn lower_exists_rel(
                     .extend(left.filters.iter().map(|filter| filter.predicate.clone()));
                 return Ok(LoweredRel {
                     table: left.table,
+                    scope: right.scope,
                     filters: Vec::new(),
                     joins: left.joins,
                     reachable: {
@@ -1605,9 +1835,16 @@ fn lower_exists_rel(
                     .into_iter()
                     .map(|filter| filter.predicate)
                     .collect(),
-                nested_joins: right.joins,
+                nested_joins: right
+                    .joins
+                    .into_iter()
+                    .map(LoweredRelJoin::into_core)
+                    .collect(),
             };
-            left.joins.push(join);
+            left.joins.push(LoweredRelJoin {
+                scope: right.scope,
+                join,
+            });
             left.reachable.extend(right.reachable);
             Ok(left)
         }
@@ -1653,6 +1890,7 @@ fn lower_gather_rel(
         }
     };
     Ok(LoweredRel {
+        scope: output_table.clone(),
         table: output_table,
         filters: Vec::new(),
         joins: Vec::new(),
@@ -1772,32 +2010,38 @@ fn unwrap_joined_seed_projection<'a>(
     table: &TableName,
     path: &str,
     left: &'a RelExpr,
-    right: &RelExpr,
+    right: &'a RelExpr,
     on: &[crate::tools::public_api::relation_ir::JoinCondition],
     projected: &ColumnRef,
 ) -> Result<(&'a RelExpr, Option<String>), SchemaConversionError> {
-    let RelExpr::TableScan {
-        alias: right_alias, ..
-    } = right
-    else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather projected seed hop must join to a table scan",
-        ));
-    };
     let Some(join) = on.first() else {
         return Err(err(
             format!("$.{}.{}", table.as_str(), path),
             "Gather projected seed hop requires a join condition",
         ));
     };
-    if projected.scope.as_ref() != right_alias.as_ref() || projected.column != "id" {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather projected seed id must come from the hop target row id",
-        ));
+
+    if projected.column == "id" && projection_names_table(projected, right) {
+        return Ok((left, Some(join.left.column.clone())));
     }
-    Ok((left, Some(join.left.column.clone())))
+    if projected.column == "id" && projection_names_table(projected, left) {
+        return Ok((right, Some(join.right.column.clone())));
+    }
+
+    Err(err(
+        format!("$.{}.{}", table.as_str(), path),
+        "Gather projected seed id must come from either joined target row id",
+    ))
+}
+
+fn projection_names_table(projected: &ColumnRef, rel: &RelExpr) -> bool {
+    let RelExpr::TableScan { table, alias } = rel else {
+        return false;
+    };
+    match projected.scope.as_deref() {
+        Some(scope) => alias.as_deref() == Some(scope) || table.as_str() == scope,
+        None => true,
+    }
 }
 
 fn lower_gather_step(
@@ -1820,7 +2064,32 @@ fn lower_gather_step(
             "Gather policies require recursive hop joins",
         ));
     };
-    let (edge_input, filters) = unwrap_rel_filter(left);
+    let Some(on) = on.first() else {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            "Gather recursive hop join requires a column equality",
+        ));
+    };
+    let (edge_relation, edge_parent_column) = match left.as_ref() {
+        RelExpr::Project { input, columns } => {
+            let Some(projected) = columns.iter().find(|column| column.alias == on.left.column)
+            else {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "Gather recursive hop projection must expose the joined parent column",
+                ));
+            };
+            let RelProjectExpr::Column(projected) = &projected.expr else {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "Gather recursive hop parent must be a column projection",
+                ));
+            };
+            (input.as_ref(), projected.column.clone())
+        }
+        relation => (relation, on.left.column.clone()),
+    };
+    let (edge_input, filters) = unwrap_rel_filter(edge_relation);
     let RelExpr::TableScan {
         table: edge_table, ..
     } = edge_input
@@ -1857,12 +2126,6 @@ fn lower_gather_step(
             "Gather frontier equality must name an edge column",
         ));
     };
-    let Some(on) = on.first() else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather recursive hop join requires a column equality",
-        ));
-    };
     let edge_filters = lowered_filters
         .into_iter()
         .enumerate()
@@ -1872,7 +2135,7 @@ fn lower_gather_step(
         edge_table.as_str().to_owned(),
         output_table.as_str().to_owned(),
         edge_member_column,
-        on.left.column.clone(),
+        edge_parent_column,
         edge_filters,
     ))
 }
@@ -1895,6 +2158,7 @@ fn rel_predicate_to_policy(
             predicate: Predicate::Any(Vec::new()),
             column: None,
             value: None,
+            scope: None,
         }]),
         RelPredicateExpr::And(children) => {
             let mut lowered = Vec::new();
@@ -1916,6 +2180,7 @@ fn rel_predicate_to_policy(
                 predicate: Predicate::Any(predicates),
                 column: None,
                 value: None,
+                scope: None,
             }])
         }
         RelPredicateExpr::Not(child) => {
@@ -1927,6 +2192,7 @@ fn rel_predicate_to_policy(
                 predicate: Predicate::Not(Box::new(Predicate::All(predicates))),
                 column: None,
                 value: None,
+                scope: None,
             }])
         }
         RelPredicateExpr::Cmp { left, op, right } => {
@@ -1965,12 +2231,14 @@ fn rel_predicate_to_policy(
                 predicate,
                 column: Some(left.column.clone()),
                 value: Some(value),
+                scope: left.scope.clone(),
             }])
         }
         RelPredicateExpr::IsNull { column } => Ok(vec![LoweredRelPredicate {
             predicate: Predicate::IsNull(Operand::Column(column.column.clone())),
             column: Some(column.column.clone()),
             value: None,
+            scope: column.scope.clone(),
         }]),
         RelPredicateExpr::IsNotNull { column } => Ok(vec![LoweredRelPredicate {
             predicate: Predicate::Not(Box::new(Predicate::IsNull(Operand::Column(
@@ -1978,6 +2246,7 @@ fn rel_predicate_to_policy(
             )))),
             column: Some(column.column.clone()),
             value: None,
+            scope: column.scope.clone(),
         }]),
         RelPredicateExpr::Contains { left, right } => {
             let LoweredRelValue::Operand(operand) =
@@ -1992,6 +2261,7 @@ fn rel_predicate_to_policy(
                 predicate: Predicate::Contains(Operand::Column(left.column.clone()), operand),
                 column: Some(left.column.clone()),
                 value: None,
+                scope: left.scope.clone(),
             }])
         }
         RelPredicateExpr::EnumMatch {
@@ -2010,6 +2280,7 @@ fn rel_predicate_to_policy(
                 },
                 column: Some(column.column.clone()),
                 value: None,
+                scope: column.scope.clone(),
             }])
         }
         RelPredicateExpr::In { left, values } => {
@@ -2029,6 +2300,7 @@ fn rel_predicate_to_policy(
                 predicate: Predicate::In(Operand::Column(left.column.clone()), values),
                 column: Some(left.column.clone()),
                 value: None,
+                scope: left.scope.clone(),
             }])
         }
     }

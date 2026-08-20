@@ -556,7 +556,6 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
 /// dave ──membership sales─────► query sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "read-side ExistsRel join grants never become visible in integration"]
 async fn exists_rel_join_grants_and_denies_correctly() {
     tokio::task::LocalSet::new()
         .run_until(exists_rel_join_grants_and_denies_correctly_inner())
@@ -695,7 +694,6 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
 /// dave ──hop via sales─────────► query sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "read-side ExistsRel hop grants never become visible in integration"]
 async fn exists_rel_hop_grants_and_denies_correctly() {
     tokio::task::LocalSet::new()
         .run_until(exists_rel_hop_grants_and_denies_correctly_inner())

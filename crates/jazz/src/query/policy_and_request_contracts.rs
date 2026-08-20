@@ -469,6 +469,9 @@ pub enum JoinTarget {
 pub struct ReachableVia {
     /// Access table that relates root rows to reachable teams.
     pub access_table: String,
+    /// Root-table column matched against `access_row_column`. Row id when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_column: Option<String>,
     /// Access-table column referencing the root row.
     pub access_row_column: String,
     /// Access-table column referencing a team.

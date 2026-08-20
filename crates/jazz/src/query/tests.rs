@@ -325,6 +325,56 @@ mod tests {
     }
 
     #[test]
+    fn validates_reachability_over_explicit_scalar_equalities() {
+        let schema = JazzSchema::new([
+            TableSchema::new(
+                "resources",
+                [
+                    ColumnSchema::new("name", ColumnType::String),
+                    ColumnSchema::new("resource_key", ColumnType::Uuid),
+                ],
+            ),
+            TableSchema::new(
+                "access_edges",
+                [
+                    ColumnSchema::new("resource_id", ColumnType::Uuid),
+                    ColumnSchema::new("team_id", ColumnType::Uuid),
+                ],
+            ),
+            TableSchema::new(
+                "team_edges",
+                [
+                    ColumnSchema::new("child_team", ColumnType::Uuid),
+                    ColumnSchema::new("parent_team", ColumnType::Uuid),
+                ],
+            ),
+            TableSchema::new(
+                "team_memberships",
+                [
+                    ColumnSchema::new("user_id", ColumnType::String),
+                    ColumnSchema::new("team_id", ColumnType::Uuid),
+                ],
+            ),
+        ]);
+
+        let mut query = Query::from("resources")
+            .reachable_via(
+                "access_edges",
+                "resource_id",
+                "team_id",
+                claim("user_id"),
+                "team_edges",
+                "child_team",
+                "parent_team",
+                [],
+            )
+            .seeded_by("team_memberships", "user_id", "user_id", "team_id");
+        query.reachable[0].source_column = Some("resource_key".to_owned());
+
+        query.validate(&schema).unwrap();
+    }
+
+    #[test]
     fn filter_order_does_not_change_shape_id() {
         let schema = schema();
         let left = Query::from("issues")

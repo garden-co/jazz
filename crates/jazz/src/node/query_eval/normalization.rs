@@ -1460,7 +1460,12 @@ fn normalize_reachable(
             right: access_join_node.clone(),
             mode: NormalizedJoinMode::Inner,
             on: NormalizedPredicateExpr::Compare {
-                left: source_column_value(schema, root_source, "id", JoinTarget::Column),
+                left: source_column_value(
+                    schema,
+                    root_source,
+                    reachable.source_column.as_deref().unwrap_or("id"),
+                    JoinTarget::Column,
+                ),
                 op: NormalizedComparisonOp::Eq,
                 right: reachable_access_key(
                     schema,

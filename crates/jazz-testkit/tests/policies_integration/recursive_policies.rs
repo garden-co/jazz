@@ -794,7 +794,6 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change_inner()
 /// dave query ─► {}
 /// ```
 #[tokio::test]
-#[ignore = "read-side recursive ExistsRel never grants rows in integration"]
 async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_without_path() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -875,7 +874,7 @@ async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_wi
 /// bob should keep exactly one visible document, with no second add delta.
 /// ```
 #[tokio::test]
-#[ignore = "recursive ExistsRel grant path is still invisible, so diamond dedupe never settles"]
+#[ignore = "adding a second recursive path to an already-visible grant emits an unchanged-row updated delta"]
 async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_deltas() {
     tokio::task::LocalSet::new()
         .run_until(recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_deltas_inner())

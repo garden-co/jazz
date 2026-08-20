@@ -121,6 +121,7 @@ fn relation_gather_to_query(expr: &RelationExpr) -> Result<Option<Query>, QueryE
         // reachability closure then acts as a membership filter over that
         // same table, yielding the gather's seed rows and every reached row.
         access_table: seed_table.clone(),
+        source_column: None,
         access_row_column: "id".to_owned(),
         access_team_column: "id".to_owned(),
         access_team_target: JoinTarget::RowId,

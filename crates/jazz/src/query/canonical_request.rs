@@ -352,6 +352,10 @@ fn canonical_reachable_key_with_seed_type(
             put_bytes(&mut bytes, &canonical_predicate_key(filter));
         }
     }
+    if let Some(source_column) = &reachable.source_column {
+        bytes.push(b'c');
+        put_str(&mut bytes, source_column);
+    }
     bytes
 }
 

@@ -948,57 +948,37 @@ fn validate_reachable(
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
     let access = schema_table(schema, &reachable.access_table)?;
-    planner_column_type(&access, &reachable.access_row_column)?;
-    planner_column_type(&access, &reachable.access_team_column)?;
-    let root_key_type = if has_declared_id(root) {
-        planner_column_type(root, "id")?
+    let access_row_type = planner_column_type(&access, &reachable.access_row_column)?;
+    let access_team_type = planner_column_type(&access, &reachable.access_team_column)?;
+    let source_column = reachable.source_column.as_deref().unwrap_or("id");
+    let root_key_type = if source_column != "id" || has_declared_id(root) {
+        planner_column_type(root, source_column)?
     } else {
         &ColumnType::Uuid
     };
-    if reachable.access_row_column == "id" && !has_declared_id(&access) {
-        if access.name != root.name {
+    if access.name != root.name
+        && let Some(access_target) = access.references.get(&reachable.access_row_column)
+    {
+        let source_target = if source_column == "id" {
+            Some(&root.name)
+        } else {
+            root.references.get(source_column)
+        };
+        if source_target != Some(access_target) {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: reachable.access_table.clone(),
                 column: reachable.access_row_column.clone(),
-                target_table: root.name.clone(),
+                target_table: source_target
+                    .cloned()
+                    .unwrap_or_else(|| root.name.clone()),
             });
-        }
-    } else if access.name == root.name {
-        let access_column_type = planner_column_type(&access, &reachable.access_row_column)?;
-        if !column_types_comparable(access_column_type, root_key_type) {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: reachable.access_table.clone(),
-                column: reachable.access_row_column.clone(),
-                target_table: root.name.clone(),
-            });
-        }
-    } else {
-        match access.references.get(&reachable.access_row_column) {
-            Some(target) if target == &root.name => {}
-            _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: reachable.access_table.clone(),
-                    column: reachable.access_row_column.clone(),
-                    target_table: root.name.clone(),
-                });
-            }
-        }
-        if !column_types_comparable(
-            planner_column_type(&access, &reachable.access_row_column)?,
-            root_key_type,
-        ) {
-            return Err(QueryError::OperandTypeMismatch);
         }
     }
+    if !column_types_comparable(access_row_type, root_key_type) {
+        return Err(QueryError::OperandTypeMismatch);
+    }
     let team_table = match reachable.access_team_target {
-        JoinTarget::Column => access
-            .references
-            .get(&reachable.access_team_column)
-            .ok_or_else(|| QueryError::JoinNotRefCompatible {
-                join_table: reachable.access_table.clone(),
-                column: reachable.access_team_column.clone(),
-                target_table: "referenced table".to_owned(),
-            })?,
+        JoinTarget::Column => access.references.get(&reachable.access_team_column),
         JoinTarget::RowId => {
             if reachable.access_team_column != "id" {
                 return Err(QueryError::JoinNotRefCompatible {
@@ -1007,43 +987,51 @@ fn validate_reachable(
                     target_table: reachable.access_table.clone(),
                 });
             }
-            &access.name
+            Some(&access.name)
         }
     };
     let edge = schema_table(schema, &reachable.edge_table)?;
     for column in [&reachable.edge_member_column, &reachable.edge_parent_column] {
-        planner_column_type(&edge, column)?;
-        if *column == "id" && !has_declared_id(&edge) && edge.name == *team_table {
-            continue;
+        let edge_column_type = planner_column_type(&edge, column)?;
+        if !column_types_comparable(edge_column_type, access_team_type) {
+            return Err(QueryError::OperandTypeMismatch);
         }
-        match edge.references.get(column) {
-            Some(target) if target == team_table => {}
-            _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: reachable.edge_table.clone(),
-                    column: column.clone(),
-                    target_table: team_table.clone(),
-                });
-            }
+        if let (Some(team_table), Some(target)) = (team_table, edge.references.get(column))
+            && target != team_table
+        {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: reachable.edge_table.clone(),
+                column: column.clone(),
+                target_table: team_table.clone(),
+            });
+        }
+        if let Some(team_table) = team_table
+            && *column == "id"
+            && has_declared_id(&edge)
+            && edge.name != *team_table
+        {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: reachable.edge_table.clone(),
+                column: column.clone(),
+                target_table: team_table.clone(),
+            });
         }
     }
     if let Some(seed) = &mut reachable.seed {
         let seed_table = schema_table(schema, &seed.table)?;
-        if planner_column_type(&seed_table, &seed.team_column)? != &ColumnType::Uuid {
+        if !column_types_comparable(
+            planner_column_type(&seed_table, &seed.team_column)?,
+            access_team_type,
+        ) {
             return Err(QueryError::OperandTypeMismatch);
         }
         if let Some(user_column) = &seed.user_column {
             planner_column_type(&seed_table, user_column)?;
         }
-        let seed_projects_team = if seed.team_column == "id" {
-            seed_table.name == *team_table
-        } else {
-            matches!(
-                seed_table.references.get(&seed.team_column),
-                Some(target) if target == team_table
-            )
-        };
-        if !seed_projects_team {
+        if let (Some(team_table), Some(target)) =
+            (team_table, seed_table.references.get(&seed.team_column))
+            && target != team_table
+        {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: seed.table.clone(),
                 column: seed.team_column.clone(),

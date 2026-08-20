@@ -205,6 +205,7 @@ impl Query {
 
         self.reachable.push(ReachableVia {
             access_table: root_table.clone(),
+            source_column: None,
             access_row_column: frontier_column.clone(),
             access_team_column: frontier_column.clone(),
             access_team_target,
@@ -451,6 +452,7 @@ impl Query {
     ) -> Self {
         self.reachable.push(ReachableVia {
             access_table: access_table.into(),
+            source_column: None,
             access_row_column: access_row_column.into(),
             access_team_column: access_team_column.into(),
             access_team_target: JoinTarget::Column,

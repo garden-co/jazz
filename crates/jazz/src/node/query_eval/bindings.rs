@@ -22,6 +22,7 @@ pub(super) fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQ
     };
     let mut query = crate::query::Query::from(table.name.as_str());
     query.filters = policy.filters.clone();
+    query.flat_join = policy.flat_join.clone();
     query.joins = policy.joins.clone();
     query.exists = policy.exists.clone();
     query.reachable = policy.reachable.clone();

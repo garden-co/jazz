@@ -3,6 +3,24 @@
 use super::*;
 
 #[test]
+fn authorization_query_preserves_read_policy_flat_join() {
+    let policy = Query::from("documents").flat_join(
+        "group_memberships",
+        "documents.group_slug",
+        "group_memberships.group_slug",
+    );
+    let table = TableSchema::new(
+        "documents",
+        [ColumnSchema::new("group_slug", ColumnType::String)],
+    )
+    .with_read_policy(policy.clone());
+
+    let authorization = authorization_query_from_read_policy(&table);
+
+    assert_eq!(authorization.flat_join, policy.flat_join);
+}
+
+#[test]
 fn prepared_integer_bindings_coerce_only_when_representable() {
     let cases = [
         (Value::I64(7), ColumnType::U8, Value::U8(7)),
