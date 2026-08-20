@@ -49,9 +49,9 @@ use crate::protocol::expand_version_carriers;
 use crate::protocol::{
     AuthorizationScopeReceipt, BindingViewKey, CoverageKey, CurrentWriteSchema, LensOp,
     MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId, ReadViewKey,
-    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
-    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
-    SubscriptionKey, SyncMessage, TableLens,
+    ReadViewSchemaSpec, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
     validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
@@ -1139,7 +1139,19 @@ fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
 }
 
 fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
-    ensure_default_read_view(opts)
+    if opts.read_view.overlays.is_empty()
+        && matches!(opts.read_view.schema, ReadViewSchemaSpec::Current)
+        && matches!(
+            opts.read_view.source,
+            ReadViewSourceSpec::Current | ReadViewSourceSpec::BranchView { .. }
+        )
+    {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::Query,
+        "this read_view combination is not supported yet",
+    ))
 }
 
 fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {

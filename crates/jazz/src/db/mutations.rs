@@ -1,6 +1,7 @@
 //! Row insertion, update, deletion, restoration, and authorization.
 
 use super::*;
+use crate::protocol::BranchSelector;
 
 impl<S> Db<S>
 where
@@ -70,6 +71,29 @@ where
             cells,
             Vec::new(),
             None,
+        )
+    }
+
+    /// Insert one exact branch-keyed incarnation with a caller-supplied row id.
+    pub fn insert_with_id_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_exact_incarnation_absent(table, &branch, row)?;
+        self.write_mergeable_at_ms_with_authorship_in_branch(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+            None,
+            self.next_now_ms(),
+            branch,
         )
     }
 
@@ -249,6 +273,45 @@ where
             parent.into_iter().collect(),
             None,
             authored_columns,
+        )
+    }
+
+    /// Patch one exact branch-keyed incarnation.
+    pub fn update_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        if patch.is_empty() {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "exact branch update requires at least one authored column",
+            ));
+        }
+        let mut node = self.node.node.borrow_mut();
+        let Some(mut cells) = node.visible_current_cells_in_branch(table, &branch, row)? else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("branch incarnation not observed: {}", row.0),
+            ));
+        };
+        let parent = node.local_content_winner_tx_id_in_branch(table, &branch, row)?;
+        drop(node);
+        let authored_columns = patch.keys().cloned().collect();
+        cells.extend(patch);
+        self.write_mergeable_at_ms_with_authorship_in_branch(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            parent.into_iter().collect(),
+            None,
+            Some(authored_columns),
+            self.next_now_ms(),
+            branch,
         )
     }
 
@@ -522,6 +585,43 @@ where
     /// ```
     pub fn delete(&self, table: &str, row: RowUuid) -> Result<WriteHandle<S>, Error> {
         self.delete_at_ms_option(table, row, None)
+    }
+
+    /// Soft-delete one exact branch-keyed incarnation.
+    pub fn delete_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+    ) -> Result<WriteHandle<S>, Error> {
+        let mut node = self.node.node.borrow_mut();
+        if node
+            .visible_current_cells_in_branch(table, &branch, row)?
+            .is_none()
+        {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("branch incarnation not observed: {}", row.0),
+            ));
+        }
+        let parents = node
+            .local_deletion_winner_tx_id_in_branch(table, &branch, row)?
+            .or(node.local_content_winner_tx_id_in_branch(table, &branch, row)?)
+            .into_iter()
+            .collect();
+        drop(node);
+        self.write_mergeable_at_ms_with_authorship_in_branch(
+            self.identity.author,
+            None,
+            table,
+            row,
+            BTreeMap::new(),
+            parents,
+            Some(DeletionEvent::Deleted),
+            None,
+            self.next_now_ms(),
+            branch,
+        )
     }
 
     /// Soft-delete a row with explicit millisecond provenance time.
@@ -1037,6 +1137,34 @@ where
         authored_columns: Option<BTreeSet<String>>,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_at_ms_with_authorship_in_branch(
+            made_by,
+            permission_subject,
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            authored_columns,
+            now_ms,
+            BranchSelector::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_mergeable_at_ms_with_authorship_in_branch(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: Option<BTreeSet<String>>,
+        now_ms: u64,
+        branch: BranchSelector,
+    ) -> Result<WriteHandle<S>, Error> {
         let operation = if deletion == Some(DeletionEvent::Deleted) {
             "DELETE"
         } else if parents.is_empty() {
@@ -1050,6 +1178,7 @@ where
             cells
         };
         let mut commit = MergeableCommit::new(table, row, now_ms)
+            .branch(branch)
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
@@ -1257,6 +1386,31 @@ where
             return Err(Error::new(
                 ErrorCode::WriteRejected,
                 format!("encoding error: object already exists: {}", row.0),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_exact_incarnation_absent(
+        &self,
+        table: &str,
+        branch: &BranchSelector,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        self.table_schema(table)?;
+        let mut node = self.node.node.borrow_mut();
+        let content = node.local_content_winner_tx_id_in_branch(table, branch, row)?;
+        let deletion = node.local_deletion_winner_tx_id_in_branch(table, branch, row)?;
+        if deletion.is_some() {
+            return Err(row_already_deleted(row));
+        }
+        if content.is_some() {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!(
+                    "encoding error: branch incarnation already exists: {}",
+                    row.0
+                ),
             ));
         }
         Ok(())

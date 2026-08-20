@@ -347,6 +347,114 @@ where
             }))
     }
 
+    /// Read one exact branch-keyed incarnation for mutation preparation.
+    pub fn visible_current_cells_in_branch(
+        &mut self,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        let schema = &self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue("current write schema missing"))?
+            .schema;
+        let (branch_key, _) = schema
+            .project_branch_selector(&table_schema, branch)
+            .map_err(Error::InvalidBranchKey)?;
+        let deletion = self
+            .query_local_layer_winner_in_branch(
+                table,
+                &branch_key,
+                row_uuid,
+                VersionLayer::Deletion,
+            )?
+            .or(self.query_global_layer_winner_in_branch(
+                table,
+                &branch_key,
+                row_uuid,
+                VersionLayer::Deletion,
+            )?);
+        if deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
+            return Ok(None);
+        }
+        let Some(content) = self
+            .query_local_layer_winner_in_branch(
+                table,
+                &branch_key,
+                row_uuid,
+                VersionLayer::Content,
+            )?
+            .or(self.query_global_layer_winner_in_branch(
+                table,
+                &branch_key,
+                row_uuid,
+                VersionLayer::Content,
+            )?)
+        else {
+            return Ok(None);
+        };
+        self.materialized_cells_for_version(&table_schema, &content)
+            .map(Some)
+    }
+
+    /// Return the exact local content parent for a branch-keyed incarnation.
+    pub fn local_content_winner_tx_id_in_branch(
+        &mut self,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        self.local_layer_winner_tx_id_in_branch_selector(
+            table,
+            branch,
+            row_uuid,
+            VersionLayer::Content,
+        )
+    }
+
+    /// Return the exact local deletion parent for a branch-keyed incarnation.
+    pub fn local_deletion_winner_tx_id_in_branch(
+        &mut self,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        self.local_layer_winner_tx_id_in_branch_selector(
+            table,
+            branch,
+            row_uuid,
+            VersionLayer::Deletion,
+        )
+    }
+
+    fn local_layer_winner_tx_id_in_branch_selector(
+        &mut self,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<TxId>, Error> {
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        let schema = &self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue("current write schema missing"))?
+            .schema;
+        let (branch_key, _) = schema
+            .project_branch_selector(&table_schema, branch)
+            .map_err(Error::InvalidBranchKey)?;
+        self.query_local_layer_winner_in_branch(table, &branch_key, row_uuid, layer)?
+            .as_ref()
+            .map(|version| self.version_tx_id(version))
+            .transpose()
+    }
+
     /// Return current rows at the requested durability tier.
     pub fn current_rows(
         &mut self,
