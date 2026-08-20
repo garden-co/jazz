@@ -301,22 +301,16 @@ where
                         plan.binding_user_params.clone(),
                         plan.binding_claim_params.clone(),
                     );
-                    Box::pin(
-                        self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
-                                policy_request,
-                                base,
-                                &descriptor_field_names(&descriptor).map_err(|_| {
-                                    source_resolution_error(
-                                        request,
-                                        SourceGap::HistoricalStorageCut,
-                                    )
-                                })?,
-                            ),
-                    )
-                    .await
-                    .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                    .graph
+                    self.node
+                        .compose_policy_filtered_current_source_graph(
+                            policy_request,
+                            base,
+                            &descriptor_field_names(&descriptor).map_err(|_| {
+                                source_resolution_error(request, SourceGap::HistoricalStorageCut)
+                            })?,
+                        )
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                        .graph
                 }
             };
             (graph, descriptor, metadata, BTreeSet::new())
@@ -372,17 +366,14 @@ where
                     );
                     let output_fields = descriptor_field_names(&descriptor)
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                    Box::pin(
-                        self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
-                                policy_request,
-                                base,
-                                &output_fields,
-                            ),
-                    )
-                    .await
-                    .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                    .graph
+                    self.node
+                        .compose_policy_filtered_current_source_graph(
+                            policy_request,
+                            base,
+                            &output_fields,
+                        )
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                        .graph
                 }
             };
             (graph, descriptor, metadata, BTreeSet::new())
@@ -441,7 +432,6 @@ where
                     self.read_view.policy_schema,
                     Some(source.graph),
                 )
-                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             } else {
                 let source = self
@@ -477,17 +467,16 @@ where
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
                         );
-                        Box::pin(
-                            self.node
-                                .policy_filtered_current_source_graph_via_query_engine(
-                                    policy_request,
-                                    source.graph,
-                                    &current_row_fields(&table),
-                                ),
-                        )
-                        .await
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                        self.node
+                            .compose_policy_filtered_current_source_graph(
+                                policy_request,
+                                source.graph,
+                                &current_row_fields(&table),
+                            )
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
+                            .graph
                     }
                 };
                 (graph, source.descriptor, source.metadata, BTreeSet::new())
@@ -528,17 +517,14 @@ where
                         );
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
-                    Box::pin(
-                        self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
-                                policy_request,
-                                base.clone(),
-                                &output_fields,
-                            ),
-                    )
-                    .await
-                    .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                    .graph
+                    self.node
+                        .compose_policy_filtered_current_source_graph(
+                            policy_request,
+                            base.clone(),
+                            &output_fields,
+                        )
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                        .graph
                 }
             };
             (
@@ -579,17 +565,14 @@ where
                         );
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
-                    Box::pin(
-                        self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
-                                policy_request,
-                                base,
-                                &output_fields,
-                            ),
-                    )
-                    .await
-                    .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                    .graph
+                    self.node
+                        .compose_policy_filtered_current_source_graph(
+                            policy_request,
+                            base,
+                            &output_fields,
+                        )
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                        .graph
                 }
             };
             (
@@ -618,7 +601,6 @@ where
                 self.read_view.policy_schema,
                 selected_base,
             )
-            .await
             .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
         };
         let deletion_register = self.deletion_register_source_for_request(
@@ -659,6 +641,117 @@ impl<S> CurrentQuerySourcePreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn policy_dependency_request(
+        &mut self,
+        request: &SourceRequest,
+    ) -> Result<Option<QueryProgramRequest>, Error> {
+        let SourceAuthorizationRequest::PolicyFiltered {
+            permission_subject,
+            plan,
+        } = &request.authorization
+        else {
+            return Ok(None);
+        };
+        if plan.protected_source.table != request.source.table
+            || plan.role != PolicyDecisionRole::Read
+            || plan.protected_row_field != "row_uuid"
+        {
+            return Err(Error::QueryCapability(
+                "policy authorization plan does not match source dependency".to_owned(),
+            ));
+        }
+        let source = self
+            .read_view
+            .sources
+            .get(&request.source)
+            .ok_or(Error::InvalidStoredValue("query source dependency missing"))?;
+        let binding_source_shape = plan.binding_source_shape.clone();
+        let binding_user_params = plan.binding_user_params.clone();
+        let binding_claim_params = plan.binding_claim_params.clone();
+        let dependency = match source {
+            SourceExpr::HistoryCut {
+                data: DataSource::Current,
+                position,
+                ..
+            } => self.node.table_read_policy_authorization_request_at(
+                self.read_view.policy_schema,
+                &request.source.table,
+                *permission_subject,
+                ParamBindingMode::InlineAllReachableSeeds,
+                *position,
+                binding_source_shape,
+                binding_user_params,
+                binding_claim_params,
+            ),
+            SourceExpr::VisibleCurrent {
+                data: DataSource::Branch(branch_id),
+                ..
+            } => {
+                let table = self.node.table_in_schema_or_branch_metadata(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                )?;
+                self.node.branch_table_read_policy_authorization_request(
+                    *branch_id,
+                    &table,
+                    *permission_subject,
+                    binding_source_shape,
+                    binding_user_params,
+                    binding_claim_params,
+                )
+            }
+            SourceExpr::VisibleCurrent { .. } | SourceExpr::SettledBindingView { .. } => {
+                let tier = source.current_tier().unwrap_or(DurabilityTier::Global);
+                if request.visibility == RowVisibility::IncludeDeleted {
+                    self.node
+                        .table_read_policy_authorization_request_for_include_deleted(
+                            self.read_view.policy_schema,
+                            &request.source.table,
+                            *permission_subject,
+                            tier,
+                            binding_source_shape,
+                            binding_user_params,
+                            binding_claim_params,
+                        )
+                } else {
+                    let projected_current_without_metadata = request.visibility
+                        == RowVisibility::Visible
+                        && request.requirements.metadata.is_empty()
+                        && self.needs_projected_current_source(&request.source.table);
+                    let param_binding_mode = if projected_current_without_metadata {
+                        ParamBindingMode::InlineAllReachableSeeds
+                    } else if binding_source_shape.is_some() {
+                        ParamBindingMode::RetainAllParams
+                    } else {
+                        ParamBindingMode::InlineAllReachableSeeds
+                    };
+                    self.node.table_read_policy_authorization_request(
+                        self.read_view.policy_schema,
+                        &request.source.table,
+                        *permission_subject,
+                        param_binding_mode,
+                        tier,
+                        binding_source_shape,
+                        binding_user_params,
+                        binding_claim_params,
+                    )
+                }
+            }
+            // Transaction overlays already carry explicitly captured rows and
+            // do not apply a second read-policy program in source preparation.
+            SourceExpr::WithOverlays { .. } => return Ok(None),
+            _ => return Ok(None),
+        };
+        match dependency {
+            Ok(dependency) => Ok(Some(dependency)),
+            Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
+                Err(Error::QueryCapability(error))
+            }
+            Err(Error::QueryCapability(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn current_projection_target(
         &mut self,
         request: &SourceRequest,
@@ -1903,7 +1996,7 @@ pub(super) fn trace_capability_compile(
     );
 }
 
-async fn resolved_current_source_graph<S>(
+fn resolved_current_source_graph<S>(
     node: &mut NodeState<S>,
     table: &TableSchema,
     tier: DurabilityTier,
@@ -2065,13 +2158,11 @@ where
                 Some(selected_base) => selected_base,
                 None => node.maintained_view_content_current_with_version(table, tier)?,
             };
-            let storage_graph =
-                Box::pin(node.policy_filtered_current_source_graph_via_query_engine(
-                    policy_request,
-                    base.clone(),
-                    &output_fields,
-                ))
-                .await?;
+            let storage_graph = node.compose_policy_filtered_current_source_graph(
+                policy_request,
+                base.clone(),
+                &output_fields,
+            )?;
             let mut canonical_fields = storage_to_canonical_current_source_fields(
                 table,
                 needs_version_witnesses,

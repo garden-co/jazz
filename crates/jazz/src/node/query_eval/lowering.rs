@@ -408,7 +408,7 @@ where
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<QueryProgram, Error> {
-        self.compile_query_program_request_with_access_paths(request, BTreeMap::new())
+        Box::pin(self.compile_query_program_request_with_access_paths(request, BTreeMap::new()))
             .await
     }
 
@@ -417,10 +417,12 @@ where
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
-        self.compile_query_program_request_with_inline_sources_and_access_paths(
-            request,
-            BTreeMap::new(),
-            access_paths,
+        Box::pin(
+            self.compile_query_program_request_with_inline_sources_and_access_paths(
+                request,
+                BTreeMap::new(),
+                access_paths,
+            ),
         )
         .await
     }
@@ -431,6 +433,7 @@ where
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
+        Box::pin(self.prepare_query_program_policy_dependencies(&request)).await?;
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
         let maintained_result_membership = request
@@ -462,7 +465,7 @@ where
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
-        let result = prepare_and_lower_query_program(request, &mut resolver).await;
+        let result = Box::pin(prepare_and_lower_query_program(request, &mut resolver)).await;
         if let Some(request) = trace_request {
             trace_capability_compile(
                 node_uuid,
@@ -472,6 +475,60 @@ where
             );
         }
         result.map_err(|report| Error::QueryCapability(format!("{report:?}")))
+    }
+
+    async fn prepare_query_program_policy_dependencies(
+        &mut self,
+        request: &QueryProgramRequest,
+    ) -> Result<(), Error> {
+        let source_requests = query_program_source_requests(request)
+            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
+        let read_view = request.reads.primary.clone();
+        let dependencies = {
+            let mut preparer = CurrentQuerySourcePreparer {
+                node: self,
+                read_view: &read_view,
+                prepare_branch_subscription_sources: false,
+                inline_sources: BTreeMap::new(),
+                access_paths: BTreeMap::new(),
+                current_projection_targets: BTreeMap::new(),
+            };
+            source_requests
+                .iter()
+                .map(|source| preparer.policy_dependency_request(source))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        };
+        let dependencies = dependencies
+            .into_iter()
+            .map(|dependency| {
+                (
+                    policy_authorization_graph_cache_key(&dependency),
+                    dependency,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (cache_key, dependency) in dependencies {
+            match Box::pin(self.policy_authorization_row_id_graph(dependency)).await {
+                Ok(_) => {}
+                Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
+                    return Err(Error::QueryCapability(error));
+                }
+                Err(Error::QueryCapability(_)) => {
+                    self.query.policy_authorization_graph_cache.insert(
+                        cache_key,
+                        PolicyAuthorizationGraph {
+                            graph: empty_authorized_row_id_graph(),
+                            route_fields: BTreeSet::new(),
+                        },
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn prepared_query_plan_from_program(

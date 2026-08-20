@@ -61,6 +61,35 @@ pub(crate) type QueryCompileResult = CapabilityResult<QueryProgram>;
 /// Owned declarative Groove inputs prepared before pure Jazz lowering.
 pub(crate) type ResolvedQuerySources = BTreeMap<SourceId, ResolvedSource>;
 
+/// Analyze the logical source requests for one program without preparing or
+/// lowering any source. Compilation orchestration uses this to discover
+/// dependent policy programs before source preparation begins.
+pub(crate) fn query_program_source_requests(
+    request: &QueryProgramRequest,
+) -> CapabilityResult<Vec<SourceRequest>> {
+    let plan = analyze_query_plan(request).map_err(|gaps| {
+        Box::new(CapabilityReport {
+            gaps,
+            explain: explain_with_request(request, ExplainPlan::default()),
+        })
+    })?;
+    let source_visibilities = source_visibilities(&plan);
+    source_requirements(request, &plan)?
+        .into_iter()
+        .map(|(source, requirements)| {
+            Ok(SourceRequest {
+                visibility: source_visibilities
+                    .get(&source)
+                    .copied()
+                    .unwrap_or(RowVisibility::Visible),
+                authorization: source_authorization_for_source(request, &source)?,
+                source,
+                requirements,
+            })
+        })
+        .collect()
+}
+
 /// Prepare concrete source descriptions, then synchronously lower the program.
 ///
 /// This is an explicit compatibility boundary while snapshot capture and
@@ -72,7 +101,7 @@ pub(crate) async fn prepare_and_lower_query_program(
 ) -> QueryCompileResult {
     let mut explain = ExplainPlan::default();
 
-    let plan = match analyze_query_plan(&request) {
+    let _plan = match analyze_query_plan(&request) {
         Ok(plan) => plan,
         Err(gaps) => {
             explain
@@ -85,24 +114,13 @@ pub(crate) async fn prepare_and_lower_query_program(
         }
     };
 
-    let source_requirements = source_requirements(&request, &plan)?;
     let mut resolved_sources = BTreeMap::new();
-    let source_visibilities = source_visibilities(&plan);
-    for (source, requirements) in source_requirements {
-        let visibility = source_visibilities
-            .get(&source)
-            .copied()
-            .unwrap_or(RowVisibility::Visible);
-        let source_request = SourceRequest {
-            source: source.clone(),
-            visibility,
-            authorization: source_authorization_for_source(&request, &source)?,
-            requirements,
-        };
-        // Source preparation is the remaining async compatibility boundary,
-        // and policy proofs may prepare a nested program. Keep that future
-        // off the caller's stack so the pure lowering call graph stays small
-        // while individual snapshot sources are migrated out of this path.
+    for source_request in query_program_source_requests(&request)? {
+        let source = source_request.source.clone();
+        // Source preparation is the remaining async compatibility boundary.
+        // Policy programs have already been prepared by compilation
+        // orchestration; this future is only for source-local snapshot and
+        // physical-layout work that has not migrated to Groove yet.
         let resolved_source = match Box::pin(source_preparer.prepare_source(&source_request)).await
         {
             Ok(resolved_source) => resolved_source,

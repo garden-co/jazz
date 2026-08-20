@@ -373,14 +373,21 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             program.request.input.binding.claim_params.clone(),
         )
         .expect("compile nested chat-members policy against the invite binding");
+    node.policy_authorization_row_id_graph(members_policy.clone())
+        .expect("prepare nested chat-members policy dependency");
+    let prepared_policy_graphs = node.query_engine_read_metrics.policy_authorization_graphs;
     let members_authorized = node
-        .policy_filtered_current_source_graph_via_query_engine(
+        .compose_policy_filtered_current_source_graph(
             Ok(members_policy),
             node.maintained_view_content_current_with_version(&members, DurabilityTier::Edge)
                 .expect("compile chat-members storage source"),
             &global_current_storage_fields(&members, true, true),
         )
         .expect("route nested chat-members policy through the invite binding");
+    assert_eq!(
+        node.query_engine_read_metrics.policy_authorization_graphs, prepared_policy_graphs,
+        "source composition must only consume the prepared dependency"
+    );
     assert!(
         members_authorized.route_fields.contains(&typed_join_code),
         "a nested policy source must carry the outer invite slot even when its own policy only consumes user_id"
