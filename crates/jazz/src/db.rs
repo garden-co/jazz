@@ -1412,6 +1412,18 @@ where
         self.insert_with_id_at_ms_option(table, row, cells, None)
     }
 
+    /// Stage an insert in one exact branch incarnation.
+    fn insert_with_id_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_insert_in_branch(self.tx_id(), table, branch, row, cells, None)
+    }
+
     /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
     fn insert_with_id_at_ms(
         &self,
@@ -1426,6 +1438,26 @@ where
     /// Stage an update; omitted fields keep the transaction-local value.
     fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
         self.update_at_ms_option(table, row, patch, None)
+    }
+
+    /// Stage an update through a head-over-base branch view.
+    fn update_in_branch_view(
+        &self,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<(), Error> {
+        self.db().stage_mergeable_update_in_branch_view(
+            self.tx_id(),
+            table,
+            head,
+            base,
+            row,
+            patch,
+            None,
+        )
     }
 
     /// Stage an update with an explicit millisecond provenance time.
@@ -1444,6 +1476,18 @@ where
         self.delete_at_ms_option(table, row, None)
     }
 
+    /// Stage a deletion through a head-over-base branch view.
+    fn delete_in_branch_view(
+        &self,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_delete_in_branch_view(self.tx_id(), table, head, base, row, None)
+    }
+
     /// Stage a soft delete with explicit millisecond provenance time.
     fn delete_at_ms(&self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
         self.delete_at_ms_option(table, row, Some(now_ms))
@@ -1452,6 +1496,18 @@ where
     /// Stage a restore, applying defaults for omitted columns.
     fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
         self.restore_at_ms_option(table, row, cells, None)
+    }
+
+    /// Stage a restore in one exact branch incarnation.
+    fn restore_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_restore_in_branch(self.tx_id(), table, branch, row, cells, None)
     }
 
     /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.

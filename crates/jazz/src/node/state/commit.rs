@@ -674,6 +674,10 @@ where
                 .map(|raw| {
                     let record = raw.record();
                     Ok((
+                        BranchKey::from_canonical_bytes(
+                            record.get_bytes(GlobalCurrentRowRecord::FIELD_BRANCH_KEY_IDX)?,
+                        )
+                        .map_err(|_| Error::InvalidStoredValue("invalid ahead-current branch key"))?,
                         SchemaVersionAlias(
                             record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?,
                         ),
@@ -683,13 +687,14 @@ where
                     ))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            for (alias, row_uuid, tx_time, tx_node_alias) in content_rows {
+            for (branch_key, alias, row_uuid, tx_time, tx_node_alias) in content_rows {
                 #[cfg(feature = "testing")]
                 if let Some(receipt) = &mut receipt {
                     receipt.ahead_current_entries += 1;
                 }
                 self.insert_ahead_current_key(
                     self.logical_table_for_physical_alias(table_id, alias)?,
+                    branch_key,
                     VersionLayer::Content,
                     row_uuid,
                     tx_time,
@@ -703,6 +708,12 @@ where
                 .map(|raw| {
                     let record = raw.record();
                     Ok((
+                        BranchKey::from_canonical_bytes(
+                            record.get_bytes(
+                                RegisterGlobalCurrentRowRecord::FIELD_BRANCH_KEY_IDX,
+                            )?,
+                        )
+                        .map_err(|_| Error::InvalidStoredValue("invalid ahead-current branch key"))?,
                         SchemaVersionAlias(
                             record.get_u64(
                                 RegisterGlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX,
@@ -718,13 +729,14 @@ where
                     ))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            for (alias, row_uuid, tx_time, tx_node_alias) in deletion_rows {
+            for (branch_key, alias, row_uuid, tx_time, tx_node_alias) in deletion_rows {
                 #[cfg(feature = "testing")]
                 if let Some(receipt) = &mut receipt {
                     receipt.ahead_current_entries += 1;
                 }
                 self.insert_ahead_current_key(
                     self.logical_table_for_physical_alias(table_id, alias)?,
+                    branch_key,
                     VersionLayer::Deletion,
                     row_uuid,
                     tx_time,
@@ -738,13 +750,14 @@ where
     fn insert_ahead_current_key(
         &mut self,
         table: String,
+        branch_key: BranchKey,
         layer: VersionLayer,
         row_uuid: RowUuid,
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) {
         self.ahead_current_keys
-            .insert((table.clone(), layer, row_uuid, tx_time, tx_node_alias));
+            .insert((table.clone(), branch_key, layer, row_uuid, tx_time, tx_node_alias));
         self.ahead_current_rows.insert((table.clone(), row_uuid));
         self.ahead_current_latest
             .entry((table, layer, row_uuid))
@@ -759,6 +772,7 @@ where
     fn remove_ahead_current_key(
         &mut self,
         table: &str,
+        branch_key: &BranchKey,
         layer: VersionLayer,
         row_uuid: RowUuid,
         tx_time: TxTime,
@@ -767,6 +781,7 @@ where
         let table_key = table.to_owned();
         self.ahead_current_keys.remove(&(
             table_key.clone(),
+            branch_key.clone(),
             layer,
             row_uuid,
             tx_time,
@@ -774,18 +789,15 @@ where
         ));
         let latest_key = (table_key.clone(), layer, row_uuid);
         if self.ahead_current_latest.get(&latest_key) == Some(&(tx_time, tx_node_alias)) {
-            let start = (table_key.clone(), layer, row_uuid, TxTime(0), NodeAlias(0));
-            let end = (
-                table_key.clone(),
-                layer,
-                row_uuid,
-                TxTime(u64::MAX),
-                NodeAlias(u64::MAX),
-            );
-            if let Some((_, _, _, next_time, next_alias)) = self
+            if let Some((_, _, _, _, next_time, next_alias)) = self
                 .ahead_current_keys
-                .range(start..=end)
-                .next_back()
+                .iter()
+                .filter(|(candidate_table, _, candidate_layer, candidate_row, _, _)| {
+                    candidate_table == &table_key
+                        && *candidate_layer == layer
+                        && *candidate_row == row_uuid
+                })
+                .max_by_key(|(_, _, _, _, time, alias)| (*time, *alias))
                 .cloned()
             {
                 self.ahead_current_latest

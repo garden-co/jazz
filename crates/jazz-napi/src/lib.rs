@@ -621,6 +621,26 @@ impl Tx {
         }
     }
 
+    #[napi(js_name = "insertWithIdEncodedInBranch")]
+    pub fn insert_with_id_encoded_in_branch(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<()> {
+        if !matches!(self.kind, NapiTxKind::Mergeable) {
+            return Err(napi::Error::from_reason(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        with_napi_mergeable_tx!(self, |tx| tx
+            .insert_with_id_in_branch(&table, branch, row_id, cells))
+    }
+
     #[napi(js_name = "updateEncoded")]
     pub fn update_encoded(
         &mut self,
@@ -641,6 +661,28 @@ impl Tx {
                 with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, patch))
             }
         }
+    }
+
+    #[napi(js_name = "updateEncodedInBranchView")]
+    pub fn update_encoded_in_branch_view(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        head: JsonValue,
+        base: Option<JsonValue>,
+    ) -> napi::Result<()> {
+        if !matches!(self.kind, NapiTxKind::Mergeable) {
+            return Err(napi::Error::from_reason(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let head = core_branch_selector_from_json(head)?;
+        let base = core_branch_base_from_json(base)?;
+        with_napi_mergeable_tx!(self, |tx| tx
+            .update_in_branch_view(&table, head, base, row_id, patch))
     }
 
     #[napi(js_name = "upsertEncoded")]
@@ -686,6 +728,26 @@ impl Tx {
         }
     }
 
+    #[napi(js_name = "deleteInBranchView")]
+    pub fn delete_in_branch_view(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        head: JsonValue,
+        base: Option<JsonValue>,
+    ) -> napi::Result<()> {
+        if !matches!(self.kind, NapiTxKind::Mergeable) {
+            return Err(napi::Error::from_reason(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let head = core_branch_selector_from_json(head)?;
+        let base = core_branch_base_from_json(base)?;
+        with_napi_mergeable_tx!(self, |tx| tx
+            .delete_in_branch_view(&table, head, base, row_id))
+    }
+
     #[napi(js_name = "restoreEncoded")]
     pub fn restore_encoded(
         &mut self,
@@ -706,6 +768,26 @@ impl Tx {
                 with_napi_exclusive_tx!(self, |tx| tx.restore(&table, row_id, cells))
             }
         }
+    }
+
+    #[napi(js_name = "restoreEncodedInBranch")]
+    pub fn restore_encoded_in_branch(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<()> {
+        if !matches!(self.kind, NapiTxKind::Mergeable) {
+            return Err(napi::Error::from_reason(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        with_napi_mergeable_tx!(self, |tx| tx
+            .restore_in_branch(&table, branch, row_id, cells))
     }
 
     #[napi]

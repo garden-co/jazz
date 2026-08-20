@@ -550,6 +550,19 @@ impl WasmDbInner {
         })
     }
 
+    fn mergeable_insert_in_branch(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_id: RowUuid,
+        cells: RowCells,
+        branch: BranchSelector,
+    ) -> Result<(), jazz::db::Error> {
+        with_wasm_db!(self, |db| db
+            .mergeable_tx_ref(tx_id)
+            .insert_with_id_in_branch(table, branch, row_id, cells))
+    }
+
     fn mergeable_update(
         &self,
         tx_id: OpenTransactionId,
@@ -564,6 +577,20 @@ impl WasmDbInner {
                 .update_at_ms(table, row_id, patch, now_ms),
             None => db.mergeable_tx_ref(tx_id).update(table, row_id, patch),
         })
+    }
+
+    fn mergeable_update_in_branch_view(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_id: RowUuid,
+        patch: RowCells,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+    ) -> Result<(), jazz::db::Error> {
+        with_wasm_db!(self, |db| db
+            .mergeable_tx_ref(tx_id)
+            .update_in_branch_view(table, head, base, row_id, patch))
     }
 
     fn mergeable_delete(
@@ -581,6 +608,19 @@ impl WasmDbInner {
         })
     }
 
+    fn mergeable_delete_in_branch_view(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_id: RowUuid,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+    ) -> Result<(), jazz::db::Error> {
+        with_wasm_db!(self, |db| db
+            .mergeable_tx_ref(tx_id)
+            .delete_in_branch_view(table, head, base, row_id))
+    }
+
     fn mergeable_restore(
         &self,
         tx_id: OpenTransactionId,
@@ -595,6 +635,19 @@ impl WasmDbInner {
                 .restore_at_ms(table, row_id, cells, now_ms),
             None => db.mergeable_tx_ref(tx_id).restore(table, row_id, cells),
         })
+    }
+
+    fn mergeable_restore_in_branch(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_id: RowUuid,
+        cells: RowCells,
+        branch: BranchSelector,
+    ) -> Result<(), jazz::db::Error> {
+        with_wasm_db!(self, |db| db
+            .mergeable_tx_ref(tx_id)
+            .restore_in_branch(table, branch, row_id, cells))
     }
 
     fn exclusive_write(
@@ -2406,6 +2459,32 @@ impl WasmTx {
         Ok(())
     }
 
+    #[wasm_bindgen(js_name = insertWithIdEncodedInBranch)]
+    pub fn insert_with_id_encoded_in_branch(
+        &mut self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        branch: JsValue,
+    ) -> Result<(), JsValue> {
+        if !matches!(self.kind, WasmTxKind::Mergeable) {
+            return Err(JsValue::from_str(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let branch = serde_wasm_bindgen::from_value(branch)
+            .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?;
+        self.db
+            .mergeable_insert_in_branch(
+                self.open_tx_for_read()?,
+                &table,
+                row_uuid_from_bytes(&row_id)?,
+                decode_cells(&cells)?,
+                branch,
+            )
+            .map_err(to_js_error)
+    }
+
     #[wasm_bindgen(js_name = updateEncoded)]
     pub fn update_encoded(
         &mut self,
@@ -2426,6 +2505,41 @@ impl WasmTx {
         }
         .map_err(to_js_error)?;
         Ok(())
+    }
+
+    #[wasm_bindgen(js_name = updateEncodedInBranchView)]
+    pub fn update_encoded_in_branch_view(
+        &mut self,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        head: JsValue,
+        base: JsValue,
+    ) -> Result<(), JsValue> {
+        if !matches!(self.kind, WasmTxKind::Mergeable) {
+            return Err(JsValue::from_str(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let head = serde_wasm_bindgen::from_value(head)
+            .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?;
+        let base = if base.is_null() || base.is_undefined() {
+            None
+        } else {
+            Some(serde_wasm_bindgen::from_value(base).map_err(|error| {
+                JsValue::from_str(&format!("invalid branch view base: {error}"))
+            })?)
+        };
+        self.db
+            .mergeable_update_in_branch_view(
+                self.open_tx_for_read()?,
+                &table,
+                row_uuid_from_bytes(&row_id)?,
+                decode_cells(&patch)?,
+                head,
+                base,
+            )
+            .map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = upsertEncoded)]
@@ -2461,6 +2575,39 @@ impl WasmTx {
         Ok(())
     }
 
+    #[wasm_bindgen(js_name = deleteInBranchView)]
+    pub fn delete_in_branch_view(
+        &mut self,
+        table: String,
+        row_id: Vec<u8>,
+        head: JsValue,
+        base: JsValue,
+    ) -> Result<(), JsValue> {
+        if !matches!(self.kind, WasmTxKind::Mergeable) {
+            return Err(JsValue::from_str(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let head = serde_wasm_bindgen::from_value(head)
+            .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?;
+        let base = if base.is_null() || base.is_undefined() {
+            None
+        } else {
+            Some(serde_wasm_bindgen::from_value(base).map_err(|error| {
+                JsValue::from_str(&format!("invalid branch view base: {error}"))
+            })?)
+        };
+        self.db
+            .mergeable_delete_in_branch_view(
+                self.open_tx_for_read()?,
+                &table,
+                row_uuid_from_bytes(&row_id)?,
+                head,
+                base,
+            )
+            .map_err(to_js_error)
+    }
+
     #[wasm_bindgen(js_name = restoreEncoded)]
     pub fn restore_encoded(
         &mut self,
@@ -2481,6 +2628,32 @@ impl WasmTx {
         }
         .map_err(to_js_error)?;
         Ok(())
+    }
+
+    #[wasm_bindgen(js_name = restoreEncodedInBranch)]
+    pub fn restore_encoded_in_branch(
+        &mut self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        branch: JsValue,
+    ) -> Result<(), JsValue> {
+        if !matches!(self.kind, WasmTxKind::Mergeable) {
+            return Err(JsValue::from_str(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let branch = serde_wasm_bindgen::from_value(branch)
+            .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?;
+        self.db
+            .mergeable_restore_in_branch(
+                self.open_tx_for_read()?,
+                &table,
+                row_uuid_from_bytes(&row_id)?,
+                decode_cells(&cells)?,
+                branch,
+            )
+            .map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = commit)]

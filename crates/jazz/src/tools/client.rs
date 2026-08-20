@@ -2301,9 +2301,11 @@ impl PublicQueryDecoder {
     fn core_subscription_row_to_public(
         &self,
         db: &Backend,
-        _query: &Query,
+        query: &Query,
         row: &CoreSubscriptionOutputRow,
     ) -> Result<Row> {
+        #[cfg(not(feature = "testing"))]
+        let _ = query;
         let (_, encoded) = row.row.encoded_record();
         let provenance = db
             .row_provenance(&row.row)

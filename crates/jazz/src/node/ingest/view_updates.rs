@@ -1223,6 +1223,7 @@ where
         // insert its exact current primary key again.
         if self.ahead_current_keys.contains(&(
             version.table().to_owned(),
+            version.branch_key().clone(),
             version.layer(),
             version.row_uuid(),
             version.tx_time(),
@@ -1303,6 +1304,7 @@ where
         }
         self.insert_ahead_current_key(
             version.table().to_owned(),
+            version.branch_key().clone(),
             version.layer(),
             version.row_uuid(),
             version.tx_time(),
@@ -1338,6 +1340,7 @@ where
         batch.delete(table, history_primary_key(version));
         self.remove_ahead_current_key(
             version.table(),
+            version.branch_key(),
             version.layer(),
             version.row_uuid(),
             version.tx_time(),

@@ -223,6 +223,12 @@ type NativeDb = {
       | ((urgency: "immediate" | "deferred") => void)
       | ((error: Error | null, urgency: string) => void),
   ): void;
+  restoreEncodedInBranch?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    branch: unknown,
+  ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   setNonDurableClient?(): void;
   connectUpstream(): Transport;
@@ -270,17 +276,36 @@ type Tx = {
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): void;
+  insertWithIdEncodedInBranch?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    branch: unknown,
+  ): void;
   restoreEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): void;
+  restoreEncodedInBranch?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    branch: unknown,
+  ): void;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
     updatedAtMs?: number | null,
+  ): void;
+  updateEncodedInBranchView?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    head: unknown,
+    base?: unknown,
   ): void;
   upsertEncoded(
     table: string,
@@ -289,6 +314,7 @@ type Tx = {
     updatedAtMs?: number | null,
   ): void;
   delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
+  deleteInBranchView?(table: string, rowId: Uint8Array, head: unknown, base?: unknown): void;
 };
 
 export type Transport = {
@@ -630,10 +656,16 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const branchView = branchViewFromWriteContext(_writeContext);
     const tx = this.currentTx(_writeContext, "Insert");
-    if (tx && branchView)
-      throw writeError("Insert", "branch writes in open transactions are not yet supported");
     if (tx) {
-      this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells, updatedAtMs);
+      const nativeTx = this.txForWrite(tx, writeIdentity);
+      if (branchView) {
+        requireBranchMethod(
+          nativeTx.insertWithIdEncodedInBranch,
+          "transaction branch inserts",
+        ).call(nativeTx, table, rowId, cells, branchView.head);
+      } else {
+        nativeTx.insertWithIdEncoded(table, rowId, cells, updatedAtMs);
+      }
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
       return {
@@ -677,10 +709,19 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Restore");
-    if (tx && branchView)
-      throw writeError("Restore", "branch writes in open transactions are not yet supported");
     if (tx) {
-      this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells, updatedAtMs);
+      const nativeTx = this.txForWrite(tx, writeIdentity);
+      if (branchView) {
+        requireBranchMethod(nativeTx.restoreEncodedInBranch, "transaction branch restores").call(
+          nativeTx,
+          table,
+          rowId,
+          cells,
+          branchView.head,
+        );
+      } else {
+        nativeTx.restoreEncoded(table, rowId, cells, updatedAtMs);
+      }
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
       return {
@@ -723,10 +764,20 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Update");
-    if (tx && branchView)
-      throw writeError("Update", "branch writes in open transactions are not yet supported");
     if (tx) {
-      this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch, updatedAtMs);
+      const nativeTx = this.txForWrite(tx, writeIdentity);
+      if (branchView) {
+        requireBranchMethod(nativeTx.updateEncodedInBranchView, "transaction branch updates").call(
+          nativeTx,
+          table,
+          rowId,
+          patch,
+          branchView.head,
+          branchView.base,
+        );
+      } else {
+        nativeTx.updateEncoded(table, rowId, patch, updatedAtMs);
+      }
       tx.writes.push({
         table,
         rowId,
@@ -815,10 +866,19 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Delete");
-    if (tx && branchView)
-      throw writeError("Delete", "branch writes in open transactions are not yet supported");
     if (tx) {
-      this.txForWrite(tx, writeIdentity).delete(table, rowId, updatedAtMs);
+      const nativeTx = this.txForWrite(tx, writeIdentity);
+      if (branchView) {
+        requireBranchMethod(nativeTx.deleteInBranchView, "transaction branch deletes").call(
+          nativeTx,
+          table,
+          rowId,
+          branchView.head,
+          branchView.base,
+        );
+      } else {
+        nativeTx.delete(table, rowId, updatedAtMs);
+      }
       tx.writes.push({ table, rowId, deleted: true });
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }

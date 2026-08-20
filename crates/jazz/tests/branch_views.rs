@@ -3,7 +3,9 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, SeededRowIdSource, SubscriptionEvent,
+};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
@@ -60,6 +62,53 @@ fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
     ))
     .unwrap();
     (db, schema)
+}
+
+#[test]
+fn one_mergeable_transaction_can_atomically_write_multiple_branches() {
+    let (db, schema) = open_db();
+    let row = RowUuid::from_bytes([0x70; 16]);
+    let left = selector(0x72);
+    let right = selector(0x73);
+
+    let tx = db.mergeable_tx().unwrap();
+    tx.insert_with_id_in_branch(
+        "todos",
+        left.clone(),
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("left".to_owned()))]),
+    )
+    .unwrap();
+    tx.insert_with_id_in_branch(
+        "todos",
+        right.clone(),
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("right".to_owned()))]),
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let rows_in = |branch| {
+        block_on(db.all(&prepared, ReadOpts::default().branch_view(branch, None))).unwrap()
+    };
+    let left_rows = rows_in(left);
+    let right_rows = rows_in(right);
+    let table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "todos")
+        .unwrap();
+    assert_eq!(left_rows.len(), 1);
+    assert_eq!(right_rows.len(), 1);
+    assert_eq!(
+        left_rows[0].cell(table, "title"),
+        Some(Value::String("left".to_owned()))
+    );
+    assert_eq!(
+        right_rows[0].cell(table, "title"),
+        Some(Value::String("right".to_owned()))
+    );
 }
 
 #[test]
