@@ -47,6 +47,40 @@ afterEach(() => {
 });
 
 describe("Vue Jazz providers", () => {
+  it("JazzProvider renders the SSR fallback first, then starts its client after mount", async () => {
+    const client = fakeClient();
+    const creation = deferred();
+    mocks.createJazzClient.mockImplementation(async () => {
+      await creation.promise;
+      return client;
+    });
+    const config: DbConfig = { appId: "hydration", driver: { type: "memory" } };
+    const root = defineComponent(
+      () => () =>
+        h(
+          JazzProvider,
+          { config },
+          {
+            default: () => h("p", { id: "ready" }, "ready"),
+            fallback: () => h("p", { id: "loading" }, "loading"),
+          },
+        ),
+    );
+
+    const element = document.createElement("div");
+    document.body.appendChild(element);
+    const app = createApp(root);
+    apps.push(app);
+    app.mount(element);
+
+    expect(element.innerHTML).toBe('<p id="loading">loading</p>');
+    await settle();
+    expect(mocks.createJazzClient).toHaveBeenCalledWith(config);
+
+    creation.resolve();
+    await vi.waitFor(() => expect(element.querySelector("#ready")).not.toBeNull());
+  });
+
   it("JazzClientProvider never shuts down a caller-owned client", async () => {
     const first = fakeClient();
     const second = fakeClient();
@@ -119,5 +153,33 @@ describe("Vue Jazz providers", () => {
     apps.splice(apps.indexOf(app), 1);
     await settle();
     expect(second.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it("JazzProvider shuts down a client whose slow creation finishes after unmount", async () => {
+    let resolveClient!: (client: JazzClient) => void;
+    const clientCreatedAfterUnmount = new Promise<JazzClient>((resolve) => {
+      resolveClient = resolve;
+    });
+    const client = fakeClient();
+    mocks.createJazzClient.mockReturnValue(clientCreatedAfterUnmount);
+    const config: DbConfig = { appId: "slow", driver: { type: "memory" } };
+    const root = defineComponent(
+      () => () =>
+        h(JazzProvider, { config }, { fallback: () => h("p", { id: "loading" }, "loading") }),
+    );
+
+    const element = document.createElement("div");
+    document.body.appendChild(element);
+    const app = createApp(root);
+    apps.push(app);
+    app.mount(element);
+    await settle();
+    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+
+    app.unmount();
+    apps.splice(apps.indexOf(app), 1);
+    resolveClient(client);
+
+    await vi.waitFor(() => expect(client.shutdown).toHaveBeenCalledOnce());
   });
 });

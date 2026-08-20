@@ -3,6 +3,7 @@ import {
   defineComponent,
   h,
   inject,
+  onMounted,
   onUnmounted,
   provide,
   shallowRef,
@@ -140,43 +141,51 @@ export const JazzProvider = defineComponent({
     let activeClient: CreatedJazzClient | null = null;
     let lifecycle = Promise.resolve();
     let runId = 0;
+    let stopConfigWatch: (() => void) | null = null;
 
-    watch(
-      () => props.config,
-      (config) => {
-        const activeRunId = ++runId;
-        const configSnapshot = { ...config } as DbConfig;
-        clientRef.value = null;
-        errorRef.value = null;
+    // A config-owned client touches browser-only storage.  Do not begin creating
+    // it during SSR: rendering the fallback on the server must be side-effect
+    // free, and the same fallback is rendered for the initial client pass.
+    onMounted(() => {
+      stopConfigWatch = watch(
+        () => props.config,
+        (config) => {
+          const activeRunId = ++runId;
+          const configSnapshot = { ...config } as DbConfig;
+          clientRef.value = null;
+          errorRef.value = null;
 
-        lifecycle = lifecycle
-          .then(async () => {
-            if (activeClient) {
-              const previousClient = activeClient;
-              activeClient = null;
-              await previousClient.shutdown();
-            }
-            if (activeRunId !== runId) return;
+          lifecycle = lifecycle
+            .then(async () => {
+              if (activeClient) {
+                const previousClient = activeClient;
+                activeClient = null;
+                await previousClient.shutdown();
+              }
+              if (activeRunId !== runId) return;
 
-            const client = await createJazzClient(configSnapshot);
-            if (activeRunId !== runId) {
-              await client.shutdown();
-              return;
-            }
+              const client = await createJazzClient(configSnapshot);
+              if (activeRunId !== runId) {
+                await client.shutdown();
+                return;
+              }
 
-            activeClient = client;
-            clientRef.value = client;
-          })
-          .catch((reason) => {
-            if (activeRunId === runId) {
-              errorRef.value = reason instanceof Error ? reason : new Error(String(reason));
-            }
-          });
-      },
-      { deep: true, immediate: true },
-    );
+              activeClient = client;
+              clientRef.value = client;
+            })
+            .catch((reason) => {
+              if (activeRunId === runId) {
+                errorRef.value = reason instanceof Error ? reason : new Error(String(reason));
+              }
+            });
+        },
+        { deep: true, immediate: true },
+      );
+    });
 
     onUnmounted(() => {
+      stopConfigWatch?.();
+      stopConfigWatch = null;
       runId += 1;
       clientRef.value = null;
       const shuttingDown = lifecycle.then(async () => {
