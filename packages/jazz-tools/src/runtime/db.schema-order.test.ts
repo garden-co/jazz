@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, type DbConfig, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
-import { WriteResult, JazzClient, type BatchId, type InsertResult, WriteHandle } from "./client.js";
+import { MutationResult, JazzClient, type BatchId, type InsertResult } from "./client.js";
 import type { Session } from "./context.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 
@@ -38,13 +38,16 @@ function makeHandleClient(): JazzClient {
   } as unknown as JazzClient;
 }
 
+type WriteResult<T> = MutationResult<T>;
+type WriteHandle = MutationResult<void>;
+
 function makeWriteResult(row: InsertResult): WriteResult<InsertResult> {
   if (row.kind !== "committed") throw new Error("expected committed fixture");
-  return new WriteResult(row, row.batchId, makeHandleClient());
+  return new MutationResult(row, row.batchId, makeHandleClient(), "mergeable");
 }
 
 function makeWriteHandle(transactionId: string): WriteHandle {
-  return new WriteHandle(transactionId as BatchId, makeHandleClient());
+  return new MutationResult(undefined, transactionId as BatchId, makeHandleClient(), "mergeable");
 }
 
 describe("Db runtime schema order", () => {
@@ -366,7 +369,7 @@ describe("Db runtime schema order", () => {
     >;
 
     expect(db.upsert(table, externalId, { title: "Buy milk", done: false })).toMatchObject({
-      batchId: Promise.resolve("transaction-upsert" as BatchId),
+      transactionId: Promise.resolve("transaction-upsert" as BatchId),
     });
 
     expect(upsert).toHaveBeenCalledWith(

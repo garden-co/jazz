@@ -126,7 +126,7 @@ Restoration is a tracked work item; exclusions are not permanent.
 
 - **Packages un-excluded**: `todo-server-ts`, `todo-server-ts-docs`.
 - **Fixes**: server writes now use backend-scoped DB handles instead of the
-  unauthenticated root DB; insert routes preserve `WriteResult.value` while
+  unauthenticated root DB; insert routes preserve `MutationResult.value` while
   awaiting durability; local-only waits use `tier: "local"`; tests use UUID
   session subjects for policy-owned rows; async SSE broadcasts are awaited and
   skipped when no clients are connected; the docs package only rebuilds shared

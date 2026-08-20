@@ -2,8 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Db, type DbConfig, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import {
-  WriteResult,
-  WriteHandle,
+  MutationResult,
   type JazzClient,
   type BatchId,
   type LocalTransactionRecord,
@@ -89,25 +88,35 @@ function makeHandleClient(localTransactionRecord: LocalTransactionRecord) {
   };
 }
 
-function makeWriteResult(
+function makeValueMutationResult(
   value: Row,
   transactionId: string,
   localTransactionRecord = makeLocalTransactionRecord(transactionId),
 ) {
   const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new WriteResult(value, transactionId as BatchId, client as unknown as JazzClient),
+    handle: new MutationResult(
+      value,
+      transactionId as BatchId,
+      client as unknown as JazzClient,
+      "mergeable",
+    ),
     client,
   };
 }
 
-function makeWriteHandle(
+function makeVoidMutationResult(
   transactionId: string,
   localTransactionRecord = makeLocalTransactionRecord(transactionId),
 ) {
   const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new WriteHandle(transactionId as BatchId, client as unknown as JazzClient),
+    handle: new MutationResult(
+      undefined,
+      transactionId as BatchId,
+      client as unknown as JazzClient,
+      "mergeable",
+    ),
     client,
   };
 }
@@ -122,7 +131,7 @@ describe("Db write handles", () => {
         { type: "Boolean", value: false },
       ],
     };
-    const { handle: writeResult, client: handleClient } = makeWriteResult(
+    const { handle: writeResult, client: handleClient } = makeValueMutationResult(
       runtimeRow,
       "transaction-insert",
     );
@@ -145,7 +154,7 @@ describe("Db write handles", () => {
       undefined,
       undefined,
     );
-    await expect(pending.batchId).resolves.toBe("transaction-insert");
+    await expect(pending.transactionId).resolves.toBe("transaction-insert");
     expect(pending.value).toEqual({
       id: "todo-1",
       title: "Buy milk",
@@ -164,8 +173,10 @@ describe("Db write handles", () => {
 
   it("keeps update and delete handles waitable by durability tier", async () => {
     const table = todoTable();
-    const { handle: updateHandle, client: updateClient } = makeWriteHandle("transaction-update");
-    const { handle: deleteHandle, client: deleteClient } = makeWriteHandle("transaction-delete");
+    const { handle: updateHandle, client: updateClient } =
+      makeVoidMutationResult("transaction-update");
+    const { handle: deleteHandle, client: deleteClient } =
+      makeVoidMutationResult("transaction-delete");
     const update = vi.fn(() => updateHandle);
     const remove = vi.fn(() => deleteHandle);
     const client = {
@@ -208,7 +219,7 @@ describe("Db write handles", () => {
       claims: { role: "writer" },
       authMode: "external",
     };
-    const { handle: insertHandle, client: insertClient } = makeWriteResult(
+    const { handle: insertHandle, client: insertClient } = makeValueMutationResult(
       {
         id: "todo-2",
         values: [
@@ -218,10 +229,10 @@ describe("Db write handles", () => {
       },
       "transaction-session-insert",
     );
-    const { handle: updateHandle, client: updateClient } = makeWriteHandle(
+    const { handle: updateHandle, client: updateClient } = makeVoidMutationResult(
       "transaction-session-update",
     );
-    const { handle: deleteHandle, client: deleteClient } = makeWriteHandle(
+    const { handle: deleteHandle, client: deleteClient } = makeVoidMutationResult(
       "transaction-session-delete",
     );
     const insert = vi.fn(() => insertHandle);
@@ -320,7 +331,7 @@ describe("Db mutation error handling", () => {
       }),
       insert: vi.fn(
         () =>
-          new WriteResult(
+          new MutationResult(
             {
               id: "todo-1",
               values: [
@@ -330,6 +341,7 @@ describe("Db mutation error handling", () => {
             },
             batchId,
             client,
+            "mergeable",
           ),
       ),
       waitForTransaction: vi.fn(async () => undefined),

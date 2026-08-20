@@ -3,17 +3,15 @@ import { app } from "../schema.js";
 
 type Todo = { id: string; title: string; done: boolean };
 type MaybePromise<T> = T | Promise<T>;
-type WriteHandle = { wait(options?: { tier?: "local" | "edge" | "global" }): Promise<unknown> };
+type MutationResult<T> = {
+  value: T;
+  wait(options: { tier: "local" | "edge" | "global" }): Promise<T>;
+};
 
 export interface TodoDb {
-  insert<T, Init>(
-    table: unknown,
-    data: Init,
-  ): MaybePromise<
-    WriteHandle | { wait(options?: { tier?: "local" | "edge" | "global" }): Promise<T> }
-  >;
-  update(table: unknown, id: string, data: Partial<unknown>): MaybePromise<WriteHandle>;
-  delete(table: unknown, id: string): MaybePromise<WriteHandle>;
+  insert<T, Init>(table: unknown, data: Init): MaybePromise<MutationResult<T>>;
+  update(table: unknown, id: string, data: Partial<unknown>): MaybePromise<MutationResult<void>>;
+  delete(table: unknown, id: string): MaybePromise<MutationResult<void>>;
 }
 
 export type TodoSubscribeAll = <T extends { id: string }>(
