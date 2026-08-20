@@ -58,7 +58,6 @@ where
             Vec::new()
         };
 
-        let root_target = stored.tx.target_lineage == crate::tx::BranchLineage::Root;
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
@@ -68,7 +67,7 @@ where
             .filter(|version| version.layer() == VersionLayer::Content)
             .cloned()
             .collect::<Vec<_>>();
-        if root_target && matches!(stored.fate, Fate::Accepted) && stored.global_time.is_some() {
+        if matches!(stored.fate, Fate::Accepted) && stored.global_time.is_some() {
             global_current_updates =
                 self.global_current_updates_for_versions(tx_id, &tx_versions)?;
         }
@@ -103,7 +102,7 @@ where
                 stored.durability,
             ),
         );
-        if root_target && !matches!(stored.fate, Fate::Rejected(_)) {
+        if !matches!(stored.fate, Fate::Rejected(_)) {
             for version in &content_versions {
                 self.update_merge_heads_for_content_version(&mut batch, version)?;
             }
@@ -124,8 +123,7 @@ where
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if root_target && (matches!(stored.fate, Fate::Rejected(_)) || stored.global_time.is_some())
-        {
+        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_time.is_some() {
             self.cleanup_fated_ahead_current_for_versions(&mut batch, &tx_versions)?;
         }
         for global_time in advanced_global_times
@@ -135,7 +133,7 @@ where
         {
             self.prune_ahead_current_for_global_time(&mut batch, global_time)?;
         }
-        let rejected_payload = if root_target && cleanup_rejected_versions {
+        let rejected_payload = if cleanup_rejected_versions {
             self.remove_rejected_local_versions(tx_id, &stored, &mut batch)?
         } else {
             None
@@ -158,16 +156,14 @@ where
         }
         #[cfg(test)]
         {
-            if root_target {
-                let rows = content_versions
-                    .iter()
-                    .map(|version| (version.table().to_owned(), version.row_uuid()))
-                    .collect::<BTreeSet<_>>();
-                self.assert_merge_head_rows_match_history_for_test(&rows)?;
-                self.assert_global_current_updates_match_history_for_test(
-                    &global_current_update_versions,
-                )?;
-            }
+            let rows = content_versions
+                .iter()
+                .map(|version| (version.table().to_owned(), version.row_uuid()))
+                .collect::<BTreeSet<_>>();
+            self.assert_merge_head_rows_match_history_for_test(&rows)?;
+            self.assert_global_current_updates_match_history_for_test(
+                &global_current_update_versions,
+            )?;
         }
         if let Some(rejected_payload) = rejected_payload {
             let tx_id = rejected_payload.tx_id();
@@ -826,7 +822,7 @@ where
             let history_table = self.version_storage_table_for_row(version)?;
             batch.delete(
                 history_table.as_ref(),
-                self.version_storage_primary_key(version, tx.tx.target_lineage)?,
+                self.version_storage_primary_key(version)?,
             );
         }
         for (table_id, table, row_uuid) in affected_content_rows {

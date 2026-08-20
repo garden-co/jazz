@@ -5,7 +5,7 @@ use groove::records::{RecordDescriptor, Value, ValueType};
 use jazz::binding_codec::{
     RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
 };
-use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use jazz::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
     PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
@@ -328,31 +328,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: Some("{\"fixture\":\"wire\"}".to_owned()),
-                    target_lineage: jazz::tx::BranchLineage::Root,
-                    branch_merge: None,
-                },
-                versions: Vec::new(),
-            },
-        ),
-        (
-            "commit_unit_branch_target_empty",
-            "CommitUnit",
-            SyncMessage::CommitUnit {
-                tx: Transaction {
-                    tx_id: TxId::new(TxTime(43), node),
-                    kind: TxKind::Mergeable,
-                    n_total_writes: 0,
-                    made_by: author,
-                    permission_subject: None,
-                    base_snapshot: None,
-                    row_read_set: None,
-                    absent_read_set: None,
-                    predicate_read_set: None,
-                    user_metadata_json: None,
-                    target_lineage: jazz::tx::BranchLineage::Branch(BranchId::from_bytes(
-                        [0x42; 16],
-                    )),
-                    branch_merge: None,
                 },
                 versions: Vec::new(),
             },
@@ -481,8 +456,6 @@ fn mixed_version_carriers(
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    target_lineage: jazz::tx::BranchLineage::Root,
-                    branch_merge: None,
                 },
                 versions: vec![
                     VersionRecord::from_cells(

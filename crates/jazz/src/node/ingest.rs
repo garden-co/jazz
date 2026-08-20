@@ -13,7 +13,6 @@ use crate::protocol_limits::{
     commit_unit_limit_violation, validate_known_state_declaration, validate_shape_ast_size,
 };
 use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE};
-use crate::tx::BranchLineage;
 use groove::records::ValueType;
 
 pub(super) const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;

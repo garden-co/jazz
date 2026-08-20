@@ -482,8 +482,7 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         for storage_table in self.version_storage_sources_for_layer(table, layer)? {
             let key = if storage_table == SHARED_DELETION_HISTORY_TABLE {
-                let mut key =
-                    self.deletion_storage_prefix(table, BranchLineage::Root, Some(row_uuid))?;
+                let mut key = self.deletion_storage_prefix(table, Some(row_uuid))?;
                 key.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
                 key
             } else {

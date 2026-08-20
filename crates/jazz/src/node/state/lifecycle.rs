@@ -168,8 +168,6 @@ where
         let mut has_non_catalogue_residue = false;
         for table in [
             "jazz_transactions",
-            "jazz_branches",
-            "jazz_branch_partitions",
             "jazz_rejected_transactions",
             "jazz_pending_edges",
             "jazz_merge_heads",

@@ -13,8 +13,8 @@ use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
     ContributingMembersEntry, KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry,
-    RealRowMemberEntry, ResultMemberEntry, ResultRowSource, RowVersionRef, VersionBundle,
-    VersionBundleRef, VersionCarrier, VersionRecord, build_version_carriers_from_singletons,
+    RealRowMemberEntry, ResultMemberEntry, RowVersionRef, VersionBundle, VersionBundleRef,
+    VersionCarrier, VersionRecord, build_version_carriers_from_singletons,
 };
 
 fn maintained_view_tx_versions_contain_winner(
@@ -385,19 +385,12 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "flat tuple source witness schema version alias must exist",
                 ))?;
-            let stored_tx = self
-                .query_transaction(tx)?
-                .ok_or(Error::MissingTransaction(tx))?;
             let mut contributor = RealRowMemberEntry::current_content((
                 canonical.table.clone(),
                 canonical.row_uuid(),
                 tx,
             ));
             contributor.schema_version = Some(schema_version);
-            if let BranchLineage::Branch(branch) = stored_tx.tx.target_lineage {
-                contributor.branch_or_prefix = Some(branch.to_bytes());
-                contributor.source = ResultRowSource::Branch { branch: branch.0 };
-            }
             let fact = ProgramFactEntry::ContributingMembers(ContributingMembersEntry {
                 result: result.clone(),
                 contributor: contributor.into(),
@@ -1419,8 +1412,6 @@ where
             permission_subject,
             base_snapshot,
             user_metadata_json,
-            target_lineage,
-            branch_merge,
             ..
         } = stored_tx.tx.clone();
         let tx_payload = Transaction {
@@ -1434,8 +1425,6 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            target_lineage,
-            branch_merge,
         };
         let mut versions = Vec::with_capacity(tx_versions.len());
         for version in tx_versions {

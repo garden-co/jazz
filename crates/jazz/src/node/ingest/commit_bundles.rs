@@ -222,9 +222,7 @@ where
             Some(global_time),
             Some(DurabilityTier::Global),
         )?;
-        if stored.tx.target_lineage == crate::tx::BranchLineage::Root {
-            self.create_merge_versions_for(&records)?;
-        }
+        self.create_merge_versions_for(&records)?;
         Ok(())
     }
 
@@ -272,9 +270,7 @@ where
             Some(global_time),
             Some(DurabilityTier::Global),
         )?;
-        if tx.target_lineage == crate::tx::BranchLineage::Root {
-            self.create_merge_versions_for(&versions)?;
-        }
+        self.create_merge_versions_for(&versions)?;
         Ok(Fate::Accepted)
     }
 
@@ -425,12 +421,7 @@ where
         let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
-        let merge_rows = if root_target {
-            self.merge_rows_for_versions(&versions)?
-        } else {
-            Vec::new()
-        };
+        let merge_rows = self.merge_rows_for_versions(&versions)?;
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -439,9 +430,7 @@ where
             durability,
         )?;
         debug_assert_eq!(self.clock.committed_global_time, global_time);
-        if root_target {
-            self.create_merge_versions_for_rows(merge_rows)?;
-        }
+        self.create_merge_versions_for_rows(merge_rows)?;
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
@@ -711,12 +700,7 @@ where
         let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
-        let merge_rows = if root_target {
-            self.merge_rows_for_versions(&versions)?
-        } else {
-            Vec::new()
-        };
+        let merge_rows = self.merge_rows_for_versions(&versions)?;
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -725,9 +709,7 @@ where
             durability,
         )?;
         debug_assert_eq!(self.clock.committed_global_time, global_time);
-        if root_target {
-            self.create_merge_versions_for_rows(merge_rows)?;
-        }
+        self.create_merge_versions_for_rows(merge_rows)?;
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
@@ -1155,7 +1137,7 @@ where
                 let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
-                    self.version_storage_primary_key(&stored, BranchLineage::Root)?,
+                    self.version_storage_primary_key(&stored)?,
                     groove_record,
                 );
                 if stored.layer() == VersionLayer::Content {

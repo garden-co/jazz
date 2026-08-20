@@ -79,9 +79,8 @@ where
             commits
                 .into_iter()
                 .map(|commit| (schema_version, commit))
-                .collect(),
+            .collect(),
             made_at,
-            None,
         )
     }
 
@@ -109,29 +108,19 @@ where
         commits: Vec<MergeableCommit>,
         made_at: TxTime,
     ) -> Result<TxId, Error> {
-        self.commit_mergeable_many_at_with_branch_merge(commits, made_at, None)
-    }
-
-    pub(super) fn commit_mergeable_many_at_with_branch_merge(
-        &mut self,
-        commits: Vec<MergeableCommit>,
-        made_at: TxTime,
-        branch_merge: Option<BranchMergeProvenance>,
-    ) -> Result<TxId, Error> {
         self.require_catalogue_ready()?;
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let commits = commits
             .into_iter()
             .map(|commit| (write_schema_version, commit))
             .collect();
-        self.commit_mergeable_many_at_with_schema_versions(commits, made_at, branch_merge)
+        self.commit_mergeable_many_at_with_schema_versions(commits, made_at)
     }
 
     pub(super) fn commit_mergeable_many_at_with_schema_versions(
         &mut self,
         commits: Vec<(SchemaVersionId, MergeableCommit)>,
         made_at: TxTime,
-        branch_merge: Option<BranchMergeProvenance>,
     ) -> Result<TxId, Error> {
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
@@ -150,8 +139,6 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            target_lineage: crate::tx::BranchLineage::Root,
-            branch_merge,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let mut batch = self.database.open_batch();
@@ -248,7 +235,7 @@ where
             let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             batch.insert_raw(
                 history_table.as_ref(),
-                self.version_storage_primary_key(&stored, BranchLineage::Root)?,
+                self.version_storage_primary_key(&stored)?,
                 groove_record,
             );
             self.update_merge_heads_for_content_version(&mut batch, &stored)?;

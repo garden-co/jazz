@@ -89,8 +89,6 @@ where
         update_current_indexes: bool,
     ) -> Result<(), Error> {
         self.merge_tx_time(tx.tx_id.time);
-        let update_current_indexes =
-            update_current_indexes && tx.target_lineage == crate::tx::BranchLineage::Root;
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
         let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
         let tx_values =
@@ -193,18 +191,13 @@ where
                     }
                 }
             }
-            let (history_table, groove_record) = match tx.target_lineage {
-                crate::tx::BranchLineage::Root => self.version_storage_write_binding(&stored)?,
-                crate::tx::BranchLineage::Branch(branch_id) => {
-                    self.branch_version_storage_write_binding(&stored, branch_id)?
-                }
-            };
-            let storage_key = self.version_storage_primary_key(&stored, tx.target_lineage)?;
+            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+            let storage_key = self.version_storage_primary_key(&stored)?;
             if tx_already_known {
                 let existing = self.database.primary_key_get_raw_in_batch(
                     batch,
                     history_table.as_ref(),
-                    &self.version_storage_primary_key_values(&stored, tx.target_lineage)?,
+                    &self.version_storage_primary_key_values(&stored)?,
                 )?;
                 if let Some(existing) = existing {
                     if existing.record().raw() != groove_record.record().raw() {

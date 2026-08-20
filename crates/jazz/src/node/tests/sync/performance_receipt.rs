@@ -177,8 +177,6 @@ fn seed_policy_graph_known_global(
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-                target_lineage: crate::tx::BranchLineage::Root,
-                branch_merge: None,
             },
             vec![version],
             Fate::Accepted,

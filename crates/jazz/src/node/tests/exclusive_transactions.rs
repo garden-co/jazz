@@ -346,7 +346,6 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
         reader
             .ingest_known_transaction(
                 Transaction {
-                    target_lineage: crate::tx::BranchLineage::Root,
                     tx_id,
                     kind: TxKind::Mergeable,
                     n_total_writes: 1,
@@ -357,7 +356,6 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                branch_merge: None,
                 },
                 vec![version_record(
                     row(row_byte),
@@ -382,7 +380,6 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
     reader
         .ingest_known_transaction(
             Transaction {
-                target_lineage: crate::tx::BranchLineage::Root,
                 tx_id,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
@@ -393,7 +390,6 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-                branch_merge: None,
             },
             vec![version_record(
                 row(2),

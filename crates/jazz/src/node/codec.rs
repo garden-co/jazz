@@ -227,18 +227,16 @@ groove::define_record! {
         7 => absent_read_set: Option<Value>,
         8 => predicate_read_set: Option<Value>,
         9 => user_metadata: Option<String>,
-        10 => target_lineage: Vec<u8>,
-        11 => branch_merge: Option<Vec<u8>>,
-        12 => permission_subject: Option<AuthorId>,
+        10 => permission_subject: Option<AuthorId>,
         // Retained as an inert physical slot so existing transaction records
         // keep their fixed descriptor alignment. No core API writes or reads it.
-        13 => merge_strategy: Option<String>,
-        14 => fate: FateTag,
-        15 => global_time: Option<GlobalTime>,
-        16 => rejection_reason: Option<RejectionReasonTag>,
-        17 => cascade_root: Option<Value>,
-        18 => reason_detail: Option<String>,
-        19 => durability: DurabilityTier,
+        11 => merge_strategy: Option<String>,
+        12 => fate: FateTag,
+        13 => global_time: Option<GlobalTime>,
+        14 => rejection_reason: Option<RejectionReasonTag>,
+        15 => cascade_root: Option<Value>,
+        16 => reason_detail: Option<String>,
+        17 => durability: DurabilityTier,
     }
 }
 
@@ -269,37 +267,6 @@ groove::define_record! {
     pub(super) struct CataloguePointerRowRecord {
         0 => revision: u64,
         1 => schema: SchemaVersionId,
-    }
-}
-
-groove::define_record! {
-    pub(super) struct BranchPartitionRowRecord {
-        0 => physical_table_id: u64,
-        1 => branch_id: BranchId,
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BranchState {
-    Open,
-    Merged,
-    Discarded,
-}
-
-groove::impl_record_field_enum!(BranchState {
-    BranchState::Open = 0,
-    BranchState::Merged = 1,
-    BranchState::Discarded = 2,
-});
-
-groove::define_record! {
-    pub(super) struct BranchRowRecord {
-        0 => branch_id: BranchId,
-        1 => created_by: AuthorId,
-        2 => parent: Option<BranchId>,
-        3 => base_snapshot: Option<Value>,
-        4 => state: BranchState,
-        5 => metadata_pending: bool,
     }
 }
 
@@ -427,12 +394,6 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .record_schema();
         SchemaVersionAliasRowRecord::assert_layout(&schema_version_descriptor);
 
-        let branch_partition_descriptor = groove_schema
-            .table("jazz_branch_partitions")
-            .expect("branch partitions table")
-            .record_schema();
-        BranchPartitionRowRecord::assert_layout(&branch_partition_descriptor);
-
         let rejected_tx_descriptor = groove_schema
             .table("jazz_rejected_transactions")
             .expect("rejected transactions table")
@@ -520,8 +481,6 @@ impl StoredTransaction {
             global_time: self.global_time,
             durability: self.durability,
             user_metadata_json: self.tx.user_metadata_json.clone(),
-            target_lineage: self.tx.target_lineage,
-            branch_merge: self.tx.branch_merge.clone(),
         }
     }
 }
@@ -830,8 +789,6 @@ impl VersionRow {
                 global_time: tx.global_time,
                 durability: tx.durability,
                 user_metadata_json: tx.tx.user_metadata_json.clone(),
-                target_lineage: tx.tx.target_lineage,
-                branch_merge: tx.tx.branch_merge.clone(),
             },
             is_locally_current,
             is_globally_current,
@@ -1040,14 +997,6 @@ pub(super) fn transaction_values(
                 .clone()
                 .map(|value| Box::new(Value::String(value))),
         ),
-        Value::Bytes(
-            serde_json::to_vec(&tx.target_lineage).expect("target lineage is serializable"),
-        ),
-        Value::Nullable(tx.branch_merge.as_ref().map(|provenance| {
-            Box::new(Value::Bytes(
-                serde_json::to_vec(provenance).expect("branch merge provenance is serializable"),
-            ))
-        })),
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
         Value::Nullable(None),
         Value::String(fate_string(&fate)),

@@ -6,7 +6,6 @@
 //! node-level read layer over groove tables.
 
 use super::*;
-use crate::tx::BranchLineage;
 
 impl<S> NodeState<S>
 where
@@ -37,7 +36,7 @@ where
                 .database
                 .primary_key_scan_raw(
                     &storage_table,
-                    &self.deletion_storage_prefix(table, BranchLineage::Root, Some(row_uuid))?,
+                    &self.deletion_storage_prefix(table, Some(row_uuid))?,
                 )?
                 .into_iter()
                 .map(|raw| raw.owned_record())
@@ -132,7 +131,7 @@ where
         let mut winner = None;
         for storage_table in self.version_storage_sources_for_layer(table, layer)? {
             let prefix = if layer == VersionLayer::Deletion {
-                self.deletion_storage_prefix(table, BranchLineage::Root, Some(row_uuid))?
+                self.deletion_storage_prefix(table, Some(row_uuid))?
             } else {
                 vec![Value::Uuid(row_uuid.0)]
             };
@@ -196,10 +195,7 @@ where
         {
             let raws = self
                 .database
-                .primary_key_scan_raw(
-                    &storage_table,
-                    &self.deletion_storage_prefix(table, BranchLineage::Root, None)?,
-                )?
+                .primary_key_scan_raw(&storage_table, &self.deletion_storage_prefix(table, None)?)?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -370,7 +366,6 @@ where
     pub(super) fn deletion_storage_prefix(
         &self,
         table: &str,
-        lineage: BranchLineage,
         row_uuid: Option<RowUuid>,
     ) -> Result<Vec<Value>, Error> {
         let schema_version = if self
@@ -381,23 +376,17 @@ where
         } else {
             self.catalogue.current_schema_version_id
         };
-        self.deletion_storage_prefix_in_schema(schema_version, table, lineage, row_uuid)
+        self.deletion_storage_prefix_in_schema(schema_version, table, row_uuid)
     }
 
     pub(super) fn deletion_storage_prefix_in_schema(
         &self,
         schema_version: SchemaVersionId,
         table: &str,
-        lineage: BranchLineage,
         row_uuid: Option<RowUuid>,
     ) -> Result<Vec<Value>, Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, table)?;
-        let (branch_kind, branch_id) = shared_deletion_lineage_values(lineage);
-        let mut prefix = vec![
-            Value::U8(branch_kind),
-            Value::Uuid(branch_id),
-            Value::U64(table_id.0),
-        ];
+        let mut prefix = vec![Value::U64(table_id.0)];
         if let Some(row_uuid) = row_uuid {
             prefix.push(Value::Uuid(row_uuid.0));
         }
@@ -681,17 +670,6 @@ where
             user_metadata_json: record
                 .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
                 .map(str::to_owned),
-            target_lineage: serde_json::from_slice(
-                record.get_bytes(TransactionRowRecord::FIELD_TARGET_LINEAGE_IDX)?,
-            )
-            .map_err(|_| Error::InvalidStoredValue("invalid target lineage"))?,
-            branch_merge: record
-                .get_nullable_bytes(TransactionRowRecord::FIELD_BRANCH_MERGE_IDX)?
-                .map(|bytes| {
-                    serde_json::from_slice(bytes)
-                        .map_err(|_| Error::InvalidStoredValue("invalid branch merge provenance"))
-                })
-                .transpose()?,
         };
         let fate = fate_from_encoded_fields(record)?;
         Ok(StoredTransaction {
@@ -846,12 +824,8 @@ where
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
         let key = if storage_table == SHARED_DELETION_HISTORY_TABLE {
-            let mut key = self.deletion_storage_prefix_in_schema(
-                schema_version,
-                table,
-                BranchLineage::Root,
-                Some(row_uuid),
-            )?;
+            let mut key =
+                self.deletion_storage_prefix_in_schema(schema_version, table, Some(row_uuid))?;
             key.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
             key
         } else {

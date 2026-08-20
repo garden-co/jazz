@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::ids::{PhysicalColumnId, PhysicalTableId};
-use crate::tx::BranchLineage;
 use groove::schema::{
     ColumnSchema as GrooveColumnSchema, IndexSchema as GrooveIndexSchema,
     TableSchema as GrooveTableSchema, TableVariantField as GrooveTableVariantField,

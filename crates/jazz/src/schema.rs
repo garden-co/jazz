@@ -1005,15 +1005,12 @@ fn global_changes_table() -> GrooveTableSchema {
 /// Immutable sparse deletion/restore history for every physical table lineage.
 ///
 /// This is intentionally a fixed system table rather than a schema-variant
-/// table: deletion payload has no user cells. `branch_kind` distinguishes root
-/// from a branch whose UUID happens to equal the root sentinel; callers must
-/// therefore always provide both fields when seeking the table.
+/// table: deletion payload has no user cells. Branch-key routing is added by
+/// the physical incarnation layer rather than transaction metadata.
 pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_deletion_history",
         [
-            column("branch_kind", GrooveColumnType::U8),
-            column("branch_id", GrooveColumnType::Uuid),
             column("physical_table_id", GrooveColumnType::U64),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
@@ -1028,8 +1025,6 @@ pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
         ],
     )
     .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("branch_kind", IntegerKeyType::U8),
-        PrimaryKeyColumn::uuid("branch_id"),
         PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("row_uuid"),
         PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
@@ -1037,14 +1032,7 @@ pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
     ]))
     .with_index(GrooveIndexSchema::new(
         "by_tx",
-        [
-            "tx_time",
-            "tx_node_id",
-            "branch_kind",
-            "branch_id",
-            "physical_table_id",
-            "row_uuid",
-        ],
+        ["tx_time", "tx_node_id", "physical_table_id", "row_uuid"],
     ))
 }
 
@@ -1171,8 +1159,6 @@ fn transactions_table() -> GrooveTableSchema {
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),
             column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
-            column("target_lineage", GrooveColumnType::Bytes),
-            column("branch_merge", GrooveColumnType::Bytes.nullable()),
             column("permission_subject", GrooveColumnType::Uuid.nullable()),
             column("merge_strategy", GrooveColumnType::String.nullable()),
             // upstream-decided: written only by fate/state application.

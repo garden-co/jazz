@@ -665,8 +665,6 @@ where
             absent_read_set: Some(open_tx.absent_reads),
             predicate_read_set: Some(open_tx.predicate_reads),
             user_metadata_json: open_tx.user_metadata_json,
-            target_lineage: crate::tx::BranchLineage::Root,
-            branch_merge: None,
         };
         self.ingest_transaction_and_versions(
             tx.clone(),
@@ -826,8 +824,7 @@ where
             "mergeable transaction requires at least one write",
         ))?;
         let made_at = self.mint_tx_time(first.1.now_ms);
-        let committed =
-            self.commit_mergeable_many_at_with_schema_versions(commits, made_at, None)?;
+        let committed = self.commit_mergeable_many_at_with_schema_versions(commits, made_at)?;
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
         Ok(committed)

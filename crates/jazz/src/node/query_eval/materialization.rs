@@ -230,38 +230,20 @@ where
         row_uuid: RowUuid,
         version_ref: &RowVersionRefEntry,
     ) -> Result<VersionRow, Error> {
-        let version = if let Some(branch_id) = Self::relation_edge_branch_id(version_ref)? {
-            let stored_tx = self
-                .query_transaction(version_ref.tx)?
-                .ok_or(Error::MissingTransaction(version_ref.tx))?;
-            if stored_tx.tx.target_lineage != BranchLineage::Branch(branch_id) {
-                return Err(Error::InvalidStoredValue(
-                    "relation edge branch discriminator does not match its transaction",
-                ));
-            }
-            self.query_versions_for_tx(version_ref.tx)?
-                .into_iter()
-                .find(|version| {
-                    version.table() == canonical_table
-                        && version.row_uuid() == row_uuid
-                        && version.layer() == VersionLayer::Content
-                })
-                .ok_or(Error::MissingTransaction(version_ref.tx))?
-        } else {
-            let tx_node_alias = self
-                .node_aliases
-                .get(&version_ref.tx.node)
-                .copied()
-                .ok_or(Error::MissingTransaction(version_ref.tx))?;
-            self.query_version_by_alias(
+        let tx_node_alias = self
+            .node_aliases
+            .get(&version_ref.tx.node)
+            .copied()
+            .ok_or(Error::MissingTransaction(version_ref.tx))?;
+        let version = self
+            .query_version_by_alias(
                 canonical_table,
                 row_uuid,
                 VersionLayer::Content,
                 version_ref.tx.time,
                 tx_node_alias,
             )?
-            .ok_or(Error::MissingTransaction(version_ref.tx))?
-        };
+            .ok_or(Error::MissingTransaction(version_ref.tx))?;
         Ok(version)
     }
 
@@ -272,16 +254,6 @@ where
         version_ref: &RowVersionRefEntry,
         read_schema: SchemaVersionId,
     ) -> Result<VersionRow, Error> {
-        if let Some(branch_id) = Self::relation_edge_branch_id(version_ref)? {
-            let stored_tx = self
-                .query_transaction(version_ref.tx)?
-                .ok_or(Error::MissingTransaction(version_ref.tx))?;
-            if stored_tx.tx.target_lineage != BranchLineage::Branch(branch_id) {
-                return Err(Error::InvalidStoredValue(
-                    "relation edge branch discriminator does not match its transaction",
-                ));
-            }
-        }
         let candidates = self
             .query_versions_for_tx(version_ref.tx)?
             .into_iter()
