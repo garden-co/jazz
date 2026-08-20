@@ -1,7 +1,7 @@
 //! Row insertion, update, deletion, restoration, and authorization.
 
 use super::*;
-use crate::protocol::BranchSelector;
+use crate::protocol::{BranchSelector, BranchViewBase};
 
 impl<S> Db<S>
 where
@@ -313,6 +313,40 @@ where
             self.next_now_ms(),
             branch,
         )
+    }
+
+    /// Patch a row through a head-over-base view, copying inherited content
+    /// into the head incarnation without a cross-branch causal parent.
+    pub fn update_in_branch_view(
+        &self,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch(table, &head, row)?
+            .is_some()
+        {
+            return self.update_in_branch(table, head, row, patch);
+        }
+        let Some(mut inherited) = self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+        else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("row is not visible in branch view: {}", row.0),
+            ));
+        };
+        inherited.extend(patch);
+        self.insert_with_id_in_branch(table, head, row, inherited)
     }
 
     /// Update a row with an explicit millisecond provenance time.

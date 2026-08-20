@@ -6,12 +6,65 @@
 
 use super::*;
 use crate::node::query_engine::BranchViewSourceBase;
-use crate::protocol::SnapshotRef;
+use crate::protocol::{BranchViewBase, SnapshotRef};
 
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Resolve one row through a live head-over-base branch view for mutation helpers.
+    pub fn visible_current_cells_in_branch_view(
+        &mut self,
+        table: &str,
+        head: &BranchSelector,
+        base: Option<&BranchViewBase>,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue("current write schema missing"))?
+            .schema
+            .clone();
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        let (head, _) = schema
+            .project_branch_view_selector(&table_schema, head)
+            .map_err(Error::InvalidBranchKey)?;
+        let base = base
+            .map(|base| match base {
+                BranchViewBase::Current(selector) => schema
+                    .project_branch_view_selector(&table_schema, selector)
+                    .map(|(key, _)| BranchViewSourceBase::Current(key)),
+                BranchViewBase::Snapshot { branch, snapshot } => schema
+                    .project_branch_view_selector(&table_schema, branch)
+                    .map(|(key, _)| BranchViewSourceBase::Snapshot(key, snapshot.clone())),
+            })
+            .transpose()
+            .map_err(Error::InvalidBranchKey)?;
+        Ok(self
+            .branch_view_rows_for_schema(
+                table,
+                schema_version,
+                DurabilityTier::Local,
+                &head,
+                base.as_ref(),
+            )?
+            .into_iter()
+            .find(|row| row.row_uuid() == row_uuid)
+            .map(|row| {
+                table_schema
+                    .columns
+                    .iter()
+                    .filter_map(|column| {
+                        row.cell(&table_schema, &column.name)
+                            .map(|value| (column.name.clone(), value))
+                    })
+                    .collect()
+            }))
+    }
+
     pub(super) fn branch_view_rows_for_schema(
         &mut self,
         table: &str,

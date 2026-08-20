@@ -103,9 +103,10 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         Some(Value::Uuid(uuid::Uuid::from_bytes([0x66; 16])))
     );
 
-    db.insert_with_id_in_branch(
+    db.update_in_branch_view(
         "todos",
         head.clone(),
+        Some(BranchViewBase::Current(selector(0x65))),
         row,
         BTreeMap::from([("title".to_owned(), Value::String("draft".to_owned()))]),
     )
