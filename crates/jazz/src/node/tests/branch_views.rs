@@ -168,3 +168,34 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     assert_eq!(after_delete.root_count, 1);
     assert_eq!(after_delete.rows[0].row_uuid(), inherited);
 }
+
+#[test]
+fn version_parents_cannot_cross_branch_keys() {
+    let schema = branch_view_schema();
+    let (_dir, mut node) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x51; 16]), schema);
+    let row_uuid = row(0x52);
+    let owner = AuthorId::from_bytes([0x53; 16]);
+    let parent = node
+        .commit_mergeable(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .branch(branch_selector(0x54))
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("base")),
+                    ("owner".to_owned(), Value::Uuid(owner.0)),
+                ])),
+        )
+        .unwrap();
+    let error = node
+        .commit_mergeable(
+            MergeableCommit::new("todos", row_uuid, 20)
+                .branch(branch_selector(0x55))
+                .parents(vec![parent])
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("invalid")),
+                    ("owner".to_owned(), Value::Uuid(owner.0)),
+                ])),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::InvalidMergeableCommit(_)));
+}

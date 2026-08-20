@@ -117,7 +117,7 @@ where
             Vec::new()
         };
         let mut pending_global_updates =
-            BTreeMap::<(String, RowUuid, VersionLayer), VersionRow>::new();
+            BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), VersionRow>::new();
         let mut content_versions = Vec::new();
         let mut stored_versions = Vec::new();
         for version in versions {
@@ -134,9 +134,28 @@ where
                 (author_schema != self.catalogue.current_schema_version_id)
                     .then_some(author_schema),
             )?;
+            let table_id = self.physical_table_id_for_schema(author_schema, &table_schema.name)?;
+            for parent in stored.parents() {
+                let parent_versions = self.query_versions_for_tx(parent)?;
+                if !parent_versions.is_empty()
+                    && !parent_versions.iter().any(|candidate| {
+                        candidate.row_uuid() == stored.row_uuid()
+                            && candidate.branch_key() == stored.branch_key()
+                            && self.physical_table_id_for_version(candidate).ok() == Some(table_id)
+                    })
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "version parent belongs to a different branch-keyed incarnation",
+                    ));
+                }
+            }
             let layer = VersionLayer::for_record(&version);
-            let previous_current =
-                self.query_local_layer_winner(&table_schema.name, version.row_uuid(), layer)?;
+            let previous_current = self.query_local_layer_winner_in_branch(
+                &table_schema.name,
+                stored.branch_key(),
+                version.row_uuid(),
+                layer,
+            )?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 let previous_tx_id = self.version_tx_id(previous)?;
                 let previous_made_at = if previous_tx_id == tx.tx_id {
@@ -186,7 +205,12 @@ where
                     );
                     if new_is_global_current {
                         pending_global_updates.insert(
-                            (stored.table().to_owned(), stored.row_uuid(), stored.layer()),
+                            (
+                                stored.table().to_owned(),
+                                stored.branch_key().clone(),
+                                stored.row_uuid(),
+                                stored.layer(),
+                            ),
                             stored.clone(),
                         );
                     }

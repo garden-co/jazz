@@ -267,6 +267,12 @@ impl RuntimeSchema {
                 !matches!(dimension.column_type, GrooveColumnType::Nullable(_)),
                 "branch dimensions must be non-nullable"
             );
+            assert!(
+                RecordDescriptor::new([("value", dimension.column_type.clone())])
+                    .create(&[dimension.migration_default.clone()])
+                    .is_ok(),
+                "branch dimension migration default must match its declared type"
+            );
         }
         for table in &self.tables {
             let mut bound_dimensions = BTreeSet::new();

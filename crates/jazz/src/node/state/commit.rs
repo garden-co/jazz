@@ -166,6 +166,24 @@ where
             let (branch_key, dimension_cells) = schema
                 .project_branch_selector(&table_schema, &commit.branch)
                 .map_err(Error::InvalidBranchKey)?;
+            let table_id = self.physical_table_id_for_schema(
+                write_schema_version,
+                &table_schema.name,
+            )?;
+            for parent in &commit.parents {
+                let parent_versions = self.query_versions_for_tx(*parent)?;
+                if !parent_versions.is_empty()
+                    && !parent_versions.iter().any(|version| {
+                        version.row_uuid() == commit.row_uuid
+                            && version.branch_key() == &branch_key
+                            && self.physical_table_id_for_version(version).ok() == Some(table_id)
+                    })
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "version parent belongs to a different branch-keyed incarnation",
+                    ));
+                }
+            }
             let layer = VersionLayer::for_commit(&commit);
             let previous_current =
                 match self.query_local_layer_winner_in_branch(
