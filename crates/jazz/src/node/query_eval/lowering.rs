@@ -452,7 +452,7 @@ where
         let prepare_branch_subscription_sources = maintained_result_membership
             && (request.authorization_mode == QueryAuthorizationMode::TrustedServing
                 || client_local_branch_at_local);
-        let mut resolver = CurrentQuerySourceResolver {
+        let mut resolver = CurrentQuerySourcePreparer {
             node: self,
             read_view: &read_view,
             prepare_branch_subscription_sources,

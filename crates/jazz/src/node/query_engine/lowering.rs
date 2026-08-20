@@ -68,7 +68,7 @@ pub(crate) type ResolvedQuerySources = BTreeMap<SourceId, ResolvedSource>;
 /// this function; the lowering phase itself is [`lower_resolved_query_program`].
 pub(crate) async fn prepare_and_lower_query_program(
     request: QueryProgramRequest,
-    source_resolver: &mut impl SourceResolver,
+    source_preparer: &mut impl AsyncSourcePreparer,
 ) -> QueryCompileResult {
     let mut explain = ExplainPlan::default();
 
@@ -103,7 +103,7 @@ pub(crate) async fn prepare_and_lower_query_program(
         // and policy proofs may prepare a nested program. Keep that future
         // off the caller's stack so the pure lowering call graph stays small
         // while individual snapshot sources are migrated out of this path.
-        let resolved_source = match Box::pin(source_resolver.resolve_source(&source_request)).await
+        let resolved_source = match Box::pin(source_preparer.prepare_source(&source_request)).await
         {
             Ok(resolved_source) => resolved_source,
             Err(err) => {
@@ -246,9 +246,9 @@ pub(crate) fn lower_resolved_query_program(
 #[cfg(test)]
 pub(crate) async fn lower_query_program(
     request: QueryProgramRequest,
-    source_resolver: &mut impl SourceResolver,
+    source_preparer: &mut impl AsyncSourcePreparer,
 ) -> QueryCompileResult {
-    prepare_and_lower_query_program(request, source_resolver).await
+    prepare_and_lower_query_program(request, source_preparer).await
 }
 
 fn verify_routed_terminal_outputs(

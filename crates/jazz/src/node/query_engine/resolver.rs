@@ -113,12 +113,11 @@ pub(crate) enum FieldRequirement {
 /// metadata. They must not execute the query being lowered. Live data loading
 /// and residency belong to Groove evaluation, not this trait.
 ///
-/// The historical `SourceResolver` name means "prepare a declarative source";
-/// it is not the Groove runtime source resolver. New code must keep this trait
-/// on the preparation side of `lower_resolved_query_program`.
-pub(crate) trait SourceResolver {
+/// This is not the Groove runtime source resolver. New code must keep this
+/// trait on the preparation side of `lower_resolved_query_program`.
+pub(crate) trait AsyncSourcePreparer {
     /// Prepare one source request into a concrete Groove graph and row shape.
-    async fn resolve_source(
+    async fn prepare_source(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError>;

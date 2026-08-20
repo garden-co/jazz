@@ -583,8 +583,8 @@ pub(super) struct FakeSourceResolver {
     pub(super) branch_witnesses: bool,
 }
 
-impl SourceResolver for FakeSourceResolver {
-    async fn resolve_source(
+impl AsyncSourcePreparer for FakeSourceResolver {
+    async fn prepare_source(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError> {
@@ -687,8 +687,8 @@ impl InlineCollectorResolver {
     }
 }
 
-impl SourceResolver for InlineCollectorResolver {
-    async fn resolve_source(
+impl AsyncSourcePreparer for InlineCollectorResolver {
+    async fn prepare_source(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError> {

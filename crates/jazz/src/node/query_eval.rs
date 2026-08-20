@@ -39,7 +39,7 @@ use super::query_engine::{
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection, SettledBindingRows,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
     SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest,
-    SourceRequirements, SourceResolutionError, SourceResolver, SourceRole, SourceRowShape,
+    AsyncSourcePreparer, SourceRequirements, SourceResolutionError, SourceRole, SourceRowShape,
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
     VersionIdentityFields, VersionedRowRefSchema, aggregate_output_app_field,
     aggregate_output_column, aggregate_output_field, claim_param_field,
