@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { JazzProvider, createJazzClient } from "jazz-tools/vue";
+import { JazzProvider } from "jazz-tools/vue";
 import { generateAuthSecret, type DbConfig } from "jazz-tools";
 import { Toaster } from "vue-sonner";
 import TodoList from "./TodoList.vue";
@@ -48,11 +48,11 @@ function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
 }
 // #endregion context-setup-vue
 
-const client = computed(() => createJazzClient(defaultConfig(props.config)));
+const config = computed(() => defaultConfig(props.config));
 </script>
 
 <template>
-  <JazzProvider :client="client">
+  <JazzProvider :config="config">
     <h1>Todos</h1>
     <TodoList />
     <Toaster />

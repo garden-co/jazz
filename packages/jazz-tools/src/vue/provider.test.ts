@@ -26,8 +26,10 @@ describe("vue/useSession", () => {
     mockClientRef.value = null;
   });
 
-  it("throws when no JazzProvider context is present", () => {
-    expect(() => useSession()).toThrow("Jazz Vue composables must be used within <JazzProvider>");
+  it("throws when no Jazz provider context is present", () => {
+    expect(() => useSession()).toThrow(
+      "Jazz Vue composables must be used within <JazzProvider> or <JazzClientProvider>",
+    );
   });
 
   it("returns a reactive ComputedRef", () => {
