@@ -1,15 +1,17 @@
 #[cfg(feature = "testing")]
 use std::time::Duration;
 
-use crate::tools::object::ObjectId;
 #[cfg(feature = "testing")]
-use crate::tools::public_api::query::Query;
+use crate::query::Query;
+use crate::tools::object::ObjectId;
 #[cfg(feature = "testing")]
 use crate::tools::public_api::types::Value;
 #[cfg(feature = "testing")]
 use crate::tools::{DurabilityTier, JazzClient};
 
 #[cfg(feature = "testing")]
+pub use crate::tools::admin_catalogue_row_format::decode_row;
+
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
 
 #[cfg(feature = "testing")]

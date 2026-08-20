@@ -1,7 +1,6 @@
-//! Stable public schema, query, and session vocabulary.
+//! Stable public schema and session vocabulary.
 
 pub use crate::tools::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-pub use crate::tools::public_api::query::{AggregateFunction, Query, QueryBuilder};
 pub use crate::tools::public_api::relation_ir::{
     ColumnRef as RelColumnRef, JoinCondition as RelJoinCondition, JoinKind as RelJoinKind,
     KeyRef as RelKeyRef, PredicateCmpOp as RelPredicateCmpOp, PredicateExpr as RelPredicateExpr,

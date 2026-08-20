@@ -127,7 +127,8 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use jazz::tools::{ObjectId, QueryBuilder, Value};
+use jazz::query::Query;
+use jazz::tools::{ObjectId, Value};
 
 fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     if values.len() < 2 {
@@ -162,7 +163,7 @@ fn todo_values(
 
 /// Broadcast current todos to all SSE connections.
 async fn broadcast_todos(state: &AppState) {
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     if let Ok(rows) = state.client.query(query, None).await {
         let todos: Vec<Todo> = rows
             .iter()
@@ -178,7 +179,7 @@ async fn todos_live(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.sse_tx.subscribe();
 
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     let initial_todos: Vec<Todo> = state
         .client
         .query(query, None)
@@ -209,7 +210,7 @@ async fn todos_live(
 }
 
 async fn list_todos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     match state.client.query(query, None).await {
         Ok(rows) => {
             let todos: Vec<Todo> = rows
@@ -266,7 +267,7 @@ async fn update_todo(
     match state.client.update(object_id, updates).await {
         Ok(_batch_id) => {
             broadcast_todos(&state).await;
-            let query = QueryBuilder::new("todos").build();
+            let query = Query::from("todos");
             match state.client.query(query, None).await {
                 Ok(rows) => {
                     for (oid, values) in &rows {
@@ -482,7 +483,7 @@ async fn test_local_persistence() {
         let (row_id, _row_values, _batch_id) = client.insert("todos", values).unwrap();
 
         // Verify it exists
-        let query = QueryBuilder::new("todos").build();
+        let query = Query::from("todos");
         let results = client.query(query, None).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1[0], Value::Text("Persist me".to_string()));
@@ -511,7 +512,7 @@ async fn test_local_persistence() {
         let client = connect_native(context).await.unwrap();
 
         // Query todos - should have the one we created
-        let query = QueryBuilder::new("todos").build();
+        let query = Query::from("todos");
         let results = client.query(query, None).await.unwrap();
 
         assert_eq!(
@@ -809,7 +810,7 @@ async fn test_server_resync() {
         let (_row_id, _row_values, _batch_id) = client.insert("todos", values).unwrap();
 
         // Verify it exists locally
-        let query = QueryBuilder::new("todos").build();
+        let query = Query::from("todos");
         let results = client.query(query, None).await.unwrap();
         assert_eq!(results.len(), 1, "Todo should exist locally");
 
@@ -847,7 +848,7 @@ async fn test_server_resync() {
 
         // One-shot query with EdgeServer durability tier — waits for the server's
         // QuerySettled response before resolving, ensuring synced data arrives.
-        let query = QueryBuilder::new("todos").build();
+        let query = Query::from("todos");
         let results = tokio::time::timeout(
             Duration::from_secs(10),
             client.query(query, Some(DurabilityTier::EdgeServer)),

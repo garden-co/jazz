@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use jazz::query::Query;
 use jazz::tools::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, ObjectId, Query,
-    QueryBuilder, RowDescriptor, Schema, TableName, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, ObjectId,
+    RowDescriptor, Schema, TableName, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{TestingClient, wait_for, wait_for_query};
@@ -166,7 +167,7 @@ async fn concurrent_writes_converge_to_sorted_union_impl() {
         .insert("docs", doc_values("b", &["seed"]))
         .expect("alice creates doc b");
 
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),
@@ -263,7 +264,7 @@ async fn concurrent_writes_never_remove_a_shared_element_impl() {
         .insert("docs", doc_values("b", &["base", "keep"]))
         .expect("alice creates doc b");
 
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),
@@ -360,7 +361,7 @@ async fn same_elements_in_different_orders_converge_to_one_canonical_order_impl(
     let (doc_id, _, _) = alice
         .insert("docs", doc_values("order", &[]))
         .expect("alice creates doc");
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),
@@ -430,7 +431,7 @@ async fn duplicate_insertions_are_idempotent_impl() {
     let (doc_id, _, _) = alice
         .insert("docs", doc_values("idempotent", &[]))
         .expect("alice creates doc");
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),
@@ -500,7 +501,7 @@ async fn later_writes_cannot_remove_existing_elements_impl() {
         .await
         .expect("attempted removal settles");
 
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &alice,
         query,
@@ -553,7 +554,7 @@ async fn empty_and_non_empty_sets_union_in_both_propagation_orders_impl() {
     let (doc_bob_first, _, _) = alice
         .insert("docs", doc_values("non-empty-first", &[]))
         .expect("alice creates second doc");
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),
@@ -691,7 +692,7 @@ async fn distinct_float_representations_converge_deterministically_impl() {
         .insert("docs", score_doc_values("b", &[]))
         .expect("alice creates doc b");
 
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),

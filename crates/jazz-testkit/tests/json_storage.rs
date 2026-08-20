@@ -3,9 +3,7 @@
 //! must still be enforced at every write boundary.
 
 use jazz::row_input;
-use jazz::tools::{
-    AppContext, ColumnType, JazzClient, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{AppContext, ColumnType, JazzClient, Schema, SchemaBuilder, TableSchema, Value};
 
 fn documents_schema(json_schema: Option<serde_json::Value>) -> Schema {
     SchemaBuilder::new()
@@ -64,7 +62,7 @@ fn json_array_schema() -> Schema {
 async fn assert_documents_empty(client: &JazzClient, context: &str) {
     let rows = client
         .query(
-            QueryBuilder::new("documents").select(&["payload"]).build(),
+            jazz::query::Query::from("documents").select(["payload"]),
             None,
         )
         .await
@@ -78,7 +76,7 @@ async fn assert_documents_empty(client: &JazzClient, context: &str) {
 async fn assert_json_array_documents_empty(client: &JazzClient, context: &str) {
     let rows = client
         .query(
-            QueryBuilder::new("documents").select(&["payloads"]).build(),
+            jazz::query::Query::from("documents").select(["payloads"]),
             None,
         )
         .await
@@ -103,7 +101,7 @@ async fn json_column_preserves_original_text() {
 
             let rows = client
                 .query(
-                    QueryBuilder::new("documents").select(&["payload"]).build(),
+                    jazz::query::Query::from("documents").select(["payload"]),
                     None,
                 )
                 .await
@@ -187,7 +185,7 @@ async fn json_column_rejects_schema_invalid_update_and_preserves_original_text()
 
             let rows = client
                 .query(
-                    QueryBuilder::new("documents").select(&["payload"]).build(),
+                    jazz::query::Query::from("documents").select(["payload"]),
                     None,
                 )
                 .await
@@ -269,7 +267,7 @@ async fn json_column_valid_default_is_inserted_when_omitted() {
                 .expect("empty insert uses admitted JSON default");
             let rows = client
                 .query(
-                    QueryBuilder::new("documents").select(&["payload"]).build(),
+                    jazz::query::Query::from("documents").select(["payload"]),
                     None,
                 )
                 .await

@@ -4,9 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use jazz::query::{OrderDirection, col, eq, lit};
 use jazz::tools::{
-    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema,
-    SchemaBuilder, TableSchema, Value,
+    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder,
+    TableSchema, Value,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -635,39 +636,38 @@ async fn run_w1_interactive(
         match op.as_str() {
             "query_board" => {
                 let project_idx = rng.next_usize(seed.hot_project_count);
-                let query = QueryBuilder::new("tasks")
-                    .filter_eq("project_id", Value::Uuid(seed.projects[project_idx]))
-                    .order_by_desc("updated_at")
-                    .limit(200)
-                    .build();
+                let query = jazz::query::Query::from("tasks")
+                    .filter(eq(
+                        col("project_id"),
+                        lit(*seed.projects[project_idx].uuid()),
+                    ))
+                    .order_by("updated_at", OrderDirection::Desc)
+                    .limit(200);
                 let _ = client.query(query, None).await?;
             }
             "query_my_work" => {
                 let user_idx = rng.next_usize(seed.users.len());
-                let query = QueryBuilder::new("tasks")
-                    .filter_eq("assignee_id", Value::Uuid(seed.users[user_idx]))
-                    .filter_eq("status", Value::Text("in_progress".into()))
-                    .order_by_desc("updated_at")
-                    .limit(200)
-                    .build();
+                let query = jazz::query::Query::from("tasks")
+                    .filter(eq(col("assignee_id"), lit(*seed.users[user_idx].uuid())))
+                    .filter(eq(col("status"), lit("in_progress")))
+                    .order_by("updated_at", OrderDirection::Desc)
+                    .limit(200);
                 let _ = client.query(query, None).await?;
             }
             "query_task_detail" => {
                 let task_idx = rng.next_usize(seed.tasks.len());
                 let task = &seed.tasks[task_idx];
 
-                let comments = QueryBuilder::new("task_comments")
-                    .filter_eq("task_id", Value::Uuid(task.id))
-                    .order_by_desc("created_at")
-                    .limit(200)
-                    .build();
+                let comments = jazz::query::Query::from("task_comments")
+                    .filter(eq(col("task_id"), lit(*task.id.uuid())))
+                    .order_by("created_at", OrderDirection::Desc)
+                    .limit(200);
                 let _ = client.query(comments, None).await?;
 
-                let activity = QueryBuilder::new("activity_events")
-                    .filter_eq("task_id", Value::Uuid(task.id))
-                    .order_by_desc("created_at")
-                    .limit(200)
-                    .build();
+                let activity = jazz::query::Query::from("activity_events")
+                    .filter(eq(col("task_id"), lit(*task.id.uuid())))
+                    .order_by("created_at", OrderDirection::Desc)
+                    .limit(200);
                 let _ = client.query(activity, None).await?;
             }
             "update_task_status" => {
@@ -806,9 +806,8 @@ async fn run_w3_offline_reconnect(
     let mut polls = 0usize;
 
     loop {
-        let query = QueryBuilder::new("task_comments")
-            .filter_eq("task_id", Value::Uuid(target_task_id))
-            .build();
+        let query = jazz::query::Query::from("task_comments")
+            .filter(eq(col("task_id"), lit(*target_task_id.uuid())));
         let rows = online_client
             .query(query, Some(DurabilityTier::EdgeServer))
             .await?;
@@ -903,11 +902,10 @@ async fn run_w4_cold_start(
         copy_dir_recursive(&data_dir, &cycle_data_dir)?;
         let t0 = Instant::now();
         let client = connect_client(app_id, cycle_data_dir, None).await?;
-        let query = QueryBuilder::new("tasks")
-            .filter_eq("project_id", Value::Uuid(hot_project))
-            .order_by_desc("updated_at")
-            .limit(200)
-            .build();
+        let query = jazz::query::Query::from("tasks")
+            .filter(eq(col("project_id"), lit(*hot_project.uuid())))
+            .order_by("updated_at", OrderDirection::Desc)
+            .limit(200);
         let _ = client.query(query, None).await?;
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
         latencies.push(elapsed_ms);

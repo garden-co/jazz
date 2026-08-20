@@ -1,3 +1,96 @@
+/// A table participating in a query, optionally under a public alias.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableRef {
+    table: String,
+    alias: Option<String>,
+}
+
+impl TableRef {
+    /// Assign the name used to qualify this table's fields.
+    pub fn alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+}
+
+impl<T> From<T> for TableRef
+where
+    T: Into<String>,
+{
+    fn from(table: T) -> Self {
+        Self {
+            table: table.into(),
+            alias: None,
+        }
+    }
+}
+
+/// Refer to a table that may be assigned an alias.
+pub fn table(name: impl Into<String>) -> TableRef {
+    TableRef::from(name.into())
+}
+
+/// Configuration for recursively gathering rows through an edge relation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gather {
+    step_table: String,
+    current_column: Option<String>,
+    hop_column: Option<String>,
+    frontier_column: Option<String>,
+    filters: Vec<Predicate>,
+    bound: RecursionBound,
+}
+
+impl Gather {
+    /// Start a recursive step from `table`.
+    pub fn from(table: impl Into<String>) -> Self {
+        Self {
+            step_table: table.into(),
+            current_column: None,
+            hop_column: None,
+            frontier_column: None,
+            filters: Vec::new(),
+            bound: RecursionBound::default_max_depth(),
+        }
+    }
+
+    /// Match this step-table column against the current recursive frontier.
+    pub fn where_current(mut self, column: impl Into<String>) -> Self {
+        self.current_column = Some(column.into());
+        self
+    }
+
+    /// Follow this step-table reference to the next gathered row.
+    pub fn hop_to(mut self, column: impl Into<String>) -> Self {
+        self.hop_column = Some(column.into());
+        self
+    }
+
+    /// Use an application column as the recursive frontier instead of row ids.
+    pub fn frontier_column(mut self, column: impl Into<String>) -> Self {
+        self.frontier_column = Some(column.into());
+        self
+    }
+
+    /// Restrict the step rows traversed during recursion.
+    pub fn filter(mut self, predicate: Predicate) -> Self {
+        self.filters.push(predicate);
+        self
+    }
+
+    /// Stop after at most `max_depth` recursive steps.
+    pub fn max_depth(mut self, max_depth: usize) -> Self {
+        self.bound = RecursionBound::MaxDepth(max_depth);
+        self
+    }
+
+    /// Continue until the recursive frontier reaches a fixpoint.
+    pub fn until_fixpoint(mut self) -> Self {
+        self.bound = RecursionBound::Fixpoint;
+        self
+    }
+}
+
 impl Query {
     /// Construct a query rooted at `table`.
     ///
@@ -8,12 +101,17 @@ impl Query {
     /// query.validate(&doctest_support::schema())?;
     /// # Ok::<(), jazz::query::QueryError>(())
     /// ```
-    pub fn from(table: impl Into<String>) -> Self {
+    pub fn from(source: impl Into<TableRef>) -> Self {
+        let source = source.into();
+        let flat_join = source.alias.map(|root_alias| FlatJoin {
+            root_alias: Some(root_alias),
+            sources: Vec::new(),
+        });
         Self {
-            table: table.into(),
+            table: source.table,
             filters: Vec::new(),
             joins: Vec::new(),
-            flat_join: None,
+            flat_join,
             policy_branches: Vec::new(),
             reachable: Vec::new(),
             inherits: Vec::new(),
@@ -46,6 +144,74 @@ impl Query {
     /// ```
     pub fn filter(mut self, predicate: Predicate) -> Self {
         self.filters.push(predicate);
+        self
+    }
+
+    /// Add a source to an output-changing flat join.
+    ///
+    /// Unlike [`Query::join_via`], a flat join emits fields from every source
+    /// and may produce multiple result occurrences for one root row.
+    pub fn flat_join(
+        mut self,
+        source: impl Into<TableRef>,
+        left: impl Into<String>,
+        right: impl Into<String>,
+    ) -> Self {
+        let source = source.into();
+        let flat_join = self.flat_join.get_or_insert_with(|| FlatJoin {
+            root_alias: None,
+            sources: Vec::new(),
+        });
+        flat_join.sources.push(FlatJoinSource {
+            table: source.table,
+            alias: source.alias,
+            on: FlatJoinOn {
+                left: left.into(),
+                right: right.into(),
+            },
+        });
+        self
+    }
+
+    /// Gather root-table rows recursively through a relation step.
+    ///
+    /// Filters already present on the query select the seed rows. Filters
+    /// added after `gather` apply to the gathered output. Row ids form the
+    /// frontier by default; use [`Gather::frontier_column`] for scalar values.
+    pub fn gather(mut self, gather: Gather) -> Self {
+        let root_table = self.table.clone();
+        let (frontier_column, access_team_target) = gather
+            .frontier_column
+            .map(|column| (column, JoinTarget::Column))
+            .unwrap_or_else(|| ("id".to_owned(), JoinTarget::RowId));
+        let edge_member_column = gather
+            .current_column
+            .expect("Gather::where_current must be called before Query::gather");
+        let edge_parent_column = gather
+            .hop_column
+            .expect("Gather::hop_to must be called before Query::gather");
+        let seed_filters = std::mem::take(&mut self.filters);
+
+        self.reachable.push(ReachableVia {
+            access_table: root_table.clone(),
+            access_row_column: frontier_column.clone(),
+            access_team_column: frontier_column.clone(),
+            access_team_target,
+            from: Operand::Literal(Value::Uuid(uuid::Uuid::nil())),
+            access_filters: Vec::new(),
+            edge_table: gather.step_table,
+            edge_member_column,
+            edge_parent_column,
+            edge_filters: gather.filters,
+            bound: gather.bound,
+            seed: Some(ReachableSeed {
+                table: root_table,
+                user_column: None,
+                user_claim: None,
+                team_column: frontier_column,
+                filters: seed_filters,
+            }),
+        });
         self
     }
 

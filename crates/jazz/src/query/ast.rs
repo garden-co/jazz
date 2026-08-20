@@ -6,7 +6,8 @@ pub const QUERY_NAMESPACE: uuid::Uuid = uuid::uuid!("5d39e9ed-88f3-5b58-b8db-878
 pub struct Query {
     /// Root table.
     pub table: String,
-    /// Root filters.
+    /// Conjunctive filters. Flat-join filters may address a source-qualified
+    /// column and are evaluated on that source before the inner join.
     pub filters: Vec<Predicate>,
     /// Junction traversals.
     pub joins: Vec<JoinVia>,

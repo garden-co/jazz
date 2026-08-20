@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+import { JazzProvider } from "jazz-tools/vue";
 
-const client = createJazzClient({
+const config = {
   appId: "my-app",
   serverUrl: "http://127.0.0.1:4200",
   jwtToken: "<provider-jwt>",
-});
+};
 </script>
 
 <template>
-  <JazzProvider :client="client">
+  <JazzProvider :config="config">
     <slot />
   </JazzProvider>
 </template>

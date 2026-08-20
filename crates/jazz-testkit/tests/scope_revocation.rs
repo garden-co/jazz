@@ -6,8 +6,8 @@ use std::time::Duration;
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
 use jazz::tools::{
-    ColumnDescriptor, ColumnType, DurabilityTier, ObjectId, QueryBuilder, RowDescriptor, Session,
-    TableName, TableSchema, Value,
+    ColumnDescriptor, ColumnType, DurabilityTier, ObjectId, RowDescriptor, Session, TableName,
+    TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{
@@ -122,7 +122,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                 .await
                 .expect("create reaches edge");
 
-            let query = QueryBuilder::new("docs").build();
+            let query = jazz::query::Query::from("docs");
             wait_for_query(
                 &bob,
                 query.clone(),
