@@ -10,6 +10,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, BranchDimensionId, NodeUuid, RowUuid};
+use jazz::node::ContributionMergeRow;
 use jazz::protocol::{
     BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
 };
@@ -64,6 +65,41 @@ fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
             },
         )
         .with_id_source(SeededRowIdSource::new(1)),
+    ))
+    .unwrap();
+    (db, schema)
+}
+
+fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
+    let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x61; 16]));
+    let schema = JazzSchema::new_with_branch_dimensions(
+        [BranchDimensionSchema::new(
+            dimension,
+            "branch",
+            ColumnType::Uuid,
+            Value::Uuid(uuid::Uuid::nil()),
+        )],
+        [TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("branch_id", ColumnType::Uuid),
+                ColumnSchema::new("title", ColumnType::String),
+            ],
+        )
+        .with_branch_dimension("branch_id", dimension)],
+    );
+    let families = schema.column_families();
+    let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>());
+    let db = block_on(Db::open_history_complete(
+        DbConfig::new(
+            schema.clone(),
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x90; 16]),
+                author: AuthorId::SYSTEM,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(9)),
     ))
     .unwrap();
     (db, schema)
@@ -429,6 +465,40 @@ fn one_mergeable_transaction_can_atomically_write_multiple_branches() {
 }
 
 #[test]
+fn branch_move_is_explicit_source_delete_and_destination_restore() {
+    let (db, schema) = open_db();
+    let source = selector(0x94);
+    let target = selector(0x95);
+    let row = RowUuid::from_bytes([0x96; 16]);
+    db.insert_with_id_in_branch(
+        "todos",
+        source.clone(),
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("move me".to_owned()))]),
+    )
+    .unwrap();
+
+    let tx = db.mergeable_tx().unwrap();
+    tx.move_between_branches("todos", source.clone(), target.clone(), row)
+        .unwrap();
+    tx.commit().unwrap();
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    assert!(
+        block_on(db.all(&query, ReadOpts::default().branch_view(source, None),))
+            .unwrap()
+            .is_empty()
+    );
+    let destination =
+        block_on(db.all(&query, ReadOpts::default().branch_view(target, None))).unwrap();
+    assert_eq!(destination.len(), 1);
+    assert_eq!(
+        destination[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("move me".to_owned()))
+    );
+}
+
+#[test]
 fn sibling_branch_view_subscriptions_isolate_first_writes() {
     let (db, _schema) = open_db();
     let left = selector(0x89);
@@ -759,4 +829,44 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
         block_on(subscription.next_event()).unwrap(),
         SubscriptionEvent::Delta { reset: false, ref added, .. } if added.len() == 1
     ));
+}
+
+#[test]
+fn db_contribution_merge_is_an_ordinary_retry_safe_transaction() {
+    let (db, schema) = open_history_complete_db();
+    let source = selector(0x91);
+    let target = selector(0x92);
+    let row = RowUuid::from_bytes([0x93; 16]);
+    db.insert_with_id_in_branch(
+        "todos",
+        source.clone(),
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("source".to_owned()))]),
+    )
+    .unwrap();
+
+    let selected = || {
+        [ContributionMergeRow {
+            table: "todos".to_owned(),
+            row_uuid: row,
+        }]
+    };
+    let merged = db
+        .merge_branch_contributions(source.clone(), target.clone(), selected())
+        .unwrap()
+        .expect("the first calculation emits an ordinary transaction");
+    let _ordinary_write_state = db.write_state(merged).unwrap();
+    assert!(
+        db.merge_branch_contributions(source, target.clone(), selected())
+            .unwrap()
+            .is_none(),
+        "observed contribution provenance suppresses a retry"
+    );
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let rows = block_on(db.all(&query, ReadOpts::default().branch_view(target, None))).unwrap();
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("source".to_owned()))
+    );
 }

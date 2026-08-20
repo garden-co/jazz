@@ -1,12 +1,42 @@
 //! Row insertion, update, deletion, restoration, and authorization.
 
 use super::*;
+use crate::node::{ContributionMergeRequest, ContributionMergeRow};
 use crate::protocol::{BranchSelector, BranchViewBase};
 
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Calculate and commit novel contributions from one exact branch key into
+    /// another. This requires a history-complete database and emits an ordinary
+    /// mergeable transaction when the target does not already represent every
+    /// selected contribution.
+    pub fn merge_branch_contributions(
+        &self,
+        source: BranchSelector,
+        target: BranchSelector,
+        rows: impl IntoIterator<Item = ContributionMergeRow>,
+    ) -> Result<Option<TxId>, Error> {
+        let tx_id =
+            self.node
+                .node
+                .borrow_mut()
+                .merge_branch_contributions(ContributionMergeRequest {
+                    source,
+                    target,
+                    rows: rows.into_iter().collect(),
+                    made_by: self.identity.author,
+                    permission_subject: Some(self.identity.author),
+                    now_ms: self.next_now_ms(),
+                })?;
+        if let Some(tx_id) = tx_id {
+            self.finalize_local_commit(tx_id)?;
+            self.refresh_subscriptions()?;
+        }
+        Ok(tx_id)
+    }
+
     /// Insert a row locally, generating a uuidv7-shaped row id.
     ///
     /// The generated id is available from [`WriteHandle::row_uuid`].

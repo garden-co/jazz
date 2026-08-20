@@ -1510,6 +1510,51 @@ where
             .stage_mergeable_restore_in_branch(self.tx_id(), table, branch, row, cells, None)
     }
 
+    /// Stage an atomic move of one object incarnation between exact branch
+    /// keys. The destination receives an explicit content write and restore,
+    /// while the source receives an explicit deletion in the same transaction.
+    fn move_between_branches(
+        &self,
+        table: &str,
+        source: BranchSelector,
+        target: BranchSelector,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        if source == target {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "branch move requires distinct source and target selectors",
+            ));
+        }
+        let mut cells = self
+            .db()
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch(table, &source, row)?
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::NotObserved,
+                    format!("source incarnation is not visible: {}", row.0),
+                )
+            })?;
+        let table_schema = self
+            .db()
+            .schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))?;
+        let (_, target_cells) = self
+            .db()
+            .schema
+            .project_branch_selector(table_schema, &target)
+            .map_err(|message| Error::new(ErrorCode::Schema, message))?;
+        cells.extend(target_cells);
+        self.restore_in_branch(table, target, row, cells)?;
+        self.delete_in_branch_view(table, source, None, row)
+    }
+
     /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
     fn restore_at_ms(
         &self,
