@@ -735,37 +735,21 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        let mut staged = self.clone();
-        let records = staged.query_snapshot_staged(graph, storage).await?;
-        *self = staged;
-        Ok(records)
-    }
-
-    async fn query_snapshot_staged<S>(
-        &mut self,
-        graph: GraphBuilder,
-        storage: &S,
-    ) -> Result<RecordDeltas, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
         self.flush_pending_binding_retractions(storage).await?;
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
         }
-        self.logical_nodes_requested += count_builder_nodes(&graph) as u64;
+        let mut query = EphemeralQuery::new(self);
+        let runtime = query.runtime();
+        runtime.logical_nodes_requested += count_builder_nodes(&graph) as u64;
         let CompiledNode {
             output,
             node: output_node,
             ..
-        } = self.add_dedup_graph(&graph)?;
-        let records = self
+        } = runtime.add_dedup_graph(&graph)?;
+        let records = runtime
             .hydration_snapshot(output_node, storage, HydrationMode::Ordinary)
             .await?;
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
-        }
-        self.prune_unreferenced_arrangements();
         if !records.descriptor.registry_compatible_with(&output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
@@ -786,20 +770,6 @@ impl IvmRuntime {
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
-        let mut staged = self.clone();
-        let snapshots = staged.query_snapshots_staged(sinks, storage).await?;
-        *self = staged;
-        Ok(snapshots)
-    }
-
-    async fn query_snapshots_staged<S>(
-        &mut self,
-        sinks: Vec<(String, GraphBuilder)>,
-        storage: &S,
-    ) -> Result<MultisinkDeltas, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
         self.flush_pending_binding_retractions(storage).await?;
         if sinks.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
@@ -813,22 +783,44 @@ impl IvmRuntime {
                 return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(sink.clone()));
             }
         }
-        self.logical_nodes_requested += sinks
+        let mut query = EphemeralQuery::new(self);
+        let runtime = query.runtime();
+        runtime.logical_nodes_requested += sinks
             .iter()
             .map(|(_, graph)| count_builder_nodes(graph))
             .sum::<usize>() as u64;
         let mut outputs = BTreeMap::new();
         for (sink, graph) in sinks {
-            outputs.insert(sink, self.add_dedup_graph(&graph)?);
+            outputs.insert(sink, runtime.add_dedup_graph(&graph)?);
         }
-        let snapshots = self
+        runtime
             .hydration_snapshots(&outputs, storage, HydrationMode::Ordinary)
-            .await;
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
+            .await
+    }
+}
+
+/// Ensures a cancellable one-shot evaluation cannot strand ephemeral graph
+/// nodes while leaving shared live-subscription nodes untouched.
+struct EphemeralQuery<'a> {
+    runtime: &'a mut IvmRuntime,
+}
+
+impl<'a> EphemeralQuery<'a> {
+    fn new(runtime: &'a mut IvmRuntime) -> Self {
+        Self { runtime }
+    }
+
+    fn runtime(&mut self) -> &mut IvmRuntime {
+        self.runtime
+    }
+}
+
+impl Drop for EphemeralQuery<'_> {
+    fn drop(&mut self) {
+        for node in self.runtime.gc_ephemeral_nodes(0) {
+            self.runtime.remove_node_runtime(node);
         }
-        self.prune_unreferenced_arrangements();
-        snapshots
+        self.runtime.prune_unreferenced_arrangements();
     }
 }
 
