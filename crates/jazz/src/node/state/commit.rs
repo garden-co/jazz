@@ -154,7 +154,6 @@ where
         );
         let mut stored_versions = Vec::new();
         let mut pending_parents = BTreeSet::new();
-        let mut invalidates_branch_views = false;
         for (write_schema_version, commit) in commits {
             let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
@@ -167,7 +166,6 @@ where
             let (branch_key, dimension_cells) = schema
                 .project_branch_selector(&table_schema, &commit.branch)
                 .map_err(Error::InvalidBranchKey)?;
-            invalidates_branch_views |= !branch_key.dimensions.is_empty();
             let table_id = self.physical_table_id_for_schema(
                 write_schema_version,
                 &table_schema.name,
@@ -302,9 +300,6 @@ where
             }
         }
         self.database.commit_batch(batch)?;
-        if invalidates_branch_views {
-            self.groove_runtime_token = next_groove_runtime_token();
-        }
         self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {
             self.open_tx

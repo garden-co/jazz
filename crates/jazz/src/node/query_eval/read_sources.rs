@@ -286,9 +286,7 @@ where
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(request, SourceGap::Coverage));
             }
-            if request.requirements.metadata.is_empty()
-                && base.is_none_or(|base| matches!(base, BranchViewSourceBase::Current(_)))
-            {
+            if base.is_none_or(|base| matches!(base, BranchViewSourceBase::Current(_))) {
                 let head_keys = self
                     .node
                     .equivalent_stored_branch_keys(
@@ -352,67 +350,55 @@ where
                     }
                     _ => (head_content, head_deletions),
                 };
+                let content_version = request
+                    .requirements
+                    .metadata
+                    .contains(&SourceMetadataRequirement::VersionPayloads)
+                    .then(|| ContentVersionSource {
+                        graph: content
+                            .clone()
+                            .project(maintained_view_history_storage_field_names(&table)),
+                        row_uuid_field: "row_uuid".to_owned(),
+                    });
+                let deletion_register = request
+                    .requirements
+                    .metadata
+                    .contains(&SourceMetadataRequirement::DeletionMarkers)
+                    .then(|| DeletionRegisterSource {
+                        graph: deletions.clone().project(register_storage_field_names()),
+                        row_uuid_field: "row_uuid".to_owned(),
+                    });
                 let deleted = deletions
                     .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
                     .project(["row_uuid"]);
-                let graph = GraphBuilder::anti_join(content, deleted, ["row_uuid"], ["row_uuid"])
-                    .project_fields(branch_view_current_source_fields(&table, head).map_err(
-                        |_| source_resolution_error(request, SourceGap::SchemaProjection),
-                    )?);
-                let graph = match &authorization {
-                    SourceAuthorizationRequest::System => graph,
-                    SourceAuthorizationRequest::PolicyFiltered {
-                        permission_subject,
-                        plan,
-                    }
-                    | SourceAuthorizationRequest::PolicyProof {
-                        permission_subject,
-                        plan,
-                    } => {
-                        if plan.protected_source.table != table.name
-                            || plan.role != PolicyDecisionRole::Read
-                            || plan.protected_row_field != "row_uuid"
-                        {
-                            return Err(source_resolution_error(request, SourceGap::Coverage));
-                        }
-                        let policy_request = self.node.table_read_policy_authorization_request(
-                            self.read_view.policy_schema,
-                            &table.name,
-                            *permission_subject,
-                            ParamBindingMode::InlineAllReachableSeeds,
-                            graph_tier.expect("branch view has a current tier"),
-                            plan.binding_source_shape.clone(),
-                            plan.binding_user_params.clone(),
-                            plan.binding_claim_params.clone(),
-                        );
-                        let policy_request = policy_request.map(|mut request| {
-                            request.reads.primary = self.read_view.clone();
-                            request
-                        });
-                        self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
-                                policy_request,
-                                graph,
-                                &current_row_fields(&table),
-                            )
-                            .map_err(|error| {
-                                source_resolution_error_from_policy_proof(request, error)
-                            })?
-                            .graph
-                    }
-                };
+                let selected_base =
+                    GraphBuilder::anti_join(content, deleted, ["row_uuid"], ["row_uuid"])
+                        .project_fields(branch_view_storage_source_fields(&table, head).map_err(
+                            |_| source_resolution_error(request, SourceGap::SchemaProjection),
+                        )?);
+                let (graph, descriptor, metadata, routing_fields) = resolved_current_source_graph(
+                    self.node,
+                    &table,
+                    graph_tier.expect("branch view has a current tier"),
+                    &request.requirements,
+                    &authorization,
+                    self.read_view.policy_schema,
+                    Some(&self.read_view),
+                    Some(selected_base),
+                )
+                .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
                 return Ok(ResolvedSource {
                     table_schema: table.clone(),
                     graph,
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
-                        descriptor: current_row_descriptor(&table),
+                        descriptor,
                         row_uuid_field: "row_uuid".to_owned(),
-                        metadata: BTreeMap::new(),
+                        metadata,
                     },
-                    routing_fields: BTreeSet::new(),
-                    content_version: None,
-                    deletion_register: None,
+                    routing_fields,
+                    content_version,
+                    deletion_register,
                 });
             }
             let rows = self
@@ -615,6 +601,7 @@ where
                     &request.requirements,
                     &authorization,
                     self.read_view.policy_schema,
+                    None,
                     Some(source.graph),
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
@@ -787,6 +774,7 @@ where
                 &request.requirements,
                 &authorization,
                 self.read_view.policy_schema,
+                None,
                 selected_base,
             )
             .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
@@ -1803,6 +1791,7 @@ fn resolved_current_source_graph<S>(
     requirements: &SourceRequirements,
     authorization: &SourceAuthorizationRequest,
     policy_schema: SchemaVersionId,
+    policy_read_view: Option<&ReadView<RequestedSourceStage>>,
     selected_base: Option<GraphBuilder>,
 ) -> Result<
     (
@@ -1949,6 +1938,12 @@ where
                 binding_user_params.clone(),
                 binding_claim_params,
             );
+            let policy_request = policy_request.map(|mut request| {
+                if let Some(read_view) = policy_read_view {
+                    request.reads.primary = read_view.clone();
+                }
+                request
+            });
             let output_fields = global_current_storage_fields(
                 table,
                 needs_version_witnesses,
@@ -2066,12 +2061,17 @@ fn storage_to_canonical_current_source_fields(
     fields
 }
 
-fn branch_view_current_source_fields(
+fn branch_view_storage_source_fields(
     table: &TableSchema,
     head: &BranchKey,
 ) -> Result<Vec<ProjectField>, Error> {
     let head_values = head.dimensions.iter().cloned().collect::<BTreeMap<_, _>>();
-    let mut fields = vec![ProjectField::named("row_uuid")];
+    let mut fields = vec![
+        ProjectField::named("row_uuid"),
+        ProjectField::named("schema_version"),
+        ProjectField::named("parents"),
+        ProjectField::named("authored_columns"),
+    ];
     for column in &table.columns {
         if let Some(binding) = table
             .branch_by
@@ -2096,12 +2096,13 @@ fn branch_view_current_source_fields(
         }
     }
     fields.extend([
-        ProjectField::renamed("created_by", "$createdBy"),
-        ProjectField::renamed("created_at", "$createdAt"),
-        ProjectField::renamed("updated_by", "$updatedBy"),
-        ProjectField::renamed("updated_at", "$updatedAt"),
+        ProjectField::named("created_by"),
+        ProjectField::named("created_at"),
+        ProjectField::named("updated_by"),
+        ProjectField::named("updated_at"),
         ProjectField::named("tx_time"),
         ProjectField::named("tx_node_id"),
+        ProjectField::named("global_seq"),
     ]);
     Ok(fields)
 }

@@ -109,6 +109,22 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         SubscriptionEvent::Delta { reset: true, .. }
     ));
 
+    db.update_in_branch(
+        "todos",
+        selector(0x65),
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("base edited".to_owned()))]),
+    )
+    .unwrap();
+    let base_changed = block_on(subscription.next_event()).unwrap();
+    assert!(
+        matches!(
+            base_changed,
+            SubscriptionEvent::Delta { reset: false, ref updated, .. } if updated.len() == 1
+        ),
+        "unexpected live-base subscription delta: {base_changed:?}"
+    );
+
     db.update_in_branch_view(
         "todos",
         head.clone(),
@@ -122,9 +138,6 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         matches!(
             changed,
             SubscriptionEvent::Delta { reset: false, ref updated, .. } if updated.len() == 1
-        ) || matches!(
-            changed,
-            SubscriptionEvent::Delta { reset: true, ref added, .. } if added.len() == 1
         ),
         "unexpected branch subscription delta: {changed:?}"
     );

@@ -201,7 +201,7 @@ fn version_parents_cannot_cross_branch_keys() {
 }
 
 #[test]
-fn remote_branch_write_invalidates_live_branch_view_plans() {
+fn remote_branch_write_does_not_invalidate_live_branch_view_plans() {
     let schema = branch_view_schema();
     let (_writer_dir, mut writer) =
         open_node_with_schema(NodeUuid::from_bytes([0x56; 16]), schema.clone());
@@ -219,5 +219,67 @@ fn remote_branch_write_invalidates_live_branch_view_plans() {
         .unwrap();
     let before = reader.groove_runtime_token();
     reader.apply_sync_message(unit).unwrap();
-    assert_ne!(reader.groove_runtime_token(), before);
+    assert_eq!(reader.groove_runtime_token(), before);
+}
+
+#[test]
+fn maintained_live_base_emits_a_delta_before_facade_refresh() {
+    let schema = branch_view_schema();
+    let (_dir, mut node) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x5a; 16]), schema.clone());
+    let row_uuid = row(0x5b);
+    let base = branch_selector(0x5c);
+    let head = branch_selector(0x5d);
+    node.commit_mergeable(
+        MergeableCommit::new("todos", row_uuid, 10)
+            .branch(base.clone())
+            .cells(BTreeMap::from([
+                ("title".to_owned(), v("base")),
+                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+            ])),
+    )
+    .unwrap();
+    let read_view = crate::protocol::ReadViewSpec::branch_view(
+        head,
+        Some(crate::protocol::BranchViewBase::Current(base.clone())),
+    );
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (shape, binding, plan) = node
+        .prepare_query_binding_for_link_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorId::SYSTEM,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    let (mut maintained, initial) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            AuthorId::SYSTEM,
+            DurabilityTier::Local,
+            &read_view,
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    assert_eq!(initial.root_count, 1);
+
+    node.commit_mergeable(
+        MergeableCommit::new("todos", row_uuid, 20)
+            .branch(base)
+            .cells(BTreeMap::from([
+                ("title".to_owned(), v("base edited")),
+                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+            ])),
+    )
+    .unwrap();
+    let update = node
+        .drain_local_maintained_view_subscription(&mut maintained, None)
+        .unwrap()
+        .expect("live-base write must emit a maintained delta");
+    assert_eq!(update.added.len(), 1);
+    assert_eq!(update.removed.len(), 1);
 }
