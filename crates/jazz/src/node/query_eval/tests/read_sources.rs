@@ -125,7 +125,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
         node.physical_table_id_for_schema(evolved_payload.id, "people")
             .unwrap(),
     );
-    let mut resolver = CurrentQuerySourcePreparer {
+    let mut resolver = JazzSourceGraphPreparer {
         node: &mut node,
         read_view: &read_view,
         prepare_branch_subscription_sources: false,
@@ -135,7 +135,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
     };
 
     assert!(resolver.needs_projected_current_source("users"));
-    let resolved = resolver.prepare_source(&source_request).unwrap();
+    let resolved = resolver.prepare_source_graph(&source_request).unwrap();
     assert_eq!(
         resolver.current_projection_targets.len(),
         1,

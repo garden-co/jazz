@@ -6,7 +6,7 @@
 //! rows.
 
 use super::*;
-pub(super) struct CurrentQuerySourcePreparer<'a, S> {
+pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     /// A maintained trusted subscription must remain connected when its first
@@ -34,11 +34,11 @@ pub(super) enum CurrentAccessPath {
     Index { column: String, prefix: Vec<Value> },
 }
 
-impl<S> AsyncSourcePreparer for CurrentQuerySourcePreparer<'_, S>
+impl<S> SourceGraphPreparer for JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
-    async fn prepare_source(
+    async fn prepare_source_graph(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError> {
@@ -637,7 +637,7 @@ where
     }
 }
 
-impl<S> CurrentQuerySourcePreparer<'_, S>
+impl<S> JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {

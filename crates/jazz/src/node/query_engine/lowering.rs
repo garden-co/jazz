@@ -97,7 +97,7 @@ pub(crate) fn query_program_source_requests(
 /// this function; the lowering phase itself is [`lower_resolved_query_program`].
 pub(crate) async fn prepare_and_lower_query_program(
     request: QueryProgramRequest,
-    source_preparer: &mut impl AsyncSourcePreparer,
+    source_preparer: &mut impl SourceGraphPreparer,
 ) -> QueryCompileResult {
     let mut explain = ExplainPlan::default();
 
@@ -121,20 +121,20 @@ pub(crate) async fn prepare_and_lower_query_program(
         // Policy programs have already been prepared by compilation
         // orchestration; this future is only for source-local snapshot and
         // physical-layout work that has not migrated to Groove yet.
-        let resolved_source = match Box::pin(source_preparer.prepare_source(&source_request)).await
-        {
-            Ok(resolved_source) => resolved_source,
-            Err(err) => {
-                let mut failure_explain = explain.clone();
-                failure_explain
-                    .read
-                    .push(format!("failed source request: {:#?}", err.request));
-                return Err(Box::new(CapabilityReport {
-                    gaps: vec![UnsupportedReason::Source(err.gap)],
-                    explain: explain_with_request(&request, failure_explain),
-                }));
-            }
-        };
+        let resolved_source =
+            match Box::pin(source_preparer.prepare_source_graph(&source_request)).await {
+                Ok(resolved_source) => resolved_source,
+                Err(err) => {
+                    let mut failure_explain = explain.clone();
+                    failure_explain
+                        .read
+                        .push(format!("failed source request: {:#?}", err.request));
+                    return Err(Box::new(CapabilityReport {
+                        gaps: vec![UnsupportedReason::Source(err.gap)],
+                        explain: explain_with_request(&request, failure_explain),
+                    }));
+                }
+            };
         explain.physical.push(format!(
             "source {:?} ({:?}) -> resolved table {}",
             source,
@@ -264,7 +264,7 @@ pub(crate) fn lower_resolved_query_program(
 #[cfg(test)]
 pub(crate) async fn lower_query_program(
     request: QueryProgramRequest,
-    source_preparer: &mut impl AsyncSourcePreparer,
+    source_preparer: &mut impl SourceGraphPreparer,
 ) -> QueryCompileResult {
     prepare_and_lower_query_program(request, source_preparer).await
 }
