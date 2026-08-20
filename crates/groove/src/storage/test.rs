@@ -29,6 +29,12 @@ enum ResidentRegion {
 }
 
 impl ResidentRegion {
+    fn column_family(&self) -> &str {
+        match self {
+            Self::Point { cf, .. } | Self::Range { cf, .. } | Self::Prefix { cf, .. } => cf,
+        }
+    }
+
     fn contains(&self, cf: &str, key: &[u8]) -> bool {
         match self {
             Self::Point {
@@ -152,6 +158,17 @@ impl ResidentState {
     fn invalidate(&mut self, cf: &str, key: &[u8]) {
         self.values.remove(&(cf.to_owned(), key.to_vec()));
         self.regions.retain(|region| !region.contains(cf, key));
+    }
+
+    fn evict_column_family(&mut self, cf: &str) {
+        self.values.retain(|(resident_cf, _), _| resident_cf != cf);
+        self.regions.retain(|region| region.column_family() != cf);
+    }
+
+    fn evict_scans(&mut self, cf: &str) {
+        self.regions.retain(|region| {
+            region.column_family() != cf || matches!(region, ResidentRegion::Point { .. })
+        });
     }
 }
 
@@ -361,6 +378,18 @@ impl<S> YieldingStorage<S> {
     /// Evict all retained read results, making subsequent reads cold again.
     pub fn evict_all(&self) {
         *self.resident.borrow_mut() = ResidentState::default();
+    }
+
+    /// Evict retained results for one column family without disturbing
+    /// unrelated resident work.
+    pub fn evict_column_family(&self, cf: &str) {
+        self.resident.borrow_mut().evict_column_family(cf);
+    }
+
+    /// Evict complete scan snapshots while retaining individually known
+    /// points in the same column family.
+    pub fn evict_scans(&self, cf: &str) {
+        self.resident.borrow_mut().evict_scans(cf);
     }
 }
 

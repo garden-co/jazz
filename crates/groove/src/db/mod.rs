@@ -57,7 +57,16 @@ pub struct Database {
     persisted_publications: BTreeSet<PublicationId>,
     resident_writes: Rc<RefCell<StagedWriteState>>,
     publication_persistence: Rc<RefCell<PersistenceOrder>>,
+    abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppliedBatchLifecycle {
+    Applied,
+    PersistenceComplete,
+    Finished,
+    Abandoned,
 }
 
 /// One resident publication whose ordered storage write can progress without
@@ -72,6 +81,8 @@ pub struct AppliedBatch {
     storage_writes: StorageWriteMetrics,
     tick: TickMetrics,
     notifications_deferred: bool,
+    lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    abandoned_application: Rc<Cell<bool>>,
 }
 
 impl AppliedBatch {
@@ -92,6 +103,8 @@ impl AppliedBatch {
         let storage_start = Instant::now();
         let result = self.storage.write_many(self.operations.clone()).await;
         let storage_write_time = storage_start.elapsed();
+        self.lifecycle
+            .set(AppliedBatchLifecycle::PersistenceComplete);
         if result.is_ok() {
             let waiters = {
                 let mut order = self.order.borrow_mut();
@@ -114,6 +127,19 @@ impl AppliedBatch {
                 storage_writes: self.storage_writes,
                 tick: self.tick.clone(),
             },
+            receipt: PersistenceReceipt {
+                lifecycle: Rc::clone(&self.lifecycle),
+                abandoned_application: Rc::clone(&self.abandoned_application),
+            },
+        }
+    }
+}
+
+impl Drop for AppliedBatch {
+    fn drop(&mut self) {
+        if self.lifecycle.get() == AppliedBatchLifecycle::Applied {
+            self.lifecycle.set(AppliedBatchLifecycle::Abandoned);
+            self.abandoned_application.set(true);
         }
     }
 }
@@ -130,6 +156,27 @@ pub struct PersistedBatch {
     result: Result<(), crate::storage::Error>,
     notifications_deferred: bool,
     metrics: CommitMetrics,
+    receipt: PersistenceReceipt,
+}
+
+struct PersistenceReceipt {
+    lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    abandoned_application: Rc<Cell<bool>>,
+}
+
+impl PersistenceReceipt {
+    fn finish(&self) {
+        self.lifecycle.set(AppliedBatchLifecycle::Finished);
+    }
+}
+
+impl Drop for PersistenceReceipt {
+    fn drop(&mut self) {
+        if self.lifecycle.get() == AppliedBatchLifecycle::PersistenceComplete {
+            self.lifecycle.set(AppliedBatchLifecycle::Abandoned);
+            self.abandoned_application.set(true);
+        }
+    }
 }
 
 mod batch;
