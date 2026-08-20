@@ -17,6 +17,7 @@ use jazz::protocol::{
 use jazz::query::{OrderDirection, Query, claim, col, eq, lit};
 use jazz::schema::{BranchDimensionSchema, JazzSchema, Policy, TableSchema};
 use jazz::time::GlobalSeq;
+use jazz_storage_rocksdb::RocksDbStorage;
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -103,6 +104,27 @@ fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
     ))
     .unwrap();
     (db, schema)
+}
+
+fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db<RocksDbStorage> {
+    let families = schema.column_families();
+    let storage = RocksDbStorage::open(
+        path,
+        &families.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    block_on(Db::open(
+        DbConfig::new(
+            schema.clone(),
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xa4; 16]),
+                author: AuthorId::SYSTEM,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(10)),
+    ))
+    .unwrap()
 }
 
 #[test]
@@ -676,8 +698,54 @@ fn branch_move_is_explicit_source_delete_and_destination_restore() {
 }
 
 #[test]
+fn cross_branch_transaction_and_independent_winners_survive_reopen() {
+    let (_template, schema) = open_db();
+    let directory = tempfile::tempdir().unwrap();
+    let row = RowUuid::from_bytes([0xa5; 16]);
+    let left = selector(0xa6);
+    let right = selector(0xa7);
+    {
+        let db = open_rocks_db(directory.path(), &schema);
+        let tx = db.mergeable_tx().unwrap();
+        tx.insert_with_id_in_branch(
+            "todos",
+            left.clone(),
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("left".to_owned()))]),
+        )
+        .unwrap();
+        tx.insert_with_id_in_branch(
+            "todos",
+            right.clone(),
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("right".to_owned()))]),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        db.delete_in_branch("todos", left.clone(), row).unwrap();
+    }
+
+    let db = open_rocks_db(directory.path(), &schema);
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    assert!(
+        block_on(db.all(&query, ReadOpts::default().branch_view(left, None)))
+            .unwrap()
+            .is_empty(),
+        "the left deletion register must recover independently"
+    );
+    let rows = block_on(db.all(&query, ReadOpts::default().branch_view(right, None))).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("right".to_owned()))
+    );
+}
+
+#[test]
 fn sibling_branch_view_subscriptions_isolate_first_writes() {
     let (db, _schema) = open_db();
+    #[cfg(feature = "testing")]
+    let baseline = db.runtime_stats_for_test().active_subscriptions;
     let left = selector(0x89);
     let right = selector(0x8a);
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
@@ -746,6 +814,21 @@ fn sibling_branch_view_subscriptions_isolate_first_writes() {
             if added.iter().any(|candidate| candidate.row_uuid() == row)
     ));
     assert!(right_stream.try_next_event().is_none());
+
+    drop(left_stream);
+    #[cfg(feature = "testing")]
+    assert_eq!(
+        db.runtime_stats_for_test().active_subscriptions,
+        baseline + 1,
+        "dropping one branch view must preserve its sibling subscription"
+    );
+    drop(right_stream);
+    #[cfg(feature = "testing")]
+    assert_eq!(
+        db.runtime_stats_for_test().active_subscriptions,
+        baseline,
+        "dropping the final branch view must release its maintained source"
+    );
 }
 
 #[test]
