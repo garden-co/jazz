@@ -1048,6 +1048,7 @@ where
             "jazz_global_changes",
             &[
                 Value::U64(table_id.0),
+                Value::Bytes(version.branch_key().canonical_bytes()),
                 Value::Uuid(version.row_uuid().0),
                 Value::Bytes(version_layer_string(version.layer()).into_bytes()),
                 Value::U64(global_time.0),

@@ -11,6 +11,62 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn global_layer_winner_at(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        global_base: GlobalTime,
+    ) -> Result<Option<VersionRow>, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
+        let prefix = [
+            Value::U64(table_id.0),
+            Value::Bytes(BranchKey::default().canonical_bytes()),
+            Value::Uuid(row_uuid.0),
+            Value::Bytes(version_layer_string(layer).into_bytes()),
+        ];
+        let upper = [
+            Value::U64(table_id.0),
+            Value::Bytes(BranchKey::default().canonical_bytes()),
+            Value::Uuid(row_uuid.0),
+            Value::Bytes(version_layer_string(layer).into_bytes()),
+            Value::U64(global_base.0),
+        ];
+        let Some(raw) = self.database.primary_key_last_before_or_at_raw(
+            "jazz_global_changes",
+            &prefix,
+            &upper,
+        )?
+        else {
+            return Ok(None);
+        };
+        let record = raw.record();
+        let tx_time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
+        let tx_node_alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
+        self.query_version_by_alias(table, row_uuid, layer, tx_time, tx_node_alias)
+    }
+
+    pub(super) fn visible_global_content_tx_id_at(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        global_base: GlobalTime,
+    ) -> Result<Option<TxId>, Error> {
+        let deleted = self
+            .global_layer_winner_at(table, row_uuid, VersionLayer::Deletion, global_base)?
+            .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted));
+        if deleted {
+            return Ok(None);
+        }
+        let Some(content) =
+            self.global_layer_winner_at(table, row_uuid, VersionLayer::Content, global_base)?
+        else {
+            return Ok(None);
+        };
+        self.version_tx_id(&content).map(Some)
+    }
+
     pub(super) fn global_currency_changed_after(
         &mut self,
         table: &str,
@@ -21,7 +77,10 @@ where
         let Some(raw) = self.database.index_last_raw(
             "jazz_global_changes",
             "by_table_global_time",
-            &[Value::U64(table_id.0)],
+            &[
+                Value::U64(table_id.0),
+                Value::Bytes(BranchKey::default().canonical_bytes()),
+            ],
         )?
         else {
             return Ok(false);

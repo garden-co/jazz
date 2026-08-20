@@ -1106,6 +1106,7 @@ fn global_changes_table() -> GrooveTableSchema {
         "jazz_global_changes",
         [
             column("physical_table_id", GrooveColumnType::U64),
+            column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("layer", GrooveColumnType::Bytes),
             column("global_time", GrooveColumnType::U64),
@@ -1116,17 +1117,30 @@ fn global_changes_table() -> GrooveTableSchema {
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::bytes("branch_key"),
         PrimaryKeyColumn::uuid("row_uuid"),
         PrimaryKeyColumn::bytes("layer"),
         PrimaryKeyColumn::integer("global_time", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new(
         "by_global_time",
-        ["global_time", "physical_table_id", "row_uuid", "layer"],
+        [
+            "global_time",
+            "physical_table_id",
+            "branch_key",
+            "row_uuid",
+            "layer",
+        ],
     ))
     .with_index(GrooveIndexSchema::new(
         "by_table_global_time",
-        ["physical_table_id", "global_time", "row_uuid", "layer"],
+        [
+            "physical_table_id",
+            "branch_key",
+            "global_time",
+            "row_uuid",
+            "layer",
+        ],
     ))
 }
 

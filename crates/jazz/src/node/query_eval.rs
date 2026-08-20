@@ -1678,14 +1678,25 @@ where
             Ok(self.database.index_scan_raw(
                 "jazz_global_changes",
                 "by_table_global_time",
-                &[Value::U64(table_id.0)],
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                ],
             )?)
         } else {
             Ok(self.database.index_scan_range_raw(
                 "jazz_global_changes",
                 "by_table_global_time",
-                &[Value::U64(table_id.0), Value::U64(0)],
-                &[Value::U64(table_id.0), Value::U64(position.0 + 1)],
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::U64(0),
+                ],
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::U64(position.0 + 1),
+                ],
             )?)
         }
     }
@@ -1767,14 +1778,25 @@ where
             self.database.index_scan_raw(
                 "jazz_global_changes",
                 "by_table_global_time",
-                &[Value::U64(table_id.0)],
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                ],
             )?
         } else {
             self.database.index_scan_range_raw(
                 "jazz_global_changes",
                 "by_table_global_time",
-                &[Value::U64(table_id.0), Value::U64(0)],
-                &[Value::U64(table_id.0), Value::U64(position.0 + 1)],
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::U64(0),
+                ],
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::U64(position.0 + 1),
+                ],
             )?
         };
         for raw in raw_records {

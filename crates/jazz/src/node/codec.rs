@@ -100,12 +100,13 @@ groove::define_record! {
 groove::define_record! {
     pub(super) struct GlobalChangeRowRecord {
         0 => physical_table_id: u64,
-        1 => row_uuid: RowUuid,
-        2 => layer: Vec<u8>,
-        3 => global_time: GlobalTime,
-        4 => tx_time: TxTime,
-        5 => tx_node_id: NodeAlias,
-        6 => _deletion: Option<DeletionEvent>,
+        1 => branch_key: Vec<u8>,
+        2 => row_uuid: RowUuid,
+        3 => layer: Vec<u8>,
+        4 => global_time: GlobalTime,
+        5 => tx_time: TxTime,
+        6 => tx_node_id: NodeAlias,
+        7 => _deletion: Option<DeletionEvent>,
     }
 }
 
@@ -1453,6 +1454,7 @@ pub(super) fn global_change_values(
 ) -> Vec<Value> {
     vec![
         Value::U64(table_id.0),
+        Value::Bytes(version.branch_key().canonical_bytes()),
         Value::Uuid(version.row_uuid().0),
         Value::Bytes(version_layer_string(version.layer()).into_bytes()),
         Value::U64(global_time.0),
@@ -1472,6 +1474,11 @@ pub(super) fn global_change_primary_key_from_record(
 ) -> Result<PrimaryKeyValue, Error> {
     Ok(PrimaryKeyValue::Composite(vec![
         PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?),
+        PrimaryKeyValue::Bytes(
+            record
+                .get_bytes(GlobalChangeRowRecord::FIELD_BRANCH_KEY_IDX)?
+                .to_vec(),
+        ),
         PrimaryKeyValue::Uuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?),
         PrimaryKeyValue::Bytes(
             record
