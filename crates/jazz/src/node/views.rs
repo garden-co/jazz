@@ -353,7 +353,7 @@ where
                 allow_storage_witness_fallback: false,
             })
             .await;
-        self.unsubscribe_groove_subscription(receiver.id());
+        self.unsubscribe_groove_subscription(receiver.id()).await;
         update
     }
 

@@ -277,7 +277,7 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
         )
         .unwrap();
     }
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 4,
@@ -291,12 +291,12 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
         if (seed + idx as u64).is_multiple_of(2) {
             let title = format!("v1-{seed}-{idx}");
             let (_tx, unit) = writer_v1
-                .commit_mergeable_unit(
+                .commit_mergeable_unit_settled(
                     MergeableCommit::new("todos", row_uuid, 1_000 + idx as u64)
                         .cells(title_cells(title.clone())),
                 )
                 .unwrap();
-            core.apply_sync_message(unit).unwrap();
+            core.apply_sync_message_settled(unit).unwrap();
             oracle.apply_accepted_write(
                 schemas[0].version_id(),
                 row_uuid,
@@ -309,12 +309,12 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
                 ("search_name".to_owned(), v(name.clone())),
             ]);
             let (_tx, unit) = writer_v4
-                .commit_mergeable_unit(
+                .commit_mergeable_unit_settled(
                     MergeableCommit::new("todos", row_uuid, 1_000 + idx as u64)
                         .cells(cells.clone()),
                 )
                 .unwrap();
-            core.apply_sync_message(unit).unwrap();
+            core.apply_sync_message_settled(unit).unwrap();
             oracle.apply_accepted_write(schemas[3].version_id(), row_uuid, cells);
         }
     }
@@ -1170,7 +1170,7 @@ fn sync_current_rows_to(
 ) {
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(core, "todos").unwrap();
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
 }
 fn register_shape_binding<S>(
     node: &mut NodeState<S>,
@@ -1179,7 +1179,7 @@ fn register_shape_binding<S>(
 ) where
     S: OrderedKvStorage + ReopenableStorage,
 {
-    node.apply_sync_message(SyncMessage::RegisterShape {
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
         ast: crate::protocol::ShapeAst::from_validated(shape),
         opts: crate::protocol::RegisterShapeOptions::default(),
@@ -1190,7 +1190,7 @@ fn register_shape_binding<S>(
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect::<Vec<_>>();
-    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+    node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
         subscription: crate::protocol::SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -1767,14 +1767,14 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 if deliver_a {
                     writer_known_a.record_fate_delivery(&message);
                     writer_a
-                        .apply_sync_message(message.clone())
+                        .apply_sync_message_settled(message.clone())
                         .unwrap_or_else(|err| {
                             panic!("seed {seed}: writer A failed to apply {message:?}: {err:?}")
                         });
                 } else {
                     writer_known_b.record_fate_delivery(&message);
                     writer_b
-                        .apply_sync_message(message.clone())
+                        .apply_sync_message_settled(message.clone())
                         .unwrap_or_else(|err| {
                             panic!("seed {seed}: writer B failed to apply {message:?}: {err:?}")
                         });
@@ -1812,10 +1812,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 message_counts.view_delivered += 1;
                 if deliver_a {
                     delivered_a.record_view_delivery(&message);
-                    reader_a.apply_sync_message(message).unwrap();
+                    reader_a.apply_sync_message_settled(message).unwrap();
                 } else {
                     delivered_b.record_view_delivery(&message);
-                    reader_b.apply_sync_message(message).unwrap();
+                    reader_b.apply_sync_message_settled(message).unwrap();
                 }
             }
             6 if reader_restarts < 2 => {
@@ -1878,10 +1878,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
         message_counts.view_delivered += 1;
         if deliver_a {
             delivered_a.record_view_delivery(&message);
-            reader_a.apply_sync_message(message).unwrap();
+            reader_a.apply_sync_message_settled(message).unwrap();
         } else {
             delivered_b.record_view_delivery(&message);
-            reader_b.apply_sync_message(message).unwrap();
+            reader_b.apply_sync_message_settled(message).unwrap();
         }
     }
 

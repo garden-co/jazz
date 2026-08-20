@@ -316,15 +316,16 @@ fn subscriber_connection_rejects_subscribe_without_link_shape_options() {
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    server
-        .node()
-        .borrow_mut()
-        .apply_sync_message(SyncMessage::RegisterShape {
-            shape_id: shape.shape_id(),
-            ast: ShapeAst::from_validated(&shape),
-            opts: RegisterShapeOptions::default(),
-        })
-        .unwrap();
+    let shared_node = server.node();
+    let mut node = shared_node.borrow_mut();
+    let outcome = crate::db::block_on(node.apply_sync_message(SyncMessage::RegisterShape {
+        shape_id: shape.shape_id(),
+        ast: ShapeAst::from_validated(&shape),
+        opts: RegisterShapeOptions::default(),
+    }))
+    .unwrap();
+    crate::db::block_on(node.persist_and_settle_outcome(outcome)).unwrap();
+    drop(node);
 
     client_transport
         .send(SyncMessage::Subscribe(Subscribe {
