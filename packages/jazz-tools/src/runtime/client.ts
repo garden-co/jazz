@@ -16,6 +16,38 @@ import {
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
+import { PostcardWriter } from "./native-runtime/native-codec.js";
+
+function encodeBranchDimensionValue(value: Value): Uint8Array {
+  const writer = new PostcardWriter();
+  switch (value.type) {
+    case "Integer":
+      writer.enumUnit(14); // groove::Value::I32
+      writer.i64(value.value);
+      break;
+    case "BigInt":
+      writer.enumUnit(13); // groove::Value::I64
+      writer.i64(value.value);
+      break;
+    case "Uuid": {
+      writer.enumUnit(8); // groove::Value::Uuid
+      const hex = value.value.replaceAll("-", "");
+      if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid branch UUID ${value.value}`);
+      writer.bytes(
+        Uint8Array.from({ length: 16 }, (_, index) =>
+          Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16),
+        ),
+        false,
+      );
+      break;
+    }
+    default:
+      throw new Error(
+        `branch dimensions currently require Integer, BigInt, or Uuid values; got ${value.type}`,
+      );
+  }
+  return writer.finish();
+}
 
 /**
  * Minimal request shape supported by backend request helpers.
@@ -210,11 +242,30 @@ export type QueryPropagation = "full" | "local-only";
  * Defaults to `"public"`.
  */
 export type QueryVisibility = "public" | "hidden_from_live_query_list";
+
+/** Named values selecting one exact branch incarnation. */
+export interface BranchSelector {
+  dimensions: Record<string, Value>;
+}
+
+/** A live or application-resolved frozen base underneath a branch head. */
+export type BranchViewBase =
+  | { kind: "current"; branch: BranchSelector }
+  | { kind: "snapshot"; branch: BranchSelector; snapshot: unknown };
+
+/** User-facing head-over-base branch view. */
+export interface BranchView {
+  head: BranchSelector;
+  base?: BranchViewBase;
+}
+
 export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
+  /** Admit exact-head history, falling back to an optional live or frozen base. */
+  branch?: BranchView;
 }
 
 type InternalQueryExecutionOptions = QueryExecutionOptions & {
@@ -227,6 +278,7 @@ export interface ResolvedQueryExecutionOptions {
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
   visibility: QueryVisibility;
+  branch?: BranchView;
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
@@ -354,6 +406,7 @@ export function resolveEffectiveQueryExecutionOptions(
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
+    branch: options?.branch,
   };
 }
 
@@ -376,10 +429,23 @@ function getScheduler(): (task: () => void) => void {
 }
 
 function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): string | undefined {
+  type WireBranchSelector = { dimensions: Record<string, number[]> };
   const payload: {
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
     transaction_batch_id?: string;
+    read_view?: {
+      source: {
+        BranchView: {
+          head: WireBranchSelector;
+          base?:
+            | { Current: WireBranchSelector }
+            | { Snapshot: { branch: WireBranchSelector; snapshot: unknown } };
+        };
+      };
+      schema: "Current";
+      overlays: [];
+    };
   } = {};
   if ((options.propagation ?? "full") !== "full") {
     payload.propagation = options.propagation;
@@ -390,8 +456,39 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   if (options.openBatchId) {
     payload.transaction_batch_id = options.openBatchId;
   }
+  if (options.branch) {
+    const base = options.branch.base;
+    const selector = (value: BranchSelector): WireBranchSelector => ({
+      dimensions: Object.fromEntries(
+        Object.entries(value.dimensions).map(([name, dimension]) => [
+          name,
+          Array.from(encodeBranchDimensionValue(dimension)),
+        ]),
+      ),
+    });
+    payload.read_view = {
+      source: {
+        BranchView: {
+          head: selector(options.branch.head),
+          base:
+            base?.kind === "current"
+              ? { Current: selector(base.branch) }
+              : base?.kind === "snapshot"
+                ? { Snapshot: { branch: selector(base.branch), snapshot: base.snapshot } }
+                : undefined,
+        },
+      },
+      schema: "Current",
+      overlays: [],
+    };
+  }
 
-  if (!payload.propagation && !payload.local_updates && !payload.transaction_batch_id) {
+  if (
+    !payload.propagation &&
+    !payload.local_updates &&
+    !payload.transaction_batch_id &&
+    !payload.read_view
+  ) {
     return undefined;
   }
 

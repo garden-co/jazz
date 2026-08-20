@@ -291,6 +291,48 @@ describe("JazzClient schema access", () => {
 });
 
 describe("JazzClient transaction query plumbing", () => {
+  it("encodes ergonomic branch selectors into the native read view", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    await client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+      branch: {
+        head: { dimensions: { workspace: { type: "Integer", value: 7 } } },
+        base: {
+          kind: "current",
+          branch: {
+            dimensions: {
+              workspace: { type: "Integer", value: 1 },
+              tenant: { type: "Uuid", value: "42424242-4242-4242-4242-424242424242" },
+            },
+          },
+        },
+      },
+    });
+
+    const optionsJson = runtime.query.mock.calls[0][3];
+    expect(JSON.parse(optionsJson as string)).toMatchObject({
+      read_view: {
+        source: {
+          BranchView: {
+            head: { dimensions: { workspace: [14, 14] } },
+            base: {
+              Current: {
+                dimensions: {
+                  workspace: [14, 2],
+                  tenant: [8, ...Array(16).fill(0x42)],
+                },
+              },
+            },
+          },
+        },
+        schema: "Current",
+        overlays: [],
+      },
+    });
+  });
+
   it("supports raw reads scoped to the open transaction", async () => {
     const runtime = makeFakeRuntime();
     runtime.query.mockResolvedValue([{ id: "todo-transaction-query", values: [] }]);
