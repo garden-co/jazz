@@ -844,6 +844,12 @@ where
             rows: root_rows,
             edges: Vec::new(),
         };
+        // Aggregate result records intentionally have no application row
+        // identity and cannot own relation edges. They are already fully
+        // materialized by the root terminal.
+        if shape.query().aggregate.is_some() {
+            return Ok(snapshot);
+        }
         let mut row_keys = snapshot
             .rows
             .iter()

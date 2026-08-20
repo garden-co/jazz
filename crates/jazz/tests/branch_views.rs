@@ -14,7 +14,7 @@ use jazz::node::ContributionMergeRow;
 use jazz::protocol::{
     BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
 };
-use jazz::query::{Query, claim, col, eq};
+use jazz::query::{OrderDirection, Query, claim, col, eq};
 use jazz::schema::{BranchDimensionSchema, JazzSchema, Policy, TableSchema};
 use jazz::time::GlobalSeq;
 
@@ -149,6 +149,60 @@ fn indexed_branch_view_masks_base_before_applying_the_predicate() {
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         vec![inherited],
         "the non-matching head incarnation must still mask the base index hit"
+    );
+}
+
+#[test]
+fn branch_view_reduction_precedes_aggregation_and_ordered_windows() {
+    let (db, schema) = open_db();
+    let base = selector(0x97);
+    let head = selector(0x98);
+    let replaced = RowUuid::from_bytes([0x99; 16]);
+    let inherited = RowUuid::from_bytes([0x9a; 16]);
+    let added = RowUuid::from_bytes([0x9b; 16]);
+    for (row, title) in [(replaced, "alpha"), (inherited, "bravo")] {
+        db.insert_with_id_in_branch(
+            "todos",
+            base.clone(),
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+        )
+        .unwrap();
+    }
+    db.update_in_branch_view(
+        "todos",
+        head.clone(),
+        Some(BranchViewBase::Current(base.clone())),
+        replaced,
+        BTreeMap::from([("title".to_owned(), Value::String("zulu".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id_in_branch(
+        "todos",
+        head.clone(),
+        added,
+        BTreeMap::from([("title".to_owned(), Value::String("charlie".to_owned()))]),
+    )
+    .unwrap();
+    let opts = ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base)));
+
+    let count = db.prepare_query(&Query::from("todos").count()).unwrap();
+    let count_rows = block_on(db.all(&count, opts.clone())).unwrap();
+    assert_eq!(count_rows[0].cell_at(0), Some(Value::U64(3)));
+
+    let window = db
+        .prepare_query(
+            &Query::from("todos")
+                .order_by("title", OrderDirection::Asc)
+                .offset(1)
+                .limit(1),
+        )
+        .unwrap();
+    let rows = block_on(db.all(&window, opts)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("charlie".to_owned()))
     );
 }
 

@@ -1070,7 +1070,7 @@ impl CurrentRow {
             .record
             .descriptor()
             .field_index("row_uuid")
-            .map_or(CurrentRowRecord::USER_CELLS, |idx| idx + 1);
+            .map_or(0, |idx| idx + 1);
         match self
             .record
             .borrowed()
