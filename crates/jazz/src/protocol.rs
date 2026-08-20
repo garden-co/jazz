@@ -3119,6 +3119,39 @@ mod tests {
     }
 
     #[test]
+    fn branch_view_keys_isolate_siblings_and_live_from_frozen_bases() {
+        let selector = |byte| {
+            BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+        };
+        let key = |read_view| {
+            RegisterShapeOptions {
+                read_view,
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key()
+        };
+        let live =
+            ReadViewSpec::branch_view(selector(1), Some(BranchViewBase::Current(selector(2))));
+        let sibling =
+            ReadViewSpec::branch_view(selector(3), Some(BranchViewBase::Current(selector(2))));
+        let frozen = ReadViewSpec::branch_view(
+            selector(1),
+            Some(BranchViewBase::snapshot(
+                selector(2),
+                SnapshotRef {
+                    owner: NodeUuid::from_bytes([4; 16]),
+                    global_base: GlobalSeq(5),
+                    local_base: TxTime(6),
+                    dots: Vec::new(),
+                },
+            )),
+        );
+
+        assert_ne!(key(live.clone()), key(sibling));
+        assert_ne!(key(live), key(frozen));
+    }
+
+    #[test]
     fn result_member_transport_preserves_typed_union_occurrence() {
         let root = ObjectId::from_uuid(uuid::Uuid::from_bytes([1; 16]));
         let joined = ObjectId::from_uuid(uuid::Uuid::from_bytes([2; 16]));
