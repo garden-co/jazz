@@ -102,9 +102,9 @@ fn measure_unrelated_coverage_group_refresh(group_count: usize) -> Duration {
         .collect::<Vec<_>>();
 
     for _ in 0..100 {
-        client.tick().expect("send coverage groups");
-        server.tick().expect("serve coverage groups");
-        client.tick().expect("receive coverage groups");
+        block_on(client.tick()).expect("send coverage groups");
+        block_on(server.tick()).expect("serve coverage groups");
+        block_on(client.tick()).expect("receive coverage groups");
         if attachments
             .iter()
             .all(|attachment| client.query_attachment_is_covered(attachment))
@@ -132,7 +132,7 @@ fn measure_unrelated_coverage_group_refresh(group_count: usize) -> Duration {
         .expect("write unrelated row");
 
     let start = Instant::now();
-    server.tick().expect("serve unrelated row change");
+    block_on(server.tick()).expect("serve unrelated row change");
     let elapsed = start.elapsed();
 
     assert_eq!(attachments.len(), group_count);
