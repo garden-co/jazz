@@ -3712,47 +3712,45 @@ mod dynamic_schema_view_tests {
             )))
             .unwrap(),
         );
-        let view = Rc::new(owner.register_schema_view(schema).unwrap());
+        let view = Rc::new(block_on(owner.register_schema_view(schema)).unwrap());
         let batch = OpenTransactionId::new();
-        owner.begin_mergeable(batch).unwrap();
+        block_on(owner.begin_mergeable(batch)).unwrap();
         drop(WasmTx {
             db: WasmDbInner::Memory(Rc::clone(&view)),
             kind: WasmTxKind::Mergeable,
             open_tx: Some(batch),
             owns_lifetime: false,
         });
-        view.mergeable_tx_ref(batch)
-            .insert_with_id(
-                "items",
-                RowUuid::from_bytes([1; 16]),
-                BTreeMap::from([("label".to_owned(), Value::String("kept".to_owned()))]),
-            )
-            .unwrap();
+        block_on(view.mergeable_tx_ref(batch).insert_with_id(
+            "items",
+            RowUuid::from_bytes([1; 16]),
+            BTreeMap::from([("label".to_owned(), Value::String("kept".to_owned()))]),
+        ))
+        .unwrap();
         let prepared = view.prepare_query(&view.table("items")).unwrap();
         let rows = WasmDbInner::Memory(Rc::clone(&view))
             .mergeable_all(batch, &prepared, ReadOpts::default())
             .unwrap();
         assert_eq!(rows.len(), 1, "the attached view reads staged rows");
-        owner.commit_mergeable_handle(batch).unwrap();
+        block_on(owner.commit_mergeable_handle(batch)).unwrap();
 
         let exclusive = OpenTransactionId::new();
-        owner.begin_exclusive(exclusive).unwrap();
+        block_on(owner.begin_exclusive(exclusive)).unwrap();
         drop(WasmTx {
             db: WasmDbInner::Memory(Rc::clone(&view)),
             kind: WasmTxKind::Exclusive,
             open_tx: Some(exclusive),
             owns_lifetime: false,
         });
-        view.exclusive_tx_ref(exclusive)
-            .insert_with_id(
-                "items",
-                RowUuid::from_bytes([2; 16]),
-                BTreeMap::from([(
-                    "label".to_owned(),
-                    Value::String("exclusive-kept".to_owned()),
-                )]),
-            )
-            .unwrap();
-        owner.commit_exclusive_handle(exclusive).unwrap();
+        block_on(view.exclusive_tx_ref(exclusive).insert_with_id(
+            "items",
+            RowUuid::from_bytes([2; 16]),
+            BTreeMap::from([(
+                "label".to_owned(),
+                Value::String("exclusive-kept".to_owned()),
+            )]),
+        ))
+        .unwrap();
+        block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
     }
 }
