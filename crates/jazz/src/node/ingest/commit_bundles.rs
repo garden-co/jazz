@@ -117,10 +117,6 @@ where
         {
             return self.reject_malformed_commit(tx, reason);
         }
-        if commit_unit_limit_violation(&versions).is_none()
-            && commit_unit_write_count_matches(&tx, versions.len())
-        {
-        }
         let mut updates =
             self.ingest_edge_authority_mergeable_commit_unit_once(tx, versions, now_ms, None)?;
         updates.extend(self.drain_parked_commit_units()?);
@@ -145,10 +141,6 @@ where
             && let Some(reason) = self.malformed_authored_version_reason(&versions)
         {
             return self.reject_malformed_commit(tx, reason);
-        }
-        if commit_unit_limit_violation(&versions).is_none()
-            && commit_unit_write_count_matches(&tx, versions.len())
-        {
         }
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
@@ -1188,5 +1180,4 @@ where
         }
         Ok(loaded_tx_ids)
     }
-
 }
