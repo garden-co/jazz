@@ -21,6 +21,7 @@ use jazz::tools::public_schema::{
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
 use jazz_sim::public_schema_fixture::compile_public_schema;
+use jazz_sim::fixture::{apply_sync_message_settled, commit_mergeable_unit_settled};
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields, profiling};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
@@ -513,7 +514,7 @@ struct ClientHarness {
     hydration_rows: usize,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    _upstream: Rc<RefCell<jazz::db::PeerConnection<RocksDbStorage>>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<RocksDbStorage>>>,
 }
 
 struct QueueTransport {
@@ -585,13 +586,13 @@ fn run_jazz_workload(
         };
         attempts += 1;
         let submit = Instant::now();
-        let result = apply_jazz_op(
+        let result = jazz::db::block_on(apply_jazz_op(
             &mut clients[client_idx],
             &mut core,
             &op,
             now_ms,
             &mut edge_acceptance,
-        );
+        ));
         now_ms += match mode {
             RunMode::ThroughputSettlement | RunMode::ThroughputPropagationInclusive => 1,
             RunMode::Slo | RunMode::ScaleOut | RunMode::ScaleOutLadder { .. } => 1_000_u64
@@ -672,13 +673,13 @@ fn run_jazz_hot_item_contention(config: &Config) -> JazzSummary {
         };
         attempts += 1;
         let submit = Instant::now();
-        match apply_jazz_op(
+        match jazz::db::block_on(apply_jazz_op(
             &mut clients[client_idx],
             &mut core,
             &op,
             now_ms,
             &mut edge_acceptance,
-        ) {
+        )) {
             Ok(true) => {
                 let settle_us = submit.elapsed().as_micros() as u64;
                 latency.record(settle_us).unwrap();
@@ -741,13 +742,13 @@ fn run_jazz_contention(config: &Config, level: ContentionLevel) -> JazzSummary {
                 amount: 1.0 + attempts as f64 / 100.0,
             };
             let submit = Instant::now();
-            match apply_jazz_op(
+            match jazz::db::block_on(apply_jazz_op(
                 &mut clients[client_idx],
                 &mut core,
                 &op,
                 now_ms,
                 &mut edge_acceptance,
-            ) {
+            )) {
                 Ok(true) => {
                     let settle_us = submit.elapsed().as_micros() as u64;
                     latency.record(settle_us).unwrap();
@@ -794,14 +795,14 @@ fn run_jazz_contention(config: &Config, level: ContentionLevel) -> JazzSummary {
     }
 }
 
-fn apply_jazz_op(
+async fn apply_jazz_op(
     client: &mut ClientHarness,
     core: &mut NodeState<RocksDbStorage>,
     op: &Op,
     now_ms: u64,
     edge_acceptance: &mut Histogram<u64>,
 ) -> Result<bool, jazz::db::Error> {
-    let tx = client.db.exclusive_tx()?;
+    let tx = client.db.exclusive_tx().await?;
     match op {
         Op::NewOrder {
             warehouse,
@@ -812,9 +813,9 @@ fn apply_jazz_op(
             let w = warehouse_row(*warehouse);
             let d = district_row(*warehouse, *district);
             let c = customer_row(*warehouse, *district, *customer);
-            tx.read(WAREHOUSES, w)?;
-            let district_cells = tx.read(DISTRICTS, d)?.expect("district");
-            tx.read(CUSTOMERS, c)?;
+            tx.read(WAREHOUSES, w).await?;
+            let district_cells = tx.read(DISTRICTS, d).await?.expect("district");
+            tx.read(CUSTOMERS, c).await?;
             let order_number = u64_cell(&district_cells, "nextOrderNumber");
             tx.insert_with_id(
                 DISTRICTS,
@@ -825,7 +826,8 @@ fn apply_jazz_op(
                     ("nextOrderNumber", Value::U64(order_number + 1)),
                     ("ytd", Value::F64(f64_cell(&district_cells, "ytd"))),
                 ]),
-            )?;
+            )
+            .await?;
             let order = order_row(*warehouse, *district, order_number);
             tx.insert_with_id(
                 ORDERS,
@@ -838,12 +840,13 @@ fn apply_jazz_op(
                     ("lineCount", Value::U64(items.len() as u64)),
                     ("delivered", Value::Bool(false)),
                 ]),
-            )?;
+            )
+            .await?;
             for (line_idx, (item, quantity)) in items.iter().enumerate() {
                 let item_row = item_row(*item);
                 let stock = stock_row(*warehouse, *item);
-                let item_cells = tx.read(ITEMS, item_row)?.expect("item");
-                let stock_cells = tx.read(STOCK, stock)?.expect("stock");
+                let item_cells = tx.read(ITEMS, item_row).await?.expect("item");
+                let stock_cells = tx.read(STOCK, stock).await?.expect("stock");
                 let price = f64_cell(&item_cells, "price");
                 let old_qty = u64_cell(&stock_cells, "quantity");
                 let new_qty = old_qty.saturating_sub(*quantity);
@@ -856,7 +859,8 @@ fn apply_jazz_op(
                         ("quantity", Value::U64(new_qty)),
                         ("ytd", Value::U64(u64_cell(&stock_cells, "ytd") + quantity)),
                     ]),
-                )?;
+                )
+                .await?;
                 tx.insert_with_id(
                     ORDER_LINES,
                     order_line_row(*warehouse, *district, order_number, line_idx),
@@ -868,7 +872,8 @@ fn apply_jazz_op(
                         ("amount", Value::F64(price * *quantity as f64)),
                         ("delivered", Value::Bool(false)),
                     ]),
-                )?;
+                )
+                .await?;
             }
         }
         Op::Payment {
@@ -880,9 +885,9 @@ fn apply_jazz_op(
             let w = warehouse_row(*warehouse);
             let d = district_row(*warehouse, *district);
             let c = customer_row(*warehouse, *district, *customer);
-            let warehouse_cells = tx.read(WAREHOUSES, w)?.expect("warehouse");
-            let district_cells = tx.read(DISTRICTS, d)?.expect("district");
-            let customer_cells = tx.read(CUSTOMERS, c)?.expect("customer");
+            let warehouse_cells = tx.read(WAREHOUSES, w).await?.expect("warehouse");
+            let district_cells = tx.read(DISTRICTS, d).await?.expect("district");
+            let customer_cells = tx.read(CUSTOMERS, c).await?.expect("customer");
             tx.insert_with_id(
                 WAREHOUSES,
                 w,
@@ -893,7 +898,8 @@ fn apply_jazz_op(
                         Value::F64(f64_cell(&warehouse_cells, "ytd") + amount),
                     ),
                 ]),
-            )?;
+            )
+            .await?;
             tx.insert_with_id(
                 DISTRICTS,
                 d,
@@ -906,7 +912,8 @@ fn apply_jazz_op(
                     ),
                     ("ytd", Value::F64(f64_cell(&district_cells, "ytd") + amount)),
                 ]),
-            )?;
+            )
+            .await?;
             tx.insert_with_id(
                 CUSTOMERS,
                 c,
@@ -923,7 +930,8 @@ fn apply_jazz_op(
                         Value::U64(u64_cell(&customer_cells, "paymentCount") + 1),
                     ),
                 ]),
-            )?;
+            )
+            .await?;
             tx.insert_with_id(
                 PAYMENTS,
                 payment_row(*warehouse, *district, *customer, now_ms),
@@ -933,14 +941,16 @@ fn apply_jazz_op(
                     ("customer", Value::Uuid(c.0)),
                     ("amount", Value::F64(*amount)),
                 ]),
-            )?;
+            )
+            .await?;
         }
         Op::Delivery {
             warehouse,
             district,
         } => {
             let oldest = tx
-                .all(ORDERS)?
+                .all(ORDERS)
+                .await?
                 .into_iter()
                 .filter_map(|row| {
                     let schema = schema();
@@ -956,7 +966,7 @@ fn apply_jazz_op(
                 })
                 .min_by_key(|(order_no, _)| *order_no);
             if let Some((order_number, order)) = oldest {
-                let order_cells = tx.read(ORDERS, order)?.expect("order");
+                let order_cells = tx.read(ORDERS, order).await?.expect("order");
                 let customer = match order_cells.get("customer").unwrap() {
                     Value::Uuid(value) => RowUuid(*value),
                     other => panic!("expected customer uuid, got {other:?}"),
@@ -975,11 +985,12 @@ fn apply_jazz_op(
                         ("lineCount", Value::U64(u64_cell(&order_cells, "lineCount"))),
                         ("delivered", Value::Bool(true)),
                     ]),
-                )?;
+                )
+                .await?;
                 let mut total = 0.0;
                 for line_idx in 0..u64_cell(&order_cells, "lineCount") as usize {
                     let line = order_line_row(*warehouse, *district, order_number, line_idx);
-                    let line_cells = tx.read(ORDER_LINES, line)?.expect("line");
+                    let line_cells = tx.read(ORDER_LINES, line).await?.expect("line");
                     total += f64_cell(&line_cells, "amount");
                     tx.insert_with_id(
                         ORDER_LINES,
@@ -992,9 +1003,10 @@ fn apply_jazz_op(
                             ("amount", line_cells.get("amount").unwrap().clone()),
                             ("delivered", Value::Bool(true)),
                         ]),
-                    )?;
+                    )
+                    .await?;
                 }
-                let customer_cells = tx.read(CUSTOMERS, customer)?.expect("customer");
+                let customer_cells = tx.read(CUSTOMERS, customer).await?.expect("customer");
                 tx.insert_with_id(
                     CUSTOMERS,
                     customer,
@@ -1017,7 +1029,8 @@ fn apply_jazz_op(
                             customer_cells.get("paymentCount").unwrap().clone(),
                         ),
                     ]),
-                )?;
+                )
+                .await?;
             }
         }
         Op::StockLevel {
@@ -1026,20 +1039,21 @@ fn apply_jazz_op(
             threshold,
         } => {
             let recent_start = tx
-                .read(DISTRICTS, district_row(*warehouse, *district))?
+                .read(DISTRICTS, district_row(*warehouse, *district))
+                .await?
                 .map(|cells| u64_cell(&cells, "nextOrderNumber").saturating_sub(20))
                 .unwrap_or(0);
             for order_no in recent_start..recent_start + 20 {
                 let order = order_row(*warehouse, *district, order_no);
-                if let Some(order_cells) = tx.read(ORDERS, order)? {
+                if let Some(order_cells) = tx.read(ORDERS, order).await? {
                     for line_idx in 0..u64_cell(&order_cells, "lineCount") as usize {
                         let line = order_line_row(*warehouse, *district, order_no, line_idx);
-                        if let Some(line_cells) = tx.read(ORDER_LINES, line)? {
+                        if let Some(line_cells) = tx.read(ORDER_LINES, line).await? {
                             let stock = match line_cells.get("stock").unwrap() {
                                 Value::Uuid(value) => RowUuid(*value),
                                 other => panic!("expected stock uuid, got {other:?}"),
                             };
-                            if let Some(stock_cells) = tx.read(STOCK, stock)?
+                            if let Some(stock_cells) = tx.read(STOCK, stock).await?
                                 && u64_cell(&stock_cells, "quantity") < *threshold
                             {
                                 // The benchmark reports validation pressure; the count is client-side.
@@ -1050,8 +1064,8 @@ fn apply_jazz_op(
             }
         }
     }
-    let _tx_id = tx.commit()?;
-    client.db.tick()?;
+    let _tx_id = tx.commit().await?;
+    client.db.tick().await?;
     let unit = client
         .outbound
         .borrow_mut()
@@ -1060,14 +1074,15 @@ fn apply_jazz_op(
     if let SyncMessage::CommitUnit { tx, versions } = unit.clone() {
         let edge_start = Instant::now();
         let _ = now_ms;
-        client.edge.ingest_relay_commit_unit(tx, versions)?;
+        client.edge.ingest_relay_commit_unit(tx, versions).await?;
         edge_acceptance
             .record(edge_start.elapsed().as_micros() as u64)
             .unwrap();
     } else {
         unreachable!();
     }
-    let updates = core.apply_sync_message(unit)?;
+    let outcome = core.apply_sync_message(unit).await?;
+    let updates = core.persist_and_settle_outcome(outcome).await?;
     let mut accepted = false;
     for update in updates {
         if let SyncMessage::FateUpdate {
@@ -1077,9 +1092,10 @@ fn apply_jazz_op(
         {
             accepted = true;
         }
-        client.edge.apply_sync_message(update.clone())?;
+        let outcome = client.edge.apply_sync_message(update.clone()).await?;
+        client.edge.persist_and_settle_outcome(outcome).await?;
         client.inbound.borrow_mut().push_back(update);
-        client.db.tick()?;
+        client.db.tick().await?;
     }
     Ok(accepted)
 }
@@ -1132,19 +1148,21 @@ fn refresh_clients(core: &mut NodeState<RocksDbStorage>, clients: &mut [ClientHa
 
 fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarness) {
     for table in TABLES {
-        let update = client.edge_peer.current_rows_update(core, table).unwrap();
+        let update = jazz::db::block_on(client.edge_peer.current_rows_update(core, table)).unwrap();
         client.hydration_bytes += view_update_bytes(&update);
         client.hydration_rows += result_row_count(&update);
-        client.edge.apply_sync_message(update).unwrap();
+        apply_sync_message_settled(&mut client.edge, update).unwrap();
     }
     for table in TABLES {
-        let update = client
-            .client_peer
-            .current_rows_update(&mut client.edge, table)
-            .unwrap();
+        let update = jazz::db::block_on(
+            client
+                .client_peer
+                .current_rows_update(&mut client.edge, table),
+        )
+        .unwrap();
         client.inbound.borrow_mut().push_back(update);
     }
-    client.db.tick().unwrap();
+    jazz::db::block_on(client.db.tick()).unwrap();
 }
 
 fn seed_jazz_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>) {
@@ -1225,15 +1243,17 @@ fn accept_merge(
     values: BTreeMap<String, Value>,
     global: &mut u64,
 ) {
-    let tx = core
-        .commit_mergeable(MergeableCommit::new(table, row, *global + 1).cells(values))
-        .unwrap();
-    core.apply_fate_update(
-        tx,
+    let tx = commit_mergeable_unit_settled(
+        core,
+        MergeableCommit::new(table, row, *global + 1).cells(values),
+    )
+    .unwrap();
+    jazz::db::block_on(core.apply_fate_update(
+        tx.0,
         Fate::Accepted,
         Some(GlobalTime(*global)),
         Some(DurabilityTier::Global),
-    )
+    ))
     .unwrap();
     *global += 1;
 }
@@ -1503,27 +1523,25 @@ fn jazz_totals(
         .flat_map(|w| (0..config.districts_per_warehouse).map(move |d| (w, d)))
         .map(|(w, d)| row_u64(core, DISTRICTS, district_row(w, d), "nextOrderNumber"))
         .collect();
-    let customer_balance_sum_cents = core
-        .current_rows(CUSTOMERS, DurabilityTier::Global)
-        .unwrap()
-        .into_iter()
-        .map(|row| {
-            cents(value_f64(
-                row.cell(table_schema(schema, CUSTOMERS), "balance")
-                    .unwrap(),
-            ))
-        })
-        .sum();
-    let stock_quantity_sum = core
-        .current_rows(STOCK, DurabilityTier::Global)
+    let customer_balance_sum_cents =
+        jazz::db::block_on(core.current_rows(CUSTOMERS, DurabilityTier::Global))
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                cents(value_f64(
+                    row.cell(table_schema(schema, CUSTOMERS), "balance")
+                        .unwrap(),
+                ))
+            })
+            .sum();
+    let stock_quantity_sum = jazz::db::block_on(core.current_rows(STOCK, DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .map(|row| value_u64(row.cell(table_schema(schema, STOCK), "quantity").unwrap()))
         .sum();
-    let order_rows = core.current_rows(ORDERS, DurabilityTier::Global).unwrap();
-    let order_line_rows = core
-        .current_rows(ORDER_LINES, DurabilityTier::Global)
-        .unwrap();
+    let order_rows = jazz::db::block_on(core.current_rows(ORDERS, DurabilityTier::Global)).unwrap();
+    let order_line_rows =
+        jazz::db::block_on(core.current_rows(ORDER_LINES, DurabilityTier::Global)).unwrap();
     let delivered_max_order_by_district = (0..config.warehouses)
         .flat_map(|w| (0..config.districts_per_warehouse).map(move |d| (w, d)))
         .map(|(w, d)| {
@@ -1567,8 +1585,7 @@ fn jazz_totals(
             .count() as u64,
         delivered_max_order_by_district,
         order_lines: order_line_rows.len() as u64,
-        payments: core
-            .current_rows(PAYMENTS, DurabilityTier::Global)
+        payments: jazz::db::block_on(core.current_rows(PAYMENTS, DurabilityTier::Global))
             .unwrap()
             .len() as u64,
     }
@@ -1958,7 +1975,7 @@ fn open_node(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).unwrap();
+    let node = jazz::db::block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
     (dir, node)
 }
 
@@ -2092,8 +2109,7 @@ fn f64_cell(cells: &BTreeMap<String, Value>, name: &str) -> f64 {
 fn row_u64(core: &mut NodeState<RocksDbStorage>, table: &str, row: RowUuid, column: &str) -> u64 {
     let schema = schema();
     let table_schema = table_schema(&schema, table);
-    let row = core
-        .current_rows(table, DurabilityTier::Global)
+    let row = jazz::db::block_on(core.current_rows(table, DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .find(|candidate| candidate.row_uuid() == row)
@@ -2104,8 +2120,7 @@ fn row_u64(core: &mut NodeState<RocksDbStorage>, table: &str, row: RowUuid, colu
 fn row_f64(core: &mut NodeState<RocksDbStorage>, table: &str, row: RowUuid, column: &str) -> f64 {
     let schema = schema();
     let table_schema = table_schema(&schema, table);
-    let row = core
-        .current_rows(table, DurabilityTier::Global)
+    let row = jazz::db::block_on(core.current_rows(table, DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .find(|candidate| candidate.row_uuid() == row)

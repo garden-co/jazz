@@ -23,6 +23,9 @@ use jazz::tools::public_schema::{
 use jazz::tx::{DurabilityTier, Fate, RejectionReason};
 use jazz::wire::TransportError;
 use jazz_sim::public_schema_fixture::compile_public_schema;
+use jazz_sim::fixture::{
+    apply_sync_message_settled, commit_mergeable_unit_settled, settle_outcome,
+};
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
@@ -43,7 +46,7 @@ struct WorkerHarness {
     client_peer: PeerState,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    _upstream: Rc<RefCell<jazz::db::PeerConnection<RocksDbStorage>>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<RocksDbStorage>>>,
 }
 
 struct QueueTransport {
@@ -437,11 +440,10 @@ fn run_jazz(config: &Config) -> JazzSummary {
         aggregate_elapsed_us += aggregate_start.elapsed().as_micros();
 
         let dashboard_start = Instant::now();
-        let update = dashboard_peer
-            .current_rows_update(&mut core, INSTANCES)
-            .unwrap();
+        let update =
+            jazz::db::block_on(dashboard_peer.current_rows_update(&mut core, INSTANCES)).unwrap();
         sync_bytes += view_update_bytes(&update);
-        dashboard.apply_sync_message(update).unwrap();
+        apply_sync_message_settled(&mut dashboard, update).unwrap();
         assert_dashboard_matches(&mut dashboard, &oracle, config.steps_per_instance);
         dashboard_latency
             .record(dashboard_start.elapsed().as_micros() as u64)
@@ -449,9 +451,9 @@ fn run_jazz(config: &Config) -> JazzSummary {
 
         let tail_start = Instant::now();
         for (_, tailer, peer) in &mut tailers {
-            let update = peer.current_rows_update(&mut core, EVENTS).unwrap();
+            let update = jazz::db::block_on(peer.current_rows_update(&mut core, EVENTS)).unwrap();
             sync_bytes += view_update_bytes(&update);
-            tailer.apply_sync_message(update).unwrap();
+            apply_sync_message_settled(tailer, update).unwrap();
             assert_tailers_gap_free(tailer, &oracle);
         }
         tail_latency
@@ -467,9 +469,9 @@ fn run_jazz(config: &Config) -> JazzSummary {
     let mut resume_peer = PeerState::new();
     let mut resume_bytes = 0_u64;
     for table in [INSTANCES, STEPS, EVENTS] {
-        let update = resume_peer.current_rows_update(&mut core, table).unwrap();
+        let update = jazz::db::block_on(resume_peer.current_rows_update(&mut core, table)).unwrap();
         resume_bytes += view_update_bytes(&update);
-        resume.apply_sync_message(update).unwrap();
+        apply_sync_message_settled(&mut resume, update).unwrap();
     }
     resume_latency
         .record(resume_start.elapsed().as_micros() as u64)
@@ -553,9 +555,9 @@ fn apply_transition(
     steps_per_instance: usize,
     now_ms: u64,
 ) -> Result<bool, jazz::db::Error> {
-    let tx = client.db.exclusive_tx()?;
+    let tx = jazz::db::block_on(client.db.exclusive_tx())?;
     let row = instance_row(instance);
-    let cells = tx.read(INSTANCES, row)?.expect("instance");
+    let cells = jazz::db::block_on(tx.read(INSTANCES, row))?.expect("instance");
     let workflow = uuid_cell(&cells, "workflow");
     let current_step = u64_cell(&cells, "currentStep");
     let next_step = current_step + 1;
@@ -564,7 +566,7 @@ fn apply_transition(
     } else {
         "running"
     };
-    tx.insert_with_id(
+    jazz::db::block_on(tx.insert_with_id(
         INSTANCES,
         row,
         cells_map([
@@ -573,9 +575,9 @@ fn apply_transition(
             ("currentStep", Value::U64(next_step)),
             ("wakeAt", Value::U64(0)),
         ]),
-    )?;
-    let _tx_id = tx.commit()?;
-    client.db.tick()?;
+    ))?;
+    let _tx_id = jazz::db::block_on(tx.commit())?;
+    jazz::db::block_on(client.db.tick())?;
     let unit = client
         .outbound
         .borrow_mut()
@@ -584,9 +586,10 @@ fn apply_transition(
     let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
         unreachable!();
     };
-    client.edge.ingest_relay_commit_unit(tx, versions).unwrap();
+    jazz::db::block_on(client.edge.ingest_relay_commit_unit(tx, versions)).unwrap();
     let _ = now_ms;
-    let updates = core.apply_sync_message(unit).unwrap();
+    let outcome = jazz::db::block_on(core.apply_sync_message(unit)).unwrap();
+    let updates = settle_outcome(core, outcome).unwrap();
     let mut accepted = false;
     let mut rejection = None;
     for update in updates {
@@ -597,9 +600,9 @@ fn apply_transition(
                 Fate::Pending => {}
             }
         }
-        client.edge.apply_sync_message(update.clone()).unwrap();
+        apply_sync_message_settled(&mut client.edge, update.clone()).unwrap();
         client.inbound.borrow_mut().push_back(update);
-        client.db.tick()?;
+        jazz::db::block_on(client.db.tick())?;
     }
     if matches!(
         rejection,
@@ -620,28 +623,14 @@ fn append_step_and_event(
     now_ms: u64,
 ) {
     let instance = instance_row(transition.instance);
-    let step_tx = core
-        .commit_mergeable(
-            MergeableCommit::new(
-                STEPS,
-                step_row(transition.instance, transition.to_step),
-                now_ms,
-            )
-            .cells(cells_map([
-                ("instance", Value::Uuid(instance.0)),
-                ("seq", Value::U64(transition.to_step)),
-                ("kind", Value::String("activity".to_owned())),
-                (
-                    "input",
-                    Value::String(format!("{{\"from\":{}}}", transition.from_step)),
-                ),
-                (
-                    "output",
-                    Value::String(format!("{{\"to\":{}}}", transition.to_step)),
-                ),
-                ("status", Value::String("completed".to_owned())),
-            ])),
+    let step_tx = commit_mergeable_unit_settled(
+        core,
+        MergeableCommit::new(
+            STEPS,
+            step_row(transition.instance, transition.to_step),
+            now_ms,
         )
+/* Superseded synchronous scenario setup retained only while replaying the refactor.
         .unwrap();
     accept_global(core, step_tx, global_time);
     let event_tx = core
@@ -691,6 +680,71 @@ fn seed_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>, global_ti
             )
             .unwrap();
         accept_global(core, tx, global_time);
+*/
+        .cells(cells_map([
+            ("instance", Value::Uuid(instance.0)),
+            ("seq", Value::U64(transition.to_step)),
+            ("kind", Value::String("activity".to_owned())),
+            (
+                "input",
+                Value::String(format!("{{\"from\":{}}}", transition.from_step)),
+            ),
+            (
+                "output",
+                Value::String(format!("{{\"to\":{}}}", transition.to_step)),
+            ),
+            ("status", Value::String("completed".to_owned())),
+        ])),
+    )
+    .unwrap();
+    accept_global(core, step_tx.0, global_time);
+    let event_tx = commit_mergeable_unit_settled(
+        core,
+        MergeableCommit::new(
+            EVENTS,
+            event_row(transition.instance, transition.to_step),
+            now_ms,
+        )
+        .cells(cells_map([
+            ("instance", Value::Uuid(instance.0)),
+            ("seq", Value::U64(transition.to_step)),
+            (
+                "payload",
+                Value::Bytes(
+                    format!("{}:{}", transition.instance, transition.to_step).into_bytes(),
+                ),
+            ),
+        ])),
+    )
+    .unwrap();
+    accept_global(core, event_tx.0, global_time);
+}
+
+fn seed_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>, global_time: &mut u64) {
+    let tx = commit_mergeable_unit_settled(
+        core,
+        MergeableCommit::new(WORKFLOWS, workflow_row(), 1).cells(cells_map([
+            ("name", Value::String("workflow-main".to_owned())),
+            (
+                "definition",
+                Value::String(format!("{{\"steps\":{}}}", config.steps_per_instance)),
+            ),
+        ])),
+    )
+    .unwrap();
+    accept_global(core, tx.0, global_time);
+    for instance in 0..config.instances {
+        let tx = commit_mergeable_unit_settled(
+            core,
+            MergeableCommit::new(INSTANCES, instance_row(instance), 2).cells(cells_map([
+                ("workflow", Value::Uuid(workflow_row().0)),
+                ("state", Value::String("running".to_owned())),
+                ("currentStep", Value::U64(0)),
+                ("wakeAt", Value::U64(0)),
+            ])),
+        )
+        .unwrap();
+        accept_global(core, tx.0, global_time);
     }
 }
 
@@ -949,8 +1003,7 @@ fn assert_dashboard_matches(
 ) {
     let schema = schema();
     let table = table_schema(&schema, INSTANCES);
-    let running = node
-        .current_rows(INSTANCES, DurabilityTier::Local)
+    let running = jazz::db::block_on(node.current_rows(INSTANCES, DurabilityTier::Local))
         .unwrap()
         .into_iter()
         .filter(|row| row.cell(table, "state") == Some(Value::String("running".to_owned())))
@@ -966,7 +1019,7 @@ fn assert_tailers_gap_free(node: &mut NodeState<RocksDbStorage>, oracle: &[u64])
     let schema = schema();
     let table = table_schema(&schema, EVENTS);
     let mut seen = BTreeMap::<usize, BTreeSet<u64>>::new();
-    for row in node.current_rows(EVENTS, DurabilityTier::Local).unwrap() {
+    for row in jazz::db::block_on(node.current_rows(EVENTS, DurabilityTier::Local)).unwrap() {
         let instance = instance_idx(RowUuid(match row.cell(table, "instance").unwrap() {
             Value::Uuid(uuid) => uuid,
             other => panic!("expected uuid, got {other:?}"),
@@ -986,7 +1039,7 @@ fn assert_tailers_gap_free(node: &mut NodeState<RocksDbStorage>, oracle: &[u64])
 fn assert_resume_matches(node: &mut NodeState<RocksDbStorage>, oracle: &[u64]) {
     let schema = schema();
     let table = table_schema(&schema, INSTANCES);
-    let rows = node.current_rows(INSTANCES, DurabilityTier::Local).unwrap();
+    let rows = jazz::db::block_on(node.current_rows(INSTANCES, DurabilityTier::Local)).unwrap();
     for row in rows {
         let instance = instance_idx(row.row_uuid());
         assert_eq!(
@@ -1003,8 +1056,8 @@ fn sync_tables(
     tables: &[&str],
 ) {
     for table in tables {
-        let update = peer.current_rows_update(core, table).unwrap();
-        node.apply_sync_message(update).unwrap();
+        let update = jazz::db::block_on(peer.current_rows_update(core, table)).unwrap();
+        apply_sync_message_settled(node, update).unwrap();
     }
 }
 
@@ -1014,14 +1067,16 @@ fn sync_worker_tables(
     tables: &[&str],
 ) {
     for table in tables {
-        let update = worker.edge_peer.current_rows_update(core, table).unwrap();
-        worker.edge.apply_sync_message(update).unwrap();
-        let update = worker
-            .client_peer
-            .current_rows_update(&mut worker.edge, table)
-            .unwrap();
+        let update = jazz::db::block_on(worker.edge_peer.current_rows_update(core, table)).unwrap();
+        apply_sync_message_settled(&mut worker.edge, update).unwrap();
+        let update = jazz::db::block_on(
+            worker
+                .client_peer
+                .current_rows_update(&mut worker.edge, table),
+        )
+        .unwrap();
         worker.inbound.borrow_mut().push_back(update);
-        worker.db.tick().unwrap();
+        jazz::db::block_on(worker.db.tick()).unwrap();
     }
 }
 
@@ -1057,12 +1112,12 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
 }
 
 fn accept_global(core: &mut NodeState<RocksDbStorage>, tx: jazz::tx::TxId, global_time: &mut u64) {
-    core.apply_fate_update(
+    jazz::db::block_on(core.apply_fate_update(
         tx,
         Fate::Accepted,
         Some(GlobalTime(*global_time)),
         Some(DurabilityTier::Global),
-    )
+    ))
     .unwrap();
     *global_time += 1;
 }
@@ -1107,7 +1162,7 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<Roc
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).unwrap();
+    let node = jazz::db::block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
     (dir, node)
 }
 
