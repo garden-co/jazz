@@ -217,9 +217,12 @@ describe("dev catalogue push behavior", () => {
           return new Response(JSON.stringify({ hashes: [storedHash] }), { status: 200 });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${storedHash}`)) {
-          return new Response(JSON.stringify({ schema: storedSchema, publishedAt: 0 }), {
-            status: 200,
-          });
+          return new Response(
+            JSON.stringify({ schema: { tables: storedSchema }, publishedAt: 0 }),
+            {
+              status: 200,
+            },
+          );
         }
         if (input.includes(`/admin/permissions`) || input.endsWith(`/admin/schemas`)) {
           throw new Error("deploy() should not publish when schema is already stored.");
@@ -295,9 +298,12 @@ describe("dev catalogue push behavior", () => {
           return new Response(JSON.stringify({ hashes: [nextSchemaHash] }), { status: 200 });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
-          return new Response(JSON.stringify({ schema: storedSchema, publishedAt: 0 }), {
-            status: 200,
-          });
+          return new Response(
+            JSON.stringify({ schema: { tables: storedSchema }, publishedAt: 0 }),
+            {
+              status: 200,
+            },
+          );
         }
         if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
           return new Response(JSON.stringify({ head: previousHead }), { status: 200 });
@@ -375,12 +381,12 @@ describe("dev catalogue push behavior", () => {
           return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-          return new Response(JSON.stringify({ schema: fromSchema, publishedAt: 0 }), {
+          return new Response(JSON.stringify({ schema: { tables: fromSchema }, publishedAt: 0 }), {
             status: 200,
           });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
-          return new Response(JSON.stringify({ schema: toSchema, publishedAt: 0 }), {
+          return new Response(JSON.stringify({ schema: { tables: toSchema }, publishedAt: 0 }), {
             status: 200,
           });
         }

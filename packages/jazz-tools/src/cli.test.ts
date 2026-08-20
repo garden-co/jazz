@@ -458,7 +458,7 @@ function storedSchemaResponse(
 ) {
   return new Response(
     JSON.stringify({
-      schema,
+      schema: { tables: schema },
       publishedAt,
     }),
     { status },
