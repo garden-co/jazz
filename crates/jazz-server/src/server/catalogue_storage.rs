@@ -167,6 +167,14 @@ impl CatalogueStorage for CatalogueKvStorage {
     }
 }
 
+impl Drop for CatalogueKvStorage {
+    fn drop(&mut self) {
+        // The owner thread holds the boxed storage and therefore any backend
+        // lock. Join its close boundary before a direct builder drop returns.
+        let _ = self.close();
+    }
+}
+
 fn run_catalogue_storage(storage: BoxedStorage, commands: mpsc::Receiver<CatalogueStorageCommand>) {
     while let Ok(command) = commands.recv() {
         match command {
