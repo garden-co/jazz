@@ -292,6 +292,13 @@ fn current_winner_key(
 /// directly. The trait intentionally exposes batch atomicity but no higher
 /// transaction semantics; `commit_batch` owns the tick ordering above this
 /// layer.
+///
+/// A read future's first poll also communicates residency. When a backend has
+/// retained a point or complete scan region, reads fully covered by that
+/// resident data must return `Poll::Ready` on their first poll, including known
+/// absences. Successful writes through the same storage instance must be
+/// reflected by those resident reads. A backend may evict retained data; after
+/// eviction, a later read may become pending again.
 pub trait OrderedKvStorage {
     /// Begin an encoded storage transaction over this backend.
     ///
