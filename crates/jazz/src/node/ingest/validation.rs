@@ -83,6 +83,7 @@ where
             &staged_versions,
         )
         .await?;
+        batch.deliver_notifications(groove::db::NotificationTiming::AfterPersistence);
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;

@@ -97,9 +97,7 @@ impl Database {
     /// ```
     #[cfg(any(test, feature = "test"))]
     pub async fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
-        let publication = self
-            .apply_batch_with_notification_policy(batch, false)
-            .await?;
+        let publication = self.apply_batch(batch).await?;
         let persistence = publication.persist().await;
         self.finish_persistence(persistence)?;
         Ok(())
@@ -110,16 +108,9 @@ impl Database {
     /// no longer borrows this database, so resident queries may continue while
     /// storage suspends.
     pub async fn apply_batch(&mut self, batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
-        self.apply_batch_with_notification_policy(batch, false)
-            .await
-    }
-
-    async fn apply_batch_with_notification_policy(
-        &mut self,
-        batch: DatabaseBatch,
-        defer_notifications_until_durable: bool,
-    ) -> Result<AppliedBatch, Error> {
         self.ensure_not_poisoned()?;
+        let defer_notifications_until_durable =
+            batch.notification_timing == NotificationTiming::AfterPersistence;
         let pending_writes = self.pending_writes_from_batch(batch)?;
         let descriptors = pending_writes
             .iter()

@@ -6,7 +6,9 @@ use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use groove::db::{Database, Error as DatabaseError, GraphBuilder, PrimaryKeyValue};
+use groove::db::{
+    Database, Error as DatabaseError, GraphBuilder, NotificationTiming, PrimaryKeyValue,
+};
 use groove::ivm::{
     AggregateExpr, AggregateFunction, LiteralValue, PlanExpr, ProjectField, PublicationId,
     StaticScanSpec,
@@ -521,6 +523,29 @@ fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked()
     assert_eq!(resumed.deltas.deltas.len(), 2);
     let persistence = block_on(published.persist());
     database.finish_persistence(persistence).unwrap();
+}
+
+#[test]
+fn after_persistence_batch_holds_notifications_until_receipt_is_finished() {
+    let storage = TestStorage::new(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let subscription =
+        block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.deliver_notifications(NotificationTiming::AfterPersistence);
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Speak No Evil".into())],
+    );
+    let applied = block_on(database.apply_batch(batch)).unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    let persisted = block_on(applied.persist());
+    assert!(subscription.try_recv().is_err());
+    database.finish_persistence(persisted).unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
 }
 
 #[test]
