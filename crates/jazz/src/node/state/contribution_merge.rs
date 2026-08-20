@@ -2,12 +2,10 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Calculate novel LWW field/register contributions between explicit branch
-    /// views and commit the result as one ordinary atomic transaction.
-    ///
-    /// Counter and grow-only-set encoding are deliberately rejected until
-    /// their native-operation extractors are available; partial calculation is
-    /// never committed.
+    /// Calculate novel scalar, counter, grow-only-set, and deletion-register
+    /// contributions between explicit branch views and commit the result as
+    /// one ordinary atomic transaction. Unsupported or incomplete calculation
+    /// fails before any output transaction is minted.
     pub fn merge_branch_contributions(
         &mut self,
         request: ContributionMergeRequest,
