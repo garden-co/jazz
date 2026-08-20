@@ -598,14 +598,19 @@ where
                             plan.binding_claim_params.clone(),
                         );
                         let policy_request = policy_request.map(|mut request| {
-                            request.reads.primary = self.read_view.clone();
+                            request.reads.primary = policy_read_view_projected_through(
+                                &request.reads.primary,
+                                self.read_view,
+                            );
                             request
                         });
+                        let mut output_fields = current_row_fields(&table);
+                        output_fields.push("supplying_branch_key".to_owned());
                         self.node
                             .policy_filtered_current_source_graph_via_query_engine(
                                 policy_request,
                                 unfiltered,
-                                &current_row_fields(&table),
+                                &output_fields,
                             )
                             .map_err(|error| {
                                 source_resolution_error_from_policy_proof(request, error)
@@ -700,7 +705,10 @@ where
                         plan.binding_claim_params.clone(),
                     );
                     let policy_request = policy_request.map(|mut request| {
-                        request.reads.primary = self.read_view.clone();
+                        request.reads.primary = policy_read_view_projected_through(
+                            &request.reads.primary,
+                            self.read_view,
+                        );
                         request
                     });
                     self.node
@@ -1966,6 +1974,31 @@ fn policy_proof_cycle_from_capability(message: &str) -> Option<(String, usize)> 
     Some((table.to_owned(), depth))
 }
 
+fn policy_read_view_projected_through(
+    policy_view: &ReadView<RequestedSourceStage>,
+    enclosing_view: &ReadView<RequestedSourceStage>,
+) -> ReadView<RequestedSourceStage> {
+    let mut projected = enclosing_view.clone();
+    // The outer normalized query and the independently normalized policy proof
+    // may use different aliases for one logical table. Keep every policy alias,
+    // but give it the enclosing view's exact current/live/frozen source.
+    for policy_source in policy_view.sources.keys() {
+        if projected.sources.contains_key(policy_source) {
+            continue;
+        }
+        if let Some(source) = enclosing_view
+            .sources
+            .iter()
+            .find_map(|(source_id, source)| {
+                (source_id.table == policy_source.table).then(|| source.clone())
+            })
+        {
+            projected.sources.insert(policy_source.clone(), source);
+        }
+    }
+    projected
+}
+
 pub(super) fn capability_trace_enabled() -> bool {
     std::env::var_os("JAZZ_CAPABILITY_TRACE").is_some()
         || std::env::var_os("JAZZ_CAPABILITY_TRACE_FILE").is_some()
@@ -2195,25 +2228,8 @@ where
             );
             let policy_request = policy_request.map(|mut request| {
                 if let Some(read_view) = policy_read_view {
-                    let mut policy_view = read_view.clone();
-                    // The outer normalized query and the independently
-                    // normalized policy proof use different source aliases
-                    // for the same logical dependency. Preserve the policy
-                    // request's complete source set while projecting every
-                    // alias through the enclosing branch view by table.
-                    for policy_source in request.reads.primary.sources.keys() {
-                        if policy_view.sources.contains_key(policy_source) {
-                            continue;
-                        }
-                        if let Some(source) =
-                            read_view.sources.iter().find_map(|(source_id, source)| {
-                                (source_id.table == policy_source.table).then(|| source.clone())
-                            })
-                        {
-                            policy_view.sources.insert(policy_source.clone(), source);
-                        }
-                    }
-                    request.reads.primary = policy_view;
+                    request.reads.primary =
+                        policy_read_view_projected_through(&request.reads.primary, read_view);
                 }
                 request
             });

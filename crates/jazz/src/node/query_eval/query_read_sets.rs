@@ -252,7 +252,7 @@ pub(super) fn query_read_set_for_read_view(
                 let (head_key, _) = schema
                     .project_branch_view_selector(table, head)
                     .map_err(Error::InvalidBranchKey)?;
-                let base = base
+                let mut base = base
                     .as_ref()
                     .map(|base| match base {
                         BranchViewBase::Current(selector) => schema
@@ -264,6 +264,13 @@ pub(super) fn query_read_set_for_read_view(
                     })
                     .transpose()
                     .map_err(Error::InvalidBranchKey)?;
+                if base.as_ref().is_some_and(|base| match base {
+                    BranchViewSourceBase::Current(key) | BranchViewSourceBase::Snapshot(key, _) => {
+                        key == &head_key
+                    }
+                }) {
+                    base = None;
+                }
                 sources.insert(
                     source.clone(),
                     SourceExpr::BranchView {

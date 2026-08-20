@@ -402,7 +402,7 @@ fn branch_view_reachability_consumes_effective_sources() {
     );
     let families = schema.column_families();
     let db = block_on(Db::open(DbConfig::new(
-        schema,
+        schema.clone(),
         MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
         DbIdentity {
             node: NodeUuid::from_bytes([0x9d; 16]),
@@ -613,6 +613,148 @@ fn branch_dimension_reference_policy_controls_effective_reads() {
         .unwrap()
         .is_empty(),
         "a forged branch coordinate has no ordinary policy evidence"
+    );
+}
+
+#[test]
+fn frozen_base_applies_one_cut_to_policy_dependencies() {
+    let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0xa8; 16]));
+    let policy = Policy::shape(Query::from("todos").join_via_row_id(
+        "branches",
+        "branch_id",
+        [eq(col("owner"), claim("sub"))],
+    ));
+    let schema = JazzSchema::new_with_branch_dimensions(
+        [BranchDimensionSchema::new(
+            dimension,
+            "branch",
+            ColumnType::Uuid,
+            Value::Uuid(uuid::Uuid::nil()),
+        )],
+        [
+            TableSchema::new(
+                "branches",
+                [
+                    ColumnSchema::new("scope_id", ColumnType::Uuid),
+                    ColumnSchema::new("name", ColumnType::String),
+                    ColumnSchema::new("owner", ColumnType::Uuid),
+                ],
+            )
+            .with_branch_dimension("scope_id", dimension)
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+            TableSchema::new(
+                "todos",
+                [
+                    ColumnSchema::new("branch_id", ColumnType::Uuid),
+                    ColumnSchema::new("title", ColumnType::String),
+                ],
+            )
+            .with_reference("branch_id", "branches")
+            .with_branch_dimension("branch_id", dimension)
+            .with_read_policy(policy.clone())
+            .with_write_policy(policy),
+        ],
+    );
+    let families = schema.column_families();
+    let db = block_on(Db::open(DbConfig::new(
+        schema.clone(),
+        MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xa9; 16]),
+            author: AuthorId::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let before = AuthorId::from_bytes([0xad; 16]);
+    let after = AuthorId::from_bytes([0xae; 16]);
+    let base_branch = RowUuid::from_bytes([0xaa; 16]);
+    let head_branch = RowUuid::from_bytes([0xab; 16]);
+    let base = BranchSelector::new([("branch", Value::Uuid(base_branch.0))]);
+    let head = BranchSelector::new([("branch", Value::Uuid(head_branch.0))]);
+    for branch in [base_branch, head_branch] {
+        db.insert_with_id_in_branch(
+            "branches",
+            base.clone(),
+            branch,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("branch".to_owned())),
+                ("owner".to_owned(), Value::Uuid(before.0)),
+            ]),
+        )
+        .unwrap();
+    }
+    let row = RowUuid::from_bytes([0xac; 16]);
+    let authored = db
+        .insert_with_id_in_branch_for_identity(
+            before,
+            "todos",
+            base.clone(),
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("frozen".to_owned()))]),
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    let cut = SnapshotRef {
+        owner: authored.node,
+        global_base: GlobalSeq(0),
+        local_base: authored.time,
+        dots: Vec::new(),
+    };
+    db.update_in_branch(
+        "branches",
+        base.clone(),
+        head_branch,
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(after.0))]),
+    )
+    .unwrap();
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let opts = ReadOpts::default().branch_view(
+        head,
+        Some(BranchViewBase::Snapshot {
+            branch: base,
+            snapshot: cut,
+        }),
+    );
+    let branches = db.prepare_query(&db.table("branches")).unwrap();
+    let branch_rows = block_on(db.all(&branches, opts.clone())).unwrap();
+    assert_eq!(branch_rows.len(), 2);
+    let branch_table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "branches")
+        .unwrap();
+    assert!(branch_rows.iter().all(|row| {
+        row.cell(branch_table, "owner") == Some(Value::Uuid(before.0))
+            && row.cell(branch_table, "scope_id") == Some(Value::Uuid(head_branch.0))
+    }));
+    let system_rows = block_on(db.all(&query, opts.clone())).unwrap();
+    assert_eq!(system_rows.len(), 1);
+    let live_opts = ReadOpts::default().branch_view(
+        BranchSelector::new([("branch", Value::Uuid(head_branch.0))]),
+        Some(BranchViewBase::Current(BranchSelector::new([(
+            "branch",
+            Value::Uuid(base_branch.0),
+        )]))),
+    );
+    assert_eq!(
+        block_on(db.all_for_identity(&query, live_opts, after))
+            .unwrap()
+            .len(),
+        1
+    );
+    let before_rows = block_on(db.all_for_identity(&query, opts.clone(), before)).unwrap();
+    let after_rows = block_on(db.all_for_identity(&query, opts, after)).unwrap();
+    assert_eq!(
+        before_rows.len(),
+        1,
+        "policy traversal must see the head branch row at the frozen cut; post-cut identity saw {} rows",
+        after_rows.len()
+    );
+    assert!(
+        after_rows.is_empty(),
+        "a post-cut policy grant must not leak into a frozen branch view"
     );
 }
 
