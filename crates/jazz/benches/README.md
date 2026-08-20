@@ -20,7 +20,6 @@ the facade-level Criterion and realistic lanes, including:
 - `validation`
 - `sync`
 - `cold_subscription`
-- `merge_back_cost`
 - `relation_include_delivery`
 - `selective_global_hydration`
 

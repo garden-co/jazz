@@ -38,7 +38,6 @@ result.
 | `cold_subscription`         | global update and local current-row materialization over increasing history depth | history depth, pending local state, current-row hydration |
 | `validation`                | multi-client exclusive ingest against an independent simplified model             | clients, rows, contention, OCC, and predicate sets        |
 | `sync`                      | mixed commits over UI → worker → edge → core with periodic view updates           | commit mix, topology, view cadence, known-state reuse     |
-| `merge_back_cost`           | branch creation, mergeable writes, merge-back, and current-row count              | branch write count; not a complete offline-sync scenario  |
 | `relation_include_delivery` | one-row relation/include delivery over a 1k–20k accumulated-view ladder           | incremental delivery work versus retained view size       |
 
 The smoke gate retains these receipts and their deltas. The
@@ -54,8 +53,8 @@ streams, text traces, migrations, and durable execution. They are retained by
 the smoke workflow.
 
 **S8 still does not exist.** The specification reserves it for
-branch/merge/offline edits. `merge_back_cost` and the declarative R8 fixture
-cover pieces of that story, not the complete lifecycle.
+branch/merge/offline edits. The declarative R8 fixture covers pieces of that
+story, not the complete lifecycle.
 
 ### Groove
 

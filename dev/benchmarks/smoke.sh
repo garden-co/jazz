@@ -413,11 +413,6 @@ run_scenario \
   env GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --bench validation
 
 run_scenario \
-  "jazz/merge_back_cost" \
-  "JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost" \
-  env JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost
-
-run_scenario \
   "jazz/relation_include_delivery" \
   "JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --no-default-features --bench relation_include_delivery" \
   env JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --no-default-features --bench relation_include_delivery
