@@ -308,6 +308,8 @@ pub enum IvmRuntimeError {
     EnumProjectionNonEnum,
     #[error("index not found: {0}")]
     IndexNotFound(String),
+    #[error("invalid persisted index entry: {0}")]
+    InvalidPersistedIndex(String),
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]

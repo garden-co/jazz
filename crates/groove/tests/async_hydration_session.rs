@@ -7,8 +7,11 @@ use std::task::{Context, Poll};
 use futures::executor::block_on;
 use futures::task::noop_waker;
 use groove::db::{Database, Error as DatabaseError, GraphBuilder, PrimaryKeyValue};
-use groove::ivm::{AggregateExpr, AggregateFunction, PlanExpr, ProjectField, PublicationId};
-use groove::records::{RecordDescriptor, Value};
+use groove::ivm::{
+    AggregateExpr, AggregateFunction, LiteralValue, PlanExpr, ProjectField, PublicationId,
+    StaticScanSpec,
+};
+use groove::records::{RecordDescriptor, Value, ValueType, VariantRecord};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
@@ -35,6 +38,19 @@ fn indexed_schema() -> DatabaseSchema {
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_index(IndexSchema::new("albums_by_title", ["title"]))])
+}
+
+fn variant_indexed_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "albums",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("title", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_index(IndexSchema::new("albums_by_title", ["title"]))
+    .with_variant(1, ["title", "id"])])
 }
 
 fn edges_schema() -> DatabaseSchema {
@@ -236,6 +252,110 @@ fn blocked_index_source_retains_its_storage_request_across_polls() {
             .count(),
         1,
         "resuming evaluation must poll the retained request, not recreate it"
+    );
+}
+
+#[test]
+fn projected_indexed_rows_discover_and_hydrate_referenced_rows() {
+    let schema = variant_indexed_schema();
+    let (storage, control) = TestStorage::controlled(&schema.column_families());
+    let mut database = block_on(Database::new(schema, storage)).unwrap();
+    let physical = RecordDescriptor::new([("title", ValueType::String), ("id", ValueType::U64)]);
+    let output = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    database
+        .define_variant_projection("albums", "logical-album", output)
+        .unwrap();
+    database
+        .register_variant_projection_case(
+            "albums",
+            "logical-album",
+            1,
+            [ProjectField::named("id"), ProjectField::named("title")],
+        )
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        VariantRecord::create(
+            1,
+            physical,
+            &[Value::String("Kind of Blue".into()), Value::U64(1)],
+        )
+        .unwrap(),
+    );
+    batch.insert(
+        "albums",
+        VariantRecord::create(
+            1,
+            physical,
+            &[Value::String("Kind of Blue".into()), Value::U64(2)],
+        )
+        .unwrap(),
+    );
+    block_on(database.commit_batch(batch)).unwrap();
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+    let graph = GraphBuilder::variant_index_scan(
+        "albums",
+        "albums_by_title",
+        "logical-album",
+        StaticScanSpec::Prefix(vec![LiteralValue::String("Kind of Blue".into())]),
+    );
+    let mut install = Box::pin(database.subscribe_one_sink(graph));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+    assert!(control.observed().contains(&TestStorageOperation::ScanOpen));
+    assert!(!control.observed().contains(&TestStorageOperation::Get));
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::Get)
+            .count(),
+        2,
+        "all sibling row loads must be discovered and started together"
+    );
+
+    control.resume_operation(TestStorageOperation::Get);
+    let subscription = block_on(install).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        vec![
+            (vec![Value::U64(1), Value::String("Kind of Blue".into())], 1,),
+            (vec![Value::U64(2), Value::String("Kind of Blue".into())], 1,)
+        ]
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        VariantRecord::create(
+            1,
+            physical,
+            &[Value::String("Kind of Blue".into()), Value::U64(3)],
+        )
+        .unwrap(),
+    );
+    batch.insert(
+        "albums",
+        VariantRecord::create(
+            1,
+            physical,
+            &[Value::String("Blue Train".into()), Value::U64(4)],
+        )
+        .unwrap(),
+    );
+    block_on(database.commit_batch(batch)).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(3), Value::String("Kind of Blue".into())], 1,)],
+        "incremental table deltas must use the same index predicate"
     );
 }
 

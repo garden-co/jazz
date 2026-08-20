@@ -1170,7 +1170,6 @@ where
                         &prefix,
                         &projection_target,
                     )
-                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 self.node.query_engine_read_metrics.source_index_probes += 1;
                 Ok(Some(rows))
@@ -1462,7 +1461,6 @@ where
                             &prefix,
                             &projection_target,
                         )
-                        .await
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
                 }
                 None => {
@@ -1549,7 +1547,6 @@ where
                         &projection_target,
                         raw_global_output.clone(),
                     )
-                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             }
             _ => {
@@ -2684,7 +2681,7 @@ where
         Ok(())
     }
 
-    async fn physical_global_current_source_for_index_scan(
+    fn physical_global_current_source_for_index_scan(
         &self,
         table: &TableSchema,
         schema_version: SchemaVersionId,
@@ -2700,17 +2697,16 @@ where
             projection_target,
             table.global_current_storage_tables()[0].record_schema(),
         )
-        .await
     }
 
-    async fn physical_global_current_source_for_index_scan_with_output(
+    fn physical_global_current_source_for_index_scan_with_output(
         &self,
         table: &TableSchema,
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
         projection_target: &str,
-        output: RecordDescriptor,
+        _output: RecordDescriptor,
     ) -> Result<GraphBuilder, Error> {
         let mapping = self
             .catalogue
@@ -2728,26 +2724,12 @@ where
                 "physical current index column mapping missing",
             ))?;
         let storage_table = physical_global_current_table_name(mapping.table_id);
-        let indexed = self
-            .database
-            .index_scan_raw(
-                &storage_table,
-                &physical_current_index_name(column_id),
-                prefix,
-            )
-            .await?;
-        let mut records = Vec::with_capacity(indexed.len());
-        for raw in indexed {
-            let variant_tag = raw.variant_tag();
-            let record = groove::records::VariantRecord::new(variant_tag, raw.owned_record());
-            if let Some(projected) =
-                self.database
-                    .project_variant_record(&storage_table, projection_target, &record)?
-            {
-                records.push(projected.raw().to_vec());
-            }
-        }
-        Ok(GraphBuilder::inline_records(output, records))
+        Ok(GraphBuilder::variant_index_scan(
+            storage_table,
+            physical_current_index_name(column_id),
+            projection_target,
+            StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect()),
+        ))
     }
 }
 

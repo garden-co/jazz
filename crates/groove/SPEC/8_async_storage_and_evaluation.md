@@ -128,6 +128,16 @@ Interruptible state is concentrated at table/index sources, persisted
 arrangements and operators, recursive hydration, and other storage-dependent
 seams.
 
+An indexed-row source is the canonical example of dependency discovery within
+one source evaluation. Its first retained request scans the durable index. The
+result reveals a set of primary keys; all corresponding row reads are then
+started together and the source remains blocked until they are ready. The
+source projects those rows into its declared output descriptor. Subsequent
+table deltas apply the same index predicate and projection synchronously, so
+the hydrated source and its incremental form remain one hash-consed node and
+one delta path. A higher layer must not emulate this by awaiting an index read
+and lowering the returned rows as inline records.
+
 ## Tick lifecycle
 
 The tick boundary is:

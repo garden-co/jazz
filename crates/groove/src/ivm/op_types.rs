@@ -55,6 +55,9 @@ pub struct IndexSourceOp {
     /// descriptor.
     pub input_descriptor: RecordDescriptor,
     pub variant_projection: Option<VariantProjectionTarget>,
+    /// Named projection for indexed table-row output. Absent for the
+    /// traditional encoded index-entry source.
+    pub row_projection: Option<VariantProjectionTarget>,
     pub key_fields: Vec<usize>,
     pub value_fields: Vec<usize>,
     pub unique: bool,

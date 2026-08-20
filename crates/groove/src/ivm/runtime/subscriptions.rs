@@ -2622,6 +2622,21 @@ impl IvmRuntime {
                 Ok(table_schema.record_schema())
             }
             GraphBuilder::InlineRecords { output, .. } => Ok(*output),
+            GraphBuilder::Index {
+                table,
+                row_projection: Some(target),
+                ..
+            } => self
+                .variant_projections
+                .get(&VariantProjectionKey {
+                    table: table.clone(),
+                    target: VariantProjectionTarget::Named(target.clone()),
+                })
+                .map(|projection| projection.output)
+                .ok_or_else(|| IvmRuntimeError::VariantProjectionNotFound {
+                    table: table.clone(),
+                    target: target.clone(),
+                }),
             GraphBuilder::Index { .. } => Ok(index_record_descriptor()),
             GraphBuilder::FrontierSource { output, .. }
             | GraphBuilder::BindingSource { output, .. } => Ok(*output),

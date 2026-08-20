@@ -126,7 +126,12 @@ impl IvmRuntime {
                     root_ordering_node: None,
                 })
             }
-            GraphBuilder::Index { table, index, scan } => {
+            GraphBuilder::Index {
+                table,
+                index,
+                scan,
+                row_projection,
+            } => {
                 let table = self
                     .schema
                     .table(table)
@@ -138,7 +143,8 @@ impl IvmRuntime {
                     .find(|candidate| candidate.name == *index)
                     .ok_or_else(|| IvmRuntimeError::IndexNotFound(index.clone()))?
                     .clone();
-                let source = self.index_source_op(&table, &index, scan.clone())?;
+                let source =
+                    self.index_source_op(&table, &index, scan.clone(), row_projection.clone())?;
                 let output = inferred_output;
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(OpType::IndexSource(source), [], output),
@@ -1240,6 +1246,7 @@ impl IvmRuntime {
         table: &TableSchema,
         index: &IndexSchema,
         scan: Option<StaticScanSpec>,
+        row_projection: Option<String>,
     ) -> Result<IndexSourceOp, IvmRuntimeError> {
         let (table_descriptor, variant_projection) = if table.has_variants() {
             (
@@ -1281,6 +1288,7 @@ impl IvmRuntime {
             index: index.name.clone(),
             input_descriptor: table_descriptor,
             variant_projection,
+            row_projection: row_projection.map(VariantProjectionTarget::Named),
             key_fields,
             value_fields,
             unique: index.unique || index_key_covers_primary_key,

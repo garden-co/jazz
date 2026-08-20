@@ -150,6 +150,9 @@ pub enum GraphBuilder {
         table: String,
         index: String,
         scan: Option<StaticScanSpec>,
+        /// When present, fetch indexed table rows and project their variants
+        /// instead of exposing the index's encoded key/value records.
+        row_projection: Option<String>,
     },
     FrontierSource {
         binding: FrontierName,
@@ -439,6 +442,7 @@ impl GraphBuilder {
             table: table.into(),
             index: index.into(),
             scan: None,
+            row_projection: None,
         }
     }
 
@@ -451,6 +455,23 @@ impl GraphBuilder {
             table: table.into(),
             index: index.into(),
             scan: Some(scan),
+            row_projection: None,
+        }
+    }
+
+    /// Read table rows selected by a durable secondary index through one
+    /// fixed-output variant projection target.
+    pub fn variant_index_scan(
+        table: impl Into<String>,
+        index: impl Into<String>,
+        projection_target: impl Into<String>,
+        scan: StaticScanSpec,
+    ) -> Self {
+        Self::Index {
+            table: table.into(),
+            index: index.into(),
+            scan: Some(scan),
+            row_projection: Some(projection_target.into()),
         }
     }
 

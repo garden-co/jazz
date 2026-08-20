@@ -678,6 +678,8 @@ impl HydrationEvaluator<'_> {
                 OpType::IndexSource(index) => match self.evaluation_inputs.as_deref_mut() {
                     Some(inputs) => super::NodeState::update_index_source_from_inputs(
                         index,
+                        self.schema,
+                        self.variant_projections,
                         &output_desc,
                         inputs,
                     ),

@@ -48,6 +48,28 @@ impl NodeState {
     pub(super) fn index_source_request(
         input: &IndexSourceOp,
     ) -> Result<Option<super::evaluation_session::StorageRequestKey>, IvmRuntimeError> {
+        if input.row_projection.is_some() {
+            return Ok(Some(
+                match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
+                {
+                    StaticScanBounds::Prefix(prefix) => {
+                        super::evaluation_session::StorageRequestKey::IndexedRowsPrefix {
+                            table: input.table.clone(),
+                            index: input.index.clone(),
+                            prefix,
+                        }
+                    }
+                    StaticScanBounds::Range { start, end } => {
+                        super::evaluation_session::StorageRequestKey::IndexedRowsRange {
+                            table: input.table.clone(),
+                            index: input.index.clone(),
+                            start,
+                            end,
+                        }
+                    }
+                },
+            ));
+        }
         Ok(
             match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())? {
                 StaticScanBounds::Prefix(prefix) => {
@@ -118,14 +140,58 @@ impl NodeState {
 
     pub(super) fn update_index_source_from_inputs(
         input: &IndexSourceOp,
+        schema: &DatabaseSchema,
+        variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
         output_desc: &RecordDescriptor,
         inputs: &mut super::evaluation_session::EvaluationInputs,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let Some(request) = Self::index_source_request(input)? else {
             return Ok(RecordDeltas::empty(*output_desc));
         };
-        let deltas = inputs
-            .rows(request)?
+        let rows = inputs.rows(request)?;
+        if let Some(row_projection) = &input.row_projection {
+            let table_schema = schema
+                .table(&input.table)
+                .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
+            let mut grouped = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
+            for (_, stored) in rows {
+                let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
+                let descriptor = table_schema
+                    .record_schema_for_variant(variant_tag)
+                    .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                        table: input.table.clone(),
+                        version: u64::from(variant_tag),
+                    })?;
+                grouped
+                    .entry((variant_tag, descriptor))
+                    .or_default()
+                    .push(RecordDelta {
+                        record: Bytes::copy_from_slice(payload),
+                        weight: 1,
+                    });
+            }
+            let table_deltas = grouped
+                .into_iter()
+                .map(|((variant_tag, descriptor), deltas)| TableDelta {
+                    table: input.table.clone(),
+                    variant_tag,
+                    descriptor,
+                    deltas,
+                })
+                .collect::<Vec<_>>();
+            return Self::update_table_source(
+                &TableSourceOp {
+                    table: input.table.clone(),
+                    scan: None,
+                    variant_projection: Some(row_projection.clone()),
+                },
+                schema,
+                variant_projections,
+                output_desc,
+                &table_deltas,
+            );
+        }
+        let deltas = rows
             .iter()
             .map(|(_, record)| RecordDelta {
                 record: Bytes::copy_from_slice(record),
@@ -305,6 +371,68 @@ impl NodeState {
             return Ok(RecordDeltas {
                 descriptor: *output_desc,
                 deltas,
+            });
+        }
+
+        if let Some(row_projection) = &input.row_projection {
+            let index_by = IndexByOp {
+                key_expressions: Vec::new(),
+                value_expressions: Vec::new(),
+                explicit_index: None,
+                key_fields: input.key_fields.clone(),
+                value_fields: input.value_fields.clone(),
+                unique: input.unique,
+                append_value_to_key: input.append_value_to_key,
+                store_value: input.store_value,
+                scan: input.scan.clone(),
+            };
+            let mut matching = Vec::new();
+            for table_delta in table_deltas
+                .iter()
+                .filter(|delta| delta.table == input.table)
+            {
+                for record_delta in &table_delta.deltas {
+                    let one = TableDelta {
+                        table: table_delta.table.clone(),
+                        variant_tag: table_delta.variant_tag,
+                        descriptor: table_delta.descriptor,
+                        deltas: vec![record_delta.clone()],
+                    };
+                    let index_input = Self::update_table_source(
+                        &TableSourceOp {
+                            table: input.table.clone(),
+                            scan: None,
+                            variant_projection: input.variant_projection.clone(),
+                        },
+                        schema,
+                        variant_projections,
+                        &input.input_descriptor,
+                        std::slice::from_ref(&one),
+                    )?;
+                    if apply_index_by(&index_by, &input.input_descriptor, &index_input.deltas)?
+                        .is_empty()
+                    {
+                        continue;
+                    }
+                    matching.extend(
+                        Self::update_table_source(
+                            &TableSourceOp {
+                                table: input.table.clone(),
+                                scan: None,
+                                variant_projection: Some(row_projection.clone()),
+                            },
+                            schema,
+                            variant_projections,
+                            output_desc,
+                            std::slice::from_ref(&one),
+                        )?
+                        .deltas,
+                    );
+                }
+            }
+            return Ok(RecordDeltas {
+                descriptor: *output_desc,
+                deltas: matching,
             });
         }
 
