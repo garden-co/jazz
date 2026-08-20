@@ -2149,7 +2149,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(attachedSubjects).toEqual(["client", "client"]);
   });
 
-  it("passes supported read tiers through and fails fast for unsupported read options", async () => {
+  it("passes supported read tiers and branch views through", async () => {
     const runtime = emptyNativeRuntime();
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual(
@@ -2173,7 +2173,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "local",
         JSON.stringify({ read_view: { source: "branch" } }),
       ),
-    ).rejects.toThrow("read_view");
+    ).resolves.toEqual([]);
     await expect(
       runtime.query(
         JSON.stringify({ table: "todos" }),
@@ -2181,7 +2181,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "local",
         JSON.stringify({ readView: { source: "branch" } }),
       ),
-    ).rejects.toThrow("read_view");
+    ).resolves.toEqual([]);
   });
 
   it("passes include_deleted query intent through native read options", async () => {
@@ -2618,7 +2618,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
   });
 
-  it("rejects non-default read_view subscription options", () => {
+  it("passes non-default read_view subscription options through", () => {
     const runtime = emptyNativeRuntime();
 
     expect(() =>
@@ -2628,7 +2628,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "edge",
         JSON.stringify({ read_view: { source: "branch" } }),
       ),
-    ).toThrow("read_view");
+    ).not.toThrow();
     expect(() =>
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
@@ -2636,7 +2636,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "edge",
         JSON.stringify({ readView: { source: "branch" } }),
       ),
-    ).toThrow("read_view");
+    ).not.toThrow();
   });
 
   it("accepts well-formed subscription sessions and rejects malformed sessions", () => {

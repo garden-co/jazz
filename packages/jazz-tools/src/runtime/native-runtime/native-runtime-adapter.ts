@@ -2321,6 +2321,8 @@ function readOptions(
   if (includeDeleted) readOptions.include_deleted = true;
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
+  const readView = options.read_view ?? options.readView;
+  if (readView != null) readOptions.read_view = readView;
   return readOptions;
 }
 
@@ -2378,9 +2380,6 @@ function closeSubscriptionSource(source: SubscriptionSourceState["source"]): voi
 
 function readSupportedReadOptions(optionsJson: string): void {
   const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
-  if (parsed.read_view != null || parsed.readView != null) {
-    throw new Error("Native runtime does not support non-default read_view yet");
-  }
   const propagation = parsed.propagation;
   if (propagation != null && propagation !== "full" && propagation !== "local-only") {
     throw new Error(

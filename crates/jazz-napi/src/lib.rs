@@ -61,6 +61,7 @@ use jazz::groove::storage::{
     ReopenableStorage as CoreReopenableStorage,
 };
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use jazz::protocol::ReadViewSpec as CoreReadViewSpec;
 use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
 };
@@ -2375,15 +2376,13 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
     if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
-    if value
+    if let Some(read_view) = value
         .get("read_view")
         .or_else(|| value.get("readView"))
         .filter(|read_view| !read_view.is_null())
-        .is_some()
     {
-        return Err(napi::Error::from_reason(
-            "non-default read_view is not supported yet",
-        ));
+        opts.read_view = serde_json::from_value::<CoreReadViewSpec>(read_view.clone())
+            .map_err(|error| napi::Error::from_reason(format!("invalid read_view: {error}")))?;
     }
     Ok(opts)
 }
@@ -3059,6 +3058,7 @@ mod tests {
     use jazz::groove::records::{RecordDescriptor, ValueType};
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+    use jazz::protocol::ReadViewSpec as CoreReadViewSpec;
     use jazz::tools::OpenTransactionId as CoreOpenBatchId;
     use jazz::tools::{
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
@@ -3255,6 +3255,23 @@ mod tests {
             core_read_opts_from_json(Some(json!({ "propagate": false }))).expect("parse read opts");
 
         assert_eq!(opts.propagation, CorePropagation::Full);
+    }
+
+    #[test]
+    fn core_read_opts_accept_branch_view() {
+        let expected = CoreReadViewSpec::branch_view(
+            jazz::protocol::BranchSelector::new([(
+                "branch",
+                CoreValue::Uuid(uuid::Uuid::from_bytes([0x42; 16])),
+            )]),
+            None,
+        );
+        let opts = core_read_opts_from_json(Some(json!({
+            "read_view": serde_json::to_value(&expected).unwrap()
+        })))
+        .expect("parse branch read view");
+
+        assert_eq!(opts.read_view, expected);
     }
 
     #[test]

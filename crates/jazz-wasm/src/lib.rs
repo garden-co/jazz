@@ -18,7 +18,7 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::groove::storage::OpfsStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::protocol::PermissionAdviceAction;
+use jazz::protocol::{PermissionAdviceAction, ReadViewSpec};
 use jazz::query::{Query, RelationExpr, RelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::tools::{OpenTransactionId, TransactionId};
@@ -2600,7 +2600,14 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
     if value.is_undefined() || value.is_null() {
         return Ok(opts);
     }
-    reject_unsupported_non_default_read_view(&value)?;
+    for name in ["read_view", "readView"] {
+        let prop = js_sys::Reflect::get(&value, &JsValue::from_str(name))?;
+        if !prop.is_undefined() && !prop.is_null() {
+            opts.read_view = serde_wasm_bindgen::from_value::<ReadViewSpec>(prop)
+                .map_err(|error| JsValue::from_str(&format!("invalid read_view: {error}")))?;
+            break;
+        }
+    }
     if let Some(tier) = optional_string_prop(&value, "tier")? {
         opts.tier = durability_tier_from_str(&tier)?;
     }
@@ -2622,18 +2629,6 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
         opts.include_deleted = include_deleted;
     }
     Ok(opts)
-}
-
-fn reject_unsupported_non_default_read_view(value: &JsValue) -> Result<(), JsValue> {
-    for name in ["read_view", "readView"] {
-        let prop = js_sys::Reflect::get(value, &JsValue::from_str(name))?;
-        if !prop.is_undefined() && !prop.is_null() {
-            return Err(JsValue::from_str(
-                "non-default read_view is not supported yet",
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
