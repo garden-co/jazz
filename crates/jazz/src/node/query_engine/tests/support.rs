@@ -18,8 +18,8 @@ pub(super) fn shape(byte: u8) -> ShapeId {
     ShapeId(uuid::Uuid::from_bytes([byte; 16]))
 }
 
-pub(super) fn branch(byte: u8) -> BranchId {
-    BranchId::from_bytes([byte; 16])
+pub(super) fn schema_family(byte: u8) -> SchemaFamilyId {
+    SchemaFamilyId::from_bytes([byte; 16])
 }
 
 pub(super) fn source(table: &str, role: SourceRole) -> SourceId {
@@ -139,7 +139,7 @@ pub(super) fn requested_projection() -> SchemaProjection<RequestedSourceStage> {
 
 pub(super) fn resolved_projection(byte: u8) -> SchemaProjection<ResolvedSourceStage> {
     SchemaProjection {
-        schema_family: branch(byte),
+        schema_family: schema_family(byte),
         storage: vec![ResolvedPartitionLens {
             storage_schema: schema(byte),
             lens_path_fingerprint: vec![],

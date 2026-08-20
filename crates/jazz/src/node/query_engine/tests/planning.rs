@@ -421,7 +421,7 @@ fn read_view_models_propagation_and_schema_lens_without_settled_result_source() 
     let root = source("todos", SourceRole::Root);
     let policy = source("todo_acl", SourceRole::Policy("read".to_owned()));
     let projection = SchemaProjection {
-        schema_family: SchemaFamilySelection::SchemaFamilyBranch(branch(0x33)),
+        schema_family: SchemaFamilySelection::ExplicitSchemaFamily(schema_family(0x33)),
         storage: StorageSchemaSelection::CompatiblePartitions,
         lens: LensSelection::Canonical,
     };

@@ -2069,16 +2069,6 @@ pub enum ResultRowSource {
     /// Current default source.
     #[default]
     Current,
-    /// Current state of a named branch.
-    Branch {
-        /// Branch identifier.
-        branch: uuid::Uuid,
-    },
-    /// Merge view of several named branches.
-    MergedBranches {
-        /// Branch identifiers participating in the merged source.
-        branches: Vec<uuid::Uuid>,
-    },
     /// Historic snapshot ref.
     Snapshot {
         /// Snapshot frontier.

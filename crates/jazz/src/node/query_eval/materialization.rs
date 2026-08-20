@@ -292,14 +292,14 @@ where
     #[allow(dead_code)]
     fn relation_edge_branch_id(
         version_ref: &RowVersionRefEntry,
-    ) -> Result<Option<BranchId>, Error> {
+    ) -> Result<Option<SchemaFamilyId>, Error> {
         let Some(bytes) = &version_ref.branch_or_prefix else {
             return Ok(None);
         };
         let branch: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
             Error::InvalidStoredValue("relation edge branch discriminator must be a UUID")
         })?;
-        Ok(Some(BranchId::from_bytes(branch)))
+        Ok(Some(SchemaFamilyId::from_bytes(branch)))
     }
 
     pub(super) fn materialize_historical_query_rows(

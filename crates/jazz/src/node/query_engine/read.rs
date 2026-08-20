@@ -257,7 +257,7 @@ pub(crate) enum SchemaFamilySelection {
     /// Current/default branch for the runtime.
     Current,
     /// Explicit schema-family branch.
-    SchemaFamilyBranch(BranchId),
+    ExplicitSchemaFamily(SchemaFamilyId),
 }
 
 /// Stored schema partitions to read before projecting into `read_schema`.
@@ -315,7 +315,7 @@ impl SourceResolution for RequestedSourceStage {
 pub(crate) struct ResolvedSourceStage;
 
 impl SourceResolution for ResolvedSourceStage {
-    type SchemaFamily = BranchId;
+    type SchemaFamily = SchemaFamilyId;
     type Storage = Vec<ResolvedPartitionLens>;
     type Lens = ();
     type Overlay = ResolvedOverlay;

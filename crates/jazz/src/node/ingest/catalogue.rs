@@ -978,18 +978,4 @@ where
         Ok(())
     }
 
-    /// Prepare physical branch storage only after bounded structural checks and
-    /// catalogue dependencies are known to be satisfiable. Missing catalogue
-    /// schemas are left for the ordinary parking path.
-    pub(super) fn prepare_branch_target_partitions_if_ready(
-        &mut self,
-        _tx: &Transaction,
-        _versions: &[VersionRecord],
-    ) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
-        Ok(())
-    }
-
 }

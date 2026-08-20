@@ -115,7 +115,7 @@ groove::impl_record_field_u64!(GlobalTime);
 groove::impl_record_field_u64!(NodeAlias);
 groove::impl_record_field_u64!(SchemaVersionAlias);
 groove::impl_record_field_uuid!(NodeUuid);
-groove::impl_record_field_uuid!(BranchId);
+groove::impl_record_field_uuid!(SchemaFamilyId);
 groove::impl_record_field_uuid!(RowUuid);
 groove::impl_record_field_uuid!(SchemaVersionId);
 groove::impl_record_field_enum!(TxKind {

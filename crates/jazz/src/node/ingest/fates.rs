@@ -545,9 +545,6 @@ where
                 break;
             }
             for tx_id in ready {
-                if let Some(unit) = self.parking.parked_commit_units.get(&tx_id).cloned() {
-                    self.prepare_branch_target_partitions_if_ready(&unit.tx, &unit.versions)?;
-                }
                 let Some(unit) = self.parking.parked_commit_units.remove(&tx_id) else {
                     continue;
                 };
@@ -627,7 +624,6 @@ where
                     self.sync_metrics.dropped_malformed_relay_commit_units += 1;
                     continue;
                 }
-                self.prepare_branch_target_partitions_if_ready(&unit.tx, &unit.versions)?;
                 self.sync_metrics.parked_orphans_resolved += 1;
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;

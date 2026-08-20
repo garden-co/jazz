@@ -47,7 +47,6 @@ where
         {
             return self.reject_malformed_commit(tx, reason);
         }
-        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         let clock_before_ingest = self.clock.clone();
         // One incoming authority unit can durably stage its source before a
         // derived merge is discovered. Keep their subscription publication
@@ -121,7 +120,6 @@ where
         if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
         {
-            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         }
         let mut updates =
             self.ingest_edge_authority_mergeable_commit_unit_once(tx, versions, now_ms, None)?;
@@ -151,7 +149,6 @@ where
         if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
         {
-            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         }
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
@@ -457,7 +454,6 @@ where
         if self.malformed_authored_version_reason(&versions).is_some() {
             return Err(Error::UnsupportedCommitUnit("malformed relay commit unit"));
         }
-        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         self.ingest_relay_commit_unit_once(tx, versions)?;
         self.drain_parked_relay_commit_units()?;
         Ok(())

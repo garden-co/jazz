@@ -28,8 +28,8 @@ use thiserror::Error;
 
 use self::query_engine::user_column_field;
 use crate::ids::{
-    AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
-    RowUuid, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
+    AuthorId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId, RowUuid,
+    SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
 };
 use crate::protocol::{
     BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp, MigrationLens,
@@ -402,7 +402,7 @@ pub struct NodeOpenReceipt {
     pub state_init: Duration,
     /// Total durable-state recovery time.
     pub recover_storage: Duration,
-    /// Alias, branch, clock, and physical-history recovery time.
+    /// Alias, schema-family, clock, and physical-history recovery time.
     pub recover_catalogue_state: Duration,
     /// Retained for receipt compatibility; startup no longer makes this sweep.
     pub validate_current_rows: Duration,
@@ -1774,19 +1774,6 @@ pub enum Error {
     /// Historical read must be evaluated by a history-complete server.
     #[error("historical read requires server evaluation")]
     HistoricalReadRequiresServer,
-    /// Branch id was not known locally.
-    #[error("branch not found: {0:?}")]
-    BranchNotFound(BranchId),
-    /// Branch is no longer open for writes.
-    #[error("branch is not open: {0:?}")]
-    BranchClosed(BranchId),
-    /// Branch-scoped exclusive transactions are not implemented in v1.
-    #[error("exclusive transactions on branches are unsupported in v1")]
-    UnsupportedBranchExclusive,
-    /// Local branch-merge calculation could not prove or encode the requested
-    /// ordinary target write.
-    #[error("branch merge calculation failed: {0}")]
-    BranchMergeCalculation(&'static str),
     /// The authenticated identity is not authorized for this operation.
     #[error("authorization denied")]
     AuthorizationDenied,

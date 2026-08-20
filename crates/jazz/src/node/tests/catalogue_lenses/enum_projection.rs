@@ -1009,7 +1009,7 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
     // paths that materialize projected rows before lowering.
     //
     // Actors: an evolved writer publishes `closed`; an old reader queries the
-    // same physical row through history, a branch overlay, and deleted-row
+    // same physical row through history, a schema projection, and deleted-row
     // inspection.
     //
     // ```text

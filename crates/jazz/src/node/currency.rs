@@ -645,12 +645,7 @@ where
                         } else {
                             physical_history_table_name(mapping.table_id)
                         };
-                        let branch_prefix = format!("jazz_physical_{}_branch_", mapping.table_id.0);
-                        let branch_suffix = if is_deletion { "_register" } else { "_history" };
-                        (root == storage_table
-                            || (storage_table.starts_with(&branch_prefix)
-                                && storage_table.ends_with(branch_suffix)))
-                        .then(|| logical_table.clone())
+                        (root == storage_table).then(|| logical_table.clone())
                     })
                 })
                 .ok_or(Error::InvalidStoredValue(
