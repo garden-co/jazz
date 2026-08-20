@@ -53,8 +53,8 @@ use crate::wire::{
 };
 
 use super::peer_connection::{
-    PendingRowVersionRepair, aggregate_authorization_scope_bounds,
-    authorization_scope_receipt_matches_transport_context,
+    PendingRowVersionRepair, SubscriberConnectionState, UpstreamConnectionState,
+    aggregate_authorization_scope_bounds, authorization_scope_receipt_matches_transport_context,
     authorization_scope_support_options_match, remove_scope_aggregate_member, view_update_is_empty,
 };
 use catalogue::assert_authority_rejects_staged_write;

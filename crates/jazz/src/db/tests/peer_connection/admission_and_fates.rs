@@ -321,11 +321,11 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
     assert_eq!(block_on(second), PermissionAdvice::Denied);
 
     let hydration_count = match &subscriber.borrow().link {
-        ConnectionLink::Subscriber {
+        ConnectionLink::Subscriber(SubscriberConnectionState {
             authority_scope_hydration_count,
             ..
-        } => *authority_scope_hydration_count,
-        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+        }) => *authority_scope_hydration_count,
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     };
     assert_eq!(
         hydration_count, 1,
@@ -394,11 +394,11 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     assert_eq!(block_on(advanced), PermissionAdvice::Allowed);
 
     let hydration_count = match &subscriber.borrow().link {
-        ConnectionLink::Subscriber {
+        ConnectionLink::Subscriber(SubscriberConnectionState {
             authority_scope_hydration_count,
             ..
-        } => *authority_scope_hydration_count,
-        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+        }) => *authority_scope_hydration_count,
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     };
     assert_eq!(
         hydration_count, 3,
@@ -467,8 +467,10 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     ));
 
     let proofs = match &subscriber.borrow().link {
-        ConnectionLink::Subscriber { peer, .. } => peer.terminal_authority_scope_proof_count(),
-        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => {
+            peer.terminal_authority_scope_proof_count()
+        }
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     };
     assert_eq!(
         proofs, 3,
@@ -667,10 +669,10 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     // authority: FateUpdate carries no receipt generation of its own.
     {
         let mut edge_upstream = edge_upstream.borrow_mut();
-        let ConnectionLink::Upstream {
+        let ConnectionLink::Upstream(UpstreamConnectionState {
             expected_scope_authority,
             ..
-        } = &mut edge_upstream.link
+        }) = &mut edge_upstream.link
         else {
             panic!("edge upstream must retain its admitted authority context");
         };
@@ -696,10 +698,10 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     // remain unable to discharge Alice's parked route.
     let advanced_context = {
         let edge_upstream = edge_upstream.borrow();
-        let ConnectionLink::Upstream {
+        let ConnectionLink::Upstream(UpstreamConnectionState {
             expected_scope_authority,
             ..
-        } = &edge_upstream.link
+        }) = &edge_upstream.link
         else {
             panic!("edge upstream must retain its admitted authority context");
         };
@@ -725,10 +727,10 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     ] {
         {
             let mut edge_upstream = edge_upstream.borrow_mut();
-            let ConnectionLink::Upstream {
+            let ConnectionLink::Upstream(UpstreamConnectionState {
                 expected_scope_authority,
                 ..
-            } = &mut edge_upstream.link
+            }) = &mut edge_upstream.link
             else {
                 unreachable!("edge upstream shape remains stable");
             };
@@ -763,10 +765,10 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     }
     {
         let mut edge_upstream = edge_upstream.borrow_mut();
-        let ConnectionLink::Upstream {
+        let ConnectionLink::Upstream(UpstreamConnectionState {
             expected_scope_authority,
             ..
-        } = &mut edge_upstream.link
+        }) = &mut edge_upstream.link
         else {
             unreachable!("edge upstream shape remains stable");
         };
@@ -947,7 +949,8 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
     );
     {
         let edge_b = edge_b.borrow();
-        let ConnectionLink::Upstream { uploaded, .. } = &edge_b.link else {
+        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &edge_b.link
+        else {
             panic!("B must be an upstream connection");
         };
         assert!(
@@ -961,7 +964,8 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
     // re-upload even though it was already connected before selection.
     {
         let edge_b = edge_b.borrow();
-        let ConnectionLink::Upstream { uploaded, .. } = &edge_b.link else {
+        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &edge_b.link
+        else {
             panic!("B must remain the upstream handoff connection");
         };
         assert!(

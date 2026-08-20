@@ -737,10 +737,12 @@ where
             .borrow_mut()
             .entry(coverage.clone())
             .or_insert(0) += 1;
-        let has_live_upstream =
-            self.node.connections.borrow().iter().any(|connection| {
-                matches!(&connection.borrow().link, ConnectionLink::Upstream { .. })
-            });
+        let has_live_upstream = self
+            .node
+            .connections
+            .borrow()
+            .iter()
+            .any(|connection| matches!(&connection.borrow().link, ConnectionLink::Upstream(_)));
         if has_live_upstream {
             self.node
                 .awaiting_initial_authority_coverage

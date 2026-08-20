@@ -94,6 +94,7 @@ where
 }
 
 pub(super) enum ConnectionLink {
+/* Superseded inline link-state representation retained only while replaying the refactor.
     /// Attached to an upstream: send subscribe requests and local commit units
     /// up, apply view updates and fates that come back.
     Upstream {
@@ -177,6 +178,55 @@ pub(super) enum ConnectionLink {
         /// to serve. Idle transport ticks must not poll every view.
         serve_dirty: bool,
     },
+*/
+    Upstream(UpstreamConnectionState),
+    Subscriber(SubscriberConnectionState),
+}
+
+pub(super) struct UpstreamConnectionState {
+    pub(super) local_receiver: bool,
+    pub(super) pending: Vec<PendingUpstreamCommand>,
+    pub(super) upstream_subscriptions: PendingUpstreamCommands,
+    pub(super) announced_shapes: BTreeSet<ShapeRegistrationKey>,
+    pub(super) sent_session_claim_revisions: BTreeMap<AuthorId, u64>,
+    pub(super) outbox: Outbox,
+    pub(super) uploaded: BTreeSet<TxId>,
+    pub(super) pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
+    pub(super) branch_views: BTreeMap<SubscriptionKey, crate::ids::BranchId>,
+    pub(super) pending_branch_view_updates:
+        BTreeMap<crate::ids::BranchId, Vec<PendingBranchViewUpdate>>,
+    pub(super) pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
+    pub(super) branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
+    pub(super) scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalSeq>,
+    pub(super) scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
+    pub(super) expected_scope_authority: Option<AuthorityContext>,
+    pub(super) scope_lease_manager: AuthorizationScopeLeaseManager,
+}
+
+pub(super) struct SubscriberConnectionState {
+    pub(super) peer: PeerState,
+    pub(super) ingest_context: CommitUnitIngestContext,
+    pub(super) session_claims: BTreeMap<String, Value>,
+    pub(super) session_claim_revision: u64,
+    pub(super) local_receiver: bool,
+    pub(super) outbox: Outbox,
+    pub(super) upstream_subscriptions: PendingUpstreamCommands,
+    pub(super) served: BTreeMap<SubscriptionKey, CoverageKey>,
+    pub(super) coverage_groups: BTreeMap<CoverageKey, CoverageGroup>,
+    pub(super) shape_registrations: BTreeMap<ShapeRegistrationKey, SubscriberShapeRegistration>,
+    pub(super) deferred_subscribe_rejections: VecDeque<(SubscriptionKey, String)>,
+    pub(super) served_current_rows: BTreeMap<SubscriptionKey, String>,
+    pub(super) pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
+    pub(super) pending_session_branch_metadata:
+        BTreeMap<crate::ids::BranchId, crate::protocol::BranchMetadata>,
+    pub(super) branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
+    pub(super) scope_purposes: BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
+    pub(super) scope_aggregates:
+        BTreeMap<crate::protocol::AuthorizationSupportScopeKey, AuthorityScopeAggregate>,
+    pub(super) authority_scope_hydrations:
+        BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ServedAuthorizationScopeHydration>,
+    pub(super) authority_scope_hydration_count: u64,
+    pub(super) serve_dirty: bool,
 }
 
 pub(super) struct PendingRowVersionRepair {
@@ -209,11 +259,11 @@ where
     /// Wire peers cannot invoke this path; bindings use it only after their
     /// trusted authentication layer has accepted a refreshed session.
     pub fn update_authenticated_session_claims(&mut self, claims: BTreeMap<String, Value>) {
-        let ConnectionLink::Subscriber {
+        let ConnectionLink::Subscriber(SubscriberConnectionState {
             session_claims,
             session_claim_revision,
             ..
-        } = &mut self.link
+        }) = &mut self.link
         else {
             return;
         };
@@ -229,11 +279,11 @@ where
     /// retains a cache keyed by identity, while several websocket sessions can
     /// legitimately share an identity with different claim maps.
     fn bind_subscriber_session_claims(&self) {
-        let ConnectionLink::Subscriber {
+        let ConnectionLink::Subscriber(SubscriberConnectionState {
             ingest_context,
             session_claims,
             ..
-        } = &self.link
+        }) = &self.link
         else {
             return;
         };
@@ -243,10 +293,10 @@ where
     }
 
     fn subscriber_session_claim_revision(&self) -> u64 {
-        let ConnectionLink::Subscriber {
+        let ConnectionLink::Subscriber(SubscriberConnectionState {
             session_claim_revision,
             ..
-        } = &self.link
+        }) = &self.link
         else {
             return 0;
         };
@@ -259,8 +309,10 @@ where
     async fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
         let connection_epoch = self.connection_epoch;
         let identity = match &self.link {
-            ConnectionLink::Subscriber { ingest_context, .. } => ingest_context.identity,
-            ConnectionLink::Upstream { .. } => return Ok(false),
+            ConnectionLink::Subscriber(SubscriberConnectionState { ingest_context, .. }) => {
+                ingest_context.identity
+            }
+            ConnectionLink::Upstream(_) => return Ok(false),
         };
         self.bind_subscriber_session_claims();
         let current_revision = self.subscriber_session_claim_revision();
@@ -268,14 +320,14 @@ where
             return Ok(false);
         }
 
-        let ConnectionLink::Subscriber {
+        let ConnectionLink::Subscriber(SubscriberConnectionState {
             peer,
             coverage_groups,
             served_current_rows,
             scope_purposes,
             scope_aggregates,
             ..
-        } = &mut self.link
+        }) = &mut self.link
         else {
             unreachable!("subscriber identity requires a subscriber link")
         };
@@ -375,11 +427,11 @@ where
     /// refresh it on later ticks.
     pub async fn serve_current_rows(&mut self, table: &str) -> Result<(), Error> {
         self.tick().await?;
-        let ConnectionLink::Subscriber {
+        let ConnectionLink::Subscriber(SubscriberConnectionState {
             peer,
             served_current_rows,
             ..
-        } = &mut self.link
+        }) = &mut self.link
         else {
             return Ok(());
         };
@@ -393,7 +445,9 @@ where
         if let Some(subscription) = subscription {
             served_current_rows.insert(subscription, table.to_owned());
         }
-        if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut self.link {
+        if let ConnectionLink::Subscriber(SubscriberConnectionState { serve_dirty, .. }) =
+            &mut self.link
+        {
             *serve_dirty = true;
         }
         Ok(())
@@ -412,7 +466,8 @@ where
         &self,
         subscription: SubscriptionKey,
     ) -> Option<&AuthorizationScopeReceipt> {
-        let ConnectionLink::Upstream { scope_receipts, .. } = &self.link else {
+        let ConnectionLink::Upstream(UpstreamConnectionState { scope_receipts, .. }) = &self.link
+        else {
             return None;
         };
         scope_receipts.get(&subscription)
@@ -420,13 +475,13 @@ where
 
     /// Extract this subscriber connection's resume cursor for a reconnect.
     pub fn take_resume_cursor(&mut self) -> Option<ResumeCursor> {
-        let ConnectionLink::Subscriber {
+        let ConnectionLink::Subscriber(SubscriberConnectionState {
             peer,
             ingest_context,
             session_claims,
             session_claim_revision,
             ..
-        } = &mut self.link
+        }) = &mut self.link
         else {
             return None;
         };
@@ -446,7 +501,7 @@ where
     pub(super) async fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
         self.bind_subscriber_session_claims();
         let connection_epoch = self.connection_epoch;
-        let ConnectionLink::Subscriber {
+        let ConnectionLink::Subscriber(SubscriberConnectionState {
             peer,
             coverage_groups,
             ingest_context,
@@ -454,7 +509,7 @@ where
             scope_aggregates,
             serve_dirty,
             ..
-        } = &mut self.link
+        }) = &mut self.link
         else {
             return Ok(());
         };
@@ -548,10 +603,10 @@ where
     /// receipt. The next transport arrival is therefore the first receipt
     /// candidate after selection.
     pub(super) fn stage_inbound_without_authority_receipt(&mut self) {
-        if let ConnectionLink::Upstream {
+        if let ConnectionLink::Upstream(UpstreamConnectionState {
             pending_row_version_repairs,
             ..
-        } = &mut self.link
+        }) = &mut self.link
         {
             for repair in pending_row_version_repairs {
                 repair.authority_receipt_eligible = false;
@@ -577,7 +632,7 @@ where
         self.bind_subscriber_session_claims();
         self.rebind_subscriber_views_after_claim_change().await?;
         match &mut self.link {
-            ConnectionLink::Upstream {
+            ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
                 pending,
                 upstream_subscriptions,
@@ -590,7 +645,7 @@ where
                 scope_receipts,
                 expected_scope_authority,
                 scope_lease_manager,
-            } => {
+            }) => {
                 let stop = Box::pin(async {
                     let outbound_stop = Box::pin(async {
                         // Repair is deliberately retried on each non-blocked tick. The
@@ -1573,7 +1628,7 @@ where
                     return Ok(stats);
                 }
             }
-            ConnectionLink::Subscriber {
+            ConnectionLink::Subscriber(SubscriberConnectionState {
                 peer,
                 ingest_context,
                 session_claims: _,
@@ -1591,7 +1646,7 @@ where
                 authority_scope_hydrations,
                 authority_scope_hydration_count,
                 serve_dirty,
-            } => {
+            }) => {
                 Box::pin(async {
                 // A trusted backend subscriber is an edge's normal upstream
                 // link.  Unlike an application subscriber, it is entitled to
@@ -2768,7 +2823,9 @@ where
     S: OrderedKvStorage,
 {
     pub(super) fn mark_subscriber_dirty(&mut self) -> bool {
-        if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut self.link {
+        if let ConnectionLink::Subscriber(SubscriberConnectionState { serve_dirty, .. }) =
+            &mut self.link
+        {
             *serve_dirty = true;
             self.observed_subscriber_dirty_epoch
                 .set(self.subscriber_dirty_epoch.get());
@@ -2784,15 +2841,19 @@ where
             return;
         }
         self.observed_subscriber_dirty_epoch.set(epoch);
-        if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut self.link {
+        if let ConnectionLink::Subscriber(SubscriberConnectionState { serve_dirty, .. }) =
+            &mut self.link
+        {
             *serve_dirty = true;
         }
     }
 
     pub(super) fn eviction_pins(&self) -> crate::peer::PeerEvictionPins {
         match &self.link {
-            ConnectionLink::Subscriber { peer, .. } => peer.eviction_pins(),
-            ConnectionLink::Upstream { .. } => crate::peer::PeerEvictionPins::default(),
+            ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => {
+                peer.eviction_pins()
+            }
+            ConnectionLink::Upstream(_) => crate::peer::PeerEvictionPins::default(),
         }
     }
 }
