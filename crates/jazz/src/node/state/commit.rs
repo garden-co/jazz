@@ -306,7 +306,7 @@ where
             }
             edges
         };
-        let persistence = self.database.publish_batch(batch).await?;
+        let persistence = self.database.apply_batch(batch).await?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {
             self.open_tx
@@ -364,9 +364,9 @@ where
     /// Settle a completed persistence receipt and release its storage boundary.
     pub fn settle_published_transaction(
         &mut self,
-        persistence: PublicationPersistence,
+        persistence: PersistedBatch,
     ) -> Result<(), Error> {
-        self.database.settle_publication(persistence)?;
+        self.database.finish_persistence(persistence)?;
         Ok(())
     }
 

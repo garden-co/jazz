@@ -56,30 +56,30 @@ pub struct Database {
     resident_publications: BTreeMap<PublicationId, Vec<OwnedWriteOperation>>,
     persisted_publications: BTreeSet<PublicationId>,
     resident_writes: Rc<RefCell<StagedWriteState>>,
-    publication_persistence: Rc<RefCell<PublicationPersistenceOrder>>,
+    publication_persistence: Rc<RefCell<PersistenceOrder>>,
     poisoned: bool,
 }
 
 /// One resident publication whose ordered storage write can progress without
 /// borrowing the database runtime.
 #[must_use = "an immediate publication must be persisted and settled"]
-pub struct PublishedBatch {
+pub struct AppliedBatch {
     publication: PublicationId,
     storage: Rc<LayoutStorage>,
     operations: Vec<OwnedWriteOperation>,
-    order: Rc<RefCell<PublicationPersistenceOrder>>,
+    order: Rc<RefCell<PersistenceOrder>>,
     ivm_tick_time: Duration,
     storage_writes: StorageWriteMetrics,
     tick: TickMetrics,
     notifications_deferred: bool,
 }
 
-impl PublishedBatch {
+impl AppliedBatch {
     pub fn publication(&self) -> PublicationId {
         self.publication
     }
 
-    pub async fn persist(&self) -> PublicationPersistence {
+    pub async fn persist(&self) -> PersistedBatch {
         std::future::poll_fn(|cx| {
             let mut order = self.order.borrow_mut();
             if order.next == self.publication.0 {
@@ -102,7 +102,7 @@ impl PublishedBatch {
                 waiter.wake();
             }
         }
-        PublicationPersistence {
+        PersistedBatch {
             publication: self.publication,
             result,
             notifications_deferred: self.notifications_deferred,
@@ -118,14 +118,14 @@ impl PublishedBatch {
     }
 }
 
-struct PublicationPersistenceOrder {
+struct PersistenceOrder {
     next: u64,
     waiters: BTreeMap<u64, Waker>,
 }
 
 /// Completion of one owned publication persistence operation.
 #[must_use = "persistence completion must be settled on its database"]
-pub struct PublicationPersistence {
+pub struct PersistedBatch {
     publication: PublicationId,
     result: Result<(), crate::storage::Error>,
     notifications_deferred: bool,

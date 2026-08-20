@@ -94,40 +94,28 @@ impl Database {
     /// # }).unwrap();
     /// ```
     pub async fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
-        let publication = self.publish_batch(batch).await?;
-        let persistence = publication.persist().await;
-        self.settle_publication(persistence)?;
-        Ok(())
-    }
-
-    /// Atomically persist a batch before releasing its subscription deltas.
-    ///
-    /// Resident evaluation still builds the complete storage batch in one
-    /// pass, but notifications are held until that batch is durable. This is
-    /// intended for authority/receiver ingress, where an acknowledgement or
-    /// observed delta must never escape a failed durable commit.
-    pub async fn commit_batch_durable(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
         let publication = self
-            .publish_batch_with_notification_policy(batch, true)
+            .apply_batch_with_notification_policy(batch, true)
             .await?;
         let persistence = publication.persist().await;
-        self.settle_publication(persistence)?;
+        self.finish_persistence(persistence)?;
         Ok(())
     }
 
-    /// Publish resident rows and unblocked terminal deltas before ordered
-    /// persistence. The returned handle owns persistence and no longer borrows
-    /// this database, so resident queries may continue while storage suspends.
-    pub async fn publish_batch(&mut self, batch: DatabaseBatch) -> Result<PublishedBatch, Error> {
-        self.publish_batch_with_notification_policy(batch, false)
+    /// Apply resident rows and unblocked terminal deltas before ordered
+    /// persistence. The returned handle owns the pending persistence work and
+    /// no longer borrows this database, so resident queries may continue while
+    /// storage suspends.
+    pub async fn apply_batch(&mut self, batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
+        self.apply_batch_with_notification_policy(batch, false)
             .await
     }
 
-    async fn publish_batch_with_notification_policy(
+    async fn apply_batch_with_notification_policy(
         &mut self,
         batch: DatabaseBatch,
         defer_notifications_until_durable: bool,
-    ) -> Result<PublishedBatch, Error> {
+    ) -> Result<AppliedBatch, Error> {
         self.ensure_not_poisoned()?;
         let pending_writes = self.pending_writes_from_batch(batch)?;
         let descriptors = pending_writes
@@ -203,7 +191,7 @@ impl Database {
             .extend(staged_operations.iter().cloned());
         self.resident_publications
             .insert(publication, staged_operations.clone());
-        Ok(PublishedBatch {
+        Ok(AppliedBatch {
             publication,
             storage: Rc::clone(&self.storage),
             operations: staged_operations,
@@ -217,9 +205,9 @@ impl Database {
 
     /// Install one persistence result and advance only the contiguous durable
     /// publication frontier.
-    pub fn settle_publication(
+    pub fn finish_persistence(
         &mut self,
-        persistence: PublicationPersistence,
+        persistence: PersistedBatch,
     ) -> Result<PublicationId, Error> {
         self.last_tick_metrics = Some(persistence.metrics.tick.clone());
         self.last_commit_metrics = Some(persistence.metrics.clone());

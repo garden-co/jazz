@@ -878,7 +878,7 @@ where
                 branch_record,
             );
         }
-        let persistence = self.database.publish_batch(batch).await?;
+        let persistence = self.database.apply_batch(batch).await?;
         self.cache_tx_version_tables(tx_id, transaction_tables);
         Ok(PublishedTransaction { tx_id, persistence })
     }

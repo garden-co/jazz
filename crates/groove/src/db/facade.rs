@@ -62,7 +62,7 @@ impl Database {
             resident_publications: BTreeMap::new(),
             persisted_publications: BTreeSet::new(),
             resident_writes: Rc::new(RefCell::new(StagedWriteState::default())),
-            publication_persistence: Rc::new(RefCell::new(PublicationPersistenceOrder {
+            publication_persistence: Rc::new(RefCell::new(PersistenceOrder {
                 next: 1,
                 waiters: BTreeMap::new(),
             })),

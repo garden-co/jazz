@@ -475,9 +475,9 @@ fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked()
     let mut seed = database.open_batch();
     seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
-    let seeded = block_on(database.publish_batch(seed)).unwrap();
+    let seeded = block_on(database.apply_batch(seed)).unwrap();
     let persistence = block_on(seeded.persist());
-    database.settle_publication(persistence).unwrap();
+    database.finish_persistence(persistence).unwrap();
 
     let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
     assert!(albums.recv().unwrap().is_empty());
@@ -492,7 +492,7 @@ fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked()
         vec![Value::U64(1), Value::String("Speak No Evil".into())],
     );
     batch.delete("edges", PrimaryKeyValue::U64(2));
-    let mut publication = Box::pin(database.publish_batch(batch));
+    let mut publication = Box::pin(database.apply_batch(batch));
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     let Poll::Ready(published) = publication.as_mut().poll(&mut context) else {
@@ -510,7 +510,7 @@ fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked()
     assert_eq!(resumed.publication, Some(publication_id));
     assert_eq!(resumed.deltas.deltas.len(), 2);
     let persistence = block_on(published.persist());
-    database.settle_publication(persistence).unwrap();
+    database.finish_persistence(persistence).unwrap();
 }
 
 #[test]
@@ -520,9 +520,9 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
     let mut seed = database.open_batch();
     seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
-    let seeded = block_on(database.publish_batch(seed)).unwrap();
+    let seeded = block_on(database.apply_batch(seed)).unwrap();
     let persistence = block_on(seeded.persist());
-    database.settle_publication(persistence).unwrap();
+    database.finish_persistence(persistence).unwrap();
 
     let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
     assert!(albums.recv().unwrap().is_empty());
@@ -539,7 +539,7 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
         vec![Value::U64(1), Value::String("Speak No Evil".into())],
     );
     batch.delete("edges", PrimaryKeyValue::U64(2));
-    let published = block_on(database.publish_batch(batch)).unwrap();
+    let published = block_on(database.apply_batch(batch)).unwrap();
     assert_eq!(albums.recv().unwrap().deltas.len(), 1);
 
     control.resume_operation(TestStorageOperation::ScanOpen);
@@ -558,15 +558,15 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
     let reinstalled = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
     assert_eq!(reinstalled.recv().unwrap().deltas.len(), 1);
     let persistence = block_on(published.persist());
-    database.settle_publication(persistence).unwrap();
+    database.finish_persistence(persistence).unwrap();
 
     let mut later = database.open_batch();
     later.insert("albums", vec![Value::U64(2), Value::String("JuJu".into())]);
-    let later = block_on(database.publish_batch(later)).unwrap();
+    let later = block_on(database.apply_batch(later)).unwrap();
     assert_eq!(albums.recv().unwrap().deltas.len(), 1);
 
     let persistence = block_on(later.persist());
-    database.settle_publication(persistence).unwrap();
+    database.finish_persistence(persistence).unwrap();
 
     control.fail_next(TestStorageOperation::ScanOpen);
     let mut immediate_failure = database.open_batch();
@@ -575,14 +575,14 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
         vec![Value::U64(3), Value::String("Adam's Apple".into())],
     );
     immediate_failure.delete("edges", PrimaryKeyValue::U64(1));
-    let immediate_failure = block_on(database.publish_batch(immediate_failure)).unwrap();
+    let immediate_failure = block_on(database.apply_batch(immediate_failure)).unwrap();
     assert_eq!(albums.recv().unwrap().deltas.len(), 1);
     assert!(matches!(
         block_on(database.next_subscription(&reinstalled)),
         Err(DatabaseError::SubscriptionFailed(_))
     ));
     let persistence = block_on(immediate_failure.persist());
-    database.settle_publication(persistence).unwrap();
+    database.finish_persistence(persistence).unwrap();
 }
 
 #[test]
@@ -607,7 +607,7 @@ fn resident_publication_returns_before_independent_recursive_hydration() {
         vec![Value::U64(1), Value::String("Speak No Evil".into())],
     );
     batch.delete("edges", PrimaryKeyValue::U64(2));
-    let mut publication = Box::pin(database.publish_batch(batch));
+    let mut publication = Box::pin(database.apply_batch(batch));
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     let Poll::Ready(result) = publication.as_mut().poll(&mut context) else {
@@ -656,7 +656,7 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
         vec![Value::U64(1), Value::String("Speak No Evil".into())],
     );
     first.delete("edges", PrimaryKeyValue::U64(2));
-    let mut first = Box::pin(database.publish_batch(first));
+    let mut first = Box::pin(database.apply_batch(first));
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(
@@ -672,7 +672,7 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
             "albums",
             vec![Value::U64(id), Value::String(format!("resident-{id}"))],
         );
-        let mut later = Box::pin(database.publish_batch(later));
+        let mut later = Box::pin(database.apply_batch(later));
         assert!(matches!(
             later.as_mut().poll(&mut context),
             Poll::Ready(Ok(_))
@@ -943,7 +943,7 @@ fn resident_publication_is_queryable_and_tagged_while_persistence_is_suspended()
         "albums",
         vec![Value::U64(1), Value::String("Kind of Blue".into())],
     );
-    let published = block_on(database.publish_batch(batch)).unwrap();
+    let published = block_on(database.apply_batch(batch)).unwrap();
     assert_eq!(published.publication(), PublicationId(1));
     let update = subscription.recv_with_publication().unwrap();
     assert_eq!(update.publication, Some(PublicationId(1)));
@@ -976,7 +976,7 @@ fn resident_publication_is_queryable_and_tagged_while_persistence_is_suspended()
     control.resume_operation(TestStorageOperation::WriteMany);
     let persistence = block_on(published.persist());
     assert_eq!(
-        database.settle_publication(persistence).unwrap(),
+        database.finish_persistence(persistence).unwrap(),
         PublicationId(1)
     );
     assert_eq!(
@@ -995,23 +995,23 @@ fn durable_frontier_does_not_pass_an_earlier_unsettled_publication() {
         "albums",
         vec![Value::U64(1), Value::String("Kind of Blue".into())],
     );
-    let first = block_on(database.publish_batch(first)).unwrap();
+    let first = block_on(database.apply_batch(first)).unwrap();
 
     let mut second = database.open_batch();
     second.insert(
         "albums",
         vec![Value::U64(2), Value::String("Bitches Brew".into())],
     );
-    let second = block_on(database.publish_batch(second)).unwrap();
+    let second = block_on(database.apply_batch(second)).unwrap();
 
     let first_persistence = block_on(first.persist());
     let second_persistence = block_on(second.persist());
-    database.settle_publication(second_persistence).unwrap();
+    database.finish_persistence(second_persistence).unwrap();
     assert_eq!(database.durable_publication_frontier(), None);
     let rows = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
     assert_eq!(rows.deltas.len(), 2);
 
-    database.settle_publication(first_persistence).unwrap();
+    database.finish_persistence(first_persistence).unwrap();
     assert_eq!(
         database.durable_publication_frontier(),
         Some(PublicationId(2))
@@ -1028,14 +1028,14 @@ fn later_same_key_persistence_waits_for_its_predecessor() {
         "albums",
         vec![Value::U64(1), Value::String("Kind of Blue".into())],
     );
-    let first = block_on(database.publish_batch(first)).unwrap();
+    let first = block_on(database.apply_batch(first)).unwrap();
 
     let mut second = database.open_batch();
     second.update(
         "albums",
         vec![Value::U64(1), Value::String("Blue in Green".into())],
     );
-    let second = block_on(database.publish_batch(second)).unwrap();
+    let second = block_on(database.apply_batch(second)).unwrap();
 
     control.take_observed();
     let mut second_persistence = Box::pin(second.persist());
@@ -1053,9 +1053,9 @@ fn later_same_key_persistence_waits_for_its_predecessor() {
 
     let first_persistence = block_on(first.persist());
     let second_persistence = block_on(second_persistence);
-    database.settle_publication(second_persistence).unwrap();
+    database.finish_persistence(second_persistence).unwrap();
     assert_eq!(database.durable_publication_frontier(), None);
-    database.settle_publication(first_persistence).unwrap();
+    database.finish_persistence(first_persistence).unwrap();
     assert_eq!(
         database.durable_publication_frontier(),
         Some(PublicationId(2))
@@ -1086,7 +1086,7 @@ fn publishing_an_insert_into_a_resident_table_does_not_wait_for_storage() {
     );
     control.take_observed();
     control.pause_on(TestStorageOperation::WriteMany);
-    let mut publication = Box::pin(database.publish_batch(batch));
+    let mut publication = Box::pin(database.apply_batch(batch));
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     let published = match Pin::new(&mut publication).poll(&mut context) {
