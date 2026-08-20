@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 
 use crate::server::catalogue_entry::CatalogueEntry;
-use jazz::groove::storage::{BoxedStorage, OrderedKvStorage};
+use jazz::groove::storage::{BoxedStorage, OrderedKvStorage, StorageFactory};
 use jazz::tools::ObjectId;
 
 pub(crate) type DynCatalogueStorage = Box<dyn CatalogueStorage + Send>;
@@ -67,7 +69,15 @@ impl CatalogueStorage for CatalogueMemoryStorage {
 }
 
 pub(crate) struct CatalogueKvStorage {
-    storage: Mutex<Option<BoxedStorage>>,
+    commands: mpsc::Sender<CatalogueStorageCommand>,
+    closed: AtomicBool,
+}
+
+enum CatalogueStorageCommand {
+    Scan(mpsc::Sender<CatalogueStorageResult<Vec<CatalogueEntry>>>),
+    Upsert(CatalogueEntry, mpsc::Sender<CatalogueStorageResult<()>>),
+    Flush(mpsc::Sender<CatalogueStorageResult<()>>),
+    Close(mpsc::Sender<CatalogueStorageResult<()>>),
 }
 
 impl CatalogueKvStorage {
@@ -76,23 +86,52 @@ impl CatalogueKvStorage {
     pub(crate) const COLUMN_FAMILY: &'static str = "default";
     const ENTRY_PREFIX: &'static [u8] = b"cat:";
 
-    pub(crate) fn new(storage: BoxedStorage) -> Self {
-        Self {
-            storage: Mutex::new(Some(storage)),
-        }
+    pub(crate) fn open(
+        factory: Arc<dyn StorageFactory>,
+        path: PathBuf,
+    ) -> CatalogueStorageResult<Self> {
+        let (commands, receiver) = mpsc::channel();
+        let (opened_tx, opened_rx) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("jazz-catalogue-storage".to_owned())
+            .spawn(move || {
+                let storage = match jazz::db::block_on(
+                    factory.open(path, vec![Self::COLUMN_FAMILY.to_owned()]),
+                ) {
+                    Ok(storage) => storage,
+                    Err(error) => {
+                        let _ = opened_tx.send(Err(storage_error(error)));
+                        return;
+                    }
+                };
+                if opened_tx.send(Ok(())).is_err() {
+                    return;
+                }
+                run_catalogue_storage(storage, receiver);
+            })
+            .map_err(|error| {
+                CatalogueStorageError::IoError(format!("spawn catalogue storage owner: {error}"))
+            })?;
+        opened_rx.recv().map_err(|_| {
+            CatalogueStorageError::IoError("catalogue storage owner exited during open".to_owned())
+        })??;
+        Ok(Self {
+            commands,
+            closed: AtomicBool::new(false),
+        })
     }
 
-    fn with_storage<T>(
+    fn request<T>(
         &self,
-        operation: impl FnOnce(&BoxedStorage) -> CatalogueStorageResult<T>,
+        command: impl FnOnce(mpsc::Sender<CatalogueStorageResult<T>>) -> CatalogueStorageCommand,
     ) -> CatalogueStorageResult<T> {
-        let storage = self.storage.lock().map_err(|_| {
-            CatalogueStorageError::IoError("catalogue storage mutex poisoned".to_owned())
+        let (reply, response) = mpsc::channel();
+        self.commands.send(command(reply)).map_err(|_| {
+            CatalogueStorageError::IoError("catalogue storage owner is closed".to_owned())
         })?;
-        let storage = storage.as_ref().ok_or_else(|| {
-            CatalogueStorageError::IoError("catalogue storage already closed".to_owned())
-        })?;
-        operation(storage)
+        response.recv().map_err(|_| {
+            CatalogueStorageError::IoError("catalogue storage owner exited".to_owned())
+        })?
     }
 
     fn entry_key(object_id: ObjectId) -> Vec<u8> {
@@ -105,82 +144,92 @@ impl CatalogueKvStorage {
 
 impl CatalogueStorage for CatalogueKvStorage {
     fn scan_catalogue_entries(&self) -> CatalogueStorageResult<Vec<CatalogueEntry>> {
-        let mut entries = Vec::new();
-        self.with_storage(|storage| {
-            storage
-                .scan_prefix(
-                    Self::COLUMN_FAMILY,
-                    Self::ENTRY_PREFIX,
-                    &mut |key, value| {
-                        let Some(hex_id) = key.strip_prefix(Self::ENTRY_PREFIX) else {
-                            return Ok(());
-                        };
-                        let uuid = uuid::Uuid::parse_str(std::str::from_utf8(hex_id).map_err(
-                            |error| jazz::groove::storage::Error::Backend {
-                                backend: "catalogue",
-                                message: format!("catalogue key utf8: {error}"),
-                            },
-                        )?)
-                        .map_err(|error| {
-                            jazz::groove::storage::Error::Backend {
-                                backend: "catalogue",
-                                message: format!("catalogue key uuid: {error}"),
-                            }
-                        })?;
-                        let object_id = ObjectId::from_uuid(uuid);
-                        let entry = CatalogueEntry::decode_storage_row(object_id, value).map_err(
-                            |error| jazz::groove::storage::Error::Backend {
-                                backend: "catalogue",
-                                message: format!("decode catalogue entry: {error}"),
-                            },
-                        )?;
-                        entries.push(entry);
-                        Ok(())
-                    },
-                )
-                .map_err(storage_error)
-        })?;
-        entries.sort_by_key(|entry| entry.object_id);
-        Ok(entries)
+        self.request(CatalogueStorageCommand::Scan)
     }
 
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()> {
-        let bytes = entry.encode_storage_row().map_err(|error| {
-            CatalogueStorageError::IoError(format!("encode catalogue entry: {error}"))
-        })?;
-        self.with_storage(|storage| {
-            storage
-                .set(
-                    Self::COLUMN_FAMILY,
-                    &Self::entry_key(entry.object_id),
-                    &bytes,
-                )
-                .map_err(storage_error)
-        })
+        self.request(|reply| CatalogueStorageCommand::Upsert(entry.clone(), reply))
     }
 
     fn flush(&self) -> CatalogueStorageResult<()> {
-        self.with_storage(|storage| storage.flush_write_boundary().map_err(storage_error))
+        self.request(CatalogueStorageCommand::Flush)
     }
 
     fn flush_wal(&self) -> CatalogueStorageResult<()> {
-        self.with_storage(|storage| storage.flush_write_boundary().map_err(storage_error))
+        self.request(CatalogueStorageCommand::Flush)
     }
 
     fn close(&self) -> CatalogueStorageResult<()> {
-        let storage = self
-            .storage
-            .lock()
-            .map_err(|_| {
-                CatalogueStorageError::IoError("catalogue storage mutex poisoned".to_owned())
-            })?
-            .take();
-        if let Some(storage) = storage {
-            storage.flush_write_boundary().map_err(storage_error)?;
-            drop(storage);
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
         }
-        Ok(())
+        self.request(CatalogueStorageCommand::Close)
     }
+}
+
+fn run_catalogue_storage(storage: BoxedStorage, commands: mpsc::Receiver<CatalogueStorageCommand>) {
+    while let Ok(command) = commands.recv() {
+        match command {
+            CatalogueStorageCommand::Scan(reply) => {
+                let _ = reply.send(scan_entries(&storage));
+            }
+            CatalogueStorageCommand::Upsert(entry, reply) => {
+                let result = entry
+                    .encode_storage_row()
+                    .map_err(|error| {
+                        CatalogueStorageError::IoError(format!("encode catalogue entry: {error}"))
+                    })
+                    .and_then(|bytes| {
+                        jazz::db::block_on(storage.set(
+                            CatalogueKvStorage::COLUMN_FAMILY.to_owned(),
+                            CatalogueKvStorage::entry_key(entry.object_id),
+                            bytes,
+                        ))
+                        .map_err(storage_error)
+                    });
+                let _ = reply.send(result);
+            }
+            CatalogueStorageCommand::Flush(reply) => {
+                let result =
+                    jazz::db::block_on(storage.flush_write_boundary()).map_err(storage_error);
+                let _ = reply.send(result);
+            }
+            CatalogueStorageCommand::Close(reply) => {
+                let result = jazz::db::block_on(storage.close()).map_err(storage_error);
+                let _ = reply.send(result);
+                break;
+            }
+        }
+    }
+}
+
+fn scan_entries(storage: &BoxedStorage) -> CatalogueStorageResult<Vec<CatalogueEntry>> {
+    let rows = jazz::db::block_on(storage.prefix(
+        CatalogueKvStorage::COLUMN_FAMILY.to_owned(),
+        CatalogueKvStorage::ENTRY_PREFIX.to_vec(),
+    ))
+    .map_err(storage_error)?;
+    let mut entries = rows
+        .into_iter()
+        .map(|(key, value)| {
+            let hex_id = key
+                .strip_prefix(CatalogueKvStorage::ENTRY_PREFIX)
+                .ok_or_else(|| {
+                    CatalogueStorageError::IoError("invalid catalogue key".to_owned())
+                })?;
+            let uuid = uuid::Uuid::parse_str(std::str::from_utf8(hex_id).map_err(|error| {
+                CatalogueStorageError::IoError(format!("catalogue key utf8: {error}"))
+            })?)
+            .map_err(|error| {
+                CatalogueStorageError::IoError(format!("catalogue key uuid: {error}"))
+            })?;
+            CatalogueEntry::decode_storage_row(ObjectId::from_uuid(uuid), &value).map_err(|error| {
+                CatalogueStorageError::IoError(format!("decode catalogue entry: {error}"))
+            })
+        })
+        .collect::<CatalogueStorageResult<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.object_id);
+    Ok(entries)
 }
 
 fn storage_error(error: jazz::groove::storage::Error) -> CatalogueStorageError {
@@ -190,7 +239,7 @@ fn storage_error(error: jazz::groove::storage::Error) -> CatalogueStorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jazz::groove::storage::{OrderedKvStorage, StorageFactory};
+    use jazz::groove::storage::OrderedKvStorage;
 
     #[test]
     fn adapter_catalogue_reads_the_pre_extraction_default_cf_layout() {
@@ -205,19 +254,19 @@ mod tests {
 
         {
             let legacy = jazz_storage_rocksdb::RocksDbStorage::open(&path, &["default"]).unwrap();
-            legacy
-                .set(
-                    "default",
-                    &CatalogueKvStorage::entry_key(object_id),
-                    &entry.encode_storage_row().unwrap(),
-                )
-                .unwrap();
+            jazz::db::block_on(legacy.set(
+                "default".to_owned(),
+                CatalogueKvStorage::entry_key(object_id),
+                entry.encode_storage_row().unwrap(),
+            ))
+            .unwrap();
         }
 
-        let storage = jazz_storage_rocksdb::RocksDbStorageFactory
-            .open(&path, &[CatalogueKvStorage::COLUMN_FAMILY])
-            .unwrap();
-        let catalogue = CatalogueKvStorage::new(storage);
+        let catalogue =
+            CatalogueKvStorage::open(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory), path)
+                .unwrap();
         assert_eq!(catalogue.scan_catalogue_entries().unwrap(), vec![entry]);
+        catalogue.close().unwrap();
+        catalogue.close().unwrap();
     }
 }
