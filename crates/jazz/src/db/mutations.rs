@@ -1027,21 +1027,28 @@ where
             .iter()
             .all(|column| patch.contains_key(&column.name));
         self.ensure_row_not_deleted(table, row)?;
-        if !is_full_row && self.local_current_row(table, row)?.is_none() {
+        let existing = self.local_current_row(table, row)?;
+        if !is_full_row && existing.is_none() {
             return Err(read_for_write_denied("partial UPDATE", table));
         }
+        let parents = existing
+            .as_ref()
+            .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing))
+            .into_iter()
+            .collect();
 
         let open_tx_id = OpenTransactionId::new();
         let staged = {
             let mut node = self.node.node.borrow_mut();
             node.open_mergeable(open_tx_id, made_by, permission_subject)
                 .and_then(|()| {
-                    node.tx_patch_mergeable_in_schema(
+                    node.tx_patch_mergeable_in_schema_with_parents(
                         open_tx_id,
                         self.schema_version_id,
                         table,
                         row,
                         patch,
+                        parents,
                         Some(now_ms),
                     )
                 })

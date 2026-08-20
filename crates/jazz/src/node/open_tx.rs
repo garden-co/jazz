@@ -502,6 +502,27 @@ where
         patch: BTreeMap<String, Value>,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.tx_patch_mergeable_in_schema_with_parents(
+            tx_id,
+            write_schema_version,
+            table,
+            row_uuid,
+            patch,
+            Vec::new(),
+            now_ms,
+        )
+    }
+
+    pub(crate) fn tx_patch_mergeable_in_schema_with_parents(
+        &mut self,
+        tx_id: OpenTransactionId,
+        write_schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        patch: BTreeMap<String, Value>,
+        parents: Vec<TxId>,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -525,7 +546,7 @@ where
                 schema_version: write_schema_version,
                 cells: PendingCells::Patch(patch),
                 deletion: None,
-                parents: Vec::new(),
+                parents,
                 now_ms,
                 refresh_parents_at_commit: false,
             },

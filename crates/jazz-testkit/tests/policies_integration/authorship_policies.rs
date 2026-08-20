@@ -543,14 +543,18 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     ]);
     // The shared flag bootstraps the row into Bob's local state before the
     // `$updatedBy` handoff on the later update.
-    let note_id = alice
+    let (note_id, _, insert_tx) = alice
         .for_session(Session::new(super::ALICE_ID))
         .insert(
             "notes",
             jazz::row_input!("title" => "draft", "shared" => true),
         )
-        .expect("alice creates shared draft")
-        .0;
+        .expect("alice creates shared draft");
+    wait_for_edge_txs(
+        &alice,
+        &[insert_tx.expect("alice insert should commit immediately")],
+    )
+    .await;
 
     let initial_rows = wait_for_rows(
         &alice,
@@ -582,7 +586,8 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     assert_eq!(bob_rows[0].1[2], Value::from(super::ALICE_ID));
     assert_eq!(bob_rows[0].1[3], Value::from(super::ALICE_ID));
 
-    bob.for_session(Session::new(super::BOB_ID))
+    let bob_update_tx = bob
+        .for_session(Session::new(super::BOB_ID))
         .update(
             note_id,
             vec![
@@ -590,7 +595,9 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
                 ("shared".to_string(), false.into()),
             ],
         )
-        .expect("bob becomes latest updater");
+        .expect("bob becomes latest updater")
+        .expect("bob update should commit immediately");
+    wait_for_edge_txs(&bob, &[bob_update_tx]).await;
 
     let alice_rows = wait_for_rows(
         &alice,
