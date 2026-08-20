@@ -27,6 +27,9 @@ use jazz::tools::public_schema::{
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
 use jazz_sim::public_schema_fixture::compile_public_schema;
+use jazz_sim::fixture::{
+    apply_sync_message_settled, commit_mergeable_unit_settled, settle_outcome,
+};
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, mem, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
@@ -61,7 +64,7 @@ fn main() {
         emit_db_surface_summary(&config, &profile, &db_surface);
     }
     if phase_selection.should_run("process_local_resume") {
-        let resume_canary = run_process_local_resume_canary(&config);
+        let resume_canary = block_on(run_process_local_resume_canary(&config));
         emit_process_local_resume_canary(&config, &profile, &resume_canary);
     }
 }
@@ -134,7 +137,7 @@ pub fn smoke() {
     assert_eq!(db_surface.appends, config.commits_per_stream());
     assert_eq!(db_surface.rows, config.streams);
     emit_db_surface_summary(&config, &profile, &db_surface);
-    let resume_canary = run_process_local_resume_canary(&config);
+    let resume_canary = block_on(run_process_local_resume_canary(&config));
     assert!(resume_canary.full_rehydrate_bytes > 0);
     assert!(resume_canary.resume_bytes > 0);
     assert!(matches!(
@@ -303,8 +306,8 @@ fn run_jazz(config: &Config) -> JazzSummary {
     for stream in 0..config.streams {
         seed_stream(&mut core, stream, &mut global_time);
         for (_, tailer, peer, seen) in &mut tailers {
-            let update = peer.current_rows_update(&mut core, STREAM_DOCS).unwrap();
-            tailer.apply_sync_message(update).unwrap();
+            let update = block_on(peer.current_rows_update(&mut core, STREAM_DOCS)).unwrap();
+            apply_sync_message_settled(tailer, update).unwrap();
             seen[stream] = Vec::new();
         }
     }
@@ -326,13 +329,13 @@ fn run_jazz(config: &Config) -> JazzSummary {
                     ("stream", Value::Uuid(stream_row(stream).0)),
                     ("content", Value::Bytes(content.clone())),
                 ]));
-            let (tx_id, unit) = core.commit_mergeable_unit(commit).unwrap();
-            core.apply_fate_update(
+            let (tx_id, unit) = commit_mergeable_unit_settled(&mut core, commit).unwrap();
+            block_on(core.apply_fate_update(
                 tx_id,
                 Fate::Accepted,
                 Some(GlobalTime(global_time)),
                 Some(DurabilityTier::Global),
-            )
+            ))
             .unwrap();
             global_time += 1;
             let append_elapsed_us = before.elapsed().as_micros();
@@ -340,9 +343,9 @@ fn run_jazz(config: &Config) -> JazzSummary {
             core_cpu_us += append_elapsed_us;
             let tail_start = Instant::now();
             for (_, tailer, peer, seen) in &mut tailers {
-                let update = peer.current_rows_update(&mut core, STREAM_DOCS).unwrap();
+                let update = block_on(peer.current_rows_update(&mut core, STREAM_DOCS)).unwrap();
                 sync_bytes += view_update_bytes(&update);
-                tailer.apply_sync_message(update).unwrap();
+                apply_sync_message_settled(tailer, update).unwrap();
                 let current = read_doc(tailer, stream);
                 assert!(current.starts_with(&seen[stream]));
                 seen[stream] = current;
@@ -371,10 +374,10 @@ fn run_jazz(config: &Config) -> JazzSummary {
             let (_dir, mut resumer) = open_node(node(90 + idx as u8), schema.clone());
             let mut peer = PeerState::new();
             let resume_start = Instant::now();
-            let update = peer.current_rows_update(&mut core, STREAM_DOCS).unwrap();
+            let update = block_on(peer.current_rows_update(&mut core, STREAM_DOCS)).unwrap();
             let bytes = view_update_bytes(&update);
             resume_bytes += bytes;
-            resumer.apply_sync_message(update).unwrap();
+            apply_sync_message_settled(&mut resumer, update).unwrap();
             let elapsed_us = resume_start.elapsed().as_micros() as u64;
             resume.record(elapsed_us).unwrap();
             resume_samples.push(ResumeSample {
@@ -418,13 +421,12 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     let mut edge_acceptance = Histogram::new(3).unwrap();
     let mut contents = vec![Vec::<u8>::new(); config.streams];
     for stream in 0..config.streams {
-        let stream_write = db
-            .insert_with_id(
-                STREAMS,
-                stream_row(stream),
-                cells([("name", Value::String(format!("stream-{stream}")))]),
-            )
-            .expect("db stream insert");
+        let stream_write = block_on(db.insert_with_id(
+            STREAMS,
+            stream_row(stream),
+            cells([("name", Value::String(format!("stream-{stream}")))]),
+        ))
+        .expect("db stream insert");
         block_on(stream_write.wait(DurabilityTier::Local)).expect("db stream local wait");
         drain_db_route(
             &db,
@@ -435,16 +437,15 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
             &mut core,
             &mut edge_acceptance,
         );
-        let doc_write = db
-            .insert_with_id(
-                STREAM_DOCS,
-                stream_doc_row(stream),
-                cells([
-                    ("stream", Value::Uuid(stream_row(stream).0)),
-                    ("content", Value::Bytes(Vec::new())),
-                ]),
-            )
-            .expect("db stream doc insert");
+        let doc_write = block_on(db.insert_with_id(
+            STREAM_DOCS,
+            stream_doc_row(stream),
+            cells([
+                ("stream", Value::Uuid(stream_row(stream).0)),
+                ("content", Value::Bytes(Vec::new())),
+            ]),
+        ))
+        .expect("db stream doc insert");
         block_on(doc_write.wait(DurabilityTier::Local)).expect("db stream doc local wait");
         drain_db_route(
             &db,
@@ -459,10 +460,10 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     let mut edge_hydration_bytes = 0;
     let mut edge_hydration_rows = 0;
     for table in [STREAMS, STREAM_DOCS] {
-        let update = edge_peer.current_rows_update(&mut core, table).unwrap();
+        let update = block_on(edge_peer.current_rows_update(&mut core, table)).unwrap();
         edge_hydration_bytes += view_update_bytes(&update);
         edge_hydration_rows += result_row_count(&update);
-        edge.apply_sync_message(update).unwrap();
+        apply_sync_message_settled(&mut edge, update).unwrap();
     }
 
     let query = Query::from(STREAM_DOCS);
@@ -493,13 +494,12 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
             let content = contents[stream].clone();
             let before = Instant::now();
             let update_start = Instant::now();
-            let write = db
-                .update(
-                    STREAM_DOCS,
-                    stream_doc_row(stream),
-                    cells([("content", Value::Bytes(content))]),
-                )
-                .expect("db stream doc update");
+            let write = block_on(db.update(
+                STREAM_DOCS,
+                stream_doc_row(stream),
+                cells([("content", Value::Bytes(content))]),
+            ))
+            .expect("db stream doc update");
             update_latencies.push(update_start.elapsed().as_micros() as u64);
             let wait_start = Instant::now();
             block_on(write.wait(DurabilityTier::Local)).expect("db stream doc local wait");
@@ -559,7 +559,7 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     }
 }
 
-fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
+async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let schema = schema();
     let (_server_dir, server_state) = open_node(node(180), schema.clone());
     let server = Node::new(server_state);
@@ -569,7 +569,7 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let mut global_time = 1_u64;
     {
         let server_node = server.node();
-        let mut core = server_node.borrow_mut();
+        let mut core = server_node.lock().await;
         for stream in 0..streams {
             seed_stream(&mut core, stream, &mut global_time);
         }
@@ -585,30 +585,38 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let mut watch =
         block_on(client.subscribe(&prepared, ReadOpts::default())).expect("db subscribe");
 
-    client.tick().expect("client fresh subscribe tick");
+    client.tick().await.expect("client fresh subscribe tick");
     subscriber
-        .borrow_mut()
+        .lock()
+        .await
         .serve_current_rows(STREAM_DOCS)
+        .await
         .expect("serve fresh rows");
-    client.tick().expect("client fresh apply tick");
+    client.tick().await.expect("client fresh apply tick");
     let mut rows = Vec::new();
     drain_subscription_events(&mut watch, &mut rows);
     assert_eq!(rows.len(), streams);
     let full_rehydrate_bytes = subscriber
-        .borrow()
+        .lock()
+        .await
         .last_resume_bytes()
         .expect("fresh rehydrate bytes");
 
     // Let the freshly served view finish its round trip before capturing its
     // resumable peer state. A cursor captured before this acknowledgement has
     // no acknowledged view frontier to resume from.
-    server.tick().expect("server fresh acknowledgement tick");
+    server
+        .tick()
+        .await
+        .expect("server fresh acknowledgement tick");
     client
         .tick()
+        .await
         .expect("client fresh acknowledgement apply tick");
 
     let cursor = subscriber
-        .borrow_mut()
+        .lock()
+        .await
         .take_resume_cursor()
         .expect("resume cursor");
     assert!(client.detach_connection(&upstream));
@@ -617,21 +625,22 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     append_tokens(config, &mut content, 0, 0);
     {
         let server_node = server.node();
-        let mut core = server_node.borrow_mut();
-        let (tx_id, _) = core
-            .commit_mergeable_unit(
-                MergeableCommit::new(STREAM_DOCS, stream_doc_row(0), 10).cells(cells([
-                    ("stream", Value::Uuid(stream_row(0).0)),
-                    ("content", Value::Bytes(content.clone())),
-                ])),
-            )
-            .expect("server commit");
+        let mut core = server_node.lock().await;
+        let (tx_id, _) = commit_mergeable_unit_settled(
+            &mut core,
+            MergeableCommit::new(STREAM_DOCS, stream_doc_row(0), 10).cells(cells([
+                ("stream", Value::Uuid(stream_row(0).0)),
+                ("content", Value::Bytes(content.clone())),
+            ])),
+        )
+        .expect("server commit");
         core.apply_fate_update(
             tx_id,
             Fate::Accepted,
             Some(GlobalTime(global_time)),
             Some(DurabilityTier::Global),
         )
+        .await
         .expect("server fate");
     }
 
@@ -639,16 +648,19 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let _resumed_upstream = client.connect_upstream(client_transport);
     let resumed = server.accept_subscriber_with_resume(server_transport, AuthorId::SYSTEM, cursor);
 
-    client.tick().expect("client resumed subscribe tick");
+    client.tick().await.expect("client resumed subscribe tick");
     resumed
-        .borrow_mut()
+        .lock()
+        .await
         .serve_current_rows(STREAM_DOCS)
+        .await
         .expect("serve resumed stream rows");
-    server.tick().expect("server resumed tick");
-    client.tick().expect("client resumed apply tick");
+    server.tick().await.expect("server resumed tick");
+    client.tick().await.expect("client resumed apply tick");
 
     let resume_bytes = resumed
-        .borrow()
+        .lock()
+        .await
         .last_resume_bytes()
         .expect("resume catch-up bytes");
     drain_subscription_events(&mut watch, &mut rows);
@@ -679,26 +691,29 @@ fn drain_db_route(
     core: &mut NodeState<RocksDbStorage>,
     edge_acceptance: &mut Histogram<u64>,
 ) {
-    db.tick().unwrap();
+    block_on(db.tick()).unwrap();
     while let Some(unit) = outbound.borrow_mut().pop_front() {
         let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
             continue;
         };
         let start = Instant::now();
-        edge_peer
-            .ingest_edge_mergeable_commit_unit(edge, tx, versions, u64::MAX)
-            .unwrap();
+        let outcome =
+            block_on(edge_peer.ingest_edge_mergeable_commit_unit(edge, tx, versions, u64::MAX))
+                .unwrap();
+        settle_outcome(edge, outcome).unwrap();
         edge_acceptance
             .record(start.elapsed().as_micros() as u64)
             .unwrap();
-        for update in core.apply_sync_message(unit).unwrap() {
-            edge.apply_sync_message(update.clone()).unwrap();
+        let outcome = block_on(core.apply_sync_message(unit)).unwrap();
+        for update in settle_outcome(core, outcome).unwrap() {
+            apply_sync_message_settled(edge, update.clone()).unwrap();
             inbound.borrow_mut().push_back(update);
-            db.tick().unwrap();
+            block_on(db.tick()).unwrap();
         }
     }
 }
 
+/* Superseded synchronous stream fixture retained only while replaying the refactor.
 fn seed_stream(core: &mut NodeState<RocksDbStorage>, stream: usize, global_time: &mut u64) {
     let tx = core
         .commit_mergeable(
@@ -724,10 +739,36 @@ fn seed_stream(core: &mut NodeState<RocksDbStorage>, stream: usize, global_time:
         .unwrap();
     core.apply_fate_update(
         tx,
+*/
+fn seed_stream(core: &mut NodeState<RocksDbStorage>, stream: usize, global_time: &mut u64) {
+    let tx = commit_mergeable_unit_settled(
+        core,
+        MergeableCommit::new(STREAMS, stream_row(stream), 1)
+            .cells(cells([("name", Value::String(format!("stream-{stream}")))])),
+    )
+    .unwrap();
+    block_on(core.apply_fate_update(
+        tx.0,
         Fate::Accepted,
         Some(GlobalTime(*global_time)),
         Some(DurabilityTier::Global),
+    ))
+    .unwrap();
+    *global_time += 1;
+    let tx = commit_mergeable_unit_settled(
+        core,
+        MergeableCommit::new(STREAM_DOCS, stream_doc_row(stream), 2).cells(cells([
+            ("stream", Value::Uuid(stream_row(stream).0)),
+            ("content", Value::Bytes(Vec::new())),
+        ])),
     )
+    .unwrap();
+    block_on(core.apply_fate_update(
+        tx.0,
+        Fate::Accepted,
+        Some(GlobalTime(*global_time)),
+        Some(DurabilityTier::Global),
+    ))
     .unwrap();
     *global_time += 1;
 }
@@ -1062,7 +1103,7 @@ fn append_tokens(config: &Config, content: &mut Vec<u8>, stream: usize, seq: usi
 fn read_doc(node: &mut NodeState<RocksDbStorage>, stream: usize) -> Vec<u8> {
     let schema = schema();
     let table = table_schema(&schema, STREAM_DOCS);
-    node.current_rows(STREAM_DOCS, DurabilityTier::Local)
+    block_on(node.current_rows(STREAM_DOCS, DurabilityTier::Local))
         .unwrap()
         .into_iter()
         .find(|row| row.row_uuid() == stream_doc_row(stream))
@@ -1092,7 +1133,7 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<Roc
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).unwrap();
+    let node = block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
     (dir, node)
 }
 
