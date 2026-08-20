@@ -3,6 +3,7 @@
     createJazzClient,
     JazzSvelteProvider,
     LocalFirstAuth,
+    type JazzClient,
   } from "jazz-tools/svelte";
   import type { AuthState } from "jazz-tools";
   import type { Snippet } from "svelte";
@@ -48,14 +49,29 @@
     };
   });
 
-  let client = $derived.by(() => {
-    if (!appId || !serverUrl) return null;
-    if (authenticated) {
-      return jwtToken ? createJazzClient({ appId, serverUrl, jwtToken }) : null;
-    }
-    return !auth.isLoading && auth.secret
-      ? createJazzClient({ appId, serverUrl, secret: auth.secret })
-      : null;
+  let client = $state<Promise<JazzClient> | null>(null);
+  let clientConfigKey = $state<string | null>(null);
+
+  $effect(() => {
+    if (!appId || !serverUrl) return;
+    const credentials = authenticated
+      ? jwtToken
+        ? { jwtToken }
+        : null
+      : !auth.isLoading && auth.secret
+        ? { secret: auth.secret }
+        : null;
+    if (!credentials) return;
+
+    const nextConfigKey = JSON.stringify(credentials);
+    if (nextConfigKey === clientConfigKey) return;
+    clientConfigKey = nextConfigKey;
+
+    const previousClient = client;
+    client = (previousClient
+      ? previousClient.then((resolved) => resolved.shutdown())
+      : Promise.resolve()
+    ).then(() => createJazzClient({ appId, serverUrl, ...credentials }));
   });
 
   $effect(() => {
@@ -82,7 +98,9 @@
 {#if client}
   <JazzSvelteProvider {client}>
     {#snippet children()}
-      {@render pageChildren?.()}
+      {#if !authenticated || jwtToken}
+        {@render pageChildren?.()}
+      {/if}
     {/snippet}
     {#snippet fallback()}
       <p>Loading...</p>

@@ -78,7 +78,8 @@ try {
     appId,
     serverUrl,
     adminSecret,
-    schemaDir: "examples/todo-client-localfirst-react",
+    schema: app,
+    permissions,
   });
 
   const identity = createLocalFirstIdentity("napi-receipt-user");

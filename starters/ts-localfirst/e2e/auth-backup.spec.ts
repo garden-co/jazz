@@ -12,7 +12,7 @@ async function waitForApp(page: Page) {
 async function addTodo(page: Page, title: string) {
   await page.getByLabel(TODO_INPUT_LABEL).fill(title);
   await page.getByRole("button", { name: "Add" }).click();
-  await expect(page.getByText(title)).toBeVisible({ timeout: TIMEOUT });
+  await expect(page.getByText(title, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
   // Edge sync may fail after Local durability; either terminal status is safe to reload.
   await expect(page.getByRole("status")).toContainText("Saved locally", { timeout: TIMEOUT });
 }
@@ -46,5 +46,5 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
 
   // Page reloads; the original todo should reappear.
   await waitForApp(page);
-  await expect(page.getByText(todo)).toBeVisible({ timeout: TIMEOUT });
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });

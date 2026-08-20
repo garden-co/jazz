@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::thread;
 
+use jazz::query::Query;
 use jazz::tools::{
-    AppContext, TransactionId, DurabilityTier, JazzClient, JazzError, ObjectId, Query, Value,
+    AppContext, TransactionId, DurabilityTier, JazzClient, JazzError, ObjectId, Value,
 };
 use tokio::sync::{mpsc, oneshot};
 

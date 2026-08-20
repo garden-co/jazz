@@ -55,6 +55,26 @@ describe("client-registry", () => {
     expect(reacquired).toBe(client);
   });
 
+  it("shares the pending release promise across repeated releases", async () => {
+    const client = fakeClient();
+    const holder = {};
+    await acquireClient("k", async () => client, holder);
+
+    const firstRelease = releaseClient("k", holder);
+    const repeatedRelease = releaseClient("k", holder);
+    let repeatedSettled = false;
+    void repeatedRelease.then(() => {
+      repeatedSettled = true;
+    });
+
+    await Promise.resolve();
+    expect(repeatedSettled).toBe(false);
+
+    await firstRelease;
+    await repeatedRelease;
+    expect(client.shutdown).toHaveBeenCalledOnce();
+  });
+
   it("waits for a started teardown before creating a replacement", async () => {
     let finishShutdown!: () => void;
     const shutdownFinished = new Promise<void>((resolve) => {

@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { JazzProvider as JazzBaseProvider, useDb, useLocalFirstAuth } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
@@ -66,13 +66,16 @@ function HybridProvider({ children }: React.PropsWithChildren) {
     if (secretLoading || !secret) return null;
     return { appId: APP_ID, serverUrl: SERVER_URL, secret };
   }, [authenticated, jwtToken, secret, secretLoading]);
+  const lastConfig = useRef<DbConfig | null>(null);
+  if (config) lastConfig.current = config;
+  const providerConfig = config ?? lastConfig.current;
 
-  if (isPending || !config) return null;
+  if (!providerConfig) return null;
 
   return (
-    <JazzBaseProvider config={config} fallback={<p>Loading...</p>}>
+    <JazzBaseProvider config={providerConfig} fallback={<p>Loading...</p>}>
       {authenticated && <JwtRefresh />}
-      {children}
+      {!isPending && config ? children : null}
     </JazzBaseProvider>
   );
 }
