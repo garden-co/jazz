@@ -61,11 +61,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
     }))?;
 
-    let insert_milk = db.insert("todos", todo_cells("buy milk", false))?;
+    let insert_milk = block_on(db.insert("todos", todo_cells("buy milk", false)))?;
     let buy_milk = insert_milk.row_uuid();
     block_on(insert_milk.wait(DurabilityTier::Local))?;
 
-    let insert_docs = db.insert("todos", todo_cells("write docs", false))?;
+    let insert_docs = block_on(db.insert("todos", todo_cells("write docs", false)))?;
     let write_docs = insert_docs.row_uuid();
     block_on(insert_docs.wait(DurabilityTier::Local))?;
 
@@ -73,14 +73,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rows = block_on(db.all(&query, ReadOpts::default()))?;
     print_todos("After insert:", &table, &rows);
 
-    let update_milk = db.update(
+    let update_milk = block_on(db.update(
         "todos",
         buy_milk,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
-    )?;
+    ))?;
     block_on(update_milk.wait(DurabilityTier::Local))?;
 
-    let delete_docs = db.delete("todos", write_docs)?;
+    let delete_docs = block_on(db.delete("todos", write_docs))?;
     block_on(delete_docs.wait(DurabilityTier::Local))?;
 
     let rows = block_on(db.all(&query, ReadOpts::default()))?;

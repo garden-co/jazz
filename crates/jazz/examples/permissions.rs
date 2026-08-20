@@ -72,8 +72,11 @@ fn open_core(
     schema: JazzSchema,
     storage: MemoryStorage,
 ) -> Result<CoreDb, Box<dyn std::error::Error>> {
-    let node =
-        NodeState::new_history_complete(NodeUuid::from_bytes([node_byte; 16]), schema, storage)?;
+    let node = block_on(NodeState::new_history_complete(
+        NodeUuid::from_bytes([node_byte; 16]),
+        schema,
+        storage,
+    ))?;
     Ok(CoreDb {
         server: Node::new(node),
         author,
@@ -97,22 +100,35 @@ impl CoreDb {
     ) -> Result<RowUuid, Error> {
         let row = self.id_source.next_row_id();
         let node = self.server.node();
-        let tx_id = node.borrow_mut().commit_mergeable(
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(made_by)
-                .permission_subject(self.author)
-                .cells(cells),
-        )?;
-        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        let tx_id = block_on(async {
+            let mut node = node.lock().await;
+            let published = node
+                .commit_mergeable(
+                    MergeableCommit::new(table, row, self.next_now_ms())
+                        .made_by(made_by)
+                        .permission_subject(self.author)
+                        .cells(cells),
+                )
+                .await?;
+            node.persist_and_settle_transaction(published).await
+        })?;
+        block_on(async {
+            let mut node = node.lock().await;
+            let outcome = node.finalize_local_mergeable_commit(tx_id).await?;
+            node.persist_and_settle_outcome(outcome).await
+        })?;
         Ok(row)
     }
 
     fn read(&self, table: &str) -> Result<Vec<jazz::node::CurrentRow>, Error> {
-        self.server
-            .node()
-            .borrow_mut()
-            .current_rows(table, DurabilityTier::Local)
-            .map_err(Into::into)
+        let node = self.server.node();
+        block_on(async {
+            node.lock()
+                .await
+                .current_rows(table, DurabilityTier::Local)
+                .await
+        })
+        .map_err(Into::into)
     }
 
     fn accept_subscriber(&self, transport: Box<dyn Transport>, identity: AuthorId) {
@@ -120,7 +136,7 @@ impl CoreDb {
     }
 
     fn tick(&self) -> Result<(), Error> {
-        self.server.tick().map(|_| ())
+        block_on(self.server.tick()).map(|_| ())
     }
 }
 
@@ -163,9 +179,9 @@ fn sync_client_to_core(
     let (client_transport, server_transport) = duplex();
     let _upstream = client.connect_upstream(client_transport);
     core.accept_subscriber(server_transport, identity);
-    client.tick()?;
+    block_on(client.tick())?;
     core.tick()?;
-    client.tick()?;
+    block_on(client.tick())?;
     Ok(())
 }
 
@@ -195,7 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(owner_db.read(&todos)?.len(), 0);
 
     let row = RowUuid::from_bytes([0x33; 16]);
-    owner_db.insert_with_id("todos", row, todo_cells("private", false, owner))?;
+    block_on(owner_db.insert_with_id("todos", row, todo_cells("private", false, owner)))?;
 
     assert_eq!(owner_db.can_read("todos", row)?, PermissionAdvice::Unknown);
     assert_eq!(
@@ -227,11 +243,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         todo_cells("written by core for user", false, attributed_user),
     )?;
 
-    let client_err =
-        match owner_db.insert_attributed(other, "todos", todo_cells("forged", false, other)) {
-            Ok(_) => panic!("clients cannot attribute writes to another user"),
-            Err(err) => err,
-        };
+    let client_err = match block_on(owner_db.insert_attributed(
+        other,
+        "todos",
+        todo_cells("forged", false, other),
+    )) {
+        Ok(_) => panic!("clients cannot attribute writes to another user"),
+        Err(err) => err,
+    };
     assert_eq!(client_err.code, ErrorCode::WriteRejected);
     assert!(client_err.message.contains("attribution"));
     println!(
@@ -240,13 +259,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let forbidden_row = RowUuid::from_bytes([0x44; 16]);
-    let forbidden = other_db.insert_with_id(
+    let forbidden = block_on(other_db.insert_with_id(
         "todos",
         forbidden_row,
         todo_cells("forbidden at authority", false, owner),
-    )?;
+    ))?;
     assert_eq!(
-        forbidden.write_state()?,
+        block_on(forbidden.write_state())?,
         WriteState {
             fate: Fate::Pending,
             durability: DurabilityTier::Local,
@@ -255,7 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     sync_client_to_core(&other_db, &core, other)?;
     assert_eq!(
-        forbidden.write_state()?,
+        block_on(forbidden.write_state())?,
         WriteState {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             durability: DurabilityTier::Local,
