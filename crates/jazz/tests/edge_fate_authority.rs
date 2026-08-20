@@ -1,3 +1,5 @@
+#![cfg(feature = "runtime")]
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;

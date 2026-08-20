@@ -28,9 +28,7 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         // An authority scope view carries an ordinary settlement-bearing view
         // update. Its row payload is part of the simulated delivery cost.
         SyncMessage::AuthorizationScopeView { view, .. } => view_update_bytes(view),
-        SyncMessage::BranchMetadata(_)
-        | SyncMessage::FetchBranchMetadata { .. }
-        | SyncMessage::RegisterShape { .. }
+        SyncMessage::RegisterShape { .. }
         | SyncMessage::Subscribe(_)
         | SyncMessage::PublishSchema { .. }
         | SyncMessage::PublishSchemaWithLens { .. }
@@ -116,7 +114,7 @@ mod tests {
     use jazz::query::{BindingId, ShapeId};
     use jazz::time::{GlobalTime, TxTime};
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-    use jazz::tx::{BranchLineage, DurabilityTier, Fate, Transaction, TxId, TxKind};
+    use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 
     use super::*;
 
@@ -164,8 +162,6 @@ mod tests {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    target_lineage: BranchLineage::Root,
-                    branch_merge: None,
                 },
                 versions: vec![version],
                 fate: Fate::Accepted,

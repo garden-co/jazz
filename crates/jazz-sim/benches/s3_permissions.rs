@@ -29,7 +29,7 @@ use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
     Value as PublicValue,
 };
-use jazz::tx::{BranchLineage, DeletionEvent, DurabilityTier, Fate, Transaction, TxId, TxKind};
+use jazz::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::TransportError;
 use jazz_sim::public_schema_fixture::{
     all_operation_policies, compile_public_schema, seeded_recursive_access_policy,
@@ -1632,8 +1632,6 @@ fn flush_headline_versions(
         predicate_read_set: None,
         permission_subject: Some(AuthorId::SYSTEM),
         user_metadata_json: Some("s3_block_tree_headline_fixture".to_owned()),
-        target_lineage: BranchLineage::Root,
-        branch_merge: None,
     };
     let chunk = std::mem::take(versions);
     core.ingest_commit_unit(tx, chunk, u64::MAX)
