@@ -62,6 +62,10 @@ export default defineConfig({
     plugins: () => [wasm(), topLevelAwait()],
   },
   test: {
+    // Browser-backed files share Chromium CPU and main-thread transport work.
+    // Keep concurrency below the host CPU count so worker round trips are not
+    // starved when CI runs the Node/Turbo suite alongside this suite.
+    maxWorkers: 4,
     browser: {
       enabled: true,
       provider: playwright(),
