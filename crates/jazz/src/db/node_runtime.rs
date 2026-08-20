@@ -17,6 +17,8 @@ where
     pub(super) node: SharedNodeState<S>,
     pub(super) subscriptions: SubscriptionList,
     pub(super) outbox: Outbox,
+    pub(super) pending_local_publications: PendingLocalPublications,
+    pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) latest_coverage_subscriptions: LatestCoverageSubscriptions,
     pub(super) upstream_coverage_refcounts: UpstreamCoverageRefCounts,
@@ -39,6 +41,7 @@ where
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
     pub(super) edge_cache_budget: Cell<Option<EdgeCacheBudget>>,
     pub(super) upstream_durability_floor: Cell<DurabilityTier>,
+    pub(super) defer_local_persistence: Cell<bool>,
 }
 
 impl<S> Node<S>
@@ -59,6 +62,8 @@ where
             node: Rc::new(futures::lock::Mutex::new(node)),
             subscriptions: Rc::new(RefCell::new(Vec::new())),
             outbox: Rc::new(RefCell::new(Vec::new())),
+            pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
+            local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
@@ -84,6 +89,7 @@ where
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
             edge_cache_budget: Cell::new(None),
             upstream_durability_floor: Cell::new(DurabilityTier::Global),
+            defer_local_persistence: Cell::new(false),
         }
     }
 
@@ -117,6 +123,10 @@ where
         self.upstream_durability_floor.set(DurabilityTier::Local);
     }
 
+    pub(super) fn set_deferred_local_persistence(&self, deferred: bool) {
+        self.defer_local_persistence.set(deferred);
+    }
+
     /// Change whether subscriber links may serve their registered views.
     /// Publishing a permissions head always rehydrates every live view, so a
     /// tighter head retracts rows without requiring a reconnect.
@@ -139,6 +149,47 @@ where
         drop(outbox);
         self.mark_subscriber_connections_dirty();
         self.schedule_tick(TickUrgency::Deferred);
+    }
+
+    pub(super) fn queue_local_publication(
+        &self,
+        published: PublishedTransaction,
+        upload_unit: Option<SyncMessage>,
+    ) {
+        self.pending_local_publications
+            .borrow_mut()
+            .push_back(PendingLocalPublication {
+                published: Rc::new(published),
+                upload_unit,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
+        let _settler = self.local_publication_settler.lock().await;
+        loop {
+            let Some((published, upload_unit)) = self
+                .pending_local_publications
+                .borrow()
+                .front()
+                .map(|pending| (Rc::clone(&pending.published), pending.upload_unit.clone()))
+            else {
+                return Ok(());
+            };
+            let tx_id = published.tx_id();
+            let persistence = published.persist().await;
+            self.node
+                .lock()
+                .await
+                .settle_published_transaction(persistence)?;
+            let settled = self
+                .pending_local_publications
+                .borrow_mut()
+                .pop_front()
+                .expect("settled local publication remains at queue front");
+            debug_assert_eq!(settled.published.tx_id(), tx_id);
+            self.queue_pending_upload(tx_id, upload_unit);
+        }
     }
 
     /// Restore locally originated, unsettled durable writes into the

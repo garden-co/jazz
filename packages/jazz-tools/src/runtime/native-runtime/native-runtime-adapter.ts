@@ -270,7 +270,7 @@ type NativeDb = {
     localEpoch: bigint,
   ): Transport;
   acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
-  tick(): void;
+  tick(): void | Promise<void>;
   close?(): void;
   free?(): void;
 };
@@ -351,8 +351,8 @@ export type Transport = {
   recvWireFrames(): unknown[];
   sendWireFrame(frame: Uint8Array): void;
   sendWireFrames?(frames: readonly Uint8Array[]): void;
-  tick(): number;
-  updateAuthenticatedClaims?(claims: Record<string, unknown>): void;
+  tick(): number | Promise<number>;
+  updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
 };
 
@@ -505,6 +505,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private coreTickRunning = false;
   private coreTickAgain = false;
   private serverPumpScheduled = false;
+  private serverPumpRunning = false;
   private serverPumpAgain = false;
   private closed = false;
   private nextSubscriptionId = 1;
@@ -1082,7 +1083,7 @@ export class NativeRuntimeAdapter implements Runtime {
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
-      this.pumpServerTransport();
+      void this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
       const settlement = write.wait(tier);
       const transportError = this.waitForServerTransportError(tier);
@@ -1350,7 +1351,7 @@ export class NativeRuntimeAdapter implements Runtime {
       const transport = this.connectNegotiatedUpstream(negotiation);
       this.serverTransport = transport;
       this.flushQueuedServerFrames(carrier);
-      this.pumpServerTransport();
+      void this.pumpServerTransport();
       this.pumpSubscriptions();
       return carrier;
     });
@@ -1710,7 +1711,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // that boundary.
       if (this.closed) return;
       this.throwServerTransportErrorForTier(tier);
-      this.pumpServerTransport();
+      await this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
       if (this.db.queryAttachmentIsCovered) {
         const peerHasResponded =
@@ -1855,15 +1856,15 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
-      this.runCoreTick();
+      void this.runCoreTick().catch(reportAsyncRuntimeError);
     });
   }
 
-  private runCoreTick(): void {
+  private async runCoreTick(): Promise<void> {
     if (this.closed || this.coreTickRunning) return;
     this.coreTickRunning = true;
     try {
-      this.db.tick();
+      await this.db.tick();
       this.pumpSubscriptions();
       this.scheduleServerPump();
       this.notifyPeerTransportWork();
@@ -2175,16 +2176,17 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private scheduleServerPump(): void {
-    if (this.closed || !this.serverTransport || this.serverPumpScheduled) return;
+    if (this.closed || !this.serverTransport) return;
+    if (this.serverPumpRunning) {
+      this.serverPumpAgain = true;
+      return;
+    }
+    if (this.serverPumpScheduled) return;
     this.serverPumpScheduled = true;
     setTimeout(() => {
       this.serverPumpScheduled = false;
       if (this.closed) return;
-      this.pumpServerTransport();
-      if (this.serverPumpAgain) {
-        this.serverPumpAgain = false;
-        this.scheduleServerPump();
-      }
+      void this.pumpServerTransport().catch((error) => this.handleServerTransportError(error));
     }, SERVER_PUMP_DEBOUNCE_MS);
   }
 
@@ -2198,22 +2200,35 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.serverTransport != null || this.peerUpstreamAttached;
   }
 
-  private pumpServerTransport(): void {
+  private async pumpServerTransport(): Promise<void> {
     const transport = this.serverTransport;
     if (this.closed || !transport) return;
-    this.drainPendingInboundServerFrames(transport);
-    for (let round = 0; round < 32; round += 1) {
-      transport.tick();
-      const frames = normalizeTransportFrames(transport.recvWireFrames());
-      if (frames.length > 0) {
-        this.sendServerFrames(frames);
+    if (this.serverPumpRunning) {
+      this.serverPumpAgain = true;
+      return;
+    }
+    this.serverPumpRunning = true;
+    try {
+      this.drainPendingInboundServerFrames(transport);
+      for (let round = 0; round < 32; round += 1) {
+        await transport.tick();
+        const frames = normalizeTransportFrames(transport.recvWireFrames());
+        if (frames.length > 0) {
+          this.sendServerFrames(frames);
+        }
+        this.pumpSubscriptions();
+        if (frames.length === 0) {
+          return;
+        }
       }
-      this.pumpSubscriptions();
-      if (frames.length === 0) {
-        return;
+      this.serverPumpAgain = true;
+    } finally {
+      this.serverPumpRunning = false;
+      if (this.serverPumpAgain) {
+        this.serverPumpAgain = false;
+        this.scheduleServerPump();
       }
     }
-    this.serverPumpAgain = true;
   }
 
   private drainPendingInboundServerFrames(transport: Transport): void {
@@ -5110,4 +5125,10 @@ function assertBytes(value: unknown, label: string): Uint8Array {
   if (value instanceof Uint8Array) return value;
   if (Array.isArray(value)) return Uint8Array.from(value);
   throw new Error(`expected ${label} bytes`);
+}
+
+function reportAsyncRuntimeError(error: unknown): void {
+  queueMicrotask(() => {
+    throw error;
+  });
 }

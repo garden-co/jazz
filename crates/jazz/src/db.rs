@@ -335,6 +335,12 @@ type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type PermissionAdviceWaiters =
     Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
 type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
+struct PendingLocalPublication {
+    published: Rc<PublishedTransaction>,
+    upload_unit: Option<SyncMessage>,
+}
+
+type PendingLocalPublications = Rc<RefCell<VecDeque<PendingLocalPublication>>>;
 type AdmittedUpstreamAuthorities = Rc<RefCell<Vec<AuthorityContext>>>;
 const MAX_EDGE_FATE_ROUTES: usize = 1024;
 const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;

@@ -364,6 +364,12 @@ where
         self.node.set_non_durable_client();
     }
 
+    /// Let a single-threaded host return resident writes synchronously while
+    /// its tick loop owns suspendable persistence and later peer visibility.
+    pub fn set_deferred_local_persistence(&self, deferred: bool) {
+        self.node.set_deferred_local_persistence(deferred);
+    }
+
     /// Configure this client database's first-snapshot durability cadence.
     ///
     /// Servers do not call this client-only setting and retain their existing
@@ -632,11 +638,13 @@ where
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub async fn tick(&self) -> Result<(), Error> {
+        self.node.settle_local_publications().await?;
         self.node.tick().await.map(|_| ())
     }
 
     /// Service every connection once and return binding-observable wake counts.
     pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
+        self.node.settle_local_publications().await?;
         self.node.tick().await
     }
 

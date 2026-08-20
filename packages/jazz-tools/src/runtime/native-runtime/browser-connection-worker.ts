@@ -141,7 +141,7 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
       break;
     case "update-auth": {
       const connectionEpoch = authConnectionEpoch;
-      subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
+      await subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
       await activeRuntime.updateAuth(message.authJson);
       await waitForAuthConfirmation(activeRuntime, connectionEpoch);
       broadcastAuthRestored();
@@ -158,7 +158,7 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
       if (!serverUrl) throw new Error("Browser worker reconnect requires a serverUrl");
       options.authJson = message.authJson;
       options.sessionClaims = message.sessionClaims;
-      subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
+      await subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
       activeRuntime.connect(serverUrl, message.authJson);
       break;
     }
@@ -320,7 +320,7 @@ async function handleFollowerMessage(
       if (!peer.subscriber) {
         throw new Error("Browser follower port is not initialized");
       }
-      peer.subscriber.updateAuthenticatedClaims?.(message.sessionClaims);
+      await peer.subscriber.updateAuthenticatedClaims?.(message.sessionClaims);
       await activeRuntime.updateAuth(message.authJson);
       broadcastAuthRestored();
       return;

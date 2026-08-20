@@ -1713,9 +1713,18 @@ where
         published: PublishedTransaction,
     ) -> Result<WriteHandle<S>, Error> {
         let tx_id = published.tx_id;
-        self.finish_publication_outcome(PublicationOutcome::published((), published))
-            .await?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
+        let local_tier = if self.node.defer_local_persistence.get() {
+            // Publication is the synchronous visibility boundary. Refresh
+            // resident subscribers before returning, then let the host tick
+            // own suspendable persistence and later peer visibility.
+            self.refresh_subscriptions().await?;
+            self.node.queue_local_publication(published, None);
+            DurabilityTier::None
+        } else {
+            self.finish_publication_outcome(PublicationOutcome::published((), published))
+                .await?;
+            self.finalize_local_commit(tx_id)?
+        };
         Ok(WriteHandle {
             node: Rc::downgrade(&self.node.node),
             row_uuid: row,
@@ -1788,19 +1797,6 @@ where
             ErrorCode::Protocol,
             "catalogue updates require a serving Node",
         ))
-    }
-
-    /// Finalize a locally-committed exclusive transaction. A `Core` authority
-    /// validates and accepts/rejects it now, using the in-memory commit unit
-    /// (which still carries `base_snapshot` and the read sets); other roles
-    /// queue it for upstream, leaving it Pending/Local.
-    pub(super) fn finalize_local_exclusive_unit(
-        &self,
-        tx_id: TxId,
-        unit: SyncMessage,
-    ) -> Result<DurabilityTier, Error> {
-        self.node.queue_pending_upload(tx_id, Some(unit));
-        Ok(self.node.node.borrow().authored_commit_durability())
     }
 
     /// Client writes stay pending at this runtime's authored durability until

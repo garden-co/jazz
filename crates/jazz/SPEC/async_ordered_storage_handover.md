@@ -46,6 +46,37 @@ loading or compatibility path during the Groove phase.
 10. Existing correctness tests are specifications. Behavior changes must be
     explicit; tests must not be mechanically rewritten to make migration pass.
 
+## Binding lifecycle decision (2026-08-20)
+
+Single-threaded bindings keep resident mutation initiation synchronous. A
+successful insert, update, delete, or transaction commit has already published
+its resident change before returning, so an immediate query or subscriber sees
+it in the same tick. The binding does not replace these methods with Promise
+returning wrappers merely because durable storage may suspend.
+
+The host explicitly enables deferred local persistence. In that mode Jazz
+publishes resident state synchronously, enqueues the prepared persistence
+outcome, and lets the existing asynchronous `Db::tick` lifecycle settle queued
+outcomes in commit order. A write's Local tier remains pending until that
+settlement completes. Peer upload is queued only afterward, preserving the
+separate Jazz requirement that optimistic local visibility must not become
+external visibility before local persistence.
+
+Consequently the TypeScript runtime accepts synchronous native ticks and
+Promise-returning WASM ticks through one adapter contract. Tick and transport
+pumps serialize their asynchronous work; CRUD and transaction APIs remain
+synchronous. The default Rust/NAPI lifecycle remains eager, while WASM opts in
+to deferred persistence because its event loop cannot synchronously wait for
+browser storage.
+
+The synchronous binding currently polls resident engine operations through the
+existing `block_on` bridge. This is safe only under the resident-ready
+contract. Replace it with an explicit single-poll helper that reports an
+invariant violation on `Pending`; never spin the browser event loop waiting for
+hydration. A resident write whose changed include/join discovers a non-resident
+row is the documented exception and must move through the interruptible query
+lifecycle rather than weakening ordinary resident visibility.
+
 ## Evolve abstractions in place
 
 The synchronous implementation is not a legacy core to wrap. It is the engine
