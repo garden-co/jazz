@@ -242,10 +242,12 @@ deletion winners remain independent.
 
 ### 3.2 Prefix indices implicitly
 
-- Prefix every physical secondary and unique key with the exact normalized
-  table branch key.
+- Prefix every physical secondary key with the exact normalized table branch
+  key.
 - Preserve user index declarations without redundant branch-dimension columns.
-- Enforce uniqueness per exact branch key only.
+- Preserve existing local unique-index behavior without claiming distributed
+  uniqueness; the replicated arbitration design is explicitly deferred by the
+  branch-view spec.
 - Rebuild index state when a dimension is added and historical branch keys acquire a
   default component.
 
@@ -262,7 +264,7 @@ deletion winners remain independent.
 
 - same `RowUuid` has independent winners in two branch keys;
 - branch-key-local delete/restore cannot affect a sibling;
-- same unique value is accepted in two branch keys and rejected twice in one branch key;
+- secondary-index entries with the same user key remain isolated by branch key;
 - indexed update/delete retracts only the exact branch key;
 - cross-branch-key transaction is wholly visible or wholly absent after crash and
   reopen;
@@ -491,7 +493,7 @@ by `AGENTS.md`:
 5. make empty branch key shared core green;
 6. add dimension schema identities and branch key codec;
 7. branch-key-qualify content/deletion/current/global-change storage;
-8. branch-key-prefix indices and per-branch-key uniqueness;
+8. branch-key-prefixed secondary indices (distributed uniqueness deferred);
 9. admit cross-branch-key atomic commit units;
 10. exact-branch-key read sources;
 11. head/live-base and head/frozen-base reducers;

@@ -34,7 +34,7 @@ Invariant digest:
 - `INV-BVIEW-3`: Every content or deletion version on a branch-keyed table MUST carry a complete canonical branch key; its version parents MUST have the same branch key.
 - `INV-BVIEW-4`: Branch bindings MUST be non-null and immutable for one incarnation. Moving an object between branch keys requires explicit writes to both incarnations, which MAY share one atomic transaction.
 - `INV-BVIEW-5`: Content and deletion histories and current winners MUST be selected independently per `(PhysicalTableId, BranchKey, RowUuid, Layer)`.
-- `INV-BVIEW-6`: Secondary and unique indices MUST be physically prefixed by the exact branch key; uniqueness is per exact branch key, not per composed branch view.
+- `INV-BVIEW-6`: Secondary indices MUST be physically prefixed by the exact branch key; a composed branch view MUST apply head/base masking before consulting or publishing index results.
 - `INV-BVIEW-7`: A table with no bound dimensions MUST behave as shared data in every branch view.
 - `INV-BVIEW-8`: A read selector MUST use globally named dimension values and each table MUST project that selector onto its declared subset; equal projected head/base branch keys collapse to one source.
 - `INV-BVIEW-9`: An overlay MUST select head winners before base winners independently for content and deletion layers, and MUST perform that masking before predicates or relational operators.
@@ -144,17 +144,19 @@ and never affect another branch key with the same `RowUuid`. Current caches pres
 independent content/deletion winner identities so they remain rebuildable from
 history.
 
-Every physical secondary or unique index implicitly prefixes its user key with
-the branch key:
+Every physical secondary index implicitly prefixes its user key with the
+branch key:
 
 ```text
 (PhysicalTableId, BranchKey, UserIndexKey..., RowUuid)
 ```
 
-The application declares only its user columns. Unique constraints are enforced
-within one exact branch key. Composing a head over a base does not create a new
-constraint domain and may expose equal indexed values from different row ids
-even when both branch keys are independently valid (`INV-BVIEW-6`).
+The application declares only its user columns. Composing a head over a base
+does not create a new physical index domain: winner masking precedes predicate
+and index-result publication (`INV-BVIEW-6`). This chapter does not add a
+distributed uniqueness guarantee; the open question below records the required
+design work rather than treating Groove's local unique-index rejection as a
+replicated conflict-resolution protocol.
 
 ### 11.3 Branch views
 
@@ -374,6 +376,19 @@ be renamed because their binding retains the stable dimension id.
 
 ## Open Questions
 
+- ⚠️ **Distributed uniqueness across replicas and branch keys.** Jazz has no
+  convergent distributed uniqueness mechanism today. Groove can reject a
+  conflicting write to one local unique index, but two offline replicas may
+  independently accept different `RowUuid`s for the same value, and arrival
+  order is not a deterministic replicated winner rule. Before Jazz exposes
+  branch-aware unique constraints, specify the replicated claim identity
+  (naturally `(PhysicalTableId, exact BranchKey, index identity, canonical
+values)`), deterministic arbitration, loser visibility, transaction-level
+  atomicity, authorization and selected-delivery behavior, and recovery when a
+  winning claim is deleted or becomes unauthorized. A composed head/base view
+  is not itself a uniqueness domain. This branch-view work intentionally
+  preserves only whatever local uniqueness behavior already exists and makes no
+  new cross-replica uniqueness promise.
 - **Selected delivery for cross-branch-key transactions.** Specify the minimal
   transaction witness an untrusted receiver needs for atomic settlement without
   exposing hidden sibling count or structure.
