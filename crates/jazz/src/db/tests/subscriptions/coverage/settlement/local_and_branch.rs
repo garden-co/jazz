@@ -429,11 +429,7 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
     drop(receipts);
     let node = client.node.node.borrow();
     assert!(
-        client
-            .node
-            .node
-            .borrow()
-            .has_settled_result_set(binding_view),
+        node.has_settled_result_set(binding_view),
         "reconnect did not restore branch settled result membership"
     );
     assert!(
@@ -460,23 +456,13 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
     );
     let replayed = block_on(subscription.next_raw()).unwrap();
     assert!(
-        !event_settled(&replayed),
-        "reconnect must first publish the branch overlay replay as provisional"
+        event_settled(&replayed),
+        "a fresh selected-authority receipt must publish the recovered branch replay as settled"
     );
-    let (added, _, _) = delta_rows(replayed);
+    let (added, updated, removed) = delta_rows(replayed);
     assert!(
         added.iter().any(|current| current.row_uuid() == row(0x42)),
-        "the provisional replay must retain the branch overlay row"
-    );
-    let resettled = block_on(subscription.next_raw()).unwrap();
-    assert!(
-        event_settled(&resettled),
-        "a fresh selected-authority branch view must re-settle after reconnect"
-    );
-    let (added, updated, removed) = delta_rows(resettled);
-    assert!(
-        added.iter().any(|current| current.row_uuid() == row(0x42)),
-        "the authoritative reset must retain the branch overlay row"
+        "the settled replay must retain the branch overlay row"
     );
     assert!(updated.is_empty());
     assert!(removed.is_empty());
