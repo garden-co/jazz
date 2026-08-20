@@ -76,6 +76,47 @@ describe("reconcileArray", () => {
     expect(target[0]!).toBe(alice);
     expect(target[0]!.name).toBe("Alice");
   });
+
+  // TEST_BURNDOWN_TS: reconcileArray > deletes dropped index properties so proxy-cached reads cannot resurface old rows
+  // known red; tracked in TEST_BURNDOWN.md — reconcileArray truncates with .length assignment, which does not delete dropped index properties, leaving proxy-cached per-index state stale.
+  it.skip("deletes dropped index properties so proxy-cached reads cannot resurface old rows", () => {
+    const deletedIndices: string[] = [];
+    const indexCache = new Map<string, unknown>();
+    const invalidate = (key: string | symbol) => {
+      if (typeof key === "string") indexCache.delete(key);
+    };
+    const rows = [
+      { id: "1", name: "Alice" },
+      { id: "2", name: "Bob" },
+      { id: "3", name: "Cara" },
+    ];
+    // Stand-in for a reactive array proxy that materializes per-index state:
+    // only set/deleteProperty traps for an index invalidate its cached read.
+    const proxy = new Proxy(rows, {
+      set(target, key, value, receiver) {
+        invalidate(key);
+        return Reflect.set(target, key, value, receiver);
+      },
+      deleteProperty(target, key) {
+        if (typeof key === "string") deletedIndices.push(key);
+        invalidate(key);
+        return Reflect.deleteProperty(target, key);
+      },
+    });
+    const readCached = (index: number): unknown => {
+      const key = String(index);
+      if (!indexCache.has(key)) indexCache.set(key, proxy[index]);
+      return indexCache.get(key);
+    };
+    expect(readCached(1)).toEqual({ id: "2", name: "Bob" });
+    expect(readCached(2)).toEqual({ id: "3", name: "Cara" });
+
+    reconcileArray(proxy, [{ id: "1", name: "Alice" }]);
+
+    expect([...deletedIndices].sort()).toEqual(["1", "2"]);
+    expect(readCached(1)).toBeUndefined();
+    expect(readCached(2)).toBeUndefined();
+  });
 });
 
 describe("deepMerge (via reconcileArray)", () => {
