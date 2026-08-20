@@ -650,198 +650,162 @@ where
                 expected_scope_authority,
                 scope_lease_manager,
             } => {
-                // Repair is deliberately retried on each non-blocked tick. The
-                // request set is bounded and deduplicated; a dropped request or
-                // response therefore cannot permanently strand a parked unit.
-                let repairs = next_branch_metadata_repairs(
-                    pending_branch_metadata_repairs,
-                    branch_metadata_repair_cursor,
-                );
-                if !repairs.is_empty() {
-                    self.transport
-                        .send(SyncMessage::FetchBranchMetadata { branches: repairs })
-                        .map_err(transport_error)?;
-                }
-                for metadata in self.node.borrow().pending_branch_metadata_uploads() {
-                    self.transport
-                        .send(SyncMessage::BranchMetadata(metadata))
-                        .map_err(transport_error)?;
-                }
-                pending.extend(upstream_subscriptions.borrow_mut().drain(..));
-                let claims = self.node.borrow().session_claims_with_revisions();
-                for (identity, claims, revision) in claims {
-                    if sent_session_claim_revisions
-                        .get(&identity)
-                        .is_some_and(|sent| *sent >= revision)
-                    {
-                        continue;
-                    }
-                    if let Err(error) = self
-                        .transport
-                        .send(SyncMessage::SessionClaims { identity, claims })
-                    {
-                        if handle_transport_backpressure(&self.node, &self.scheduler, &error) {
-                            return Ok(stats);
+                let stop = Box::pin(async {
+                    let outbound_stop = Box::pin(async {
+                        // Repair is deliberately retried on each non-blocked tick. The
+                        // request set is bounded and deduplicated; a dropped request or
+                        // response therefore cannot permanently strand a parked unit.
+                        let repairs = next_branch_metadata_repairs(
+                            pending_branch_metadata_repairs,
+                            branch_metadata_repair_cursor,
+                        );
+                        if !repairs.is_empty() {
+                            self.transport
+                                .send(SyncMessage::FetchBranchMetadata { branches: repairs })
+                                .map_err(transport_error)?;
                         }
-                        return Err(transport_error(error));
-                    }
-                    sent_session_claim_revisions.insert(identity, revision);
-                }
-                let pending_index = 0;
-                while pending_index < pending.len() {
-                    match &pending[pending_index] {
-                        PendingUpstreamCommand::Subscribe(pending_subscription) => {
-                            let shape = &pending_subscription.shape;
-                            let binding = &pending_subscription.binding;
-                            let registration_key =
-                                (shape.shape_id(), pending_subscription.opts.read_view_key());
-                            if announced_shapes.insert(registration_key) {
-                                let outcome = self
-                                    .node
-                                    .lock()
-                                    .await
-                                    .apply_sync_message(SyncMessage::RegisterShape {
-                                        shape_id: shape.shape_id(),
-                                        ast: ShapeAst::from_validated(shape),
-                                        opts: RegisterShapeOptions::default(),
-                                    })
-                                    .await?;
-                                let (_, changed) = finish_peer_publication_outcome(
-                                    &self.node,
-                                    &self.subscriptions,
-                                    &self.active_authority_view_receipts,
-                                    outcome,
-                                )
-                                .await?;
-                                stats.subscription_events += changed;
-                                if let Err(error) =
-                                    self.transport.send(SyncMessage::RegisterShape {
-                                        shape_id: shape.shape_id(),
-                                        ast: ShapeAst::from_validated(shape),
-                                        opts: pending_subscription.opts.clone(),
-                                    })
-                                {
-                                    announced_shapes.remove(&registration_key);
-                                    if handle_transport_backpressure(
-                                        &self.node,
-                                        &self.scheduler,
-                                        &error,
-                                    ) {
-                                        return Ok(stats);
-                                    }
-                                    return Err(transport_error(error));
-                                }
-                            }
-                            let values = binding_values_in_param_order(shape, binding);
-                            let known_state = self
-                                .node
-                                .lock()
-                                .await
-                                .known_state_declaration_for_subscription(
-                                    shape,
-                                    binding,
-                                    pending_subscription.subscription,
-                                    &values,
-                                    pending_subscription.identity,
-                                )
-                                .await?;
-                            let subscribe = Subscribe {
-                                shape_id: shape.shape_id(),
-                                subscription: pending_subscription.subscription,
-                                values,
-                                known_state,
-                            };
-                            if let ReadViewSourceSpec::Branch { branch } =
-                                &pending_subscription.opts.read_view.source
+                        for metadata in self.node.borrow().pending_branch_metadata_uploads() {
+                            self.transport
+                                .send(SyncMessage::BranchMetadata(metadata))
+                                .map_err(transport_error)?;
+                        }
+                        pending.extend(upstream_subscriptions.borrow_mut().drain(..));
+                        let claims = self.node.borrow().session_claims_with_revisions();
+                        for (identity, claims, revision) in claims {
+                            if sent_session_claim_revisions
+                                .get(&identity)
+                                .is_some_and(|sent| *sent >= revision)
                             {
-                                branch_views.insert(
-                                    pending_subscription.subscription,
-                                    crate::ids::BranchId(*branch),
-                                );
+                                continue;
                             }
-                            #[cfg(feature = "sync-autopsy")]
-                            sync_autopsy::record(format!(
-                                "upstream send subscribe {}",
-                                summarize_subscription_key(subscribe.subscription)
-                            ));
-                            let outcome = self
-                                .node
-                                .lock()
-                                .await
-                                .apply_sync_message(SyncMessage::Subscribe(subscribe.clone()))
-                                .await?;
-                            let (_, changed) = finish_peer_publication_outcome(
-                                &self.node,
-                                &self.subscriptions,
-                                &self.active_authority_view_receipts,
-                                outcome,
-                            )
-                            .await?;
-                            stats.subscription_events += changed;
-                            if let Err(error) =
-                                self.transport.send(SyncMessage::Subscribe(subscribe))
+                            if let Err(error) = self
+                                .transport
+                                .send(SyncMessage::SessionClaims { identity, claims })
                             {
                                 if handle_transport_backpressure(
                                     &self.node,
                                     &self.scheduler,
                                     &error,
                                 ) {
-                                    return Ok(stats);
+                                    return Ok(true);
                                 }
                                 return Err(transport_error(error));
                             }
+                            sent_session_claim_revisions.insert(identity, revision);
                         }
-                        PendingUpstreamCommand::Unsubscribe(subscription) => {
-                            self.node.borrow_mut().apply_unsubscribe(*subscription);
-                            if let Err(error) = self.transport.send(SyncMessage::Unsubscribe {
-                                subscription: *subscription,
-                            }) {
-                                if handle_transport_backpressure(
-                                    &self.node,
-                                    &self.scheduler,
-                                    &error,
-                                ) {
-                                    return Ok(stats);
-                                }
-                                return Err(transport_error(error));
-                            }
-                        }
-                        PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action } => {
-                            // An old or unauthenticated upstream must never receive a
-                            // downgraded preflight.  Resolve conservatively instead.
-                            if expected_scope_authority.is_none() {
-                                self.permission_advice_waiters
-                                    .borrow_mut()
-                                    .remove(request_id);
-                                scope_lease_manager.requests.remove(request_id);
-                            } else if self
-                                .permission_advice_waiters
-                                .borrow()
-                                .contains_key(request_id)
-                            {
-                                if let Some(existing) = scope_lease_manager
-                                    .requests
-                                    .values_mut()
-                                    .find(|request| request.action == *action)
-                                {
-                                    existing.waiters.insert(*request_id);
-                                } else {
-                                    scope_lease_manager.requests.insert(
-                                        *request_id,
-                                        AuthorizationScopeLeaseRequest {
-                                            action: action.clone(),
-                                            waiters: BTreeSet::from([*request_id]),
-                                            key: None,
-                                            lease: None,
-                                            owner: None,
-                                            clause_count: None,
-                                            applied_clauses: BTreeMap::new(),
-                                        },
+                        let pending_index = 0;
+                        while pending_index < pending.len() {
+                            match &pending[pending_index] {
+                                PendingUpstreamCommand::Subscribe(pending_subscription) => {
+                                    let shape = &pending_subscription.shape;
+                                    let binding = &pending_subscription.binding;
+                                    let registration_key = (
+                                        shape.shape_id(),
+                                        pending_subscription.opts.read_view_key(),
                                     );
+                                    if announced_shapes.insert(registration_key) {
+                                        let outcome = self
+                                            .node
+                                            .lock()
+                                            .await
+                                            .apply_sync_message(SyncMessage::RegisterShape {
+                                                shape_id: shape.shape_id(),
+                                                ast: ShapeAst::from_validated(shape),
+                                                opts: RegisterShapeOptions::default(),
+                                            })
+                                            .await?;
+                                        let (_, changed) = finish_peer_publication_outcome(
+                                            &self.node,
+                                            &self.subscriptions,
+                                            &self.active_authority_view_receipts,
+                                            outcome,
+                                        )
+                                        .await?;
+                                        stats.subscription_events += changed;
+                                        if let Err(error) =
+                                            self.transport.send(SyncMessage::RegisterShape {
+                                                shape_id: shape.shape_id(),
+                                                ast: ShapeAst::from_validated(shape),
+                                                opts: pending_subscription.opts.clone(),
+                                            })
+                                        {
+                                            announced_shapes.remove(&registration_key);
+                                            if handle_transport_backpressure(
+                                                &self.node,
+                                                &self.scheduler,
+                                                &error,
+                                            ) {
+                                                return Ok(true);
+                                            }
+                                            return Err(transport_error(error));
+                                        }
+                                    }
+                                    let values = binding_values_in_param_order(shape, binding);
+                                    let known_state = self
+                                        .node
+                                        .lock()
+                                        .await
+                                        .known_state_declaration_for_subscription(
+                                            shape,
+                                            binding,
+                                            pending_subscription.subscription,
+                                            &values,
+                                            pending_subscription.identity,
+                                        )
+                                        .await?;
+                                    let subscribe = Subscribe {
+                                        shape_id: shape.shape_id(),
+                                        subscription: pending_subscription.subscription,
+                                        values,
+                                        known_state,
+                                    };
+                                    if let ReadViewSourceSpec::Branch { branch } =
+                                        &pending_subscription.opts.read_view.source
+                                    {
+                                        branch_views.insert(
+                                            pending_subscription.subscription,
+                                            crate::ids::BranchId(*branch),
+                                        );
+                                    }
+                                    #[cfg(feature = "sync-autopsy")]
+                                    sync_autopsy::record(format!(
+                                        "upstream send subscribe {}",
+                                        summarize_subscription_key(subscribe.subscription)
+                                    ));
+                                    let outcome = self
+                                        .node
+                                        .lock()
+                                        .await
+                                        .apply_sync_message(SyncMessage::Subscribe(
+                                            subscribe.clone(),
+                                        ))
+                                        .await?;
+                                    let (_, changed) = finish_peer_publication_outcome(
+                                        &self.node,
+                                        &self.subscriptions,
+                                        &self.active_authority_view_receipts,
+                                        outcome,
+                                    )
+                                    .await?;
+                                    stats.subscription_events += changed;
                                     if let Err(error) =
-                                        self.transport.send(SyncMessage::AuthorizationScopeIntent {
-                                            request_id: *request_id,
-                                            action: action.clone(),
+                                        self.transport.send(SyncMessage::Subscribe(subscribe))
+                                    {
+                                        if handle_transport_backpressure(
+                                            &self.node,
+                                            &self.scheduler,
+                                            &error,
+                                        ) {
+                                            return Ok(true);
+                                        }
+                                        return Err(transport_error(error));
+                                    }
+                                }
+                                PendingUpstreamCommand::Unsubscribe(subscription) => {
+                                    self.node.borrow_mut().apply_unsubscribe(*subscription);
+                                    if let Err(error) =
+                                        self.transport.send(SyncMessage::Unsubscribe {
+                                            subscription: *subscription,
                                         })
                                     {
                                         if handle_transport_backpressure(
@@ -849,512 +813,554 @@ where
                                             &self.scheduler,
                                             &error,
                                         ) {
-                                            return Ok(stats);
+                                            return Ok(true);
                                         }
                                         return Err(transport_error(error));
                                     }
                                 }
-                            }
-                        }
-                    }
-                    pending.remove(pending_index);
-                }
-                // Upload locally-authored commits not yet shipped on this link.
-                let to_upload: Vec<TxId> = outbox
-                    .borrow()
-                    .iter()
-                    .map(|pending| pending.tx_id)
-                    .filter(|tx_id| !uploaded.contains(tx_id))
-                    .collect();
-                for tx_id in to_upload {
-                    let staged = outbox
-                        .borrow()
-                        .iter()
-                        .find(|pending| pending.tx_id == tx_id)
-                        .and_then(|pending| pending.unit.clone());
-                    let unit = if let Some(unit) = staged {
-                        unit
-                    } else {
-                        self.node.lock().await.commit_unit_for(tx_id).await?
-                    };
-                    if let SyncMessage::CommitUnit { tx, .. } = &unit
-                        && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
-                        && let Some(metadata) = self.node.borrow().branch_record(branch).cloned()
-                    {
-                        self.transport
-                            .send(SyncMessage::BranchMetadata((&metadata).into()))
-                            .map_err(transport_error)?;
-                    }
-                    if let Err(error) =
-                        send_with_local_sync_context(&self.node, self.transport.as_mut(), unit)
-                    {
-                        if handle_db_backpressure(&self.node, &self.scheduler, &error) {
-                            return Ok(stats);
-                        }
-                        return Err(error);
-                    }
-                    uploaded.insert(tx_id);
-                }
-                let mut applied = false;
-                let mut publications = Vec::new();
-                let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
-                let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
-                while let Some(StagedInboundMessage {
-                    message,
-                    authority_receipt_eligible,
-                }) = self.staged_inbound.pop_front().or_else(|| {
-                    self.transport
-                        .try_recv()
-                        .map(|message| StagedInboundMessage {
-                            message,
-                            authority_receipt_eligible: true,
-                        })
-                }) {
-                    let write_state_tx_id = write_state_update_tx_id(&message);
-                    #[cfg(feature = "sync-autopsy")]
-                    sync_autopsy::record(format!(
-                        "upstream recv {}",
-                        summarize_sync_message(&message)
-                    ));
-                    match message {
-                        SyncMessage::CatalogueSnapshot(snapshot) => {
-                            if !pending_view_updates.is_empty() {
-                                apply_pending_authority_view_updates(
-                                    &self.node,
-                                    &mut pending_view_updates,
-                                    &self.awaiting_initial_authority_coverage,
-                                    &mut pending_initial_coverage_clears,
-                                    &self.active_authority_view_receipts,
-                                    self.connection_epoch,
-                                )
-                                .await?;
-                            }
-                            let outcome = self
-                                .node
-                                .lock()
-                                .await
-                                .apply_trusted_catalogue_snapshot(*snapshot)
-                                .await?;
-                            publications.extend(outcome.publications);
-                        }
-                        SyncMessage::RowVersionPayloads { version_bundles } => {
-                            if !pending_view_updates.is_empty() {
-                                apply_pending_authority_view_updates(
-                                    &self.node,
-                                    &mut pending_view_updates,
-                                    &self.awaiting_initial_authority_coverage,
-                                    &mut pending_initial_coverage_clears,
-                                    &self.active_authority_view_receipts,
-                                    self.connection_epoch,
-                                )
-                                .await?;
-                            }
-                            let Some(repair) = pending_row_version_repairs.pop_front() else {
-                                drop_peer_request(&self.node);
-                                continue;
-                            };
-                            {
-                                let mut node = self.node.lock().await;
-                                node.apply_row_version_payloads_for_requests(
-                                    &repair.requests,
-                                    version_bundles,
-                                )
-                                .await?;
-                            }
-                            let (subscription, settled_through) = match &repair.update {
-                                SyncMessage::ViewUpdate {
-                                    subscription,
-                                    settled_through,
-                                    ..
-                                } => (*subscription, *settled_through),
-                                _ => unreachable!("row-version repair must retain a view update"),
-                            };
-                            stage_initial_coverage_clear_for_update(
-                                &repair.update,
-                                &self.latest_coverage_subscriptions,
-                                &mut pending_initial_coverage_clears,
-                            );
-                            push_view_update_message_for_receiver(
-                                &mut pending_view_updates,
-                                repair.update,
-                                repair.authority_receipt_eligible,
-                            )?;
-                            scope_view_cuts.insert(subscription, settled_through);
-                        }
-                        message @ SyncMessage::ViewUpdate {
-                            subscription,
-                            settled_through,
-                            ..
-                        } => {
-                            scope_receipts.remove(&subscription);
-                            if let Some(branch) = branch_views.get(&subscription).copied()
-                                && self.node.borrow().branch_record(branch).is_none()
-                            {
-                                pending_branch_view_updates.entry(branch).or_default().push(
-                                    PendingBranchViewUpdate {
-                                        message,
-                                        authority_receipt_eligible,
-                                    },
-                                );
-                                if let std::collections::btree_map::Entry::Vacant(entry) =
-                                    pending_branch_metadata_repairs.entry(branch)
-                                {
-                                    entry.insert(());
-                                    self.transport
-                                        .send(SyncMessage::FetchBranchMetadata {
-                                            branches: vec![branch],
-                                        })
-                                        .map_err(transport_error)?;
+                                PendingUpstreamCommand::AuthorizationScopeIntent {
+                                    request_id,
+                                    action,
+                                } => {
+                                    // An old or unauthenticated upstream must never receive a
+                                    // downgraded preflight.  Resolve conservatively instead.
+                                    if expected_scope_authority.is_none() {
+                                        self.permission_advice_waiters
+                                            .borrow_mut()
+                                            .remove(request_id);
+                                        scope_lease_manager.requests.remove(request_id);
+                                    } else if self
+                                        .permission_advice_waiters
+                                        .borrow()
+                                        .contains_key(request_id)
+                                    {
+                                        if let Some(existing) = scope_lease_manager
+                                            .requests
+                                            .values_mut()
+                                            .find(|request| request.action == *action)
+                                        {
+                                            existing.waiters.insert(*request_id);
+                                        } else {
+                                            scope_lease_manager.requests.insert(
+                                                *request_id,
+                                                AuthorizationScopeLeaseRequest {
+                                                    action: action.clone(),
+                                                    waiters: BTreeSet::from([*request_id]),
+                                                    key: None,
+                                                    lease: None,
+                                                    owner: None,
+                                                    clause_count: None,
+                                                    applied_clauses: BTreeMap::new(),
+                                                },
+                                            );
+                                            if let Err(error) = self.transport.send(
+                                                SyncMessage::AuthorizationScopeIntent {
+                                                    request_id: *request_id,
+                                                    action: action.clone(),
+                                                },
+                                            ) {
+                                                if handle_transport_backpressure(
+                                                    &self.node,
+                                                    &self.scheduler,
+                                                    &error,
+                                                ) {
+                                                    return Ok(true);
+                                                }
+                                                return Err(transport_error(error));
+                                            }
+                                        }
+                                    }
                                 }
-                                continue;
                             }
-                            #[cfg(not(feature = "sync-autopsy"))]
-                            let _ = subscription;
-                            let missing = {
-                                let mut node = self.node.lock().await;
-                                node.missing_known_state_row_version_refs(&message).await?
+                            pending.remove(pending_index);
+                        }
+                        // Upload locally-authored commits not yet shipped on this link.
+                        let to_upload: Vec<TxId> = outbox
+                            .borrow()
+                            .iter()
+                            .map(|pending| pending.tx_id)
+                            .filter(|tx_id| !uploaded.contains(tx_id))
+                            .collect();
+                        for tx_id in to_upload {
+                            let staged = outbox
+                                .borrow()
+                                .iter()
+                                .find(|pending| pending.tx_id == tx_id)
+                                .and_then(|pending| pending.unit.clone());
+                            let unit = if let Some(unit) = staged {
+                                unit
+                            } else {
+                                self.node.lock().await.commit_unit_for(tx_id).await?
                             };
-                            if missing.is_empty() {
+                            if let SyncMessage::CommitUnit { tx, .. } = &unit
+                                && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
+                                && let Some(metadata) =
+                                    self.node.borrow().branch_record(branch).cloned()
+                            {
+                                self.transport
+                                    .send(SyncMessage::BranchMetadata((&metadata).into()))
+                                    .map_err(transport_error)?;
+                            }
+                            if let Err(error) = send_with_local_sync_context(
+                                &self.node,
+                                self.transport.as_mut(),
+                                unit,
+                            ) {
+                                if handle_db_backpressure(&self.node, &self.scheduler, &error) {
+                                    return Ok(true);
+                                }
+                                return Err(error);
+                            }
+                            uploaded.insert(tx_id);
+                        }
+                        Ok::<bool, Error>(false)
+                    })
+                    .await?;
+                    if outbound_stop {
+                        return Ok(true);
+                    }
+                    let mut applied = false;
+                    let mut publications = Vec::new();
+                    let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
+                    let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
+                    while let Some(StagedInboundMessage {
+                        message,
+                        authority_receipt_eligible,
+                    }) = self.staged_inbound.pop_front().or_else(|| {
+                        self.transport
+                            .try_recv()
+                            .map(|message| StagedInboundMessage {
+                                message,
+                                authority_receipt_eligible: true,
+                            })
+                    }) {
+                        let write_state_tx_id = write_state_update_tx_id(&message);
+                        #[cfg(feature = "sync-autopsy")]
+                        sync_autopsy::record(format!(
+                            "upstream recv {}",
+                            summarize_sync_message(&message)
+                        ));
+                        match message {
+                            SyncMessage::CatalogueSnapshot(snapshot) => {
+                                if !pending_view_updates.is_empty() {
+                                    apply_pending_authority_view_updates(
+                                        &self.node,
+                                        &mut pending_view_updates,
+                                        &self.awaiting_initial_authority_coverage,
+                                        &mut pending_initial_coverage_clears,
+                                        &self.active_authority_view_receipts,
+                                        self.connection_epoch,
+                                    )
+                                    .await?;
+                                }
+                                let outcome = self
+                                    .node
+                                    .lock()
+                                    .await
+                                    .apply_trusted_catalogue_snapshot(*snapshot)
+                                    .await?;
+                                publications.extend(outcome.publications);
+                            }
+                            SyncMessage::RowVersionPayloads { version_bundles } => {
+                                if !pending_view_updates.is_empty() {
+                                    apply_pending_authority_view_updates(
+                                        &self.node,
+                                        &mut pending_view_updates,
+                                        &self.awaiting_initial_authority_coverage,
+                                        &mut pending_initial_coverage_clears,
+                                        &self.active_authority_view_receipts,
+                                        self.connection_epoch,
+                                    )
+                                    .await?;
+                                }
+                                let Some(repair) = pending_row_version_repairs.pop_front() else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                {
+                                    let mut node = self.node.lock().await;
+                                    node.apply_row_version_payloads_for_requests(
+                                        &repair.requests,
+                                        version_bundles,
+                                    )
+                                    .await?;
+                                }
+                                let (subscription, settled_through) = match &repair.update {
+                                    SyncMessage::ViewUpdate {
+                                        subscription,
+                                        settled_through,
+                                        ..
+                                    } => (*subscription, *settled_through),
+                                    _ => {
+                                        unreachable!("row-version repair must retain a view update")
+                                    }
+                                };
                                 stage_initial_coverage_clear_for_update(
-                                    &message,
+                                    &repair.update,
                                     &self.latest_coverage_subscriptions,
                                     &mut pending_initial_coverage_clears,
                                 );
                                 push_view_update_message_for_receiver(
                                     &mut pending_view_updates,
-                                    message,
+                                    repair.update,
+                                    repair.authority_receipt_eligible,
+                                )?;
+                                scope_view_cuts.insert(subscription, settled_through);
+                            }
+                            message @ SyncMessage::ViewUpdate {
+                                subscription,
+                                settled_through,
+                                ..
+                            } => {
+                                scope_receipts.remove(&subscription);
+                                if let Some(branch) = branch_views.get(&subscription).copied()
+                                    && self.node.borrow().branch_record(branch).is_none()
+                                {
+                                    pending_branch_view_updates.entry(branch).or_default().push(
+                                        PendingBranchViewUpdate {
+                                            message,
+                                            authority_receipt_eligible,
+                                        },
+                                    );
+                                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                                        pending_branch_metadata_repairs.entry(branch)
+                                    {
+                                        entry.insert(());
+                                        self.transport
+                                            .send(SyncMessage::FetchBranchMetadata {
+                                                branches: vec![branch],
+                                            })
+                                            .map_err(transport_error)?;
+                                    }
+                                    continue;
+                                }
+                                #[cfg(not(feature = "sync-autopsy"))]
+                                let _ = subscription;
+                                let missing = {
+                                    let mut node = self.node.lock().await;
+                                    node.missing_known_state_row_version_refs(&message).await?
+                                };
+                                if missing.is_empty() {
+                                    stage_initial_coverage_clear_for_update(
+                                        &message,
+                                        &self.latest_coverage_subscriptions,
+                                        &mut pending_initial_coverage_clears,
+                                    );
+                                    push_view_update_message_for_receiver(
+                                        &mut pending_view_updates,
+                                        message,
+                                        authority_receipt_eligible,
+                                    )?;
+                                    scope_view_cuts.insert(subscription, settled_through);
+                                    #[cfg(feature = "sync-autopsy")]
+                                    sync_autopsy::record(format!(
+                                        "upstream applied view update {}",
+                                        summarize_subscription_key(subscription)
+                                    ));
+                                } else {
+                                    #[cfg(feature = "sync-autopsy")]
+                                    sync_autopsy::record(format!(
+                                        "upstream queued repair {} missing={}",
+                                        summarize_subscription_key(subscription),
+                                        missing.len()
+                                    ));
+                                    self.transport
+                                        .send(SyncMessage::FetchRowVersions {
+                                            requests: missing.clone(),
+                                        })
+                                        .map_err(transport_error)?;
+                                    pending_row_version_repairs.push_back(
+                                        PendingRowVersionRepair {
+                                            requests: missing,
+                                            update: message,
+                                            authority_receipt_eligible,
+                                        },
+                                    );
+                                }
+                            }
+                            SyncMessage::SubscribeRejected {
+                                subscription,
+                                reason,
+                            } => {
+                                stats.subscription_events += route_upstream_subscription_rejection(
+                                    &self.subscriptions,
+                                    &self.upstream_subscription_owners,
+                                    subscription,
+                                    reason,
+                                );
+                            }
+                            SyncMessage::PermissionAdviceResponse { request_id, advice } => {
+                                // Direct answers were the pre-Phase-3 protocol.
+                                // They have no receipt-bound evidence and must
+                                // never influence a modern client.
+                                let _ = (request_id, advice);
+                                drop_peer_request(&self.node);
+                            }
+                            SyncMessage::AuthorizationScopeView {
+                                request_id,
+                                key,
+                                clause_index,
+                                clause_count,
+                                view,
+                            } => {
+                                let Some(expected) = expected_scope_authority else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                let SyncMessage::ViewUpdate {
+                                    subscription,
+                                    settled_through,
+                                    peer_payload_inventory,
+                                    ..
+                                } = view.as_ref()
+                                else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                let subscription = *subscription;
+                                let settled_through = *settled_through;
+                                let authorization_progress = peer_payload_inventory
+                                    .authorization_progress
+                                    .unwrap_or_default();
+                                if clause_count == 0
+                                    || clause_index >= clause_count
+                                    || key.subject.as_bytes() != &expected.link
+                                {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                                let Some(prior) = scope_lease_manager.requests.get(&request_id)
+                                else {
+                                    // A cancelled intent cannot be revived by a
+                                    // late/replayed authority view.
+                                    continue;
+                                };
+                                if prior.key.as_ref().is_some_and(|known| known != &key)
+                                    || prior
+                                        .clause_count
+                                        .is_some_and(|known| known != clause_count)
+                                {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                                // The first authenticated view reveals the
+                                // server-selected scope key.  Acquire here, before
+                                // the aggregate receipt, so concurrent actions
+                                // that compile to this same support scope share
+                                // one registry lifecycle rather than racing after
+                                // hydration has already completed.
+                                let acquired = if prior.lease.is_none() {
+                                    scope_lease_manager.registry.acquire(key.clone())
+                                } else {
+                                    None
+                                };
+                                let Some(request) =
+                                    scope_lease_manager.requests.get_mut(&request_id)
+                                else {
+                                    continue;
+                                };
+                                request.key = Some(key);
+                                request.clause_count = Some(clause_count);
+                                if request.lease.is_none() {
+                                    let Some((lease, acquisition)) = acquired else {
+                                        self.permission_advice_waiters
+                                            .borrow_mut()
+                                            .remove(&request_id);
+                                        scope_lease_manager.requests.remove(&request_id);
+                                        continue;
+                                    };
+                                    request.owner = match acquisition {
+                                        AuthorizationScopeAcquisition::Owner(owner) => Some(owner),
+                                        AuthorizationScopeAcquisition::Waiting
+                                        | AuthorizationScopeAcquisition::Proven => None,
+                                    };
+                                    request.lease = Some(lease);
+                                }
+                                let duplicate = request
+                                    .applied_clauses
+                                    .get(&clause_index)
+                                    .is_some_and(|(prior, _, _)| *prior != subscription);
+                                if duplicate {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                                // The envelope remains a normal ViewUpdate; retain
+                                // existing batching/settlement semantics before a
+                                // receipt can be accepted.
+                                push_view_update_message_for_receiver(
+                                    &mut pending_view_updates,
+                                    *view,
                                     authority_receipt_eligible,
                                 )?;
                                 scope_view_cuts.insert(subscription, settled_through);
-                                #[cfg(feature = "sync-autopsy")]
-                                sync_autopsy::record(format!(
-                                    "upstream applied view update {}",
-                                    summarize_subscription_key(subscription)
-                                ));
-                            } else {
-                                #[cfg(feature = "sync-autopsy")]
-                                sync_autopsy::record(format!(
-                                    "upstream queued repair {} missing={}",
-                                    summarize_subscription_key(subscription),
-                                    missing.len()
-                                ));
-                                self.transport
-                                    .send(SyncMessage::FetchRowVersions {
-                                        requests: missing.clone(),
-                                    })
-                                    .map_err(transport_error)?;
-                                pending_row_version_repairs.push_back(PendingRowVersionRepair {
-                                    requests: missing,
-                                    update: message,
-                                    authority_receipt_eligible,
-                                });
+                                request.applied_clauses.insert(
+                                    clause_index,
+                                    (subscription, settled_through, authorization_progress),
+                                );
                             }
-                        }
-                        SyncMessage::SubscribeRejected {
-                            subscription,
-                            reason,
-                        } => {
-                            stats.subscription_events += route_upstream_subscription_rejection(
-                                &self.subscriptions,
-                                &self.upstream_subscription_owners,
-                                subscription,
-                                reason,
-                            );
-                        }
-                        SyncMessage::PermissionAdviceResponse { request_id, advice } => {
-                            // Direct answers were the pre-Phase-3 protocol.
-                            // They have no receipt-bound evidence and must
-                            // never influence a modern client.
-                            let _ = (request_id, advice);
-                            drop_peer_request(&self.node);
-                        }
-                        SyncMessage::AuthorizationScopeView {
-                            request_id,
-                            key,
-                            clause_index,
-                            clause_count,
-                            view,
-                        } => {
-                            let Some(expected) = expected_scope_authority else {
-                                drop_peer_request(&self.node);
-                                continue;
-                            };
-                            let SyncMessage::ViewUpdate {
-                                subscription,
-                                settled_through,
-                                peer_payload_inventory,
-                                ..
-                            } = view.as_ref()
-                            else {
-                                drop_peer_request(&self.node);
-                                continue;
-                            };
-                            let subscription = *subscription;
-                            let settled_through = *settled_through;
-                            let authorization_progress = peer_payload_inventory
-                                .authorization_progress
-                                .unwrap_or_default();
-                            if clause_count == 0
-                                || clause_index >= clause_count
-                                || key.subject.as_bytes() != &expected.link
-                            {
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
-                            let Some(prior) = scope_lease_manager.requests.get(&request_id) else {
-                                // A cancelled intent cannot be revived by a
-                                // late/replayed authority view.
-                                continue;
-                            };
-                            if prior.key.as_ref().is_some_and(|known| known != &key)
-                                || prior
-                                    .clause_count
-                                    .is_some_and(|known| known != clause_count)
-                            {
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
-                            // The first authenticated view reveals the
-                            // server-selected scope key.  Acquire here, before
-                            // the aggregate receipt, so concurrent actions
-                            // that compile to this same support scope share
-                            // one registry lifecycle rather than racing after
-                            // hydration has already completed.
-                            let acquired = if prior.lease.is_none() {
-                                scope_lease_manager.registry.acquire(key.clone())
-                            } else {
-                                None
-                            };
-                            let Some(request) = scope_lease_manager.requests.get_mut(&request_id)
-                            else {
-                                continue;
-                            };
-                            request.key = Some(key);
-                            request.clause_count = Some(clause_count);
-                            if request.lease.is_none() {
-                                let Some((lease, acquisition)) = acquired else {
-                                    self.permission_advice_waiters
-                                        .borrow_mut()
-                                        .remove(&request_id);
-                                    scope_lease_manager.requests.remove(&request_id);
+                            SyncMessage::AuthorizationScopeAggregateReceipt {
+                                request_id,
+                                receipt,
+                            } => {
+                                // The authority's FIFO ordering says this receipt
+                                // follows the views, but apply the queued views now
+                                // so receipt admission is never merely queued.
+                                if !pending_view_updates.is_empty() {
+                                    apply_pending_authority_view_updates(
+                                        &self.node,
+                                        &mut pending_view_updates,
+                                        &self.awaiting_initial_authority_coverage,
+                                        &mut pending_initial_coverage_clears,
+                                        &self.active_authority_view_receipts,
+                                        self.connection_epoch,
+                                    )
+                                    .await?;
+                                }
+                                let Some(expected) = expected_scope_authority.as_mut() else {
+                                    drop_peer_request(&self.node);
                                     continue;
                                 };
-                                request.owner = match acquisition {
-                                    AuthorizationScopeAcquisition::Owner(owner) => Some(owner),
-                                    AuthorizationScopeAcquisition::Waiting
-                                    | AuthorizationScopeAcquisition::Proven => None,
+                                let Some(request) =
+                                    scope_lease_manager.requests.get_mut(&request_id)
+                                else {
+                                    continue;
                                 };
-                                request.lease = Some(lease);
-                            }
-                            let duplicate = request
-                                .applied_clauses
-                                .get(&clause_index)
-                                .is_some_and(|(prior, _, _)| *prior != subscription);
-                            if duplicate {
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
-                            // The envelope remains a normal ViewUpdate; retain
-                            // existing batching/settlement semantics before a
-                            // receipt can be accepted.
-                            push_view_update_message_for_receiver(
-                                &mut pending_view_updates,
-                                *view,
-                                authority_receipt_eligible,
-                            )?;
-                            scope_view_cuts.insert(subscription, settled_through);
-                            request.applied_clauses.insert(
-                                clause_index,
-                                (subscription, settled_through, authorization_progress),
-                            );
-                        }
-                        SyncMessage::AuthorizationScopeAggregateReceipt {
-                            request_id,
-                            receipt,
-                        } => {
-                            // The authority's FIFO ordering says this receipt
-                            // follows the views, but apply the queued views now
-                            // so receipt admission is never merely queued.
-                            if !pending_view_updates.is_empty() {
-                                apply_pending_authority_view_updates(
-                                    &self.node,
-                                    &mut pending_view_updates,
-                                    &self.awaiting_initial_authority_coverage,
-                                    &mut pending_initial_coverage_clears,
-                                    &self.active_authority_view_receipts,
-                                    self.connection_epoch,
-                                )
-                                .await?;
-                            }
-                            let Some(expected) = expected_scope_authority.as_mut() else {
-                                drop_peer_request(&self.node);
-                                continue;
-                            };
-                            let Some(request) = scope_lease_manager.requests.get_mut(&request_id)
-                            else {
-                                continue;
-                            };
-                            // An empty compiled support set is a valid public
-                            // policy proof.  It has no views by construction;
-                            // the authority receipt itself supplies the
-                            // server-chosen key and current context.
-                            let clause_count = request.clause_count.unwrap_or(0);
-                            let all_current = request.applied_clauses.len()
-                                == usize::from(clause_count)
-                                && request.applied_clauses.iter().all(|(index, (_, cut, _))| {
-                                    *index < clause_count && *cut >= receipt.settled_through
-                                });
-                            let applied_cut = if clause_count == 0 {
-                                Some(receipt.settled_through)
-                            } else {
-                                request
+                                // An empty compiled support set is a valid public
+                                // policy proof.  It has no views by construction;
+                                // the authority receipt itself supplies the
+                                // server-chosen key and current context.
+                                let clause_count = request.clause_count.unwrap_or(0);
+                                let all_current = request.applied_clauses.len()
+                                    == usize::from(clause_count)
+                                    && request.applied_clauses.iter().all(
+                                        |(index, (_, cut, _))| {
+                                            *index < clause_count && *cut >= receipt.settled_through
+                                        },
+                                    );
+                                let applied_cut = if clause_count == 0 {
+                                    Some(receipt.settled_through)
+                                } else {
+                                    request
+                                        .applied_clauses
+                                        .values()
+                                        .map(|(_, cut, _)| *cut)
+                                        .min()
+                                };
+                                let observed = self.node.borrow();
+                                let observed_claims = observed
+                                    .session_claim_revision(AuthorId::from_bytes(expected.link));
+                                let observed_policy = observed.active_catalogue_seq();
+                                drop(observed);
+                                // Context components are monotonic per admitted
+                                // connection. A receipt may advance an otherwise
+                                // opaque authority revision, but it can never
+                                // decrease a component already admitted.
+                                let applied_progress = request
                                     .applied_clauses
                                     .values()
-                                    .map(|(_, cut, _)| *cut)
+                                    .map(|(_, _, progress)| *progress)
                                     .min()
-                            };
-                            let observed = self.node.borrow();
-                            let observed_claims = observed
-                                .session_claim_revision(AuthorId::from_bytes(expected.link));
-                            let observed_policy = observed.active_catalogue_seq();
-                            drop(observed);
-                            // Context components are monotonic per admitted
-                            // connection. A receipt may advance an otherwise
-                            // opaque authority revision, but it can never
-                            // decrease a component already admitted.
-                            let applied_progress = request
-                                .applied_clauses
-                                .values()
-                                .map(|(_, _, progress)| *progress)
-                                .min()
-                                .unwrap_or_default();
-                            let receipt_decreased = receipt.claims_revision
-                                < expected.claims_revision
-                                || receipt.policy_epoch < expected.policy_epoch
-                                || receipt.authorization_progress < expected.authorization_progress
-                                || receipt.settled_through.0 < expected.settled_through;
-                            if observed_claims > expected.claims_revision {
-                                expected.claims_revision = observed_claims;
-                            } else if observed_claims == 0 {
-                                expected.claims_revision = receipt.claims_revision;
-                            }
-                            if observed_policy > expected.policy_epoch {
-                                expected.policy_epoch = observed_policy;
-                            } else if observed_policy == 0 {
-                                expected.policy_epoch = receipt.policy_epoch;
-                            }
-                            expected.authorization_progress =
-                                expected.authorization_progress.max(applied_progress);
-                            expected.settled_through =
-                                expected.settled_through.max(receipt.settled_through.0);
-                            let receipt_current =
-                                request.key.as_ref().is_some_and(|key| key == &receipt.key)
-                                    && all_current
-                                    && !receipt_decreased
-                                    && authorization_scope_receipt_matches_transport_context(
-                                        &receipt,
-                                        *expected,
-                                        applied_cut,
+                                    .unwrap_or_default();
+                                let receipt_decreased = receipt.claims_revision
+                                    < expected.claims_revision
+                                    || receipt.policy_epoch < expected.policy_epoch
+                                    || receipt.authorization_progress
+                                        < expected.authorization_progress
+                                    || receipt.settled_through.0 < expected.settled_through;
+                                if observed_claims > expected.claims_revision {
+                                    expected.claims_revision = observed_claims;
+                                } else if observed_claims == 0 {
+                                    expected.claims_revision = receipt.claims_revision;
+                                }
+                                if observed_policy > expected.policy_epoch {
+                                    expected.policy_epoch = observed_policy;
+                                } else if observed_policy == 0 {
+                                    expected.policy_epoch = receipt.policy_epoch;
+                                }
+                                expected.authorization_progress =
+                                    expected.authorization_progress.max(applied_progress);
+                                expected.settled_through =
+                                    expected.settled_through.max(receipt.settled_through.0);
+                                let receipt_current =
+                                    request.key.as_ref().is_some_and(|key| key == &receipt.key)
+                                        && all_current
+                                        && !receipt_decreased
+                                        && authorization_scope_receipt_matches_transport_context(
+                                            &receipt,
+                                            *expected,
+                                            applied_cut,
+                                        );
+                                if !receipt_current {
+                                    // A claim/catalogue/progress transition can
+                                    // race a just-completed hydration.  Retire its
+                                    // lease and allocate a new opaque wire id so
+                                    // old views/receipts cannot revive the
+                                    // operation; retain the caller waiters and
+                                    // reacquire under the observed context.
+                                    let retry_id =
+                                        PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+                                    let action = request.action.clone();
+                                    let waiters = request.waiters.clone();
+                                    scope_lease_manager.requests.remove(&request_id);
+                                    scope_lease_manager.requests.insert(
+                                        retry_id,
+                                        AuthorizationScopeLeaseRequest {
+                                            action: action.clone(),
+                                            waiters,
+                                            key: None,
+                                            lease: None,
+                                            owner: None,
+                                            clause_count: None,
+                                            applied_clauses: BTreeMap::new(),
+                                        },
                                     );
-                            if !receipt_current {
-                                // A claim/catalogue/progress transition can
-                                // race a just-completed hydration.  Retire its
-                                // lease and allocate a new opaque wire id so
-                                // old views/receipts cannot revive the
-                                // operation; retain the caller waiters and
-                                // reacquire under the observed context.
-                                let retry_id =
-                                    PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
-                                let action = request.action.clone();
-                                let waiters = request.waiters.clone();
-                                scope_lease_manager.requests.remove(&request_id);
-                                scope_lease_manager.requests.insert(
-                                    retry_id,
-                                    AuthorizationScopeLeaseRequest {
-                                        action: action.clone(),
-                                        waiters,
-                                        key: None,
-                                        lease: None,
-                                        owner: None,
-                                        clause_count: None,
-                                        applied_clauses: BTreeMap::new(),
-                                    },
-                                );
-                                pending.push(PendingUpstreamCommand::AuthorizationScopeIntent {
-                                    request_id: retry_id,
-                                    action,
-                                });
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
-                            let admitted = match (request.lease.as_ref(), request.owner.take()) {
-                                (Some(lease), Some(owner)) => matches!(
-                                    scope_lease_manager.registry.install(
-                                        lease,
-                                        owner,
-                                        *expected,
-                                        receipt.clone(),
-                                    ),
-                                    AuthorizationScopeInstall::Installed
-                                ),
-                                (Some(lease), None) => matches!(
-                                    scope_lease_manager.registry.receipt(
-                                        lease,
-                                        *expected,
-                                        receipt.authorization_progress,
-                                        receipt.settled_through.0,
-                                    ),
-                                    AuthorizationScopeReadiness::Proven(_)
-                                ),
-                                (None, _) => false,
-                            };
-                            if !admitted {
-                                continue;
-                            }
-                            let action = request.action.clone();
-                            let waiter_ids = request.waiters.clone();
-                            scope_lease_manager.requests.remove(&request_id);
-                            let advice = {
-                                let mut node = self.node.lock().await;
-                                evaluate_authoritative_permission_advice(
-                                    &mut node,
-                                    receipt.key.subject,
-                                    action,
-                                )
-                                .await
-                            };
-                            for waiter_id in waiter_ids {
-                                if let Some(waiter) = self
-                                    .permission_advice_waiters
-                                    .borrow_mut()
-                                    .remove(&waiter_id)
+                                    pending.push(
+                                        PendingUpstreamCommand::AuthorizationScopeIntent {
+                                            request_id: retry_id,
+                                            action,
+                                        },
+                                    );
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                                let admitted = match (request.lease.as_ref(), request.owner.take())
                                 {
-                                    let _ = waiter.send(advice);
+                                    (Some(lease), Some(owner)) => matches!(
+                                        scope_lease_manager.registry.install(
+                                            lease,
+                                            owner,
+                                            *expected,
+                                            receipt.clone(),
+                                        ),
+                                        AuthorizationScopeInstall::Installed
+                                    ),
+                                    (Some(lease), None) => matches!(
+                                        scope_lease_manager.registry.receipt(
+                                            lease,
+                                            *expected,
+                                            receipt.authorization_progress,
+                                            receipt.settled_through.0,
+                                        ),
+                                        AuthorizationScopeReadiness::Proven(_)
+                                    ),
+                                    (None, _) => false,
+                                };
+                                if !admitted {
+                                    continue;
                                 }
-                            }
-                        }
-                        SyncMessage::AuthorizationScopeUnavailable { request_id } => {
-                            if let Some(request) = scope_lease_manager.requests.remove(&request_id)
-                            {
-                                for waiter_id in request.waiters {
-                                    if let Some(waiter) = self
-                                        .permission_advice_waiters
-                                        .borrow_mut()
-                                        .remove(&waiter_id)
-                                    {
-                                        let _ = waiter.send(PermissionAdvice::Unknown);
-                                    }
-                                }
-                            }
-                        }
-                        SyncMessage::AuthorizationScopeDecision { request_id, advice } => {
-                            if expected_scope_authority.is_none() {
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
-                            if let Some(request) = scope_lease_manager.requests.remove(&request_id)
-                            {
-                                for waiter_id in request.waiters {
+                                let action = request.action.clone();
+                                let waiter_ids = request.waiters.clone();
+                                scope_lease_manager.requests.remove(&request_id);
+                                let advice = {
+                                    let mut node = self.node.lock().await;
+                                    evaluate_authoritative_permission_advice(
+                                        &mut node,
+                                        receipt.key.subject,
+                                        action,
+                                    )
+                                    .await
+                                };
+                                for waiter_id in waiter_ids {
                                     if let Some(waiter) = self
                                         .permission_advice_waiters
                                         .borrow_mut()
@@ -1364,222 +1370,266 @@ where
                                     }
                                 }
                             }
-                        }
-                        SyncMessage::AuthorizationScopeReceipt {
-                            subscription,
-                            receipt,
-                        } => {
-                            let Some(expected) = expected_scope_authority else {
-                                drop_peer_request(&self.node);
-                                continue;
-                            };
-                            if !authorization_scope_receipt_matches_transport_context(
-                                &receipt,
-                                *expected,
-                                scope_view_cuts.get(&subscription).copied(),
-                            ) {
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
-                            scope_receipts.insert(subscription, receipt);
-                        }
-                        SyncMessage::BranchMetadata(metadata) => {
-                            let branch = metadata.branch_id;
-                            self.node
-                                .lock()
-                                .await
-                                .acknowledge_branch_metadata(&metadata)
-                                .await?;
-                            let outcome = self
-                                .node
-                                .lock()
-                                .await
-                                .apply_sync_message(SyncMessage::BranchMetadata(metadata))
-                                .await?;
-                            publications.extend(outcome.publications);
-                            pending_branch_metadata_repairs.remove(&branch);
-                            if let Some(updates) = pending_branch_view_updates.remove(&branch) {
-                                for update in updates {
-                                    let (subscription, settled_through) = match &update.message {
-                                        SyncMessage::ViewUpdate {
-                                            subscription,
-                                            settled_through,
-                                            ..
-                                        } => (*subscription, *settled_through),
-                                        _ => {
-                                            unreachable!("branch parking retains only view updates")
+                            SyncMessage::AuthorizationScopeUnavailable { request_id } => {
+                                if let Some(request) =
+                                    scope_lease_manager.requests.remove(&request_id)
+                                {
+                                    for waiter_id in request.waiters {
+                                        if let Some(waiter) = self
+                                            .permission_advice_waiters
+                                            .borrow_mut()
+                                            .remove(&waiter_id)
+                                        {
+                                            let _ = waiter.send(PermissionAdvice::Unknown);
                                         }
-                                    };
-                                    stage_initial_coverage_clear_for_update(
-                                        &update.message,
-                                        &self.latest_coverage_subscriptions,
-                                        &mut pending_initial_coverage_clears,
-                                    );
-                                    push_view_update_message_for_receiver(
-                                        &mut pending_view_updates,
-                                        update.message,
-                                        update.authority_receipt_eligible,
-                                    )?;
-                                    scope_view_cuts.insert(subscription, settled_through);
+                                    }
                                 }
                             }
-                        }
-                        message => {
-                            if let SyncMessage::FateUpdate { tx_id, .. } = &message {
-                                let admitted = *self.admitted_upstream_authority.borrow();
-                                // Gate fate before any NodeState mutation. A
-                                // parallel, stale, or featureless upstream is
-                                // not merely forbidden from forwarding an
-                                // edge route; it must not settle the routed
-                                // transaction's local state. Ordinary Core
-                                // client links have no edge route and retain
-                                // their normal fate transport.
-                                let routed = self.edge_fate_routes.borrow().contains_key(tx_id);
-                                if routed
-                                    && !matches!(
-                                        (admitted, *expected_scope_authority),
-                                        (Some(admitted), Some(expected))
-                                            if admitted.same_admitted_link(expected)
-                                    )
-                                {
+                            SyncMessage::AuthorizationScopeDecision { request_id, advice } => {
+                                if expected_scope_authority.is_none() {
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
-                            }
-                            let routed_fate = match &message {
-                                SyncMessage::FateUpdate { tx_id, .. } => {
-                                    Some((*tx_id, message.clone()))
-                                }
-                                _ => None,
-                            };
-                            if let SyncMessage::CommitUnit { tx, .. } = &message
-                                && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
-                                && self.node.borrow().branch_record(branch).is_none()
-                            {
-                                if let std::collections::btree_map::Entry::Vacant(entry) =
-                                    pending_branch_metadata_repairs.entry(branch)
+                                if let Some(request) =
+                                    scope_lease_manager.requests.remove(&request_id)
                                 {
-                                    entry.insert(());
-                                    self.transport
-                                        .send(SyncMessage::FetchBranchMetadata {
-                                            branches: vec![branch],
-                                        })
-                                        .map_err(transport_error)?;
-                                }
-                            }
-                            if !pending_view_updates.is_empty() {
-                                apply_pending_authority_view_updates(
-                                    &self.node,
-                                    &mut pending_view_updates,
-                                    &self.awaiting_initial_authority_coverage,
-                                    &mut pending_initial_coverage_clears,
-                                    &self.active_authority_view_receipts,
-                                    self.connection_epoch,
-                                )
-                                .await?;
-                            }
-                            if *local_receiver {
-                                match message {
-                                    SyncMessage::CommitUnit { tx, versions } => {
-                                        self.node
-                                            .lock()
-                                            .await
-                                            .ingest_relay_commit_unit(tx, versions)
-                                            .await?;
-                                    }
-                                    other => {
-                                        let outcome = self
-                                            .node
-                                            .lock()
-                                            .await
-                                            .apply_sync_message_with_ingest_context(other, None)
-                                            .await?;
-                                        publications.extend(outcome.publications);
+                                    for waiter_id in request.waiters {
+                                        if let Some(waiter) = self
+                                            .permission_advice_waiters
+                                            .borrow_mut()
+                                            .remove(&waiter_id)
+                                        {
+                                            let _ = waiter.send(advice);
+                                        }
                                     }
                                 }
-                            } else {
+                            }
+                            SyncMessage::AuthorizationScopeReceipt {
+                                subscription,
+                                receipt,
+                            } => {
+                                let Some(expected) = expected_scope_authority else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                if !authorization_scope_receipt_matches_transport_context(
+                                    &receipt,
+                                    *expected,
+                                    scope_view_cuts.get(&subscription).copied(),
+                                ) {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                                scope_receipts.insert(subscription, receipt);
+                            }
+                            SyncMessage::BranchMetadata(metadata) => {
+                                let branch = metadata.branch_id;
+                                self.node
+                                    .lock()
+                                    .await
+                                    .acknowledge_branch_metadata(&metadata)
+                                    .await?;
                                 let outcome = self
                                     .node
                                     .lock()
                                     .await
-                                    .apply_sync_message_with_ingest_context(message, None)
+                                    .apply_sync_message(SyncMessage::BranchMetadata(metadata))
                                     .await?;
                                 publications.extend(outcome.publications);
-                            }
-                            if let Some((tx_id, fate)) = routed_fate {
-                                let authority = *expected_scope_authority;
-                                let mut routes = self.edge_fate_routes.borrow_mut();
-                                if let Some(pending) = routes.get_mut(&tx_id) {
-                                    let mut remaining = Vec::new();
-                                    for route in std::mem::take(pending) {
-                                        let authority_matches = matches!(
-                                            (route.authority, authority),
-                                            (Some(route), Some(authority))
-                                                if route.same_admitted_link(authority)
-                                        );
-                                        let queue = route.queue.upgrade();
-                                        if authority_matches {
-                                            if let Some(queue) = queue {
-                                                queue.borrow_mut().push(fate.clone());
+                                pending_branch_metadata_repairs.remove(&branch);
+                                if let Some(updates) = pending_branch_view_updates.remove(&branch) {
+                                    for update in updates {
+                                        let (subscription, settled_through) = match &update.message
+                                        {
+                                            SyncMessage::ViewUpdate {
+                                                subscription,
+                                                settled_through,
+                                                ..
+                                            } => (*subscription, *settled_through),
+                                            _ => {
+                                                unreachable!(
+                                                    "branch parking retains only view updates"
+                                                )
                                             }
-                                        } else {
-                                            remaining.push(route);
-                                        }
-                                    }
-                                    if remaining.is_empty() {
-                                        routes.remove(&tx_id);
-                                    } else {
-                                        *routes.get_mut(&tx_id).expect("route remains present") =
-                                            remaining;
+                                        };
+                                        stage_initial_coverage_clear_for_update(
+                                            &update.message,
+                                            &self.latest_coverage_subscriptions,
+                                            &mut pending_initial_coverage_clears,
+                                        );
+                                        push_view_update_message_for_receiver(
+                                            &mut pending_view_updates,
+                                            update.message,
+                                            update.authority_receipt_eligible,
+                                        )?;
+                                        scope_view_cuts.insert(subscription, settled_through);
                                     }
                                 }
-                                drop(routes);
-                                route_local_fate(&self.local_fate_routes, tx_id, &fate);
+                            }
+                            message => {
+                                if let SyncMessage::FateUpdate { tx_id, .. } = &message {
+                                    let admitted = *self.admitted_upstream_authority.borrow();
+                                    // Gate fate before any NodeState mutation. A
+                                    // parallel, stale, or featureless upstream is
+                                    // not merely forbidden from forwarding an
+                                    // edge route; it must not settle the routed
+                                    // transaction's local state. Ordinary Core
+                                    // client links have no edge route and retain
+                                    // their normal fate transport.
+                                    let routed = self.edge_fate_routes.borrow().contains_key(tx_id);
+                                    if routed
+                                        && !matches!(
+                                            (admitted, *expected_scope_authority),
+                                            (Some(admitted), Some(expected))
+                                                if admitted.same_admitted_link(expected)
+                                        )
+                                    {
+                                        drop_peer_request(&self.node);
+                                        continue;
+                                    }
+                                }
+                                let routed_fate = match &message {
+                                    SyncMessage::FateUpdate { tx_id, .. } => {
+                                        Some((*tx_id, message.clone()))
+                                    }
+                                    _ => None,
+                                };
+                                if let SyncMessage::CommitUnit { tx, .. } = &message
+                                    && let crate::tx::BranchLineage::Branch(branch) =
+                                        tx.target_lineage
+                                    && self.node.borrow().branch_record(branch).is_none()
+                                {
+                                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                                        pending_branch_metadata_repairs.entry(branch)
+                                    {
+                                        entry.insert(());
+                                        self.transport
+                                            .send(SyncMessage::FetchBranchMetadata {
+                                                branches: vec![branch],
+                                            })
+                                            .map_err(transport_error)?;
+                                    }
+                                }
+                                if !pending_view_updates.is_empty() {
+                                    apply_pending_authority_view_updates(
+                                        &self.node,
+                                        &mut pending_view_updates,
+                                        &self.awaiting_initial_authority_coverage,
+                                        &mut pending_initial_coverage_clears,
+                                        &self.active_authority_view_receipts,
+                                        self.connection_epoch,
+                                    )
+                                    .await?;
+                                }
+                                if *local_receiver {
+                                    match message {
+                                        SyncMessage::CommitUnit { tx, versions } => {
+                                            self.node
+                                                .lock()
+                                                .await
+                                                .ingest_relay_commit_unit(tx, versions)
+                                                .await?;
+                                        }
+                                        other => {
+                                            let outcome = self
+                                                .node
+                                                .lock()
+                                                .await
+                                                .apply_sync_message_with_ingest_context(other, None)
+                                                .await?;
+                                            publications.extend(outcome.publications);
+                                        }
+                                    }
+                                } else {
+                                    let outcome = self
+                                        .node
+                                        .lock()
+                                        .await
+                                        .apply_sync_message_with_ingest_context(message, None)
+                                        .await?;
+                                    publications.extend(outcome.publications);
+                                }
+                                if let Some((tx_id, fate)) = routed_fate {
+                                    let authority = *expected_scope_authority;
+                                    let mut routes = self.edge_fate_routes.borrow_mut();
+                                    if let Some(pending) = routes.get_mut(&tx_id) {
+                                        let mut remaining = Vec::new();
+                                        for route in std::mem::take(pending) {
+                                            let authority_matches = matches!(
+                                                (route.authority, authority),
+                                                (Some(route), Some(authority))
+                                                    if route.same_admitted_link(authority)
+                                            );
+                                            let queue = route.queue.upgrade();
+                                            if authority_matches {
+                                                if let Some(queue) = queue {
+                                                    queue.borrow_mut().push(fate.clone());
+                                                }
+                                            } else {
+                                                remaining.push(route);
+                                            }
+                                        }
+                                        if remaining.is_empty() {
+                                            routes.remove(&tx_id);
+                                        } else {
+                                            *routes
+                                                .get_mut(&tx_id)
+                                                .expect("route remains present") = remaining;
+                                        }
+                                    }
+                                    drop(routes);
+                                    route_local_fate(&self.local_fate_routes, tx_id, &fate);
+                                }
                             }
                         }
+                        if let Some(tx_id) = write_state_tx_id {
+                            handle_write_state_update(
+                                &self.node,
+                                &self.write_state_waiters,
+                                &self.mutation_errors,
+                                &self.scheduler,
+                                tx_id,
+                            );
+                        }
+                        applied = true;
                     }
-                    if let Some(tx_id) = write_state_tx_id {
-                        handle_write_state_update(
+                    if !pending_view_updates.is_empty() {
+                        apply_pending_authority_view_updates(
                             &self.node,
-                            &self.write_state_waiters,
-                            &self.mutation_errors,
-                            &self.scheduler,
-                            tx_id,
-                        );
+                            &mut pending_view_updates,
+                            &self.awaiting_initial_authority_coverage,
+                            &mut pending_initial_coverage_clears,
+                            &self.active_authority_view_receipts,
+                            self.connection_epoch,
+                        )
+                        .await?;
                     }
-                    applied = true;
-                }
-                if !pending_view_updates.is_empty() {
-                    apply_pending_authority_view_updates(
-                        &self.node,
-                        &mut pending_view_updates,
-                        &self.awaiting_initial_authority_coverage,
-                        &mut pending_initial_coverage_clears,
-                        &self.active_authority_view_receipts,
-                        self.connection_epoch,
-                    )
-                    .await?;
-                }
-                if applied {
-                    stats.subscription_events += refresh_subscriptions_in(
-                        &self.node,
-                        &self.subscriptions,
-                        &self.active_authority_view_receipts,
-                    )
-                    .await?;
-                    let mut persisted = Vec::with_capacity(publications.len());
-                    for publication in &publications {
-                        persisted.push(publication.persist().await);
+                    if applied {
+                        stats.subscription_events += refresh_subscriptions_in(
+                            &self.node,
+                            &self.subscriptions,
+                            &self.active_authority_view_receipts,
+                        )
+                        .await?;
+                        let mut persisted = Vec::with_capacity(publications.len());
+                        for publication in &publications {
+                            persisted.push(publication.persist().await);
+                        }
+                        let mut node = self.node.lock().await;
+                        for persistence in persisted {
+                            node.settle_published_transaction(persistence)?;
+                        }
+                        drop(node);
+                        stats.remote_sync_applied += 1;
+                        let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
+                        self.subscriber_dirty_epoch.set(next);
+                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                     }
-                    let mut node = self.node.lock().await;
-                    for persistence in persisted {
-                        node.settle_published_transaction(persistence)?;
-                    }
-                    drop(node);
-                    stats.remote_sync_applied += 1;
-                    let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
-                    self.subscriber_dirty_epoch.set(next);
-                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                    Ok::<bool, Error>(false)
+                })
+                .await?;
+                if stop {
+                    return Ok(stats);
                 }
             }
             ConnectionLink::Subscriber {
@@ -1604,6 +1654,7 @@ where
                 authority_scope_hydration_count,
                 serve_dirty,
             } => {
+                Box::pin(async {
                 // A trusted backend subscriber is an edge's normal upstream
                 // link.  Unlike an application subscriber, it is entitled to
                 // the authority catalogue and has no application subscription
@@ -2973,6 +3024,9 @@ where
                         .map_err(transport_error)?;
                     }
                 }
+                    Ok::<(), Error>(())
+                })
+                .await?;
             }
         }
         Ok(stats)
