@@ -1,16 +1,62 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::process::Command;
 
 use jazz::groove::db::{
     CommitMetrics, StorageReadBucket, StorageReadMetrics, StorageWriteBucket, StorageWriteMetrics,
 };
 use jazz::groove::ivm::{RuntimeStats, TickMetrics};
-use jazz::groove::storage::OrderedKvStorage;
-use jazz::node::{NodeState, QueryEngineReadMetrics, SyncMetrics};
-use jazz::tx::DurabilityTier;
+use jazz::groove::storage::{OrderedKvStorage, ReopenableStorage};
+use jazz::node::{
+    NodeState, PublicationOutcome, PublishedTransaction, QueryEngineReadMetrics, SyncMetrics,
+};
+use jazz::protocol::SyncMessage;
+use jazz::tx::{DurabilityTier, TxId};
 use serde_json::{Map, Value, json};
+
+/// Resolve an async operation at a synchronous benchmark phase boundary.
+///
+/// Native benchmark drivers intentionally measure one phase at a time on one
+/// thread. Keeping the blocking adapter here makes that execution policy
+/// explicit without adding a synchronous production API.
+pub trait BenchFutureExt<T, E>: Future<Output = Result<T, E>> + Sized {
+    fn expect(self, message: &str) -> T
+    where
+        E: std::fmt::Debug,
+    {
+        jazz::block_on(self).expect(message)
+    }
+}
+
+impl<F, T, E> BenchFutureExt<T, E> for F where F: Future<Output = Result<T, E>> {}
+
+pub fn settle_transaction<S>(node: &mut NodeState<S>, publication: PublishedTransaction) -> TxId
+where
+    S: OrderedKvStorage,
+{
+    node.persist_and_settle_transaction(publication)
+        .expect("persist benchmark transaction")
+}
+
+pub fn settle_outcome<S, T>(node: &mut NodeState<S>, outcome: PublicationOutcome<T>) -> T
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    node.persist_and_settle_outcome(outcome)
+        .expect("persist benchmark publication outcome")
+}
+
+pub fn apply_and_settle<S>(node: &mut NodeState<S>, message: SyncMessage) -> Vec<SyncMessage>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    let outcome = node
+        .apply_sync_message(message)
+        .expect("apply benchmark sync message");
+    settle_outcome(node, outcome)
+}
 
 pub fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)

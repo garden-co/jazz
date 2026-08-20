@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 mod schema_fixture;
 mod support;
 
+use support::BenchFutureExt as _;
+
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -102,13 +104,14 @@ impl ValidationBench {
             let owner_idx = self.rows[row_idx].owner_idx;
             let made_by = author(owner_idx);
             let title = format!("seed-{row_idx}");
-            let (tx_id, unit) = self.clients[owner_idx]
+            let (publication, unit) = self.clients[owner_idx]
                 .commit_mergeable_unit(
                     MergeableCommit::new(TABLE, self.rows[row_idx].row_uuid, 10)
                         .made_by(made_by)
                         .cells(cells(&title, made_by)),
                 )
                 .expect("seed commit");
+            let tx_id = support::settle_transaction(&mut self.clients[owner_idx], publication);
             let fate = core_ingest(&mut self.core, &unit);
             apply_fate(&mut self.clients[owner_idx], &fate);
             let global_time = accepted_global_time(&fate);
@@ -125,7 +128,7 @@ impl ValidationBench {
             let update = peer
                 .current_rows_update(&mut self.core, TABLE)
                 .expect("seed view update");
-            client.apply_sync_message(update).expect("apply seed view");
+            support::apply_and_settle(client, update);
         }
     }
 
@@ -180,9 +183,10 @@ impl ValidationBench {
                     .expect("tx write");
             }
 
-            let (_tx_id, unit) = self.clients[client_idx]
+            let (publication, unit) = self.clients[client_idx]
                 .commit_exclusive(tx_id, author(client_idx), 1_000 + step as u64)
                 .expect("commit exclusive");
+            support::settle_transaction(&mut self.clients[client_idx], publication);
             let (tx, versions) = commit_parts(&unit);
 
             let baseline_start = Instant::now();
@@ -549,16 +553,17 @@ fn core_ingest(core: &mut NodeState<RocksDbStorage>, unit: &SyncMessage) -> Sync
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
-    let [fate] = core
+    let outcome = core
         .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
-        .expect("core ingest")
+        .expect("core ingest");
+    let [fate] = support::settle_outcome(core, outcome)
         .try_into()
         .expect("one fate update");
     fate
 }
 
 fn apply_fate(node: &mut NodeState<RocksDbStorage>, fate: &SyncMessage) {
-    node.apply_sync_message(fate.clone()).expect("apply fate");
+    support::apply_and_settle(node, fate.clone());
 }
 
 fn accepted_global_time(fate: &SyncMessage) -> GlobalTime {
