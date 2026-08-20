@@ -5,6 +5,8 @@ use sha2::{Digest, Sha512};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+use crate::ids::AuthorId;
+
 const KEY_NAMESPACE: Uuid = Uuid::from_bytes([
     0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x61, 0x75, 0x74, 0x68, 0x2d, 0x6b, 0x65, 0x79, 0x2d, 0x76, 0x31,
 ]);
@@ -302,6 +304,15 @@ pub fn derive_verifying_key(seed: &[u8; 32]) -> VerifyingKey {
 pub fn derive_user_id(seed: &[u8; 32]) -> Uuid {
     let verifying_key = derive_verifying_key(seed);
     user_id_from_public_key(verifying_key.as_bytes())
+}
+
+/// Convert a public session principal into the UUID-shaped core author identity.
+/// UUID principals retain their value; other external subjects are mapped
+/// deterministically so clients and servers derive the same identity.
+pub fn author_id_from_principal(principal: &str) -> AuthorId {
+    let uuid = Uuid::parse_str(principal.trim())
+        .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_URL, principal.as_bytes()));
+    AuthorId::from_bytes(*uuid.as_bytes())
 }
 
 /// Deterministically derive a UUIDv5 user id from Ed25519 public key bytes.

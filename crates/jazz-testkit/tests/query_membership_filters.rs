@@ -1,7 +1,6 @@
+use jazz::query::{col, contains, in_list, lit};
 use jazz::row_input;
-use jazz::tools::{
-    ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value};
 
 fn membership_schema() -> Schema {
     SchemaBuilder::new()
@@ -87,13 +86,15 @@ async fn in_filters_match_integer_float_boolean_and_reference_columns() {
                 )
                 .expect("insert non-matching item");
 
-            let query = QueryBuilder::new("items")
-                .filter_in("count", vec![Value::Integer(1), Value::Integer(2)])
-                .filter_in("score", vec![Value::Double(1.5), Value::Double(2.5)])
-                .filter_in("active", vec![Value::Boolean(true), Value::Boolean(false)])
-                .filter_in("owner_id", vec![Value::Uuid(owner_a), Value::Uuid(owner_b)])
-                .select(&["title"])
-                .build();
+            let query = jazz::query::Query::from("items")
+                .filter(in_list(col("count"), [lit(1), lit(2)]))
+                .filter(in_list(col("score"), [lit(1.5), lit(2.5)]))
+                .filter(in_list(col("active"), [lit(true), lit(false)]))
+                .filter(in_list(
+                    col("owner_id"),
+                    [lit(*owner_a.uuid()), lit(*owner_b.uuid())],
+                ))
+                .select(["title"]);
 
             let mut rows = client.query(query, None).await.expect("query items");
             rows.sort_by_key(|(id, _)| *id);
@@ -153,10 +154,9 @@ async fn contains_filters_match_non_text_array_elements_and_text_substrings() {
 
             let count_rows = client
                 .query(
-                    QueryBuilder::new("items")
-                        .filter_contains("counts", Value::Integer(3))
-                        .select(&["title"])
-                        .build(),
+                    jazz::query::Query::from("items")
+                        .filter(contains(col("counts"), lit(3)))
+                        .select(["title"]),
                     None,
                 )
                 .await
@@ -168,10 +168,9 @@ async fn contains_filters_match_non_text_array_elements_and_text_substrings() {
 
             let flag_rows = client
                 .query(
-                    QueryBuilder::new("items")
-                        .filter_contains("flags", Value::Boolean(true))
-                        .select(&["title"])
-                        .build(),
+                    jazz::query::Query::from("items")
+                        .filter(contains(col("flags"), lit(true)))
+                        .select(["title"]),
                     None,
                 )
                 .await
@@ -180,10 +179,9 @@ async fn contains_filters_match_non_text_array_elements_and_text_substrings() {
 
             let ref_rows = client
                 .query(
-                    QueryBuilder::new("items")
-                        .filter_contains("watcher_ids", Value::Uuid(owner_a))
-                        .select(&["title"])
-                        .build(),
+                    jazz::query::Query::from("items")
+                        .filter(contains(col("watcher_ids"), lit(*owner_a.uuid())))
+                        .select(["title"]),
                     None,
                 )
                 .await
@@ -192,10 +190,9 @@ async fn contains_filters_match_non_text_array_elements_and_text_substrings() {
 
             let text_rows = client
                 .query(
-                    QueryBuilder::new("items")
-                        .filter_contains("title", Value::Text("needle".to_owned()))
-                        .select(&["title"])
-                        .build(),
+                    jazz::query::Query::from("items")
+                        .filter(contains(col("title"), lit("needle")))
+                        .select(["title"]),
                     None,
                 )
                 .await
@@ -213,9 +210,7 @@ async fn invalid_membership_filters_return_type_errors() {
 
             let scalar_contains = client
                 .query(
-                    QueryBuilder::new("items")
-                        .filter_contains("count", Value::Integer(1))
-                        .build(),
+                    jazz::query::Query::from("items").filter(contains(col("count"), lit(1))),
                     None,
                 )
                 .await
@@ -229,9 +224,8 @@ async fn invalid_membership_filters_return_type_errors() {
 
             let wrong_in_type = client
                 .query(
-                    QueryBuilder::new("items")
-                        .filter_in("count", vec![Value::Text("not an integer".to_owned())])
-                        .build(),
+                    jazz::query::Query::from("items")
+                        .filter(in_list(col("count"), [lit("not an integer")])),
                     None,
                 )
                 .await
@@ -274,9 +268,8 @@ async fn in_filter_rejects_scalar_candidate_for_array_column() {
 
             let error = client
                 .query(
-                    QueryBuilder::new("items")
-                        .filter_in("counts", vec![Value::Integer(3)])
-                        .build(),
+                    jazz::query::Query::from("items")
+                        .filter(in_list(col("counts"), [lit(3)])),
                     None,
                 )
                 .await

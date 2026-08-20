@@ -3,22 +3,41 @@ use jazz_testkit as support;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use jazz::db::ReadOpts;
 use jazz::groove::records::Value as CoreValue;
 use jazz::ids::{BranchId, RowUuid};
+use jazz::protocol::{ReadViewSourceSpec, ReadViewSpec};
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
 use jazz::tools::{
-    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-    policy_expr,
+    ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value, policy_expr,
 };
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
-    TestingClient, has_added, has_removed, wait_for_query, wait_for_subscription_update,
+    TestingClient, has_added_id, has_removed, wait_for_query, wait_for_subscription_update,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
+
+fn branch_read_opts(branch: BranchId) -> ReadOpts {
+    ReadOpts {
+        tier: jazz::tx::DurabilityTier::Global,
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Branch { branch: branch.0 },
+            ..ReadViewSpec::default()
+        },
+        ..ReadOpts::default()
+    }
+}
+
+fn root_read_opts() -> ReadOpts {
+    ReadOpts {
+        tier: jazz::tx::DurabilityTier::Global,
+        ..ReadOpts::default()
+    }
+}
 
 fn branch_claims_gated_schema() -> Schema {
     SchemaBuilder::new()
@@ -161,7 +180,7 @@ async fn query_applies_claims_select_policy() {
                 .await
                 .expect("room reaches edge");
 
-            let query = QueryBuilder::new("rooms").build();
+            let query = jazz::query::Query::from("rooms");
 
             let alice = TestingClient::builder()
                 .with_server(&server)
@@ -281,7 +300,7 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 .await;
             wait_for_query(
                 &bigint_claim_user,
-                QueryBuilder::new("integer_claim_rows").build(),
+                jazz::query::Query::from("integer_claim_rows"),
                 Some(DurabilityTier::EdgeServer),
                 QUERY_TIMEOUT,
                 "I64 claim matches I32 column",
@@ -304,7 +323,7 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 .await;
             wait_for_query(
                 &integer_claim_user,
-                QueryBuilder::new("bigint_claim_rows").build(),
+                jazz::query::Query::from("bigint_claim_rows"),
                 Some(DurabilityTier::EdgeServer),
                 QUERY_TIMEOUT,
                 "U32 claim matches I64 column",
@@ -367,8 +386,8 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                 .await
                 .expect("or room reaches edge");
 
-            let in_list_query = QueryBuilder::new("role_in_list_rooms").build();
-            let or_query = QueryBuilder::new("role_or_rooms").build();
+            let in_list_query = jazz::query::Query::from("role_in_list_rooms");
+            let or_query = jazz::query::Query::from("role_or_rooms");
 
             for (role, user_id) in [
                 ("admin", "dddddddd-dddd-4ddd-dddd-ddddddddddd2"),
@@ -493,7 +512,7 @@ async fn subscription_matches_claims_select_query() {
                 .await
                 .expect("room reaches edge");
 
-            let query = QueryBuilder::new("rooms").build();
+            let query = jazz::query::Query::from("rooms");
 
             let alice = TestingClient::builder()
                 .with_server(&server)
@@ -514,7 +533,7 @@ async fn subscription_matches_claims_select_query() {
                 &mut alice_log,
                 QUERY_TIMEOUT,
                 "matching claim subscription sees row",
-                |updates| has_added(updates, room_id),
+                |updates| has_added_id(updates, room_id),
             )
             .await;
             wait_for_query(
@@ -549,7 +568,7 @@ async fn subscription_matches_claims_select_query() {
             )
             .await;
             assert!(
-                !has_added(&bob_log, room_id),
+                !has_added_id(&bob_log, room_id),
                 "wrong claim subscription should not see row: {bob_log:?}"
             );
             let bob_rows = bob
@@ -583,7 +602,7 @@ async fn subscription_matches_claims_select_query() {
             )
             .await;
             assert!(
-                !has_added(&carol_log, room_id),
+                !has_added_id(&carol_log, room_id),
                 "missing claim subscription should not see row: {carol_log:?}"
             );
             let carol_rows = carol
@@ -628,7 +647,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
                 .ready_on("admin_rooms", READY_TIMEOUT)
                 .connect()
                 .await;
-            let query = QueryBuilder::new("admin_rooms").build();
+            let query = jazz::query::Query::from("admin_rooms");
 
             let (initial_id, _, initial_batch) = writer
                 .insert(
@@ -651,7 +670,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
                 &mut stream_log,
                 QUERY_TIMEOUT,
                 "authorized subscription receives its initial room",
-                |updates| has_added(updates, initial_id),
+                |updates| has_added_id(updates, initial_id),
             )
             .await;
 
@@ -688,7 +707,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
                 &mut stream_log,
                 QUERY_TIMEOUT,
                 "the original authorized session receives later authorized rows",
-                |updates| has_added(updates, future_id),
+                |updates| has_added_id(updates, future_id),
             )
             .await;
             assert!(
@@ -753,7 +772,7 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 .await
                 .expect("beta room reaches edge");
 
-            let query = QueryBuilder::new("rooms").build();
+            let query = jazz::query::Query::from("rooms");
 
             let simple = TestingClient::builder()
                 .with_server(&server)
@@ -773,11 +792,11 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 &mut simple_log,
                 QUERY_TIMEOUT,
                 "simple subscription sees only alpha",
-                |updates| has_added(updates, alpha_id),
+                |updates| has_added_id(updates, alpha_id),
             )
             .await;
             assert!(
-                !has_added(&simple_log, beta_id),
+                !has_added_id(&simple_log, beta_id),
                 "simple claim route must not receive beta row: {simple_log:?}"
             );
             let simple_rows = simple
@@ -812,7 +831,7 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 &mut admin_log,
                 QUERY_TIMEOUT,
                 "admin subscription sees all rooms",
-                |updates| has_added(updates, alpha_id) && has_added(updates, beta_id),
+                |updates| has_added_id(updates, alpha_id) && has_added_id(updates, beta_id),
             )
             .await;
             let admin_rows = admin_reader
@@ -847,7 +866,7 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
             )
             .await;
             assert!(
-                !has_added(&spy_log, alpha_id) && !has_added(&spy_log, beta_id),
+                !has_added_id(&spy_log, alpha_id) && !has_added_id(&spy_log, beta_id),
                 "spy subscription must not receive rows: {spy_log:?}"
             );
             let spy_rows = spy
@@ -886,9 +905,8 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
             let empty_branch = BranchId(uuid::Uuid::from_bytes([0x46; 16]));
             let empty_row = RowUuid(uuid::Uuid::from_bytes([0x47; 16]));
             server.create_branch_for_test(empty_branch).await;
-            let empty_query = QueryBuilder::new("rooms")
-                .branch(empty_branch.0.to_string())
-                .build();
+            let empty_query = jazz::query::Query::from("rooms");
+            let empty_opts = branch_read_opts(empty_branch);
             let partition_probe = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema.clone())
@@ -898,7 +916,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 .connect()
                 .await;
             let absent_partition_rows = partition_probe
-                .query(empty_query.clone(), Some(DurabilityTier::EdgeServer))
+                .query_with_opts(empty_query.clone(), empty_opts.clone())
                 .await
                 .expect("denied probe queries empty branch");
             assert!(
@@ -940,7 +958,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 )
                 .await;
             let populated_partition_rows = partition_probe
-                .query(empty_query.clone(), Some(DurabilityTier::EdgeServer))
+                .query_with_opts(empty_query.clone(), empty_opts.clone())
                 .await
                 .expect("denied probe queries lazily populated branch");
             assert!(
@@ -965,13 +983,11 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 )
                 .await;
 
-            let branch_query = QueryBuilder::new("rooms")
-                .branch(branch.0.to_string())
-                .build();
-            let sibling_query = QueryBuilder::new("rooms")
-                .branch(sibling.0.to_string())
-                .build();
-            let root_query = QueryBuilder::new("rooms").branch("main").build();
+            let branch_query = jazz::query::Query::from("rooms");
+            let sibling_query = jazz::query::Query::from("rooms");
+            let root_query = jazz::query::Query::from("rooms");
+            let branch_opts = branch_read_opts(branch);
+            let sibling_opts = branch_read_opts(sibling);
             let matching = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema.clone())
@@ -982,7 +998,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 .await;
 
             let branch_rows = matching
-                .query(branch_query.clone(), Some(DurabilityTier::EdgeServer))
+                .query_with_opts(branch_query.clone(), branch_opts.clone())
                 .await
                 .expect("matching claim queries branch");
             assert!(
@@ -998,7 +1014,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 "one branch must not read its sibling's overlay: {branch_rows:?}"
             );
             let sibling_rows = matching
-                .query(sibling_query, Some(DurabilityTier::EdgeServer))
+                .query_with_opts(sibling_query, sibling_opts)
                 .await
                 .expect("matching claim queries sibling branch");
             assert!(
@@ -1014,7 +1030,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 "sibling query must not reuse the first branch's cached result: {sibling_rows:?}"
             );
             let root_rows = matching
-                .query(root_query, Some(DurabilityTier::EdgeServer))
+                .query_with_opts(root_query, root_read_opts())
                 .await
                 .expect("matching claim queries root");
             assert!(
@@ -1025,7 +1041,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
             );
 
             let mut stream = matching
-                .subscribe(branch_query.clone())
+                .subscribe_with_opts(branch_query.clone(), branch_opts.clone())
                 .await
                 .expect("matching claim subscribes to branch");
             let mut updates = Vec::new();
@@ -1034,7 +1050,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 &mut updates,
                 QUERY_TIMEOUT,
                 "branch subscription sees branch-local row",
-                |updates| has_added(updates, jazz::tools::ObjectId::from_uuid(branch_row.0)),
+                |updates| has_added_id(updates, jazz::tools::ObjectId::from_uuid(branch_row.0)),
             )
             .await;
 
@@ -1047,7 +1063,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 .connect()
                 .await;
             let denied_rows = denied
-                .query(branch_query.clone(), Some(DurabilityTier::EdgeServer))
+                .query_with_opts(branch_query.clone(), branch_opts.clone())
                 .await
                 .expect("nonmatching claim queries branch");
             assert!(
@@ -1057,7 +1073,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 "branch query must retain ordinary select policy: {denied_rows:?}"
             );
             let mut denied_stream = denied
-                .subscribe(branch_query)
+                .subscribe_with_opts(branch_query, branch_opts)
                 .await
                 .expect("nonmatching claim subscribes to branch");
             let mut denied_log = Vec::new();
@@ -1070,11 +1086,11 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
             )
             .await;
             assert!(
-                !has_added(&denied_log, jazz::tools::ObjectId::from_uuid(branch_row.0)),
+                !has_added_id(&denied_log, jazz::tools::ObjectId::from_uuid(branch_row.0)),
                 "branch subscription must retain ordinary select policy: {denied_log:?}"
             );
             let mut lazy_denied_stream = partition_probe
-                .subscribe(empty_query)
+                .subscribe_with_opts(empty_query, empty_opts)
                 .await
                 .expect("denied probe subscribes after lazy partition creation");
             let mut lazy_denied_log = Vec::new();
@@ -1087,7 +1103,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
             )
             .await;
             assert!(
-                !has_added(&lazy_denied_log, jazz::tools::ObjectId::from_uuid(empty_row.0)),
+                !has_added_id(&lazy_denied_log, jazz::tools::ObjectId::from_uuid(empty_row.0)),
                 "a denied subscription must not reveal lazily partitioned branch rows: {lazy_denied_log:?}"
             );
 

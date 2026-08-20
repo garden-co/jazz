@@ -5,7 +5,7 @@ import * as devServer from "./dev-server.js";
 import * as catalogueProject from "./catalogue-project.js";
 import * as schemaWatcher from "./schema-watcher.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 
 const tempRoots = createTempRootTracker();
 
@@ -81,6 +81,41 @@ afterEach(async () => {
 });
 
 describe("ManagedDevRuntime", () => {
+  it("persists the app ID before starting the local server", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-bootstrap-env-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    const appId = "00000000-0000-0000-0000-000000000124";
+    let envAtServerStartup = "";
+
+    vi.spyOn(devServer, "startLocalJazzServer").mockImplementation(async () => {
+      envAtServerStartup = await readFile(join(schemaDir, ".env"), "utf8");
+      return {
+        appId,
+        port: 19884,
+        url: "http://127.0.0.1:19884",
+        dataDir: join(schemaDir, "node_modules", ".cache", "jazz-dev-server"),
+        adminSecret: "bootstrap-admin",
+        backendSecret: "bootstrap-backend",
+        stop: vi.fn().mockResolvedValue(undefined),
+      };
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const runtime = makeRuntime();
+    try {
+      await runtime.initialize({
+        appId,
+        schemaDir,
+        server: { port: 19884, adminSecret: "bootstrap-admin" },
+      });
+
+      expect(envAtServerStartup).toContain(`VITE_JAZZ_APP_ID=${appId}`);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it("does not print the local server banner when stdout is not interactive", async () => {
     const schemaDir = await tempRoots.create("jazz-managed-noninteractive-banner-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());

@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use jazz::query::Query;
 use jazz::tools::{
-    AppContext, ColumnType, DurabilityTier, JazzClient, ObjectId, Query, QueryBuilder,
-    SchemaBuilder, TableSchema, Value,
+    AppContext, ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, TableSchema, Value,
 };
 use jazz_server::JazzServer;
-use support::{TestingClient, has_added, wait_for_query, wait_for_subscription_update};
+use support::{TestingClient, has_added_id, wait_for_query, wait_for_subscription_update};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
@@ -84,7 +84,7 @@ async fn concurrent_updates_resolve_to_lww_winner_impl() {
         .expect("alice creates todo");
 
     // Wait for Bob to see it
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     wait_for_query(
         &bob,
         query.clone(),
@@ -222,7 +222,7 @@ async fn concurrent_creates_both_survive_impl() {
     alice_res.expect("alice task panicked");
     bob_res.expect("bob task panicked");
 
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
 
     // Both should eventually see 2 todos
     wait_for_query(
@@ -297,7 +297,7 @@ async fn rapid_concurrent_updates_converge_impl() {
     // Alice creates, wait for Bob to see it
     let (todo_id, _, _) = alice.insert("todos", todo_values("start")).expect("create");
 
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     wait_for_query(
         &bob,
         query.clone(),
@@ -424,7 +424,7 @@ async fn fresh_client_sees_lww_winner_after_conflict_impl() {
         .insert("todos", todo_values("original"))
         .expect("create");
 
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     wait_for_query(
         &bob,
         query.clone(),
@@ -583,7 +583,7 @@ async fn subscription_reflects_concurrent_update_impl() {
     let (todo_id, _, _) = alice.insert("todos", todo_values("task")).expect("create");
 
     // Wait for Bob to see it
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     wait_for_query(
         &bob,
         query.clone(),
@@ -606,7 +606,7 @@ async fn subscription_reflects_concurrent_update_impl() {
         &mut log,
         QUERY_TIMEOUT,
         "alice subscription receives initial todo before concurrent update",
-        |log| has_added(log, todo_id),
+        |log| has_added_id(log, todo_id),
     )
     .await;
 
@@ -741,7 +741,7 @@ async fn sequential_updates_preserve_latest_impl() {
     // Alice creates, Bob sees the shared starting point, then Alice updates 3 times.
     let (todo_id, _, _) = alice.insert("todos", todo_values("v0")).expect("create");
 
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     wait_for_query(
         &bob,
         query.clone(),
@@ -839,7 +839,7 @@ async fn concurrent_edits_on_different_fields_impl() {
     let (todo_id, _, _) = alice.insert("todos", todo_values("task")).expect("create");
 
     // Bob sees it
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     wait_for_query(
         &bob,
         query.clone(),
@@ -981,7 +981,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
 
     let (todo_id, _, _) = alice.insert("todos", todo_values("task")).expect("create");
 
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
     wait_for_query(
         &bob,
         query.clone(),
@@ -1119,7 +1119,7 @@ async fn establish_offline_reconnect_baseline(
         .insert("todos", todo_values("create"))
         .expect("alice creates todo");
 
-    let query = QueryBuilder::new("todos").build();
+    let query = jazz::query::Query::from("todos");
 
     wait_for_query(
         &bob,

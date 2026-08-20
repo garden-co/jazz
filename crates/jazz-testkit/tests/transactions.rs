@@ -6,8 +6,8 @@ use jazz_testkit as support;
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
-    TableSchema, Value, WriteContext,
+    ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value,
+    WriteContext,
 };
 use jazz_server::JazzServer;
 use support::wait_for_query;
@@ -24,10 +24,8 @@ fn todo_schema() -> Schema {
         .build()
 }
 
-fn todo_query() -> jazz::tools::Query {
-    QueryBuilder::new("todos")
-        .select(&["title", "completed"])
-        .build()
+fn todo_query() -> jazz::query::Query {
+    jazz::query::Query::from("todos").select(["title", "completed"])
 }
 
 async fn all_todos(client: &JazzClient) -> Vec<(ObjectId, Vec<Value>)> {
