@@ -213,13 +213,6 @@ export type QueryVisibility = "public" | "hidden_from_live_query_list";
 export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
-  /**
-   * Whether this subscription should cause upstream forwarding.
-   *
-   * Defaults to true. Set to false for inspector/helper subscriptions that
-   * should observe local state without opening remote coverage.
-   */
-  propagate?: boolean;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
 }
@@ -255,25 +248,25 @@ export type TransactionKind = "mergeable" | "exclusive";
 export type TransactionFate =
   | {
       kind: "missing";
-      batchId: BatchId;
+      transactionId: BatchId;
     }
   | {
       kind: "rejected";
-      batchId: BatchId;
+      transactionId: BatchId;
       code: string;
       reason: string;
     }
   | {
       kind: "accepted";
-      batchId: BatchId;
+      transactionId: BatchId;
       confirmedTier: DurabilityTier;
     };
 
 export interface LocalTransactionRecord {
-  batchId: BatchId;
+  transactionId: BatchId;
   kind: TransactionKind;
   sealed: boolean;
-  latestSettlement: TransactionFate | null;
+  latestSettlement: TransactionFate;
   encodedRecord?: Uint8Array;
 }
 
@@ -289,12 +282,8 @@ export interface MutationErrorEvent {
   transaction: LocalTransactionRecord;
 }
 
-export interface CreateOptions extends TimestampOverrideOptions {
+export interface InsertOptions extends TimestampOverrideOptions {
   id?: string;
-}
-
-export interface UpsertOptions extends TimestampOverrideOptions {
-  id: string;
 }
 
 export interface UpdateOptions extends TimestampOverrideOptions {}
@@ -363,7 +352,7 @@ export function resolveEffectiveQueryExecutionOptions(
   return {
     tier: options?.tier ?? resolveDefaultDurabilityTier(context),
     localUpdates: options?.localUpdates ?? "immediate",
-    propagation: options?.propagation ?? (options?.propagate === false ? "local-only" : "full"),
+    propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
   };
 }
@@ -463,7 +452,7 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   }
   const candidate = error as {
     kind?: unknown;
-    batchId?: unknown;
+    transactionId?: unknown;
     code?: unknown;
     reason?: unknown;
   };
@@ -473,12 +462,12 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   if (
     typeof candidate.code !== "string" ||
     typeof candidate.reason !== "string" ||
-    typeof candidate.batchId !== "string"
+    typeof candidate.transactionId !== "string"
   ) {
     return null;
   }
   return new PersistedWriteRejectedError(
-    candidate.batchId as BatchId,
+    candidate.transactionId as BatchId,
     candidate.code,
     candidate.reason,
   );
@@ -491,11 +480,11 @@ export class PersistedWriteRejectedError extends Error {
   readonly name = "PersistedWriteRejectedError";
 
   constructor(
-    readonly batchId: BatchId,
+    readonly transactionId: BatchId,
     readonly code: string,
     readonly reason: string,
   ) {
-    super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
+    super(`Persisted transaction ${transactionId} was rejected (${code}): ${reason}`);
   }
 }
 
@@ -505,15 +494,15 @@ export class PersistedWriteRejectedError extends Error {
 export class MutationResult<T, TKind extends TransactionKind = "mergeable"> {
   readonly #client: JazzClient;
   readonly #kind: TKind;
-  readonly batchId: Promise<BatchId>;
+  readonly transactionId: Promise<BatchId>;
 
   constructor(
     readonly value: T,
-    batchId: BatchId | Promise<BatchId>,
+    transactionId: BatchId | Promise<BatchId>,
     client: JazzClient,
     kind: TKind,
   ) {
-    this.batchId = Promise.resolve(batchId);
+    this.transactionId = Promise.resolve(transactionId);
     this.#client = client;
     this.#kind = kind;
   }
@@ -530,12 +519,12 @@ export class MutationResult<T, TKind extends TransactionKind = "mergeable"> {
     ...args: [TKind] extends ["exclusive"] ? [] : [options: { tier: DurabilityTier }]
   ): Promise<T> {
     if (this.#kind === "exclusive") {
-      await this.#client.waitForExclusiveTransaction(await this.batchId);
+      await this.#client.waitForExclusiveTransaction(await this.transactionId);
       return this.value;
     }
 
     const [options] = args as [options: { tier: DurabilityTier }];
-    await this.#client.waitForTransaction(this.batchId, options.tier);
+    await this.#client.waitForTransaction(this.transactionId, options.tier);
     return this.value;
   }
 }
@@ -741,7 +730,7 @@ export class JazzClient {
   insert(
     table: string,
     values: InsertValues,
-    options?: CreateOptions,
+    options?: InsertOptions,
     session?: Session,
     attribution?: string,
   ): MutationResult<Row> {
@@ -755,7 +744,7 @@ export class JazzClient {
   insertInternal(
     table: string,
     values: InsertValues,
-    options?: CreateOptions,
+    options?: InsertOptions,
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
@@ -820,12 +809,13 @@ export class JazzClient {
    */
   upsert(
     table: string,
+    objectId: string,
     values: InsertValues,
-    options: UpsertOptions,
+    options?: UpdateOptions,
     session?: Session,
     attribution?: string,
   ): MutationResult<void> {
-    const result = this.upsertInternal(table, values, options, session, attribution);
+    const result = this.upsertInternal(table, objectId, values, options, session, attribution);
     return new MutationResult(undefined, committedBatchId(result), this, "mergeable");
   }
 
@@ -834,8 +824,9 @@ export class JazzClient {
    */
   upsertInternal(
     table: string,
+    objectId: string,
     values: InsertValues,
-    options: UpsertOptions,
+    options?: UpdateOptions,
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
@@ -845,9 +836,9 @@ export class JazzClient {
       effectiveSession,
       attribution,
       openBatchId,
-      options.updatedAt,
+      options?.updatedAt,
     );
-    return this.runtime.upsert(table, options.id, values, writeContext);
+    return this.runtime.upsert(table, objectId, values, writeContext);
   }
 
   /**

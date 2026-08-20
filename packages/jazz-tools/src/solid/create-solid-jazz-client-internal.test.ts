@@ -19,7 +19,7 @@ function deferred<T>(): Deferred<T> {
 }
 
 async function flushMicrotasks(): Promise<void> {
-  await Promise.resolve();
+  for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
 import {
@@ -27,12 +27,12 @@ import {
   createSolidJazzClientInternal,
 } from "./create-solid-jazz-client-internal.js";
 
-function makeRawClient(id: string) {
+function makeRawClient(id: string, shutdown = vi.fn(async () => undefined)) {
   return {
     id,
     db: { clientId: id } as any,
     session: null,
-    shutdown: vi.fn(async () => undefined),
+    shutdown,
   };
 }
 
@@ -74,17 +74,26 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
     setConfig({ appId: "B" });
     await flushMicrotasks();
 
-    expect(defaultClientFactory).toHaveBeenCalledTimes(2);
-    expect(defaultClientFactory).toHaveBeenNthCalledWith(2, {
-      appId: "B",
-    });
+    expect(defaultClientFactory).toHaveBeenCalledTimes(1);
 
-    const rawA = makeRawClient("A");
+    const staleShutdown = deferred<void>();
+    const rawA = makeRawClient(
+      "A",
+      vi.fn(() => staleShutdown.promise),
+    );
     pendingByAppId.get("A")!.resolve(rawA);
     await flushMicrotasks();
 
     expect(rawA.shutdown).toHaveBeenCalledTimes(1);
     expect(result.loading).toBe(true);
+    expect(defaultClientFactory).toHaveBeenCalledTimes(1);
+
+    staleShutdown.resolve();
+    await flushMicrotasks();
+    expect(defaultClientFactory).toHaveBeenCalledTimes(2);
+    expect(defaultClientFactory).toHaveBeenNthCalledWith(2, {
+      appId: "B",
+    });
 
     const rawB = makeRawClient("B");
     pendingByAppId.get("B")!.resolve(rawB);
@@ -247,5 +256,60 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
     dispose();
     await flushMicrotasks();
     expect(rawB.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("SD-LIFE-06: exposes shutdown failure to the current replacement and lets a later config recover", async () => {
+    const pendingByAppId = new Map<string, Deferred<any>>();
+    defaultClientFactory.mockImplementation((config: DbConfig) => {
+      const entry = deferred<any>();
+      pendingByAppId.set(config.appId, entry);
+      return entry.promise;
+    });
+
+    let setConfig!: (next: DbConfig) => void;
+    let dispose!: () => void;
+    let result!: ReturnType<typeof createSolidJazzClientInternal>;
+
+    createRoot((rootDispose) => {
+      dispose = rootDispose;
+      const [config, _setConfig] = createSignal<DbConfig>({ appId: "A" });
+      setConfig = _setConfig;
+      result = createSolidJazzClientInternal(config, defaultClientFactory);
+      return undefined;
+    });
+
+    await flushMicrotasks();
+    const failedShutdown = deferred<void>();
+    const rawA = makeRawClient(
+      "A",
+      vi.fn(() => failedShutdown.promise),
+    );
+    pendingByAppId.get("A")!.resolve(rawA);
+    await flushMicrotasks();
+
+    setConfig({ appId: "B" });
+    await flushMicrotasks();
+    expect(defaultClientFactory).toHaveBeenCalledTimes(1);
+
+    const shutdownError = new Error("A did not shut down");
+    failedShutdown.reject(shutdownError);
+    await flushMicrotasks();
+
+    expect(result.error).toBe(shutdownError);
+    expect(defaultClientFactory).toHaveBeenCalledTimes(1);
+
+    setConfig({ appId: "C" });
+    await flushMicrotasks();
+    expect(defaultClientFactory).toHaveBeenCalledTimes(2);
+    expect(defaultClientFactory).toHaveBeenLastCalledWith({ appId: "C" });
+
+    const rawC = makeRawClient("C");
+    pendingByAppId.get("C")!.resolve(rawC);
+    await flushMicrotasks();
+    expect(result.error).toBeUndefined();
+    expect(result.client).toMatchObject({ id: "C" });
+
+    dispose();
+    await flushMicrotasks();
   });
 });

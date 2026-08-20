@@ -282,7 +282,22 @@ describe("Db transactions", () => {
     }
   });
 
-  it("commits an empty exclusive batch opened at begin", async () => {
+  it("types exclusive transaction waits without durability options", async () => {
+    if (false) {
+      const result = await db.exclusiveTransaction((tx) => tx.kind);
+      void result.wait();
+      // @ts-expect-error - exclusive transactions are confirmed by the global authority.
+      void result.wait({ tier: "global" });
+
+      const tx = db.beginExclusiveTransaction();
+      const committed = await tx.commit();
+      void committed.wait();
+      // @ts-expect-error - exclusive transactions are confirmed by the global authority.
+      void committed.wait({ tier: "global" });
+    }
+  });
+
+  it("commits an empty exclusive transaction opened at begin", async () => {
     await allTodos();
     const tx = db.beginExclusiveTransaction();
     await expect(tx.commit()).resolves.toMatchObject({
@@ -299,7 +314,7 @@ describe("Db transactions", () => {
 
     await tx.commit();
 
-    const coreError = `open batch ${openBatchId} is already committed`;
+    const coreError = `open transaction ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
@@ -318,7 +333,7 @@ describe("Db transactions", () => {
 
     await tx.rollback();
 
-    const coreError = `open batch ${openBatchId} has already been completed or was never opened`;
+    const coreError = `open transaction ${openBatchId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
@@ -351,12 +366,12 @@ describe("Db mergeable transactions", () => {
     );
   });
 
-  it("rejects committing an empty mergeable batch after Db initialization", async () => {
+  it("rejects committing an empty mergeable transaction after Db initialization", async () => {
     await allTodos();
     const tx = db.beginTransaction();
 
     expect(() => tx.commit()).toThrow(
-      "empty mergeable batch has no committed unit; roll it back instead",
+      "empty mergeable transaction has no committed unit; roll it back instead",
     );
   });
 
@@ -367,7 +382,7 @@ describe("Db mergeable transactions", () => {
 
     await tx.commit();
 
-    const coreError = `open batch ${openBatchId} is already committed`;
+    const coreError = `open transaction ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
@@ -385,7 +400,7 @@ describe("Db mergeable transactions", () => {
 
     await tx.rollback();
 
-    const coreError = `open batch ${openBatchId} has already been completed or was never opened`;
+    const coreError = `open transaction ${openBatchId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(

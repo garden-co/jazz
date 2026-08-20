@@ -56,7 +56,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
     }
 
     let author = user(0x71);
-    let open_tx = OpenBatchId::new();
+    let open_tx = OpenTransactionId::new();
     actual.open_mergeable(open_tx, author, Some(author)).unwrap();
     actual
         .tx_write_mergeable(
@@ -264,7 +264,7 @@ fn mergeable_open_patch_commit_uses_point_reads_not_table_scans() {
         .unwrap();
     }
 
-    let batch = OpenBatchId::new();
+    let batch = OpenTransactionId::new();
     core.open_mergeable(batch, user(0x72), None).unwrap();
     for ordinal in 0_u8..32 {
         core.tx_patch_mergeable(
@@ -293,7 +293,7 @@ fn mergeable_open_patch_commit_uses_point_reads_not_table_scans() {
 fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation() {
     let (_temp_dir, mut core) = open_node();
     let staged = row(0x31);
-    let open_tx = OpenBatchId::new();
+    let open_tx = OpenTransactionId::new();
     core.open_mergeable(open_tx, AuthorId::SYSTEM, None).unwrap();
     core.tx_write_mergeable(
         open_tx,

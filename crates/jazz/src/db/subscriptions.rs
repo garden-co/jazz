@@ -398,7 +398,16 @@ where
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)?;
-        let read_tier = effective_read_tier(&opts);
+        let requested_read_tier = effective_read_tier(&opts);
+        let read_tier = if opts.local_updates == LocalUpdates::Immediate
+            && opts.propagation == Propagation::Full
+            && supports_pending_overlay_reconciliation(prepared.shape.query())
+            && self.node.node.borrow().authored_commit_durability() == DurabilityTier::None
+        {
+            DurabilityTier::Local
+        } else {
+            requested_read_tier
+        };
         self.node
             .node
             .borrow_mut()
@@ -471,7 +480,7 @@ where
             || self.node.upstream_durability_floor.get() == DurabilityTier::Local;
         if propagates_upstream {
             let upstream_opts = self.node.upstream_register_shape_options(
-                effective_read_tier(&opts),
+                requested_read_tier,
                 opts.read_view.clone(),
                 remote_propagate_upstream,
             );
@@ -508,7 +517,7 @@ where
             upstream_subscription_handles = opened.handles;
             suppress_provisional_opening = authorization_mode
                 == QueryAuthorizationMode::ClientLocal
-                && read_tier >= DurabilityTier::Edge
+                && requested_read_tier >= DurabilityTier::Edge
                 && opened.awaits_initial_authority_response
                 && snapshot.root_count == 0
                 && snapshot.edges.is_empty();
@@ -532,10 +541,7 @@ where
                 self.node
                     .node
                     .borrow()
-                    .seed_local_maintained_authoritative_result_membership(
-                        maintained,
-                        binding_view_key,
-                    );
+                    .seed_local_maintained_authoritative_generation(maintained, binding_view_key);
             }
         }
         let settled = subscription_is_settled(
@@ -555,7 +561,7 @@ where
         // known while opening a fresh upstream handle, but an already-open
         // link has the same receipt requirement.
         suppress_provisional_opening |= authorization_mode == QueryAuthorizationMode::ClientLocal
-            && read_tier >= DurabilityTier::Edge
+            && requested_read_tier >= DurabilityTier::Edge
             && remote_read_tier.is_some()
             && !settled
             && snapshot.root_count == 0

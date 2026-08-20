@@ -4,6 +4,7 @@ use jazz_testkit as support;
 
 use std::time::Duration;
 
+use jazz::query::OrderDirection;
 use jazz::row_input;
 use jazz::tools::Operation;
 use jazz::tools::public_schema::{
@@ -11,13 +12,13 @@ use jazz::tools::public_schema::{
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
 };
 use jazz::tools::{
-    AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, QueryBuilder, Schema,
-    SchemaBuilder, SubscriptionStreamItem, TableSchema, Value,
+    AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, Schema, SchemaBuilder,
+    SubscriptionStreamItem, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
-    TestingClient, has_added, has_removed, publish_permissions, wait_for_edge_query_ready,
+    TestingClient, has_added_id, has_removed, publish_permissions, wait_for_edge_query_ready,
     wait_for_query, wait_for_subscription_update,
 };
 use tempfile::TempDir;
@@ -94,26 +95,21 @@ async fn subscription_orders_by_unprojected_field() {
                 .connect()
                 .await;
             let mut ids = Vec::new();
+            let mut txs = Vec::new();
             for (title, rank) in [("charlie", 3), ("alpha", 1), ("bravo", 2)] {
-                let (id, _, batch_id) = client
+                let (id, _, transaction_id) = client
                     .insert("todos", row_input!("title" => title, "rank" => rank))
                     .expect("insert ranked todo");
-                client
-                    .wait_for_batch(
-                        batch_id.expect("ordinary mutation commits immediately"),
-                        DurabilityTier::EdgeServer,
-                    )
-                    .await
-                    .expect("ranked todo settles at edge");
                 ids.push(id);
+                txs.push(transaction_id.expect("ordinary mutation commits immediately"));
             }
+            support::wait_for_edge_txs(&client, &txs).await;
 
             let mut stream = client
                 .subscribe(
-                    QueryBuilder::new("todos")
-                        .select(&["title"])
-                        .order_by("rank")
-                        .build(),
+                    jazz::query::Query::from("todos")
+                        .select(["title"])
+                        .order_by("rank", OrderDirection::Asc),
                 )
                 .await
                 .expect("subscribe to projected ranked todos");
@@ -135,16 +131,14 @@ async fn subscription_orders_by_unprojected_field() {
                 "subscription reset must follow rank even when rank is not projected"
             );
 
-            let batch = client
+            let tx = client
                 .update(ids[0], vec![("rank".to_owned(), Value::Integer(0))])
                 .expect("change only the unprojected ordering field");
-            client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("rank-only reorder settles at edge");
+            support::wait_for_edge_txs(
+                &client,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
             let mut updates = Vec::new();
             wait_for_subscription_update(
@@ -185,30 +179,28 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
                 .connect()
                 .await;
 
-            let query = QueryBuilder::new("todos").build();
+            let query = jazz::query::Query::from("todos");
             let mut stream = client
                 .subscribe(query)
                 .await
                 .expect("edge-tier public subscription should open");
             let mut log = Vec::new();
 
-            let (todo_id, _, batch_id) = client
+            let (todo_id, _, transaction_id) = client
                 .insert("todos", row_input!("title" => "visible", "done" => false))
                 .expect("insert todo");
-            client
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("todo should settle at edge");
+            support::wait_for_edge_txs(
+                &client,
+                &[transaction_id.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
             wait_for_subscription_update(
                 &mut stream,
                 &mut log,
                 Duration::from_secs(10),
                 "edge-tier public subscription receives inserted row",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
         })
@@ -221,8 +213,8 @@ async fn maintained_unordered_limit_and_offset_windows_open_offline() {
         .run_until(async {
             let client = JazzClient::test_client(todo_schema()).await;
             for query in [
-                QueryBuilder::new("todos").limit(2).build(),
-                QueryBuilder::new("todos").offset(1).limit(1).build(),
+                jazz::query::Query::from("todos").limit(2),
+                jazz::query::Query::from("todos").offset(1).limit(1),
             ] {
                 let _stream = client
                     .subscribe(query)
@@ -248,23 +240,19 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
                 .await;
 
             let mut ids = Vec::new();
+            let mut txs = Vec::new();
             for title in ["third", "first", "second", "fourth"] {
-                let (id, _, batch) = client
+                let (id, _, tx) = client
                     .insert("todos", row_input!("title" => title, "done" => false))
                     .expect("insert todo");
-                client
-                    .wait_for_batch(
-                        batch.expect("ordinary mutation commits immediately"),
-                        DurabilityTier::EdgeServer,
-                    )
-                    .await
-                    .expect("todo settles at edge");
                 ids.push(id);
+                txs.push(tx.expect("ordinary mutation commits immediately"));
             }
+            support::wait_for_edge_txs(&client, &txs).await;
             let mut row_id_order = ids.clone();
             row_id_order.sort();
 
-            let default_query = QueryBuilder::new("todos").build();
+            let default_query = jazz::query::Query::from("todos");
             let one_shot = client
                 .query(default_query.clone(), Some(DurabilityTier::EdgeServer))
                 .await
@@ -304,11 +292,11 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
 
             for (query, expected) in [
                 (
-                    QueryBuilder::new("todos").limit(2).build(),
+                    jazz::query::Query::from("todos").limit(2),
                     row_id_order[..2].to_vec(),
                 ),
                 (
-                    QueryBuilder::new("todos").offset(1).limit(2).build(),
+                    jazz::query::Query::from("todos").offset(1).limit(2),
                     row_id_order[1..3].to_vec(),
                 ),
             ] {
@@ -350,21 +338,18 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 .await;
 
             let mut tied = Vec::new();
+            let mut txs = Vec::new();
             for _ in 0..3 {
-                let (id, _, batch) = client
+                let (id, _, tx) = client
                     .insert("todos", row_input!("title" => "same", "done" => false))
                     .expect("insert tied todo");
-                client
-                    .wait_for_batch(
-                        batch.expect("ordinary mutation commits immediately"),
-                        DurabilityTier::EdgeServer,
-                    )
-                    .await
-                    .expect("tied todo settles at edge");
                 tied.push(id);
+                txs.push(tx.expect("ordinary mutation commits immediately"));
             }
+            support::wait_for_edge_txs(&client, &txs).await;
             tied.sort();
-            let tie_query = QueryBuilder::new("todos").order_by("title").build();
+            let tie_query =
+                jazz::query::Query::from("todos").order_by("title", OrderDirection::Asc);
             let tied_rows = client
                 .query(tie_query, Some(DurabilityTier::EdgeServer))
                 .await
@@ -377,10 +362,9 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
 
             let mut window = client
                 .subscribe(
-                    QueryBuilder::new("todos")
-                        .order_by("title")
-                        .limit(2)
-                        .build(),
+                    jazz::query::Query::from("todos")
+                        .order_by("title", OrderDirection::Asc)
+                        .limit(2),
                 )
                 .await
                 .expect("subscribe ordered window");
@@ -413,30 +397,28 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
             );
 
             let promoted = tied[2];
-            let batch = client
+            let tx = client
                 .update(
                     promoted,
                     vec![("title".to_owned(), Value::Text("ahead".to_owned()))],
                 )
                 .expect("move row into window");
-            client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("promotion settles at edge");
+            support::wait_for_edge_txs(
+                &client,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             wait_for_subscription_update(
                 &mut window,
                 &mut updates,
                 Duration::from_secs(10),
                 "promoted row enters maintained window",
-                |deltas| has_added(deltas, promoted) && has_removed(deltas, tied[1]),
+                |deltas| has_added_id(deltas, promoted) && has_removed(deltas, tied[1]),
             )
             .await;
             let promotion = updates
                 .iter()
-                .find(|delta| has_added(std::slice::from_ref(delta), promoted))
+                .find(|delta| has_added_id(std::slice::from_ref(delta), promoted))
                 .expect("promotion delta is recorded");
             assert_eq!(
                 promotion
@@ -459,25 +441,23 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 "the displaced row retains its pre-update position"
             );
 
-            let batch = client
+            let tx = client
                 .update(
                     promoted,
                     vec![("title".to_owned(), Value::Text("zulu".to_owned()))],
                 )
                 .expect("move row out of window");
-            client
-                .wait_for_batch(
-                    batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("demotion settles at edge");
+            support::wait_for_edge_txs(
+                &client,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
             wait_for_subscription_update(
                 &mut window,
                 &mut updates,
                 Duration::from_secs(10),
                 "demoted row leaves maintained window",
-                |deltas| has_removed(deltas, promoted) && has_added(deltas, tied[1]),
+                |deltas| has_removed(deltas, promoted) && has_added_id(deltas, tied[1]),
             )
             .await;
 
@@ -502,22 +482,20 @@ async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
                 .await;
 
             let mut stream = client
-                .subscribe(QueryBuilder::new("todos").build())
+                .subscribe(jazz::query::Query::from("todos"))
                 .await
                 .expect("normal subscription should open");
-            let (todo_id, _, batch_id) = client
+            let (todo_id, _, transaction_id) = client
                 .insert(
                     "todos",
                     row_input!("title" => "delta item", "done" => false),
                 )
                 .expect("insert todo");
-            client
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("todo should settle at edge");
+            support::wait_for_edge_txs(
+                &client,
+                &[transaction_id.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
             loop {
@@ -810,10 +788,8 @@ fn mapping_rule_access_policy() -> PolicyExpr {
     }
 }
 
-fn todo_query() -> jazz::tools::Query {
-    QueryBuilder::new("todos")
-        .select(&["title", "done"])
-        .build()
+fn todo_query() -> jazz::query::Query {
+    jazz::query::Query::from("todos").select(["title", "done"])
 }
 
 fn reserve_local_port() -> u16 {
@@ -851,16 +827,6 @@ async fn wait_for_row(
     .await;
 }
 
-async fn wait_edge_batch(client: &JazzClient, batch_id: jazz::tools::BatchId, label: &str) {
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        client.wait_for_batch(batch_id, DurabilityTier::EdgeServer),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("{label} timed out waiting for edge batch"))
-    .unwrap_or_else(|err| panic!("{label} failed waiting for edge batch: {err}"));
-}
-
 struct PolicyGraphSeedRows {
     resource: ObjectId,
     data_entry: ObjectId,
@@ -870,118 +836,74 @@ struct PolicyGraphSeedRows {
 }
 
 async fn seed_policy_graph_rows(admin: &JazzClient) -> PolicyGraphSeedRows {
-    let (seed_team, _, seed_batch) = admin
+    let (seed_team, _, seed_tx) = admin
         .insert(
             "teams",
             row_input!("identity_key" => "00000000-0000-4000-8000-0000000000b0"),
         )
         .expect("insert seed team");
-    wait_edge_batch(
-        admin,
-        seed_batch.expect("ordinary mutation commits immediately"),
-        "seed team",
-    )
-    .await;
-    let (resource_team, _, resource_team_batch) = admin
+    let (resource_team, _, resource_team_tx) = admin
         .insert("teams", row_input!("identity_key" => "other-sub"))
         .expect("insert resource team");
-    wait_edge_batch(
-        admin,
-        resource_team_batch.expect("ordinary mutation commits immediately"),
-        "resource team",
-    )
-    .await;
-    let (_, _, edge_batch) = admin
+    let (_, _, edge_tx) = admin
         .insert(
             "team_team_edges",
             row_input!("child_team" => seed_team, "parent_team" => resource_team),
         )
         .expect("insert team edge");
-    wait_edge_batch(
-        admin,
-        edge_batch.expect("ordinary mutation commits immediately"),
-        "team edge",
-    )
-    .await;
-    let (resource, _, resource_batch) = admin
+    let (resource, _, resource_tx) = admin
         .insert("resources", row_input!("label" => "visible resource"))
         .expect("insert resource");
-    wait_edge_batch(
-        admin,
-        resource_batch.expect("ordinary mutation commits immediately"),
-        "resource",
-    )
-    .await;
-    let (_, _, access_batch) = admin
+    let (_, _, access_tx) = admin
         .insert(
             "resource_access_edges",
             row_input!("resource" => resource, "team" => resource_team, "grant_role" => "viewer"),
         )
         .expect("insert resource access edge");
-    wait_edge_batch(
-        admin,
-        access_batch.expect("ordinary mutation commits immediately"),
-        "resource access",
-    )
-    .await;
-    let (data_entry, _, data_entry_batch) = admin
+    let (data_entry, _, data_entry_tx) = admin
         .insert(
             "data_entries",
             row_input!("resource" => resource, "label" => "visible data entry"),
         )
         .expect("insert data entry");
-    wait_edge_batch(
-        admin,
-        data_entry_batch.expect("ordinary mutation commits immediately"),
-        "data entry",
-    )
-    .await;
-    let (mapping_rule, _, mapping_rule_batch) = admin
+    let (mapping_rule, _, mapping_rule_tx) = admin
         .insert(
             "mapping_rules",
             row_input!("label" => "visible mapping rule"),
         )
         .expect("insert mapping rule");
-    wait_edge_batch(
-        admin,
-        mapping_rule_batch.expect("ordinary mutation commits immediately"),
-        "mapping rule",
-    )
-    .await;
-    let (_, _, mapping_rule_access_batch) = admin
+    let (_, _, mapping_rule_access_tx) = admin
         .insert(
             "mapping_rule_access_edges",
             row_input!("mapping_rule" => mapping_rule, "team" => resource_team, "grant_role" => "viewer"),
         )
         .expect("insert mapping rule access edge");
-    wait_edge_batch(
-        admin,
-        mapping_rule_access_batch.expect("ordinary mutation commits immediately"),
-        "mapping rule access",
-    )
-    .await;
-    let (data_entry_entry, _, data_entry_entry_batch) = admin
+    let (data_entry_entry, _, data_entry_entry_tx) = admin
         .insert(
             "data_entry_entries",
             row_input!("data_entry" => data_entry, "label" => "visible data entry child"),
         )
         .expect("insert data entry child");
-    wait_edge_batch(
-        admin,
-        data_entry_entry_batch.expect("ordinary mutation commits immediately"),
-        "data entry child",
-    )
-    .await;
-    let (mapping_rule_entry, _, mapping_rule_entry_batch) = admin
+    let (mapping_rule_entry, _, mapping_rule_entry_tx) = admin
         .insert(
             "mapping_rule_entries",
             row_input!("mapping_rule" => mapping_rule, "label" => "visible mapping rule child"),
         )
         .expect("insert mapping rule child");
-    wait_edge_batch(
+    support::wait_for_edge_txs(
         admin,
-        mapping_rule_entry_batch.expect("ordinary mutation commits immediately"),
-        "mapping rule child",
+        &[
+            seed_tx.expect("ordinary mutation commits immediately"),
+            resource_team_tx.expect("ordinary mutation commits immediately"),
+            edge_tx.expect("ordinary mutation commits immediately"),
+            resource_tx.expect("ordinary mutation commits immediately"),
+            access_tx.expect("ordinary mutation commits immediately"),
+            data_entry_tx.expect("ordinary mutation commits immediately"),
+            mapping_rule_tx.expect("ordinary mutation commits immediately"),
+            mapping_rule_access_tx.expect("ordinary mutation commits immediately"),
+            data_entry_entry_tx.expect("ordinary mutation commits immediately"),
+            mapping_rule_entry_tx.expect("ordinary mutation commits immediately"),
+        ],
     )
     .await;
 
@@ -997,7 +919,7 @@ async fn seed_policy_graph_rows(admin: &JazzClient) -> PolicyGraphSeedRows {
 async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraphSeedRows) {
     let member_rows = wait_for_query(
         member,
-        QueryBuilder::new("resources").build(),
+        jazz::query::Query::from("resources"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(30),
         "member sees resource through seeded recursive access policy",
@@ -1012,7 +934,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     );
     wait_for_query(
         member,
-        QueryBuilder::new("data_entries").build(),
+        jazz::query::Query::from("data_entries"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(30),
         "member sees data entry through seeded recursive access policy",
@@ -1023,7 +945,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     .await;
     wait_for_query(
         member,
-        QueryBuilder::new("mapping_rules").build(),
+        jazz::query::Query::from("mapping_rules"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(30),
         "member sees sibling mapping rule through same seeded recursive access policy",
@@ -1034,7 +956,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     .await;
     wait_for_query(
         member,
-        QueryBuilder::new("data_entry_entries").build(),
+        jazz::query::Query::from("data_entry_entries"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(30),
         "member sees grandchild through inherits over seeded access policy",
@@ -1046,7 +968,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     .await;
     wait_for_query(
         member,
-        QueryBuilder::new("mapping_rule_entries").build(),
+        jazz::query::Query::from("mapping_rule_entries"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(30),
         "member sees mapping rule child through inherits over sibling seeded access policy",
@@ -1118,7 +1040,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                 .await;
             wait_for_query(
                 &spy,
-                QueryBuilder::new("resources").build(),
+                jazz::query::Query::from("resources"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(30),
                 "spy sees no resources through seeded recursive access policy",
@@ -1127,7 +1049,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
             .await;
             wait_for_query(
                 &spy,
-                QueryBuilder::new("data_entries").build(),
+                jazz::query::Query::from("data_entries"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(30),
                 "spy sees no inherited data entries through seeded recursive access policy",
@@ -1209,19 +1131,17 @@ async fn edge_server_accepts_mergeable_write_while_core_down_then_promotes() {
             let alice = connect_user(&edge, schema.clone(), "alice-edge-server-mode").await;
             let bob = connect_user(&edge, schema.clone(), "bob-edge-server-mode").await;
 
-            let (todo_id, expected, batch_id) = alice
+            let (todo_id, expected, transaction_id) = alice
                 .insert(
                     "todos",
                     row_input!("title" => "edge first", "done" => false),
                 )
                 .expect("alice inserts while core is down");
-            alice
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("edge accepts write while core link is down");
+            support::wait_for_edge_txs(
+                &alice,
+                &[transaction_id.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
             wait_for_row(
                 &bob,
@@ -1240,8 +1160,8 @@ async fn edge_server_accepts_mergeable_write_while_core_down_then_promotes() {
                 .await;
 
             alice
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::GlobalServer,
                 )
                 .await
@@ -1322,15 +1242,15 @@ async fn core_write_reaches_clients_on_both_edges() {
             let mut alice_log = Vec::new();
             let mut bob_log = Vec::new();
 
-            let (todo_id, expected, batch_id) = carol
+            let (todo_id, expected, transaction_id) = carol
                 .insert(
                     "todos",
                     row_input!("title" => "core write for both edges", "done" => false),
                 )
                 .expect("carol writes directly to core");
             carol
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::GlobalServer,
                 )
                 .await
@@ -1341,7 +1261,7 @@ async fn core_write_reaches_clients_on_both_edges() {
                 &mut alice_log,
                 Duration::from_secs(30),
                 "alice receives the core write through edge_us",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
             wait_for_subscription_update(
@@ -1349,7 +1269,7 @@ async fn core_write_reaches_clients_on_both_edges() {
                 &mut bob_log,
                 Duration::from_secs(30),
                 "bob receives the core write through edge_eu",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
             wait_for_row(
@@ -1423,15 +1343,15 @@ async fn edge_write_reaches_client_on_peer_edge() {
                 .expect("bob subscribes through edge_eu");
             let mut bob_log = Vec::new();
 
-            let (todo_id, expected, batch_id) = alice
+            let (todo_id, expected, transaction_id) = alice
                 .insert(
                     "todos",
                     row_input!("title" => "edge write for peer", "done" => true),
                 )
                 .expect("alice writes through edge_us");
             alice
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::GlobalServer,
                 )
                 .await
@@ -1442,7 +1362,7 @@ async fn edge_write_reaches_client_on_peer_edge() {
                 &mut bob_log,
                 Duration::from_secs(30),
                 "bob receives edge_us write through edge_eu",
-                |deltas| has_added(deltas, todo_id),
+                |deltas| has_added_id(deltas, todo_id),
             )
             .await;
             wait_for_row(
@@ -1489,7 +1409,7 @@ fn topology_matrix_conformance_smoke_inventory() {
         Cell {
             topology: Topology::ClientCore,
             scenario: Scenario::MergeableWrite,
-            coverage: "clients_sync::wait_for_batch_reaches_edge_and_global_tiers",
+            coverage: "clients_sync::wait_for_transaction_reaches_edge_and_global_tiers",
         },
         Cell {
             topology: Topology::ClientCore,

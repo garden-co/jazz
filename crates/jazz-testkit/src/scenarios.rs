@@ -3,10 +3,11 @@
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use jazz::query::Query;
 use jazz::tools::sync::ClientId;
 use jazz::tools::{
-    AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
-    QueryBuilder, Schema, SubscriptionStream, SubscriptionStreamItem, Value,
+    AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Schema,
+    SubscriptionStream, SubscriptionStreamItem, TransactionId, Value,
 };
 use jazz_server::JazzServer;
 use jsonwebtoken::{EncodingKey, Header, encode};
@@ -299,6 +300,7 @@ pub async fn connect_ready_client(
         .with_server(server)
         .with_schema(schema.clone())
         .with_user_id(user_id)
+        .as_admin()
         .ready_on(ready_table, ready_timeout)
         .connect()
         .await
@@ -424,13 +426,32 @@ mod tests {
 pub async fn wait_for_edge_query_ready(client: &JazzClient, table: &str, timeout: Duration) {
     wait_for_query(
         client,
-        QueryBuilder::new(table).build(),
+        Query::from(table),
         Some(DurabilityTier::EdgeServer),
         timeout,
         format!("EdgeServer query readiness for {table}"),
         |_| Some(()),
     )
     .await;
+}
+
+/// Waits until every committed transaction reaches edge-server durability.
+pub async fn wait_for_edge_txs(client: &JazzClient, transaction_ids: &[TransactionId]) {
+    for &transaction_id in transaction_ids {
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            client.wait_for_transaction(transaction_id, DurabilityTier::EdgeServer),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!("transaction {transaction_id} timed out waiting for edge-server durability")
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "transaction {transaction_id} failed waiting for edge-server durability: {error}"
+            )
+        });
+    }
 }
 
 #[allow(dead_code)]
@@ -561,8 +582,20 @@ pub async fn collect_stream_deltas(
 }
 
 #[allow(dead_code)]
+/// Returns true if any logged add contains every expected named field value.
+pub fn has_added(log: &[OrderedRowDelta], expected: &[(&str, Value)]) -> bool {
+    log.iter().any(|delta| {
+        delta.added.iter().any(|change| {
+            expected
+                .iter()
+                .all(|(name, value)| change.row.get(name) == Some(value))
+        })
+    })
+}
+
+#[allow(dead_code)]
 /// Returns true if any logged subscription delta contains `id` in its added set.
-pub fn has_added(log: &[OrderedRowDelta], id: ObjectId) -> bool {
+pub fn has_added_id(log: &[OrderedRowDelta], id: ObjectId) -> bool {
     log.iter()
         .any(|delta| delta.added.iter().any(|change| change.id == id))
 }
@@ -585,7 +618,7 @@ pub fn has_updated(log: &[OrderedRowDelta], id: ObjectId) -> bool {
 /// Returns true if any logged subscription delta references `id` as an add,
 /// update, or removal.
 pub fn has_any_change(log: &[OrderedRowDelta], id: ObjectId) -> bool {
-    has_added(log, id) || has_updated(log, id) || has_removed(log, id)
+    has_added_id(log, id) || has_updated(log, id) || has_removed(log, id)
 }
 
 #[allow(dead_code)]

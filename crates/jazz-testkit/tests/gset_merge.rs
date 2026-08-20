@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use jazz::query::Query;
 use jazz::tools::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, ObjectId, Query,
-    QueryBuilder, RowDescriptor, Schema, TableName, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, ObjectId,
+    RowDescriptor, Schema, TableName, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{TestingClient, wait_for, wait_for_query};
@@ -74,27 +75,23 @@ async fn merge_concurrently(
     second: &JazzClient,
     second_value: Value,
 ) {
-    let first_batch = first
+    let first_tx = first
         .update(doc_id, vec![(column.to_string(), first_value)])
         .expect("first replica writes");
-    first
-        .wait_for_batch(
-            first_batch.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("first write settles at the server before the second is sent");
+    support::wait_for_edge_txs(
+        &first,
+        &[first_tx.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
-    let second_batch = second
+    let second_tx = second
         .update(doc_id, vec![(column.to_string(), second_value)])
         .expect("second replica writes");
-    second
-        .wait_for_batch(
-            second_batch.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("second write settles at the server");
+    support::wait_for_edge_txs(
+        &second,
+        &[second_tx.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 }
 
 /// Wait until both replicas report `doc_id`'s column as `expected`.
@@ -166,7 +163,7 @@ async fn concurrent_writes_converge_to_sorted_union_impl() {
         .insert("docs", doc_values("b", &["seed"]))
         .expect("alice creates doc b");
 
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),
@@ -263,7 +260,7 @@ async fn concurrent_writes_never_remove_a_shared_element_impl() {
         .insert("docs", doc_values("b", &["base", "keep"]))
         .expect("alice creates doc b");
 
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),
@@ -360,7 +357,7 @@ async fn same_elements_in_different_orders_converge_to_one_canonical_order_impl(
     let (doc_id, _, _) = alice
         .insert("docs", doc_values("order", &[]))
         .expect("alice creates doc");
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),
@@ -430,7 +427,7 @@ async fn duplicate_insertions_are_idempotent_impl() {
     let (doc_id, _, _) = alice
         .insert("docs", doc_values("idempotent", &[]))
         .expect("alice creates doc");
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),
@@ -489,18 +486,16 @@ async fn later_writes_cannot_remove_existing_elements_impl() {
     let (doc_id, _, _) = alice
         .insert("docs", doc_values("no-remove", &["keep"]))
         .expect("alice creates doc");
-    let remove_batch = alice
+    let remove_tx = alice
         .update(doc_id, vec![("tags".to_string(), tags_value(&[]))])
         .expect("attempted removal writes a version");
-    alice
-        .wait_for_batch(
-            remove_batch.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("attempted removal settles");
+    support::wait_for_edge_txs(
+        &alice,
+        &[remove_tx.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &alice,
         query,
@@ -553,7 +548,7 @@ async fn empty_and_non_empty_sets_union_in_both_propagation_orders_impl() {
     let (doc_bob_first, _, _) = alice
         .insert("docs", doc_values("non-empty-first", &[]))
         .expect("alice creates second doc");
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),
@@ -691,7 +686,7 @@ async fn distinct_float_representations_converge_deterministically_impl() {
         .insert("docs", score_doc_values("b", &[]))
         .expect("alice creates doc b");
 
-    let query = QueryBuilder::new("docs").build();
+    let query = jazz::query::Query::from("docs");
     wait_for_query(
         &bob,
         query.clone(),

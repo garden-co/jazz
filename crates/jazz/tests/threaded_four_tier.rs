@@ -10,7 +10,7 @@ use jazz::node::{CurrentRow, MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::{PeerMetrics, PeerState};
 use jazz::protocol::SyncMessage;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
-use jazz::tools::OpenBatchId;
+use jazz::tools::OpenTransactionId;
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, TxId};
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, decode_frame,
@@ -325,7 +325,7 @@ fn ui_thread(
         if idx % 18 == 12 {
             drain_ui_downstream(&mut ui, &from_worker);
             let row_uuid = row(40 + ((idx / 18) % 8) as u8);
-            let tx_id = OpenBatchId::new();
+            let tx_id = OpenTransactionId::new();
             ui.open_exclusive(tx_id).unwrap();
             let _ = ui.tx_read(tx_id, TABLE, row_uuid).unwrap();
             let title = format!("exclusive-{idx}");

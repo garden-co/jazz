@@ -314,9 +314,27 @@ export class SubscriptionManager<T extends { id: string }> {
         // record layout. Only Groove terminal edit payloads retain the outer
         // sparse current-row carrier described by `sparse`.
         const decoded = decodeNativeDelta(delta, logicalStorageColumns(nativeColumns));
+        // Packed row removals are applied before terminal operations. Keep their
+        // full public occurrence identities so a later descendant teardown in
+        // this frame can be recognized as subsumed by its root removal.
+        const packedRemovedRoots = new Set<string>();
+        for (const [index, change] of decoded
+          .filter((change) => change.kind === RowChangeKind.Removed)
+          .entries()) {
+          packedRemovedRoots.add(change.id);
+          const terminalKey = terminalKeyForPackedOccurrence(delta.removedOccurrenceKeys?.[index]);
+          if (!terminalKey) continue;
+          const bridgedRootId = this.terminalRootId(Array.from(terminalKey));
+          packedRemovedRoots.add(bridgedRootId);
+          // Legacy snapshots key their visible and terminal root state by the
+          // physical UUID. Retarget this packed removal before ordinary row
+          // reduction so it removes that legacy state as well as the sidecar
+          // occurrence address used by current snapshots.
+          change.id = bridgedRootId;
+        }
         for (const change of decoded) {
           if (change.kind === RowChangeKind.Removed) {
-            this.terminalRows.delete(change.id);
+            for (const rootId of packedRemovedRoots) this.terminalRows.delete(rootId);
           } else if (change.row) {
             // The plain native decoder exposes both positional values and a
             // name map, but decodes them independently. Terminal edits mutate
@@ -326,12 +344,16 @@ export class SubscriptionManager<T extends { id: string }> {
           }
         }
         const wireResult = this.handleWireDelta(decoded, transform, reset);
-        const terminalOperations = this.readyTerminalOperations(delta.terminalOperations ?? []);
+        const terminalOperations = this.readyTerminalOperations(
+          delta.terminalOperations ?? [],
+          packedRemovedRoots,
+        );
         if (terminalOperations.length > 0) {
           const terminalResult = this.handleTerminalOperations(
             terminalOperations,
             transform,
             nativeColumns,
+            packedRemovedRoots,
           );
           return reset
             ? { delta: terminalResult.delta, all: terminalResult.all ?? this.all(), reset: true }
@@ -425,7 +447,10 @@ export class SubscriptionManager<T extends { id: string }> {
    * A root insert in this same frame satisfies the dependency because the
    * terminal reducer pre-establishes such roots before applying children.
    */
-  private readyTerminalOperations(incoming: NativeTerminalOperation[]): NativeTerminalOperation[] {
+  private readyTerminalOperations(
+    incoming: NativeTerminalOperation[],
+    packedRemovedRoots: ReadonlySet<string>,
+  ): NativeTerminalOperation[] {
     const operations = [...this.deferredTerminalOperations, ...incoming];
     this.deferredTerminalOperations = [];
     const insertedRoots = new Set(
@@ -435,9 +460,18 @@ export class SubscriptionManager<T extends { id: string }> {
     );
     const ready: NativeTerminalOperation[] = [];
     for (const operation of operations) {
+      const rootAddress = this.terminalAddress(operation.root_key);
       if (
         operation.path.length > 0 &&
-        !insertedRoots.has(this.terminalAddress(operation.root_key)) &&
+        packedRemovedRoots.has(rootAddress) &&
+        !("Remove" in operation.edit)
+      ) {
+        throw new Error("terminal child edit addressed a root removed in the same packed frame");
+      }
+      if (
+        operation.path.length > 0 &&
+        !insertedRoots.has(rootAddress) &&
+        !packedRemovedRoots.has(rootAddress) &&
         !this.terminalRows.has(this.terminalRootId(operation.root_key))
       ) {
         this.deferredTerminalOperations.push(operation);
@@ -455,9 +489,11 @@ export class SubscriptionManager<T extends { id: string }> {
     operations: NativeTerminalOperation[],
     transform: (row: WasmRow) => T,
     rootColumns: readonly ColumnDescriptor[],
+    packedRemovedRoots: ReadonlySet<string>,
   ): SubscriptionDelta<T> {
     const beforeIndices = new Map(this.orderedIdIndex);
     const affectedRoots = new Set<string>();
+    const removedRoots = new Set(packedRemovedRoots);
     // Pre-establish only newly inserted root payloads so child-before-root
     // batches are addressable. Positional insertion remains in producer order:
     // applying its index before an earlier root Remove makes the outcome depend
@@ -510,6 +546,7 @@ export class SubscriptionManager<T extends { id: string }> {
             if (isUuidOnlyTerminalKey(operation.root_key)) continue;
             throw new Error(`terminal root removal addressed missing root ${rootId}`);
           }
+          removedRoots.add(rootId);
           this.currentResults.delete(rootId);
           this.removeId(rootId);
         } else if ("Move" in edit) {
@@ -524,6 +561,10 @@ export class SubscriptionManager<T extends { id: string }> {
       }
 
       const root = this.terminalRows.get(rootId);
+      // A root removal subsumes only descendant removals emitted later in the
+      // same producer frame. Other child edits against that absent root fail
+      // closed below.
+      if (!root && removedRoots.has(rootId) && "Remove" in edit) continue;
       if (!root) throw new Error(`terminal child edit addressed missing root ${rootId}`);
       assertTerminalPathEditKey(operation.path, edit);
       const target = terminalCollection(root, rootColumns, operation.path);
@@ -902,6 +943,21 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
     ordered.push(10, ...uuid);
   }
   return Uint8Array.from(ordered);
+}
+
+/** Reconstruct a terminal key for either supported packed occurrence carrier. */
+function terminalKeyForPackedOccurrence(sidecar: Uint8Array | undefined): Uint8Array | undefined {
+  if (!sidecar) return undefined;
+  const typed = orderedTerminalKeyForTypedOccurrence(sidecar);
+  if (typed) return typed;
+  if (sidecar[0] !== 1 || sidecar.byteLength < 17 || (sidecar.byteLength - 1) % 16 !== 0) {
+    return undefined;
+  }
+  const key: number[] = [];
+  for (let offset = 1; offset < sidecar.byteLength; offset += 16) {
+    key.push(10, ...sidecar.subarray(offset, offset + 16));
+  }
+  return Uint8Array.from(key);
 }
 
 function readU32Be(bytes: Uint8Array, offset: number): number {

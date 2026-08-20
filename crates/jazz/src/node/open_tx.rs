@@ -12,13 +12,13 @@ where
     S: OrderedKvStorage,
 {
     /// Open an exclusive transaction over the current snapshot.
-    pub fn open_exclusive(&mut self, id: OpenBatchId) -> Result<(), Error> {
+    pub fn open_exclusive(&mut self, id: OpenTransactionId) -> Result<(), Error> {
         self.open_exclusive_for_identity(id, AuthorId::SYSTEM)
     }
 
     pub(crate) fn open_exclusive_for_identity(
         &mut self,
-        id: OpenBatchId,
+        id: OpenTransactionId,
         made_by: AuthorId,
     ) -> Result<(), Error> {
         self.open_transaction(id, OpenTransactionKind::Exclusive, made_by)
@@ -27,7 +27,7 @@ where
     /// Open a mergeable transaction over the current snapshot.
     pub(crate) fn open_mergeable(
         &mut self,
-        id: OpenBatchId,
+        id: OpenTransactionId,
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
     ) -> Result<(), Error> {
@@ -43,7 +43,7 @@ where
 
     fn open_transaction(
         &mut self,
-        id: OpenBatchId,
+        id: OpenTransactionId,
         kind: OpenTransactionKind,
         provisional_author: AuthorId,
     ) -> Result<(), Error> {
@@ -85,7 +85,7 @@ where
     /// Read a row inside an exclusive transaction.
     pub fn tx_read(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
@@ -101,7 +101,7 @@ where
     /// Read a row through an explicit registered schema view.
     pub fn tx_read_in_schema(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
@@ -112,7 +112,7 @@ where
 
     fn tx_read_unchecked(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
@@ -161,7 +161,7 @@ where
     /// Read all current rows inside an exclusive transaction.
     pub fn tx_current_rows(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
         let schema_version = self.catalogue.current_write_schema.schema;
@@ -172,7 +172,7 @@ where
     /// Read current rows through an explicit registered schema view.
     pub fn tx_current_rows_in_schema(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -184,7 +184,7 @@ where
     /// retaining root rows whose deletion register wins.
     pub(crate) fn tx_current_rows_in_schema_with_options(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
         table: &str,
         include_deleted: bool,
@@ -195,7 +195,7 @@ where
 
     fn tx_current_rows_with_table(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
         table: &str,
         table_schema: TableSchema,
@@ -307,7 +307,7 @@ where
     /// Stage a row write inside an exclusive transaction.
     pub fn tx_write<V: Into<Value>>(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         table: &str,
         row_uuid: RowUuid,
         cells: BTreeMap<String, V>,
@@ -326,7 +326,7 @@ where
     /// Stage a row write through an explicit registered schema view.
     pub fn tx_write_in_schema<V: Into<Value>>(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         write_schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
@@ -346,7 +346,7 @@ where
 
     pub(crate) fn tx_write_in_schema_at_ms<V: Into<Value>>(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         write_schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
@@ -414,7 +414,7 @@ where
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn tx_write_mergeable(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         table: &str,
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
@@ -438,7 +438,7 @@ where
 
     pub(crate) fn tx_write_mergeable_in_schema(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         write_schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
@@ -477,7 +477,7 @@ where
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn tx_patch_mergeable(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         table: &str,
         row_uuid: RowUuid,
         patch: BTreeMap<String, Value>,
@@ -495,7 +495,7 @@ where
 
     pub(crate) fn tx_patch_mergeable_in_schema(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         write_schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
@@ -534,7 +534,7 @@ where
 
     fn stage_mergeable_write(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         pending: PendingWrite,
     ) -> Result<(), Error> {
         let open_tx = self.open_tx_mut(tx_id)?;
@@ -581,7 +581,7 @@ where
     }
 
     /// Attach application metadata to an open transaction.
-    pub fn tx_set_metadata(&mut self, tx_id: OpenBatchId, json: String) -> Result<(), Error> {
+    pub fn tx_set_metadata(&mut self, tx_id: OpenTransactionId, json: String) -> Result<(), Error> {
         self.open_tx_mut(tx_id)?.user_metadata_json = Some(json);
         Ok(())
     }
@@ -589,7 +589,7 @@ where
     /// Commit an exclusive transaction and return its sync commit unit.
     pub fn commit_exclusive(
         &mut self,
-        open_batch_id: OpenBatchId,
+        open_batch_id: OpenTransactionId,
         made_by: AuthorId,
         now_ms: u64,
     ) -> Result<(TxId, SyncMessage), Error> {
@@ -682,7 +682,7 @@ where
 
     fn open_exclusive_is_locally_serializable(
         &mut self,
-        open_batch_id: OpenBatchId,
+        open_batch_id: OpenTransactionId,
     ) -> Result<bool, Error> {
         let open_tx = self.open_tx(open_batch_id)?.clone();
         for read in &open_tx.row_reads {
@@ -735,7 +735,7 @@ where
     /// Commit a mergeable open transaction through the ordinary mergeable batch path.
     pub(crate) fn commit_mergeable_open(
         &mut self,
-        open_batch_id: OpenBatchId,
+        open_batch_id: OpenTransactionId,
         mut next_now_ms: impl FnMut() -> u64,
     ) -> Result<TxId, Error> {
         if !matches!(
@@ -834,7 +834,7 @@ where
     }
 
     /// Abandon an open transaction.
-    pub fn abandon_tx(&mut self, tx_id: OpenBatchId) -> Result<(), Error> {
+    pub fn abandon_tx(&mut self, tx_id: OpenTransactionId) -> Result<(), Error> {
         self.open_tx
             .open_transactions
             .remove(&tx_id)
@@ -844,11 +844,11 @@ where
     }
 
     /// Return whether local transaction time advanced after this transaction opened.
-    pub fn open_exclusive_snapshot_moved(&self, tx_id: OpenBatchId) -> Result<bool, Error> {
+    pub fn open_exclusive_snapshot_moved(&self, tx_id: OpenTransactionId) -> Result<bool, Error> {
         Ok(self.clock.tx_time > self.open_tx(tx_id)?.base_snapshot.local_base)
     }
 
-    pub(super) fn open_tx(&self, tx_id: OpenBatchId) -> Result<&OpenTransaction, Error> {
+    pub(super) fn open_tx(&self, tx_id: OpenTransactionId) -> Result<&OpenTransaction, Error> {
         self.open_tx
             .open_transactions
             .get(&tx_id)
@@ -857,7 +857,7 @@ where
 
     pub(super) fn open_tx_mut(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
     ) -> Result<&mut OpenTransaction, Error> {
         self.open_tx
             .open_transactions
@@ -1030,7 +1030,7 @@ where
 
     fn overlay_pending_writes_in_schema(
         &self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
@@ -1042,7 +1042,7 @@ where
 
     fn overlay_pending_writes_with_table(
         &self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         table_schema: &TableSchema,
         table: &str,
         row_uuid: RowUuid,
@@ -1060,7 +1060,7 @@ where
 
     fn overlay_pending_cells_and_deletion_with_table(
         &self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         table_schema: &TableSchema,
         table: &str,
         row_uuid: RowUuid,

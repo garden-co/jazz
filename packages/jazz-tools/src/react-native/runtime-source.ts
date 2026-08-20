@@ -9,7 +9,7 @@ import {
   REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
 } from "./storage.js";
 
-export interface ReactNativeDbConfig extends DbConfig {
+export type ReactNativeDbConfig = DbConfig & {
   /**
    * Proposal-only SQLite storage hook for a future native v2 runtime.
    *
@@ -21,7 +21,7 @@ export interface ReactNativeDbConfig extends DbConfig {
    * native ordered-KV runtime exists.
    */
   sqliteStorage?: ReactNativeSqliteStorageDriver;
-}
+};
 
 function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
   return (config.driver?.type ?? "persistent") === "persistent";

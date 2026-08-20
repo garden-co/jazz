@@ -8,7 +8,7 @@ use serde_bytes::ByteBuf;
 use crate::tools::Value;
 use crate::tools::metadata::RowProvenance;
 use crate::tools::object::ResultKey;
-use crate::tools::transaction::BatchId;
+use crate::tools::transaction::TransactionId;
 
 /// One named, typed field in a materialized query result.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,13 +116,17 @@ impl<'de> Deserialize<'de> for RowBytes {
     }
 }
 
-/// A maintained output row with its result key, binary data, and batch identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A maintained output row with its result key, binary data, and transaction identity.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(feature = "testing"), derive(Eq))]
 pub struct Row {
     pub id: ResultKey,
     /// Binary encoded row data.
     pub data: RowBytes,
-    pub batch_id: BatchId,
+    #[cfg(feature = "testing")]
+    /// Named, typed fields decoded according to the subscribed query.
+    pub fields: Vec<QueryResultField>,
+    pub transaction_id: TransactionId,
     pub provenance: RowProvenance,
 }
 
@@ -130,15 +134,33 @@ impl Row {
     pub fn new(
         id: ResultKey,
         data: impl Into<RowBytes>,
-        batch_id: BatchId,
+        transaction_id: TransactionId,
         provenance: RowProvenance,
     ) -> Self {
         Self {
             id,
             data: data.into(),
-            batch_id,
+            #[cfg(feature = "testing")]
+            fields: Vec::new(),
+            transaction_id,
             provenance,
         }
+    }
+
+    #[cfg(feature = "testing")]
+    /// Attach named, typed query-result fields to this row.
+    pub fn with_fields(mut self, fields: Vec<QueryResultField>) -> Self {
+        self.fields = fields;
+        self
+    }
+
+    #[cfg(feature = "testing")]
+    /// Look up a decoded field by its public query-result name.
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| &field.value)
     }
 }
 

@@ -85,7 +85,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
     })
     .unwrap();
 
-    let tx = OpenBatchId::new();
+    let tx = OpenTransactionId::new();
     core.open_exclusive(tx).unwrap();
     core.tx_write(
         tx,

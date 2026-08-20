@@ -303,7 +303,7 @@ describe("Chat App E2E", () => {
   // 4. Delete a message
   // -------------------------------------------------------------------------
 
-  it.fails("deletes a message via the dropdown menu", async () => {
+  it("deletes a message via the dropdown menu", async () => {
     const el = await mountApp();
 
     await waitFor(
@@ -649,7 +649,7 @@ describe("Chat App E2E", () => {
     // and would look like "019c…" or "false" — the above assertion covers both.
   });
 
-  it.fails("denies access and hides messages for non-members of a private chat", async () => {
+  it("denies access and hides messages for non-members of a private chat", async () => {
     const { bobContainer } = await setupPrivateChatAccess();
 
     // The secret message should NOT be visible to a non-member

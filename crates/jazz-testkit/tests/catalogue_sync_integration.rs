@@ -1,5 +1,3 @@
-#![allow(dead_code, clippy::redundant_pattern_matching)]
-
 //! E2E catalogue sync integration test.
 //!
 //! Verifies that schema+lens catalogue objects propagate through the full
@@ -10,22 +8,21 @@ use jazz_testkit as support;
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
+use jazz::query::{ArraySubquery, Query};
 use jazz::row_input;
 use jazz::tools::public_schema::PolicyExpr;
 use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::public_schema::TablePolicies;
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
-use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{ColumnType, DurabilityTier, JazzClient, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
 use support::{
-    PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added, has_removed,
-    publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory, wait_for,
-    wait_for_edge_query_ready, wait_for_query, wait_for_query_results,
+    PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added_id,
+    has_removed, publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory,
+    wait_for, wait_for_edge_query_ready, wait_for_query, wait_for_query_results,
     wait_for_subscription_update,
 };
 use tempfile::TempDir;
@@ -600,7 +597,7 @@ async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
 
 async fn assert_edge_query_does_not_include_row(
     client: &JazzClient,
-    query: jazz::tools::Query,
+    query: jazz::query::Query,
     row_id: jazz::tools::ObjectId,
     timeout: Duration,
     description: &str,
@@ -814,15 +811,15 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
         .await;
 
     let user_id = jazz::tools::ObjectId::new();
-    let (row_id, _, batch_id) = alice
+    let (row_id, _, transaction_id) = alice
         .insert(
             "users",
             user_values_v1(user_id, "visible through peer edge"),
         )
         .expect("peer-edge client writes after receiving the catalogue");
     alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::GlobalServer,
         )
         .await
@@ -830,7 +827,7 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
 
     let rows = wait_for_query(
         &alice,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "peer edge serves the row written after catalogue replication",
@@ -919,22 +916,22 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
         .await;
 
     let user_id = jazz::tools::ObjectId::new();
-    let (row_id, _, batch_id) = alice_v2
+    let (row_id, _, transaction_id) = alice_v2
         .insert(
             "users",
             user_values_v2(user_id, "replayed before client work", "v2@example.test"),
         )
         .expect("v2 client writes through restarted edge");
     alice_v2
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::GlobalServer,
         )
         .await
         .expect("v2 write settles after catalogue replay");
     let rows = wait_for_query(
         &alice_v2,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "restarted edge serves row written with replayed v2 schema",
@@ -1076,7 +1073,7 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let mut alice_stream = alice
         .subscribe(query.clone())
         .await
@@ -1086,15 +1083,15 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
     let mut bob_log = Vec::new();
 
     let user_id = jazz::tools::ObjectId::new();
-    let (row_id, _, batch_id) = carol
+    let (row_id, _, transaction_id) = carol
         .insert(
             "users",
             user_values_v1(user_id, "visible before retightening"),
         )
         .expect("core writer inserts visible row");
     carol
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::GlobalServer,
         )
         .await
@@ -1104,7 +1101,7 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         &mut alice_log,
         Duration::from_secs(30),
         "alice receives row through edge_us before retightening",
-        |log| has_added(log, row_id),
+        |log| has_added_id(log, row_id),
     )
     .await;
     wait_for_subscription_update(
@@ -1112,7 +1109,7 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         &mut bob_log,
         Duration::from_secs(30),
         "bob receives row through edge_eu before retightening",
-        |log| has_added(log, row_id),
+        |log| has_added_id(log, row_id),
     )
     .await;
 
@@ -1323,7 +1320,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
         tokio::time::timeout(
             Duration::from_secs(3),
             reader.query(
-                QueryBuilder::new("users").build(),
+                jazz::query::Query::from("users"),
                 Some(DurabilityTier::EdgeServer),
             ),
         )
@@ -1350,23 +1347,21 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
     wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
     let user_id_value = jazz::tools::ObjectId::new();
-    let (user_obj_id, _, batch_id) = admin
+    let (user_obj_id, _, transaction_id) = admin
         .insert(
             "users",
             user_values_v1(user_id_value, "visible after permissions"),
         )
         .expect("admin creates user after permissions publish");
-    admin
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("admin creates user after permissions publish");
+    support::wait_for_edge_txs(
+        &admin,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let rows_after_permissions = wait_for_query(
         &reader,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "reader sees row after permissions head publish",
@@ -1397,7 +1392,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let observer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1414,7 +1409,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
 
     let queued_user_id = jazz::tools::ObjectId::new();
     let queued_row_id = jazz::tools::ObjectId::new();
-    let (_, _, batch_id) = writer
+    let (_, _, transaction_id) = writer
         .insert_with_id(
             "users",
             *queued_row_id.uuid(),
@@ -1422,8 +1417,8 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
         )
         .expect("pre-permissions create should stage locally");
     let queued_write_error = writer
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::EdgeServer,
         )
         .await
@@ -1470,19 +1465,17 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     assert!(rows_after_publish.is_empty());
 
     let accepted_user_id = jazz::tools::ObjectId::new();
-    let (accepted_row_id, _, batch_id) = writer
+    let (accepted_row_id, _, transaction_id) = writer
         .insert(
             "users",
             user_values_v1(accepted_user_id, "accepted after permissions"),
         )
         .expect("post-publish create should succeed");
-    writer
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("post-publish create should settle");
+    support::wait_for_edge_txs(
+        &writer,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let rows_after_create = wait_for_query(
         &observer,
@@ -1508,7 +1501,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
         "pre-permissions row should stay hidden after permissions arrive"
     );
 
-    let batch_id = writer
+    let transaction_id = writer
         .update(
             accepted_row_id,
             vec![(
@@ -1517,13 +1510,11 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
             )],
         )
         .expect("update should succeed once permissions exist");
-    writer
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("update should settle once permissions exist");
+    support::wait_for_edge_txs(
+        &writer,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let rows_after_update = wait_for_query(
         &observer,
@@ -1545,16 +1536,14 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     .await;
     assert_eq!(rows_after_update.len(), 1);
 
-    let batch_id = writer
+    let transaction_id = writer
         .delete(accepted_row_id)
         .expect("delete should succeed once permissions exist");
-    writer
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("delete should settle once permissions exist");
+    support::wait_for_edge_txs(
+        &writer,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let rows_after_delete = wait_for_query(
         &observer,
@@ -1583,7 +1572,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
     let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let observer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1627,19 +1616,17 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
     wait_for_edge_query_ready(&writer, "users", Duration::from_secs(30)).await;
 
     let allowed_user_id = jazz::tools::ObjectId::new();
-    let (allowed_row_id, _, batch_id) = writer
+    let (allowed_row_id, _, transaction_id) = writer
         .insert(
             "users",
             user_values_v1(allowed_user_id, "accepted after timeout window"),
         )
         .expect("create should succeed after permissions publish");
-    writer
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("create should settle after permissions publish");
+    support::wait_for_edge_txs(
+        &writer,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let observer_rows = wait_for_query(
         &observer,
@@ -1679,7 +1666,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
 
     let reader = TestingClient::builder()
         .with_server(&server)
@@ -1713,26 +1700,24 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
     let user_id_value = jazz::tools::ObjectId::new();
-    let (user_obj_id, _, batch_id) = admin
+    let (user_obj_id, _, transaction_id) = admin
         .insert(
             "users",
             user_values_v1(user_id_value, "subscription target"),
         )
         .expect("admin creates user after permissions publish");
-    admin
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("admin user reaches edge after permissions publish");
+    support::wait_for_edge_txs(
+        &admin,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     wait_for_subscription_update(
         &mut stream,
         &mut log,
         Duration::from_secs(25),
         "subscription add after first permissions head",
-        |updates| has_added(updates, user_obj_id),
+        |updates| has_added_id(updates, user_obj_id),
     )
     .await;
 
@@ -1826,16 +1811,14 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id_value = jazz::tools::ObjectId::new();
-    let (user_obj_id, _, batch_id) = alice
+    let (user_obj_id, _, transaction_id) = alice
         .insert("users", user_values_v1(user_id_value, "Alice Smith"))
         .expect("alice creates user after permissions publish");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice user reaches edge after permissions publish");
+    support::wait_for_edge_txs(
+        &alice,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     // === Bob connects with v2, queries — should see Alice's row with email: null ===
     let bob = jazz_testkit::connect(
@@ -1848,7 +1831,7 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
 
     let bob_rows = wait_for_query(
         &bob,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees alice's user with email column",
@@ -1921,16 +1904,14 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id = jazz::tools::ObjectId::new();
-    let (row_id, _, batch_id) = alice
+    let (row_id, _, transaction_id) = alice
         .insert("users", user_values_v1(user_id, "Alice Pending Lens"))
         .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice user reaches edge");
+    support::wait_for_edge_txs(
+        &alice,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     seed_schema_catalogue(&server, &v2_schema).await;
 
@@ -1941,7 +1922,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         ))
         .await
         .expect("connect bob with unpublished draft schema");
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let pre_lens_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let mut pre_lens_attempts = 0;
     while tokio::time::Instant::now() < pre_lens_deadline {
@@ -2038,16 +2019,14 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
     let alice_user_id = jazz::tools::ObjectId::new();
-    let (alice_row_id, _, alice_batch_id) = alice
+    let (alice_row_id, _, alice_tx_id) = alice
         .insert("users", user_values_v1(alice_user_id, "Alice Multi-Hop"))
         .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(
-            alice_batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice user reaches edge");
+    support::wait_for_edge_txs(
+        &alice,
+        &[alice_tx_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let bob = jazz_testkit::connect(
         server.make_client_context_for_user(schema_v2(), test_user_id("bob-multi-hop")),
@@ -2056,18 +2035,17 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
     let bob_user_id = jazz::tools::ObjectId::new();
-    let (bob_row_id, _, bob_batch_id) = bob
+    let (bob_row_id, _, bob_tx_id) = bob
         .insert(
             "users",
             user_values_v2(bob_user_id, "Bob Multi-Hop", "bob@example.com"),
         )
         .expect("bob creates v2 user");
-    bob.wait_for_batch(
-        bob_batch_id.expect("ordinary mutation commits immediately"),
-        DurabilityTier::EdgeServer,
+    support::wait_for_edge_txs(
+        &bob,
+        &[bob_tx_id.expect("ordinary mutation commits immediately")],
     )
-    .await
-    .expect("bob user reaches edge");
+    .await;
 
     let charlie = jazz_testkit::connect(
         server.make_client_context_for_user(v3_schema, test_user_id("charlie-multi-hop")),
@@ -2076,7 +2054,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     .expect("connect charlie");
     wait_for_edge_query_ready(&charlie, "users", Duration::from_secs(30)).await;
     let charlie_user_id = jazz::tools::ObjectId::new();
-    let (charlie_row_id, _, charlie_batch_id) = charlie
+    let (charlie_row_id, _, charlie_tx_id) = charlie
         .insert(
             "users",
             user_values_v3(
@@ -2087,17 +2065,15 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
             ),
         )
         .expect("charlie creates v3 user");
-    charlie
-        .wait_for_batch(
-            charlie_batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("charlie user reaches edge");
+    support::wait_for_edge_txs(
+        &charlie,
+        &[charlie_tx_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let rows = wait_for_query(
         &charlie,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "charlie sees all rows transformed to v3",
@@ -2209,19 +2185,17 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id = jazz::tools::ObjectId::new();
-    let (row_id, _, batch_id) = alice
+    let (row_id, _, transaction_id) = alice
         .insert(
             "users",
             rename_chain_values_v1(user_id, "alice@example.com"),
         )
         .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice user reaches edge");
+    support::wait_for_edge_txs(
+        &alice,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v3_schema, test_user_id("bob-rename-chain")),
@@ -2232,7 +2206,7 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
 
     let rows = wait_for_query(
         &bob,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees alice row through chained column renames",
@@ -2302,15 +2276,14 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let user_id = jazz::tools::ObjectId::new();
-    let (row_id, _, batch_id) = bob
+    let (row_id, _, transaction_id) = bob
         .insert("users", rename_chain_values_v3(user_id, "bob@example.com"))
         .expect("bob creates v3 user");
-    bob.wait_for_batch(
-        batch_id.expect("ordinary mutation commits immediately"),
-        DurabilityTier::EdgeServer,
+    support::wait_for_edge_txs(
+        &bob,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
     )
-    .await
-    .expect("bob user reaches edge");
+    .await;
 
     let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-rename-chain-old")),
@@ -2321,7 +2294,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
 
     let rows = wait_for_query(
         &alice,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "alice sees bob row through chained column renames",
@@ -2390,19 +2363,17 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id = jazz::tools::ObjectId::new();
-    let (row_id, _, batch_id) = alice
+    let (row_id, _, transaction_id) = alice
         .insert(
             "users",
             table_rename_values_v1(user_id, "alice@example.com"),
         )
         .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice user reaches edge");
+    support::wait_for_edge_txs(
+        &alice,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-table-rename")),
@@ -2413,7 +2384,7 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
 
     let rows = wait_for_query(
         &bob,
-        QueryBuilder::new("people").build(),
+        jazz::query::Query::from("people"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees alice row through table rename",
@@ -2474,7 +2445,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
-    let query = QueryBuilder::new("people").build();
+    let query = jazz::query::Query::from("people");
     let mut stream = bob
         .subscribe(query.clone())
         .await
@@ -2513,7 +2484,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
         &mut log,
         Duration::from_secs(25),
         "bob subscription sees alice row through table rename",
-        |updates| has_added(updates, row_id),
+        |updates| has_added_id(updates, row_id),
     )
     .await;
     let added = log
@@ -2596,7 +2567,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let mut stream = alice
         .subscribe(query.clone())
         .await
@@ -2642,22 +2613,21 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
     let user_id = jazz::tools::ObjectId::new();
-    let (row_id, _, batch_id) = bob
+    let (row_id, _, transaction_id) = bob
         .insert("people", table_rename_values_v2(user_id, "bob@example.com"))
         .expect("bob creates v2 person");
-    bob.wait_for_batch(
-        batch_id.expect("ordinary mutation commits immediately"),
-        DurabilityTier::EdgeServer,
+    support::wait_for_edge_txs(
+        &bob,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
     )
-    .await
-    .expect("bob person reaches edge");
+    .await;
 
     wait_for_subscription_update(
         &mut stream,
         &mut log,
         Duration::from_secs(25),
         "alice subscription sees bob row through table rename",
-        |updates| has_added(updates, row_id),
+        |updates| has_added_id(updates, row_id),
     )
     .await;
 
@@ -2694,9 +2664,6 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_copy_on_write_schema_v2();
-    // The public branch grammar accepts `main` or a UUID. The former
-    // schema-hash-derived client branch spelling was never a valid branch id.
-    let v2_branch = "main".to_owned();
 
     push_catalogue_in_memory(
         server.server_state(),
@@ -2725,19 +2692,17 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id = jazz::tools::ObjectId::new();
-    let (row_id, _, batch_id) = alice
+    let (row_id, _, transaction_id) = alice
         .insert(
             "users",
             table_rename_values_v1(user_id, "alice@example.com"),
         )
         .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice user reaches edge");
+    support::wait_for_edge_txs(
+        &alice,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     // Publishing a permissions head is the public operation that moves the
     // server's current write pointer. Keep Alice's historical v1 write before
@@ -2759,7 +2724,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
         .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
-    let batch_id = bob
+    let transaction_id = bob
         .update(
             row_id,
             vec![
@@ -2774,18 +2739,15 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
             ],
         )
         .expect("bob updates renamed row");
-    bob.wait_for_batch(
-        batch_id.expect("ordinary mutation commits immediately"),
-        DurabilityTier::EdgeServer,
+    support::wait_for_edge_txs(
+        &bob,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
     )
-    .await
-    .expect("bob update reaches edge");
+    .await;
 
     let rows_after_update = wait_for_query(
         &bob,
-        QueryBuilder::new("people")
-            .branch(v2_branch.clone())
-            .build(),
+        jazz::query::Query::from("people"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees copied row on renamed table after update",
@@ -2804,17 +2766,16 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     .await;
     assert_eq!(rows_after_update.len(), 1);
 
-    let batch_id = bob.delete(row_id).expect("bob deletes renamed row");
-    bob.wait_for_batch(
-        batch_id.expect("ordinary mutation commits immediately"),
-        DurabilityTier::EdgeServer,
+    let transaction_id = bob.delete(row_id).expect("bob deletes renamed row");
+    support::wait_for_edge_txs(
+        &bob,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
     )
-    .await
-    .expect("bob delete reaches edge");
+    .await;
 
     let rows_after_delete = wait_for_query(
         &bob,
-        QueryBuilder::new("people").branch(v2_branch).build(),
+        jazz::query::Query::from("people"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees renamed row deleted",
@@ -2870,36 +2831,29 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     // `people.id` is normalized to the row identity by the flat-join planner.
     // Make the authored v1 row identity match the foreign key that the post
     // will use, as the v2 query's correlation contract requires.
-    let (_, _, batch_id) = alice
+    let (_, _, user_tx) = alice
         .insert_with_id(
             "users",
             *author_id.uuid(),
             table_rename_join_user_values(author_id, "Alice"),
         )
         .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice user reaches edge");
-
     let post_id = jazz::tools::ObjectId::new();
-    let (_, _, batch_id) = alice
+    let (_, _, post_tx) = alice
         .insert_with_id(
             "posts",
             *post_id.uuid(),
             table_rename_join_post_values(post_id, author_id, "Hello from v1"),
         )
         .expect("alice creates v1 post");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice post reaches edge");
+    support::wait_for_edge_txs(
+        &alice,
+        &[
+            user_tx.expect("ordinary mutation commits immediately"),
+            post_tx.expect("ordinary mutation commits immediately"),
+        ],
+    )
+    .await;
 
     let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-join-rename")),
@@ -2909,10 +2863,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
-    let query = QueryBuilder::new("posts")
-        .join("people")
-        .on("posts.author_id", "people.id")
-        .build();
+    let query = Query::from("posts").flat_join("people", "posts.author_id", "people.id");
     let rows = wait_for_query_results(
         &bob,
         query,
@@ -2990,35 +2941,28 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
 
     let author_id = jazz::tools::ObjectId::new();
-    let (author_row_id, _, batch_id) = alice
+    let (author_row_id, _, user_tx) = alice
         .insert_with_id(
             "users",
             *author_id.uuid(),
             table_rename_join_user_values(author_id, "Alice"),
         )
         .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice user reaches edge");
-
     let post_id = jazz::tools::ObjectId::new();
-    let (_, _, batch_id) = alice
+    let (_, _, post_tx) = alice
         .insert(
             "posts",
             table_rename_join_post_values(post_id, author_id, "Alice post"),
         )
         .expect("alice creates v1 post");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice post reaches edge");
+    support::wait_for_edge_txs(
+        &alice,
+        &[
+            user_tx.expect("ordinary mutation commits immediately"),
+            post_tx.expect("ordinary mutation commits immediately"),
+        ],
+    )
+    .await;
 
     let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-array-rename")),
@@ -3028,14 +2972,14 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
-    let query = QueryBuilder::new("people")
-        .with_array("posts", |sub| {
-            // INV-QUERY-29: this lookup intentionally selects every related
-            // post, so preserve that unbounded query at the public
-            // query boundary.
-            sub.from("posts").correlate("author_id", "people.id")
-        })
-        .build();
+    // INV-QUERY-29: this lookup intentionally selects every related post, so
+    // preserve that unbounded query at the public query boundary.
+    let query = Query::from("people").array_subquery(ArraySubquery::new(
+        "posts",
+        "posts",
+        "author_id",
+        "people.id",
+    ));
     let rows = wait_for_query(
         &bob,
         query,
@@ -3110,30 +3054,23 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .await;
     wait_for_edge_query_ready(&admin, "posts", Duration::from_secs(30)).await;
 
-    let (_, _, batch_id) = admin
+    let (_, _, user_tx) = admin
         .insert("users", legacy_join_provenance_user_values("bob"))
         .expect("admin creates legacy user");
-    admin
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("legacy user reaches edge");
-
-    let (_, _, batch_id) = admin
+    let (_, _, post_tx) = admin
         .insert(
             "posts",
             legacy_join_provenance_post_values("bob", "Bob private post"),
         )
         .expect("admin creates legacy post");
-    admin
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("legacy post reaches edge");
+    support::wait_for_edge_txs(
+        &admin,
+        &[
+            user_tx.expect("ordinary mutation commits immediately"),
+            post_tx.expect("ordinary mutation commits immediately"),
+        ],
+    )
+    .await;
 
     let current_admin = TestingClient::builder()
         .with_server(&server)
@@ -3144,7 +3081,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .connect()
         .await;
     wait_for_edge_query_ready(&current_admin, "posts", Duration::from_secs(30)).await;
-    let (second_post_id, _, batch_id) = current_admin
+    let (second_post_id, _, transaction_id) = current_admin
         .insert(
             "posts",
             row_input!(
@@ -3154,13 +3091,11 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
             ),
         )
         .expect("admin creates current-schema post");
-    current_admin
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("current-schema post reaches edge");
+    support::wait_for_edge_txs(
+        &current_admin,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -3182,10 +3117,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .await;
     wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
-    let query = QueryBuilder::new("users")
-        .join("posts")
-        .on("users.name", "posts.owner_name")
-        .build();
+    let query = Query::from("users").flat_join("posts", "users.name", "posts.owner_name");
 
     let bob_rows = wait_for_query_results(
         &bob,
@@ -3216,18 +3148,17 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .key
         .clone();
 
-    let batch_id = bob
+    let transaction_id = bob
         .update(
             second_post_id,
             vec![("viewer_name".to_owned(), Value::Text(test_user_id("alice")))],
         )
         .expect("move one joined occurrence to Alice's policy scope");
-    bob.wait_for_batch(
-        batch_id.expect("ordinary mutation commits immediately"),
-        DurabilityTier::EdgeServer,
+    support::wait_for_edge_txs(
+        &bob,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
     )
-    .await
-    .expect("selective policy update reaches edge");
+    .await;
 
     let retained_bob_rows = wait_for_query_results(
         &bob,
@@ -3310,19 +3241,17 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
     let alice_id = jazz::tools::ObjectId::new();
-    let (alice_row_id, _, batch_id) = alice
+    let (alice_row_id, _, transaction_id) = alice
         .insert(
             "users",
             multi_hop_table_rename_values_v1(alice_id, "alice@example.com"),
         )
         .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice row reaches edge");
+    support::wait_for_edge_txs(
+        &alice,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     publish_allow_all_permissions(
         &server.base_url(),
@@ -3338,18 +3267,17 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
     let bob_id = jazz::tools::ObjectId::new();
-    let (bob_row_id, _, batch_id) = bob
+    let (bob_row_id, _, transaction_id) = bob
         .insert(
             "people",
             multi_hop_table_rename_values_v2(bob_id, "bob@example.com"),
         )
         .expect("bob creates v2 person");
-    bob.wait_for_batch(
-        batch_id.expect("ordinary mutation commits immediately"),
-        DurabilityTier::EdgeServer,
+    support::wait_for_edge_txs(
+        &bob,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
     )
-    .await
-    .expect("bob row reaches edge");
+    .await;
 
     publish_allow_all_permissions(
         &server.base_url(),
@@ -3367,23 +3295,21 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
         .expect("connect carol");
     wait_for_edge_query_ready(&carol, "members", Duration::from_secs(30)).await;
     let carol_id = jazz::tools::ObjectId::new();
-    let (carol_row_id, _, batch_id) = carol
+    let (carol_row_id, _, transaction_id) = carol
         .insert(
             "members",
             multi_hop_table_rename_values_v3(carol_id, "carol@example.com"),
         )
         .expect("carol creates v3 member");
-    carol
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("carol row reaches edge");
+    support::wait_for_edge_txs(
+        &carol,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     let rows = wait_for_query(
         &carol,
-        QueryBuilder::new("members").build(),
+        jazz::query::Query::from("members"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "carol sees every schema version projected to members",
@@ -3469,19 +3395,17 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let alice_id = jazz::tools::ObjectId::new();
-    let (alice_row_id, _, batch_id) = alice
+    let (alice_row_id, _, transaction_id) = alice
         .insert(
             "users",
             removed_readded_values_v1(alice_id, "Alice Old Lineage"),
         )
         .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice row reaches edge");
+    support::wait_for_edge_txs(
+        &alice,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     publish_allow_all_permissions(
         &server.base_url(),
@@ -3499,22 +3423,21 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let bob_id = jazz::tools::ObjectId::new();
-    let (bob_row_id, _, batch_id) = bob
+    let (bob_row_id, _, transaction_id) = bob
         .insert(
             "users",
             removed_readded_values_v3(bob_id, "Bob New Lineage", "bob@example.com"),
         )
         .expect("bob creates v3 user");
-    bob.wait_for_batch(
-        batch_id.expect("ordinary mutation commits immediately"),
-        DurabilityTier::EdgeServer,
+    support::wait_for_edge_txs(
+        &bob,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
     )
-    .await
-    .expect("bob row reaches edge");
+    .await;
 
     let rows = wait_for_query(
         &bob,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "v3 users query only sees rows from the re-added table lineage",
@@ -3604,7 +3527,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
 
     wait_for_query(
         &bob,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob's v2 user settled at edge",
@@ -3623,7 +3546,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
 
     let alice_rows = wait_for_query(
         &alice,
-        QueryBuilder::new("users").build(),
+        jazz::query::Query::from("users"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "alice sees bob's user without email column",
@@ -3665,7 +3588,7 @@ async fn keeps_authorization_through_v1_head() {
 
 async fn keeps_authorization_through_v1_head_impl() {
     let server = JazzServer::start().await;
-    let query = QueryBuilder::new("users").build();
+    let query = jazz::query::Query::from("users");
     let v1_schema = schema_v1();
     push_catalogue_in_memory(
         server.server_state(),
@@ -3694,16 +3617,14 @@ async fn keeps_authorization_through_v1_head_impl() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id_value = jazz::tools::ObjectId::new();
-    let (user_obj_id, _, batch_id) = alice
+    let (user_obj_id, _, transaction_id) = alice
         .insert("users", user_values_v1(user_id_value, "Alice Through Lens"))
         .expect("alice creates user after v1 permissions publish");
-    alice
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
-        .expect("alice user reaches edge after v1 permissions publish");
+    support::wait_for_edge_txs(
+        &alice,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
 
     wait_for_query(
         &alice,

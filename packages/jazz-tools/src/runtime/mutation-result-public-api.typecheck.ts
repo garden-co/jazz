@@ -13,12 +13,10 @@ async function assertMutationResultContract() {
     done: false,
   });
   const updated: MutationResult<void> = db.update(todos, "todo-1", { done: true });
-  const upserted: MutationResult<void> = db.upsert(
-    todos,
-    { title: "todo", done: false },
-    { id: "todo-1" },
-  );
+  const upserted: MutationResult<void> = db.upsert(todos, "todo-1", { title: "todo", done: false });
   const deleted: MutationResult<void> = db.delete(todos, "todo-1");
+
+  const transactionId: Promise<string> = inserted.transactionId;
 
   inserted.wait({ tier: "local" });
   // @ts-expect-error Mergeable mutations require a durability tier when waiting.
@@ -47,6 +45,7 @@ async function assertMutationResultContract() {
   void updated;
   void upserted;
   void deleted;
+  void transactionId;
   void mergeableCommit;
   void exclusiveCommit;
 }

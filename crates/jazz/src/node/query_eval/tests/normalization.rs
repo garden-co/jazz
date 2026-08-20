@@ -1,6 +1,7 @@
 //! normalization query-evaluation tests.
 
 use super::*;
+use crate::node::query_eval::normalization::source_column_value;
 
 #[test]
 fn payload_enum_normalization_uses_case_local_field_types() {
@@ -56,6 +57,309 @@ fn predicate_params_collects_every_operand_position_and_operator() {
             "second_choice".to_owned(),
             "upper".to_owned(),
         ])
+    );
+}
+
+/// A declared `id` remains a user field in order and aggregate lowering;
+/// the physical row UUID is retained only for tables that do not declare it.
+#[test]
+fn declared_id_order_and_aggregate_lower_as_source_fields() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "things",
+        [
+            ColumnSchema::new("id", ColumnType::Uuid),
+            ColumnSchema::new("label", ColumnType::String),
+        ],
+    )]);
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([7; 16]), schema.clone());
+    let source = root_source_id("things");
+
+    let ordered = Query::from("things")
+        .order_by("id", OrderDirection::Asc)
+        .validate(&schema)
+        .unwrap();
+    let ordered = node
+        .normalized_row_set_shape(&ordered, &ordered.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+    assert!(matches!(
+        ordered.nodes.get(&RowSetNodeId("order".to_owned())),
+        Some(RowSetExpr::OrderBy { keys, .. })
+            if matches!(keys.as_slice(), [NormalizedOrderKey { value: NormalizedValueRef::SourceField { source: key_source, field }, .. }]
+                if key_source == &source && field == "id")
+    ));
+
+    let grouped = Query::from("things")
+        .count()
+        .group_by("id")
+        .validate(&schema)
+        .unwrap();
+    let grouped = node
+        .normalized_row_set_shape(&grouped, &grouped.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+    assert!(matches!(
+        grouped.nodes.get(&RowSetNodeId("aggregate".to_owned())),
+        Some(RowSetExpr::Aggregate { group_by, .. })
+            if matches!(group_by.as_slice(), [NormalizedValueRef::SourceField { source: key_source, field }]
+                if key_source == &source && field == "id")
+    ));
+}
+
+/// The shared source-key resolver is used by lookup joins, reachability seeds
+/// and access joins, array correlations, and flat joins. Declared `id` must
+/// select the authored field while legacy tables keep their physical row id.
+#[test]
+fn source_key_resolution_distinguishes_declared_and_physical_ids() {
+    let schema = JazzSchema::new([
+        TableSchema::new("declared", [ColumnSchema::new("id", ColumnType::Uuid)]),
+        TableSchema::new("legacy", [ColumnSchema::new("label", ColumnType::String)]),
+    ]);
+    let declared = root_source_id("declared");
+    let legacy = root_source_id("legacy");
+
+    assert!(matches!(
+        source_column_value(&schema, &declared, "id", JoinTarget::Column),
+        NormalizedValueRef::SourceField { source, field } if source == declared && field == "id"
+    ));
+    assert!(matches!(
+        source_column_value(&schema, &legacy, "id", JoinTarget::Column),
+        NormalizedValueRef::RowId(RowIdRef::Source(source)) if source == legacy
+    ));
+    assert!(matches!(
+        source_column_value(&schema, &declared, "id", JoinTarget::RowId),
+        NormalizedValueRef::RowId(RowIdRef::Source(source)) if source == declared
+    ));
+}
+
+/// A declared string `id` cannot be used as a UUID foreign-key join source,
+/// while FlatJoin's explicit `_id` alias remains the physical UUID row key.
+#[test]
+fn declared_id_join_types_and_flat_join_physical_alias_validate() {
+    let schema = JazzSchema::new([
+        TableSchema::new("parents", [ColumnSchema::new("id", ColumnType::String)]),
+        TableSchema::new("children", [ColumnSchema::new("parent", ColumnType::Uuid)])
+            .with_reference("parent", "parents"),
+    ]);
+    assert!(
+        Query::from("parents")
+            .join_via_column("children", "parent", "id", [])
+            .validate(&schema)
+            .is_err()
+    );
+
+    let flat = Query::from("parents").flat_join("children", "parents._id", "children.parent");
+    assert!(flat.validate(&schema).is_ok());
+}
+
+/// Flat-join filters must route a declared string `id` to authored fields on
+/// both the root and joined source, while `_id` routes to the joined row UUID.
+///
+/// alice ──filter parent.id──► parent source
+/// alice ──filter child.id/_id──► child source
+#[test]
+fn flat_join_filters_preserve_declared_id_and_physical_alias_semantics() {
+    let schema = JazzSchema::new([
+        TableSchema::new("parents", [ColumnSchema::new("id", ColumnType::String)]),
+        TableSchema::new(
+            "children",
+            [
+                ColumnSchema::new("id", ColumnType::String),
+                ColumnSchema::new("parent", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("parent", "parents"),
+    ]);
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([8; 16]), schema.clone());
+    let physical_child_id = uuid::Uuid::from_u128(0x1234);
+    let shape = Query::from(table("parents").alias("parent"))
+        .flat_join(
+            table("children").alias("child"),
+            "parent._id",
+            "child.parent",
+        )
+        .filter(eq(col("parent.id"), lit("parent-key")))
+        .filter(eq(col("child.id"), lit("child-key")))
+        .filter(eq(col("child._id"), lit(physical_child_id)))
+        .validate(&schema)
+        .expect("declared ids and physical alias validate independently");
+    let normalized = node
+        .normalized_row_set_shape(&shape, &shape.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+
+    assert!(matches!(
+        normalized.nodes.get(&RowSetNodeId("flat_join:root_filter".to_owned())),
+        Some(RowSetExpr::Filter { predicate: NormalizedPredicateExpr::Compare { left: NormalizedValueRef::SourceField { field, .. }, .. }, .. })
+            if field == "id"
+    ));
+    assert!(matches!(
+        normalized.nodes.get(&RowSetNodeId("flat_join:0:filter".to_owned())),
+        Some(RowSetExpr::Filter { predicate: NormalizedPredicateExpr::And(predicates), .. })
+            if predicates.iter().any(|predicate| matches!(
+                predicate,
+                NormalizedPredicateExpr::Compare { left: NormalizedValueRef::SourceField { field, .. }, .. }
+                    if field == "id"
+            )) && predicates.iter().any(|predicate| matches!(
+                predicate,
+                NormalizedPredicateExpr::Compare { left: NormalizedValueRef::RowId(_), .. }
+            ))
+    ));
+}
+
+/// Outside FlatJoin, `_id` remains an ordinary authored column rather than a
+/// universal alias for the physical row identity.
+#[test]
+fn ordinary_query_does_not_infer_flat_join_physical_id_alias() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "things",
+        [ColumnSchema::new("_id", ColumnType::String)],
+    )]);
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([9; 16]), schema.clone());
+    let shape = Query::from("things")
+        .filter(eq(col("_id"), lit("authored-field")))
+        .validate(&schema)
+        .unwrap();
+    let normalized = node
+        .normalized_row_set_shape(&shape, &shape.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+
+    assert!(matches!(
+        normalized.nodes.get(&RowSetNodeId("query:filter".to_owned())),
+        Some(RowSetExpr::Filter { predicate: NormalizedPredicateExpr::Compare { left: NormalizedValueRef::SourceField { field, .. }, .. }, .. })
+            if field == "_id"
+    ));
+}
+
+/// Lookup and reachability policies must reject declared ID joins whose
+/// authored types disagree, while a matching declared-ID reachability path
+/// remains valid.
+#[test]
+fn declared_id_lookup_and_reachable_types_validate() {
+    let lookup_schema = JazzSchema::new([
+        TableSchema::new("roots", [ColumnSchema::new("lookup", ColumnType::Uuid)])
+            .with_reference("lookup", "lookups"),
+        TableSchema::new("lookups", [ColumnSchema::new("id", ColumnType::String)]),
+        TableSchema::new("children", [ColumnSchema::new("lookup", ColumnType::Uuid)])
+            .with_reference("lookup", "lookups"),
+    ]);
+    assert!(
+        Query::from("roots")
+            .join_via_source_lookup(
+                "children",
+                "lookup",
+                JoinSourceLookup {
+                    table: "lookups".to_owned(),
+                    row_id_source_column: "lookup".to_owned(),
+                    value_column: "id".to_owned(),
+                },
+                [],
+            )
+            .validate(&lookup_schema)
+            .is_err()
+    );
+
+    let reachable_schema = |root_id_type| {
+        JazzSchema::new([
+            TableSchema::new("roots", [ColumnSchema::new("id", root_id_type)]),
+            TableSchema::new(
+                "access",
+                [
+                    ColumnSchema::new("id", ColumnType::String),
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("id", "roots")
+            .with_reference("team", "teams"),
+            TableSchema::new("teams", [ColumnSchema::new("label", ColumnType::String)]),
+            TableSchema::new(
+                "edges",
+                [
+                    ColumnSchema::new("member", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("member", "teams")
+            .with_reference("parent", "teams"),
+        ])
+    };
+    let reachable = || {
+        Query::from("roots").reachable_via(
+            "access",
+            "id",
+            "team",
+            lit(Value::Uuid(uuid::Uuid::nil())),
+            "edges",
+            "member",
+            "parent",
+            [],
+        )
+    };
+    assert!(
+        reachable()
+            .validate(&reachable_schema(ColumnType::Uuid))
+            .is_err()
+    );
+    assert!(
+        reachable()
+            .validate(&reachable_schema(ColumnType::String))
+            .is_ok()
+    );
+}
+
+/// A same-table reachability seed may use `id` only when its effective
+/// frontier value is a non-null UUID; string and nullable declared IDs cannot
+/// drive UUID edge traversal.
+#[test]
+fn reachable_self_seed_id_requires_non_nullable_uuid() {
+    let schema = |team_id_type| {
+        JazzSchema::new([
+            TableSchema::new("roots", [ColumnSchema::new("label", ColumnType::String)]),
+            TableSchema::new(
+                "access",
+                [
+                    ColumnSchema::new("root", ColumnType::Uuid),
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("root", "roots")
+            .with_reference("team", "teams"),
+            TableSchema::new(
+                "teams",
+                [
+                    ColumnSchema::new("id", team_id_type),
+                    ColumnSchema::new("identity", ColumnType::Uuid),
+                ],
+            ),
+            TableSchema::new(
+                "edges",
+                [
+                    ColumnSchema::new("member", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("member", "teams")
+            .with_reference("parent", "teams"),
+        ])
+    };
+    let query = || {
+        Query::from("roots")
+            .reachable_via(
+                "access",
+                "root",
+                "team",
+                lit(Value::Uuid(uuid::Uuid::nil())),
+                "edges",
+                "member",
+                "parent",
+                [],
+            )
+            .seeded_by("teams", "identity", "sub", "id")
+    };
+
+    assert!(query().validate(&schema(ColumnType::Uuid)).is_ok());
+    assert!(query().validate(&schema(ColumnType::String)).is_err());
+    assert!(
+        query()
+            .validate(&schema(ColumnType::Uuid.nullable()))
+            .is_err()
     );
 }
 

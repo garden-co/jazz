@@ -91,6 +91,102 @@ fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
             .is_empty()
     );
 }
+
+#[test]
+fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let target = row(0x71);
+
+    let (_base, base_unit) = client
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", target, 10).cells(title_cells("base")),
+        )
+        .unwrap();
+    let [base_fate] = core.apply_sync_message(base_unit).unwrap().try_into().unwrap();
+    client.apply_sync_message(base_fate).unwrap();
+
+    let (rejected, rejected_unit) = client
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", target, SKEW_TOLERANCE_MS + 1)
+                .cells(title_cells("rejected")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = rejected_unit else {
+        panic!("expected rejected update commit unit");
+    };
+    let [rejected_fate] = core
+        .ingest_commit_unit(tx, versions, 0)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        rejected_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
+            ..
+        }
+    ));
+    client.apply_sync_message(rejected_fate).unwrap();
+    assert_eq!(
+        client.transaction_state(rejected).unwrap().0,
+        Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
+    );
+    // The rejected speculative version must be removed from the visible row,
+    // leaving the previously accepted base as the current value.
+    assert_eq!(
+        client
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(target, title_cells("base"))])
+    );
+
+    let (fresh, fresh_unit) = client
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", target, 20).cells(title_cells("fresh")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = fresh_unit else {
+        panic!("expected fresh update commit unit");
+    };
+    let [fresh_fate] = core
+        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate {
+        tx_id,
+        fate,
+        global_seq,
+        durability,
+    } = fresh_fate
+    else {
+        panic!("expected fresh fate update");
+    };
+    assert_eq!(tx_id, fresh);
+    assert_eq!(fate, Fate::Accepted);
+    assert_eq!(durability, Some(DurabilityTier::Global));
+    client
+        .apply_fate_update(tx_id, fate, global_seq, durability)
+        .unwrap();
+    assert_eq!(
+        client.transaction_state(fresh).unwrap().0,
+        Fate::Accepted
+    );
+    assert_eq!(ahead_current_row_count(&mut client, "todos"), 0);
+    assert_eq!(
+        client
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(target, title_cells("fresh"))])
+    );
+}
 #[test]
 fn client_side_rejection_cascades_to_local_mergeable_descendant() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
@@ -101,7 +197,7 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         &mut core,
         MergeableCommit::new("todos", row, 1).cells(title_cells("old")),
     );
-    let tx_id = OpenBatchId::new();
+    let tx_id = OpenTransactionId::new();
     client.open_exclusive(tx_id).unwrap();
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
@@ -174,7 +270,7 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
-    let tx_id = OpenBatchId::new();
+    let tx_id = OpenTransactionId::new();
     client.open_exclusive(tx_id).unwrap();
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)

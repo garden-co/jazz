@@ -278,15 +278,19 @@ where
                 ))?
                 .schema
         };
+        // `id` resolves to a declared user column when a table has one, so an
+        // internal physical-row probe must use the dedicated access-path API.
         let shape = crate::query::Query::from(table_name)
-            .filter(crate::query::eq(
-                crate::query::col("id"),
-                crate::query::lit(Value::Uuid(row_uuid.0)),
-            ))
             .validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(BTreeMap::new())?;
-        self.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)
-            .map(|rows| !rows.is_empty())
+        self.query_rows_for_link_physical_row(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            identity,
+            row_uuid,
+        )
+        .map(|rows| rows.into_iter().any(|row| row.row_uuid() == row_uuid))
     }
 
     #[cfg(test)]
@@ -300,11 +304,7 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
-        let Some(row) = self
-            .current_rows(table_name, DurabilityTier::Local)?
-            .into_iter()
-            .find(|row| row.row_uuid() == row_uuid)
-        else {
+        let Some(row) = self.local_current_row(table_name, row_uuid)? else {
             return Ok(false);
         };
         let Some(policy) = table.write_policies.update_using.clone() else {
@@ -323,11 +323,7 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
-        let Some(row) = self
-            .current_rows(table_name, DurabilityTier::Local)?
-            .into_iter()
-            .find(|row| row.row_uuid() == row_uuid)
-        else {
+        let Some(row) = self.local_current_row(table_name, row_uuid)? else {
             return Ok(false);
         };
         let Some(policy) = table.write_policies.delete_using.clone() else {

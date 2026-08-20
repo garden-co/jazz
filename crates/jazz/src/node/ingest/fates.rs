@@ -140,10 +140,21 @@ where
         } else {
             None
         };
-        self.database.commit_batch(batch)?;
-        *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
-        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
-            self.persist_storage_consistency_marker_through(tx_id.time)?;
+        let publication_scope = self.database.begin_durable_publication_scope()?;
+        let durable_result = (|| {
+            self.database.commit_batch(batch)?;
+            *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
+            if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
+                self.persist_storage_consistency_marker_through(tx_id.time)?;
+            }
+            Ok(())
+        })();
+        match durable_result {
+            Ok(()) => publication_scope.finish(&mut self.database),
+            Err(error) => {
+                publication_scope.abort(&mut self.database);
+                return Err(error);
+            }
         }
         #[cfg(test)]
         {

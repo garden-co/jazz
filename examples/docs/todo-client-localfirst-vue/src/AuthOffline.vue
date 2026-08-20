@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+import { JazzProvider } from "jazz-tools/vue";
 
-const client = createJazzClient({ appId: "my-app" });
+const config = { appId: "my-app" };
 </script>
 
 <template>
-  <JazzProvider :client="client">
+  <JazzProvider :config="config">
     <slot />
   </JazzProvider>
 </template>

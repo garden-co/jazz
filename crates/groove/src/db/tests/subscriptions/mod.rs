@@ -154,7 +154,7 @@ fn invalid_batches_do_not_partially_write_valid_earlier_operations() {
 }
 
 #[test]
-fn final_atomic_commit_failure_leaves_base_rows_unwritten_and_poisons_database() {
+fn final_atomic_commit_failure_leaves_base_rows_unwritten_and_allows_retry() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
 
@@ -178,10 +178,17 @@ fn final_atomic_commit_failure_leaves_base_rows_unwritten_and_poisons_database()
             .unwrap(),
         None
     );
-    assert!(matches!(
-        database.primary_key_scan("albums", &[]),
-        Err(Error::DatabasePoisoned)
-    ));
+    assert!(database.primary_key_scan("albums", &[]).unwrap().is_empty());
+
+    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(database.primary_key_scan("albums", &[]).unwrap().len(), 1);
 }
 
 #[test]

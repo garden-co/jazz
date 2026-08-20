@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, QueryBuilder,
-    SchemaBuilder, Session, TablePolicies, TableSchema, Value,
+    ColumnType, DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, SchemaBuilder,
+    Session, TablePolicies, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{
@@ -266,7 +266,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
             let bob = connect_ready_user(&server, schema.clone(), &bob_user_id, "documents").await;
 
             let alice_session = alice.for_session(Session::new(alice_user_id));
-            let (folder_id, _, folder_batch) = alice_session
+            let (folder_id, _, folder_tx) = alice_session
                 .insert(
                     "folders",
                     row_input!(
@@ -276,15 +276,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
                     ),
                 )
                 .expect("alice inserts folder");
-            alice
-                .wait_for_batch(
-                    folder_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("folder reaches edge");
-
-            let (document_id, _, document_batch) = alice_session
+            let (document_id, _, document_tx) = alice_session
                 .insert(
                     "documents",
                     row_input!(
@@ -294,17 +286,18 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
                     ),
                 )
                 .expect("alice inserts document");
-            alice
-                .wait_for_batch(
-                    document_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("document reaches edge");
+            support::wait_for_edge_txs(
+                &alice,
+                &[
+                    folder_tx.expect("ordinary mutation commits immediately"),
+                    document_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             let alice_rows = wait_for_query(
                 &alice,
-                QueryBuilder::new("documents").build(),
+                jazz::query::Query::from("documents"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(25),
                 "alice sees forward-inherited document",
@@ -315,7 +308,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
 
             let bob_rows = wait_for_query(
                 &bob,
-                QueryBuilder::new("documents").build(),
+                jazz::query::Query::from("documents"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(3),
                 "bob does not see alice's forward-inherited document",
@@ -360,42 +353,33 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
             let bob = connect_ready_user(&server, schema.clone(), &bob_user_id, "files").await;
             let alice_session = alice.for_session(Session::new(alice_user_id));
 
-            let (organization_id, _, organization_batch) = alice_session
+            let (organization_id, _, organization_tx) = alice_session
                 .insert("organizations", row_input!("owner_id" => alice_owner_id))
                 .expect("alice inserts organization");
-            alice
-                .wait_for_batch(organization_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
-                .await
-                .expect("organization reaches edge");
-
-            let (team_id, _, team_batch) = alice_session
+            let (team_id, _, team_tx) = alice_session
                 .insert("teams", row_input!("organization_id" => organization_id))
                 .expect("alice inserts team");
-            alice
-                .wait_for_batch(team_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
-                .await
-                .expect("team reaches edge");
-
-            let (file_id, _, file_batch) = alice_session
+            let (file_id, _, file_tx) = alice_session
                 .insert("files", row_input!("name" => "team file"))
                 .expect("alice inserts file");
-            alice
-                .wait_for_batch(file_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
-                .await
-                .expect("file reaches edge");
-
-            let (_, _, attachment_batch) = alice_session
+            let (_, _, attachment_tx) = alice_session
                 .insert(
                     "attachments",
                     row_input!("file_id" => file_id, "team_id" => team_id),
                 )
                 .expect("alice attaches file to team");
-            alice
-                .wait_for_batch(attachment_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
-                .await
-                .expect("attachment reaches edge");
+            support::wait_for_edge_txs(
+                &alice,
+                &[
+                    organization_tx.expect("ordinary mutation commits immediately"),
+                    team_tx.expect("ordinary mutation commits immediately"),
+                    file_tx.expect("ordinary mutation commits immediately"),
+                    attachment_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
-            let query = QueryBuilder::new("files").build();
+            let query = jazz::query::Query::from("files");
             wait_for_query(
                 &alice,
                 query.clone(),
@@ -447,21 +431,13 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
                 connect_ready_user(&server, schema.clone(), &alice_user_id, "documents").await;
 
             let alice_session = alice.for_session(Session::new(alice_user_id));
-            let (organization_id, _, organization_batch) = alice_session
+            let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
                     row_input!("owner_id" => alice_owner_id, "name" => "Alice org"),
                 )
                 .expect("alice inserts organization");
-            alice
-                .wait_for_batch(
-                    organization_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("organization reaches edge");
-
-            let (folder_id, _, folder_batch) = alice_session
+            let (folder_id, _, folder_tx) = alice_session
                 .insert(
                     "folders",
                     row_input!(
@@ -471,15 +447,7 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
                     ),
                 )
                 .expect("alice inserts folder");
-            alice
-                .wait_for_batch(
-                    folder_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("folder reaches edge");
-
-            let (document_id, _, document_batch) = alice_session
+            let (document_id, _, document_tx) = alice_session
                 .insert(
                     "documents",
                     row_input!(
@@ -489,17 +457,19 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
                     ),
                 )
                 .expect("alice inserts document");
-            alice
-                .wait_for_batch(
-                    document_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("document reaches edge");
+            support::wait_for_edge_txs(
+                &alice,
+                &[
+                    organization_tx.expect("ordinary mutation commits immediately"),
+                    folder_tx.expect("ordinary mutation commits immediately"),
+                    document_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             wait_for_query(
                 &alice,
-                QueryBuilder::new("documents").build(),
+                jazz::query::Query::from("documents"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(25),
                 "alice sees multi-hop forward-inherited document",
@@ -541,7 +511,7 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
                     .await;
 
             let alice_session = alice.for_session(Session::new(alice_user_id));
-            let (bob_folder_id, _, bob_folder_batch) = alice_session
+            let (bob_folder_id, _, bob_folder_tx) = alice_session
                 .insert(
                     "folders",
                     row_input!(
@@ -551,15 +521,7 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
                     ),
                 )
                 .expect("insert bob-owned folder");
-            alice
-                .wait_for_batch(
-                    bob_folder_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("bob folder reaches edge");
-
-            let (alice_folder_id, _, alice_folder_batch) = alice_session
+            let (alice_folder_id, _, alice_folder_tx) = alice_session
                 .insert(
                     "folders",
                     row_input!(
@@ -569,15 +531,7 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
                     ),
                 )
                 .expect("insert alice-owned folder");
-            alice
-                .wait_for_batch(
-                    alice_folder_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("alice folder reaches edge");
-
-            let (document_id, _, document_batch) = alice_session
+            let (document_id, _, document_tx) = alice_session
                 .insert(
                     "shared_documents",
                     row_input!(
@@ -587,17 +541,19 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
                     ),
                 )
                 .expect("insert shared document");
-            alice
-                .wait_for_batch(
-                    document_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("shared document reaches edge");
+            support::wait_for_edge_txs(
+                &alice,
+                &[
+                    bob_folder_tx.expect("ordinary mutation commits immediately"),
+                    alice_folder_tx.expect("ordinary mutation commits immediately"),
+                    document_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             wait_for_query(
                 &alice,
-                QueryBuilder::new("shared_documents").build(),
+                jazz::query::Query::from("shared_documents"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(25),
                 "alice sees document through one of two inherited parents",
@@ -632,21 +588,13 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                     .await;
 
             let alice_session = alice.for_session(Session::new(alice_user_id));
-            let (organization_id, _, organization_batch) = alice_session
+            let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
                     row_input!("owner_id" => alice_owner_id, "name" => "Alice org"),
                 )
                 .expect("insert alice-owned organization");
-            alice
-                .wait_for_batch(
-                    organization_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("organization reaches edge");
-
-            let (primary_folder_id, _, primary_folder_batch) = alice_session
+            let (primary_folder_id, _, primary_folder_tx) = alice_session
                 .insert(
                     "folders",
                     row_input!(
@@ -656,15 +604,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                     ),
                 )
                 .expect("insert primary inherited folder");
-            alice
-                .wait_for_batch(
-                    primary_folder_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("primary folder reaches edge");
-
-            let (alternate_folder_id, _, alternate_folder_batch) = alice_session
+            let (alternate_folder_id, _, alternate_folder_tx) = alice_session
                 .insert(
                     "folders",
                     row_input!(
@@ -674,15 +614,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                     ),
                 )
                 .expect("insert alternate inherited folder");
-            alice
-                .wait_for_batch(
-                    alternate_folder_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("alternate folder reaches edge");
-
-            let (document_id, _, document_batch) = alice_session
+            let (document_id, _, document_tx) = alice_session
                 .insert(
                     "shared_documents",
                     row_input!(
@@ -692,17 +624,20 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                     ),
                 )
                 .expect("insert shared document");
-            alice
-                .wait_for_batch(
-                    document_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("shared document reaches edge");
+            support::wait_for_edge_txs(
+                &alice,
+                &[
+                    organization_tx.expect("ordinary mutation commits immediately"),
+                    primary_folder_tx.expect("ordinary mutation commits immediately"),
+                    alternate_folder_tx.expect("ordinary mutation commits immediately"),
+                    document_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             wait_for_query(
                 &alice,
-                QueryBuilder::new("shared_documents").build(),
+                jazz::query::Query::from("shared_documents"),
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(25),
                 "alice sees document when both inherited parents expand to branches",
@@ -767,21 +702,13 @@ async fn inherited_update_policy_allows_update_through_parent() {
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
             let alice_session = alice.for_session(Session::new(alice_user_id));
-            let (organization_id, _, organization_batch) = alice_session
+            let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
                     row_input!("owner_id" => alice_owner_id, "name" => "Alice org"),
                 )
                 .expect("alice inserts organization");
-            alice
-                .wait_for_batch(
-                    organization_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("organization reaches edge");
-
-            let (parent_id, _, parent_batch) = alice_session
+            let (parent_id, _, parent_tx) = alice_session
                 .insert(
                     "parents",
                     row_input!(
@@ -791,45 +718,32 @@ async fn inherited_update_policy_allows_update_through_parent() {
                     ),
                 )
                 .expect("alice inserts parent");
-            alice
-                .wait_for_batch(
-                    parent_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("parent reaches edge");
-
-            let (child_id, _, child_batch) = alice_session
+            let (child_id, _, child_tx) = alice_session
                 .insert(
                     "children",
                     row_input!("parent_id" => parent_id, "title" => "draft"),
                 )
                 .expect("alice inserts child");
-            alice
-                .wait_for_batch(
-                    child_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("child reaches edge");
-
-            let update_batch = alice_session
+            let update_tx = alice_session
                 .update(
                     child_id,
                     vec![("title".to_string(), Value::Text("published".to_string()))],
                 )
                 .expect("alice update should be admitted by inherited UPDATE policy");
-            alice
-                .wait_for_batch(
-                    update_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("inherited child update reaches edge");
+            support::wait_for_edge_txs(
+                &alice,
+                &[
+                    organization_tx.expect("ordinary mutation commits immediately"),
+                    parent_tx.expect("ordinary mutation commits immediately"),
+                    child_tx.expect("ordinary mutation commits immediately"),
+                    update_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             let rows = alice
                 .query(
-                    QueryBuilder::new("children").build(),
+                    jazz::query::Query::from("children"),
                     Some(DurabilityTier::EdgeServer),
                 )
                 .await
@@ -900,21 +814,13 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
             let alice_session = alice.for_session(Session::new(alice_user_id));
-            let (organization_id, _, organization_batch) = alice_session
+            let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
                     row_input!("owner_id" => alice_owner_id, "name" => "Alice org"),
                 )
                 .expect("alice inserts organization");
-            alice
-                .wait_for_batch(
-                    organization_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("organization reaches edge");
-
-            let (parent_id, _, parent_batch) = alice_session
+            let (parent_id, _, parent_tx) = alice_session
                 .insert(
                     "parents",
                     row_input!(
@@ -924,41 +830,28 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                     ),
                 )
                 .expect("alice inserts parent");
-            alice
-                .wait_for_batch(
-                    parent_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("parent reaches edge");
-
-            let (child_id, _, child_batch) = alice_session
+            let (child_id, _, child_tx) = alice_session
                 .insert(
                     "children",
                     row_input!("parent_id" => parent_id, "title" => "draft"),
                 )
                 .expect("alice inserts child");
-            alice
-                .wait_for_batch(
-                    child_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("child reaches edge");
-
-            let update_batch = alice_session
+            let update_tx = alice_session
                 .update(
                     child_id,
                     vec![("title".to_string(), Value::Text("published".to_string()))],
                 )
                 .expect("alice update should be admitted by multi-hop inherited UPDATE policy");
-            alice
-                .wait_for_batch(
-                    update_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("multi-hop inherited child update reaches edge");
+            support::wait_for_edge_txs(
+                &alice,
+                &[
+                    organization_tx.expect("ordinary mutation commits immediately"),
+                    parent_tx.expect("ordinary mutation commits immediately"),
+                    child_tx.expect("ordinary mutation commits immediately"),
+                    update_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             alice.shutdown().await.expect("shutdown alice");
             server.shutdown().await;
@@ -1018,21 +911,13 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
             let alice_session = alice.for_session(Session::new(alice_user_id));
-            let (organization_id, _, organization_batch) = alice_session
+            let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
                     row_input!("owner_id" => alice_owner_id, "name" => "Alice org"),
                 )
                 .expect("alice inserts organization");
-            alice
-                .wait_for_batch(
-                    organization_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("organization reaches edge");
-
-            let (parent_a, _, parent_a_batch) = alice_session
+            let (parent_a, _, parent_a_tx) = alice_session
                 .insert(
                     "parents",
                     row_input!(
@@ -1042,15 +927,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                     ),
                 )
                 .expect("alice inserts parent A");
-            alice
-                .wait_for_batch(
-                    parent_a_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("parent A reaches edge");
-
-            let (parent_b, _, parent_b_batch) = alice_session
+            let (parent_b, _, parent_b_tx) = alice_session
                 .insert(
                     "parents",
                     row_input!(
@@ -1060,29 +937,13 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                     ),
                 )
                 .expect("alice inserts parent B");
-            alice
-                .wait_for_batch(
-                    parent_b_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("parent B reaches edge");
-
-            let (child_id, _, child_batch) = alice_session
+            let (child_id, _, child_tx) = alice_session
                 .insert(
                     "children",
                     row_input!("parent_id" => parent_a, "title" => "draft"),
                 )
                 .expect("alice inserts child");
-            alice
-                .wait_for_batch(
-                    child_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("child reaches edge");
-
-            let update_batch = alice_session
+            let update_tx = alice_session
                 .update(
                     child_id,
                     vec![
@@ -1091,13 +952,17 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                     ],
                 )
                 .expect("alice reparent update should be admitted by inherited UPDATE policy");
-            alice
-                .wait_for_batch(
-                    update_batch.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("inherited reparent update reaches edge");
+            support::wait_for_edge_txs(
+                &alice,
+                &[
+                    organization_tx.expect("ordinary mutation commits immediately"),
+                    parent_a_tx.expect("ordinary mutation commits immediately"),
+                    parent_b_tx.expect("ordinary mutation commits immediately"),
+                    child_tx.expect("ordinary mutation commits immediately"),
+                    update_tx.expect("ordinary mutation commits immediately"),
+                ],
+            )
+            .await;
 
             alice.shutdown().await.expect("shutdown alice");
             server.shutdown().await;

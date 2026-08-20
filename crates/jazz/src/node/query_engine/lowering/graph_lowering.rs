@@ -906,18 +906,16 @@ fn lower_linear_plan_steps(
                     &accumulated_join_fields,
                     request,
                 )?;
-                if matches!(&plan.root, LinearRoot::Source { .. }) {
-                    let mut unwrapped_left_keys = BTreeSet::new();
-                    for left_key in &left_keys {
-                        if source_field_is_nullable(root_source, left_key)
-                            && unwrapped_left_keys.insert(left_key.clone())
-                        {
-                            graph = unwrap_nullable_join_key(
-                                graph,
-                                left_key.clone(),
-                                source_field_nullable_depth(root_source, left_key),
-                            );
-                        }
+                let mut unwrapped_left_keys = BTreeSet::new();
+                for left_key in &left_keys {
+                    if nullable_fields.contains(left_key)
+                        && unwrapped_left_keys.insert(left_key.clone())
+                    {
+                        graph = unwrap_nullable_join_key(
+                            graph,
+                            left_key.clone(),
+                            nullable_field_depths.get(left_key).copied().unwrap_or(1),
+                        );
                     }
                 }
                 let right_nullable_fields = lowered_right.nullable_fields.clone();
@@ -2288,6 +2286,15 @@ fn lower_join_key_ref(
         && value_source == source_id
         && field == "id"
     {
+        let declared_id = user_column_field(field);
+        if source
+            .row_shape
+            .descriptor
+            .field_index(&declared_id)
+            .is_some()
+        {
+            return require_source_field(source, &declared_id);
+        }
         return require_source_field(source, &source.row_shape.row_uuid_field);
     }
     match lower_value_ref(value, source_id, source, request)? {
@@ -2973,10 +2980,18 @@ fn lower_value_ref(
             source: value_source,
             field,
         } if value_source == source_id => {
-            let field = if source.row_shape.descriptor.field_index(field).is_some() {
+            let user_field = user_column_field(field);
+            let field = if source
+                .row_shape
+                .descriptor
+                .field_index(&user_field)
+                .is_some()
+            {
+                user_field
+            } else if source.row_shape.descriptor.field_index(field).is_some() {
                 field.clone()
             } else {
-                user_column_field(field)
+                user_field
             };
             Ok(LoweredValueRef::Field(require_source_field(
                 source, &field,

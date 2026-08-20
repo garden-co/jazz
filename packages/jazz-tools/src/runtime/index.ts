@@ -1,5 +1,5 @@
 export {
-  type CreateOptions,
+  type InsertOptions,
   type AuthConfig,
   type LocalTransactionRecord,
   type MutationErrorEvent,
@@ -16,7 +16,6 @@ export {
   type RestoreOptions,
   type SubscriptionCallback,
   type UpdateOptions,
-  type UpsertOptions,
   type WasmModule,
   type MutationResult,
 } from "./client.js";

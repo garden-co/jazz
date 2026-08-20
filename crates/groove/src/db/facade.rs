@@ -94,12 +94,23 @@ where
             .expect("durable publication state mutex poisoned");
         let depth = state.depth;
         let aborted = state.aborted;
+        let successful_commits = state.successful_commits;
         drop(state);
-        if aborted {
+        if aborted && successful_commits != 0 {
             self.ivm_runtime.discard_staged_subscription_notifications();
             self.poisoned = true;
+        } else if aborted {
+            self.ivm_runtime.discard_staged_subscription_notifications();
         } else if depth == 0 {
             self.ivm_runtime.publish_staged_subscription_notifications();
+        }
+        if depth == 0 {
+            let mut state = self
+                .durable_publication_state
+                .lock()
+                .expect("durable publication state mutex poisoned");
+            state.aborted = false;
+            state.successful_commits = 0;
         }
     }
 

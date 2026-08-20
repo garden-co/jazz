@@ -86,12 +86,108 @@ impl OrderedKvStorage for FailWriteManyMemoryStorage {
         self.inner.write_many(operations)
     }
 
+    fn write_many_outcome(&self, operations: &[WriteOperation<'_>]) -> WriteManyOutcome {
+        match self.write_many(operations) {
+            Ok(()) => WriteManyOutcome::Committed,
+            Err(error) => WriteManyOutcome::DefinitelyNotCommitted(error),
+        }
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.inner.column_family_names()
     }
 }
 
 impl ReopenableStorage for FailWriteManyMemoryStorage {
+    fn reopen(
+        mut self,
+        column_families: &[&str],
+    ) -> Result<Self, groove::storage::Error> {
+        self.inner = self.inner.reopen(column_families)?;
+        Ok(self)
+    }
+}
+
+/// Deliberately exercises the acknowledgement-loss case: the backing batch is
+/// durable, but the adapter reports an error. It intentionally relies on the
+/// conservative default `write_many_outcome` classification rather than
+/// claiming a pre-commit failure.
+#[derive(Clone)]
+struct CommitThenErrorMemoryStorage {
+    inner: MemoryStorage,
+    fail_next_after_commit: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl CommitThenErrorMemoryStorage {
+    fn new(column_families: &[&str]) -> Self {
+        Self {
+            inner: MemoryStorage::new(column_families),
+            fail_next_after_commit: std::rc::Rc::new(std::cell::Cell::new(false)),
+        }
+    }
+
+    fn fail_next_after_commit(&self) {
+        self.fail_next_after_commit.set(true);
+    }
+}
+
+impl OrderedKvStorage for CommitThenErrorMemoryStorage {
+    fn get(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+    ) -> Result<Option<StorageValue>, groove::storage::Error> {
+        self.inner.get(cf, key)
+    }
+
+    fn set(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+        value: &[u8],
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.set(cf, key, value)
+    }
+
+    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), groove::storage::Error> {
+        self.inner.delete(cf, key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_range(cf, start, end, visit)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_prefix(cf, prefix, visit)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
+        self.inner.write_many(operations)?;
+        if self.fail_next_after_commit.replace(false) {
+            return Err(groove::storage::Error::InvalidStorageLayout(
+                "injected post-commit acknowledgement failure".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.inner.column_family_names()
+    }
+}
+
+impl ReopenableStorage for CommitThenErrorMemoryStorage {
     fn reopen(
         mut self,
         column_families: &[&str],
@@ -113,7 +209,23 @@ fn fail_write_many_node() -> (NodeState<FailWriteManyMemoryStorage>, FailWriteMa
     (node, storage)
 }
 
-fn assert_poisoned_node_exposes_nothing(core: &mut NodeState<FailWriteManyMemoryStorage>) {
+fn commit_then_error_node(
+) -> (
+    NodeState<CommitThenErrorMemoryStorage>,
+    CommitThenErrorMemoryStorage,
+) {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = CommitThenErrorMemoryStorage::new(&refs);
+    let node = NodeState::new(node(0xd1), node_schema, storage.clone()).unwrap();
+    (node, storage)
+}
+
+fn assert_poisoned_node_exposes_nothing<S: OrderedKvStorage>(core: &mut NodeState<S>) {
     assert!(matches!(
         core.subscribe_history("todos"),
         Err(Error::Groove(groove::db::Error::DatabasePoisoned))
@@ -207,6 +319,225 @@ fn authority_storage_failure_returns_no_fate_ack_or_partial_transaction() {
         "an unacknowledged authority write must leave no fate metadata"
     );
     assert!(reopened.query_table_versions("todos").unwrap().is_empty());
+}
+
+#[test]
+fn authority_transient_storage_failure_accepts_exact_resend_after_storage_heals() {
+    // This lower-level fault injection is necessary: a real ENOSPC/write error
+    // cannot be produced deterministically through the public client API.
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xd5), 10).cells(title_cells("retry")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+
+    let (mut authority, storage) = fail_write_many_node();
+    storage.fail_nth_following_write_many(1);
+    authority
+        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .expect_err("first durable commit is intentionally failed");
+
+    authority
+        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .expect("the exact resend should apply after the transient storage failure clears");
+    assert_eq!(
+        authority.transaction_record(tx_id).map(|record| record.fate),
+        Some(Fate::Accepted)
+    );
+}
+
+/// Fate persistence and its consistency marker share one publication scope.
+/// If the marker write fails after the fate/current batch commits, the live
+/// runtime must fail closed rather than serving the newly accepted state.
+#[test]
+fn fate_marker_failure_poisoned_then_reopen_recovers_accepted_current_row() {
+    let (mut core, storage) = fail_write_many_node();
+    let tx_id = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0xd9), 10).cells(title_cells("marker fate")),
+        )
+        .unwrap();
+
+    // `apply_fate_update` first commits fate/current changes, then records the
+    // consistency marker. Interrupt only the latter write.
+    storage.fail_nth_following_write_many(2);
+    core.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalSeq(1)),
+        Some(DurabilityTier::Global),
+    )
+    .expect_err("a failed fate marker must fail-stop the live database");
+    assert_poisoned_node_exposes_nothing(&mut core);
+
+    drop(core);
+    let mut reopened = NodeState::new(node(0xd1), schema(), storage).unwrap();
+    let stored = reopened
+        .transaction_record(tx_id)
+        .expect("the pre-marker fate batch is durable and must recover coherently");
+    assert_eq!(stored.fate, Fate::Accepted);
+    assert_eq!(stored.global_seq, Some(GlobalSeq(1)));
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(0xd9), title_cells("marker fate"))])
+    );
+    assert_currency_tables_match_storage(&mut reopened, "todos");
+}
+
+/// An error returned after the storage batch commits is ambiguous, not a
+/// retryable failure. The live node must neither publish the speculative tick
+/// nor accept a resend; reopening must rebuild the already-durable unit and
+/// make it visible as one coherent history/current-row update.
+#[test]
+fn authority_post_commit_storage_error_poisoned_then_reopen_recovers_visibility() {
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xda), 10).cells(title_cells("ack lost")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+
+    let (mut authority, storage) = commit_then_error_node();
+    let history = authority.subscribe_history("todos").unwrap();
+    assert!(history.recv().unwrap().is_empty());
+    storage.fail_next_after_commit();
+    authority
+        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .expect_err("a post-commit acknowledgement failure must not publish or retry in process");
+    assert!(matches!(
+        history.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    assert_poisoned_node_exposes_nothing(&mut authority);
+    assert!(matches!(
+        authority.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS),
+        Err(Error::Groove(groove::db::Error::DatabasePoisoned))
+    ));
+
+    drop(authority);
+    let mut reopened = NodeState::new(node(0xd1), schema(), storage).unwrap();
+    let stored = reopened
+        .transaction_record(tx_id)
+        .expect("the acknowledged-lost batch is nevertheless durable");
+    assert_eq!(stored.fate, Fate::Accepted);
+    assert_eq!(stored.global_seq, Some(GlobalSeq(1)));
+    assert_eq!(stored.durability, DurabilityTier::Global);
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(0xda), title_cells("ack lost"))]),
+        "reopen must expose the mutation that the failed acknowledgement hid"
+    );
+    assert_currency_tables_match_storage(&mut reopened, "todos");
+}
+
+/// Once the source unit has committed, a later derived-merge failure may not
+/// rewind the authority allocator across that durable sequence. The third
+/// source unit proves the next allocation is 3 rather than reusing 2.
+#[test]
+fn derived_merge_failure_after_source_durability_does_not_reuse_global_sequence() {
+    let (mut writer, _) = fail_write_many_node();
+    let (_, first) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xdb), 10).cells(title_cells("first head")),
+        )
+        .unwrap();
+    let (_, second) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xdb), 20).cells(title_cells("second head")),
+        )
+        .unwrap();
+    let (_, third) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xdc), 30).cells(title_cells("third source")),
+        )
+        .unwrap();
+    let (mut authority, storage) = fail_write_many_node();
+    let history = authority.subscribe_history("todos").unwrap();
+    assert!(history.recv().unwrap().is_empty());
+
+    let SyncMessage::CommitUnit {
+        tx: first_tx,
+        versions: first_versions,
+    } = first
+    else {
+        panic!("local write must produce a commit unit")
+    };
+    authority
+        .ingest_commit_unit(
+            first_tx,
+            first_versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap();
+    assert_eq!(
+        history.recv().unwrap().to_values().unwrap().len(),
+        1,
+        "the first complete authority unit may publish normally"
+    );
+
+    // Authority ingest uses three writes for source canonical persistence,
+    // cleanup, and marker finalization. Fail the following derived local
+    // merge's initial batch, after source sequence 2 is durable.
+    storage.fail_nth_following_write_many(4);
+    let SyncMessage::CommitUnit {
+        tx: second_tx,
+        versions: second_versions,
+    } = second
+    else {
+        panic!("local write must produce a commit unit")
+    };
+    authority
+        .ingest_commit_unit(
+            second_tx,
+            second_versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .expect_err("derived merge storage failure must interrupt the authority response");
+    assert!(matches!(
+        history.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    assert_poisoned_node_exposes_nothing(&mut authority);
+
+    drop(authority);
+    let mut authority = NodeState::new(node(0xd1), schema(), storage).unwrap();
+
+    let SyncMessage::CommitUnit {
+        tx: third_tx,
+        versions: third_versions,
+    } = third
+    else {
+        panic!("local write must produce a commit unit")
+    };
+    let updates = authority
+        .ingest_commit_unit(third_tx, third_versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .expect("the durable source sequence must remain allocated after a derived failure");
+    assert!(matches!(
+        updates.as_slice(),
+        [SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(3)),
+            durability: Some(DurabilityTier::Global),
+            ..
+        }]
+    ));
 }
 
 /// The synchronous implementation currently has a deliberate recovery window

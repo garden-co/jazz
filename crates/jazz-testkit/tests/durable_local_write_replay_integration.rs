@@ -4,8 +4,7 @@ use jazz_testkit as support;
 
 use jazz::row_input;
 use jazz::tools::{
-    ClientId, ClientStorage, ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder,
-    TableSchema,
+    ClientId, ClientStorage, ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema,
 };
 use jazz_server::JazzServer;
 
@@ -46,15 +45,15 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
     let offline = jazz_testkit::connect(offline_context)
         .await
         .expect("open persistent client offline");
-    let (todo_id, expected_values, batch_id) = offline
+    let (todo_id, expected_values, transaction_id) = offline
         .insert(
             "todos",
             row_input!("title" => "deliver after restart", "completed" => false),
         )
         .expect("create offline todo");
     offline
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::Local,
         )
         .await
@@ -66,7 +65,7 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
         .expect("reopen persistent client with valid token");
     wait_for_rows(
         &reopened,
-        QueryBuilder::new("todos").build(),
+        jazz::query::Query::from("todos"),
         "reopened client uploads its durable local write",
         |rows| has_row(&rows, todo_id, &expected_values).then_some(()),
     )

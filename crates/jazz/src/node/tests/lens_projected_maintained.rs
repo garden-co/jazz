@@ -243,7 +243,7 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
     let (_dir, mut core) = open_node_with_schema(node(0x5f), base.clone());
     let shared_row = row(0x60);
 
-    let open = OpenBatchId::new();
+    let open = OpenTransactionId::new();
     core.open_exclusive(open).unwrap();
     core.tx_write(open, "tasks", shared_row, title_cells("old physical task"), None)
         .unwrap();

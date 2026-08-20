@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ColumnFamilyName, Error, Key, OrderedKvStorage, ReopenableStorage, ScanVisitor, Value,
-    WriteOperation, apply_storage_delta, key_codec,
+    WriteManyOutcome, WriteOperation, apply_storage_delta, key_codec,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
@@ -203,45 +203,63 @@ impl OrderedKvStorage for MemoryStorage {
     }
 
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
-        {
-            let inner = self.inner.lock().expect("memory storage mutex poisoned");
-            for operation in operations {
-                let cf = match operation {
-                    WriteOperation::Set { cf, .. }
-                    | WriteOperation::Delete { cf, .. }
-                    | WriteOperation::Delta { cf, .. } => *cf,
-                };
-                if !inner.contains_key(cf) {
-                    return Err(Error::ColumnFamilyNotFound(cf.to_owned()));
-                }
-            }
-        }
-
         let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
+        // Validate against a per-key prospective overlay before changing the
+        // store. Delta decoding can fail after earlier operations, but cloning
+        // every table here would make one-row writes scale with retained data.
+        let mut planned = BTreeMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
         for operation in operations {
             match operation {
                 WriteOperation::Set { cf, key, value } => {
-                    inner
-                        .get_mut(*cf)
-                        .expect("validated column family")
-                        .insert((*key).to_vec(), (*value).to_vec());
+                    if !inner.contains_key(*cf) {
+                        return Err(Error::ColumnFamilyNotFound((*cf).to_owned()));
+                    }
+                    planned.insert(((*cf).to_owned(), (*key).to_vec()), Some((*value).to_vec()));
                 }
                 WriteOperation::Delete { cf, key } => {
-                    inner
-                        .get_mut(*cf)
-                        .expect("validated column family")
-                        .remove(*key);
+                    if !inner.contains_key(*cf) {
+                        return Err(Error::ColumnFamilyNotFound((*cf).to_owned()));
+                    }
+                    planned.insert(((*cf).to_owned(), (*key).to_vec()), None);
                 }
                 WriteOperation::Delta { cf, key, delta } => {
-                    let values = inner.get_mut(*cf).expect("validated column family");
+                    let Some(values) = inner.get(*cf) else {
+                        return Err(Error::ColumnFamilyNotFound((*cf).to_owned()));
+                    };
+                    let planned_key = ((*cf).to_owned(), (*key).to_vec());
                     let encoded = delta.encode()?;
-                    let merged =
-                        apply_storage_delta(values.get(*key).map(Vec::as_slice), &encoded)?;
-                    values.insert((*key).to_vec(), merged);
+                    let existing = match planned.get(&planned_key) {
+                        Some(Some(value)) => Some(value.as_slice()),
+                        // An explicit earlier delete is an observed absence,
+                        // not a miss in the prospective overlay. Falling back
+                        // here would resurrect the pre-batch value.
+                        Some(None) => None,
+                        None => values.get(*key).map(Vec::as_slice),
+                    };
+                    let merged = apply_storage_delta(existing, &encoded)?;
+                    planned.insert(planned_key, Some(merged));
+                }
+            }
+        }
+        for ((cf, key), value) in planned {
+            let values = inner.get_mut(&cf).expect("column family was validated");
+            match value {
+                Some(value) => {
+                    values.insert(key, value);
+                }
+                None => {
+                    values.remove(&key);
                 }
             }
         }
         Ok(())
+    }
+
+    fn write_many_outcome(&self, operations: &[WriteOperation<'_>]) -> WriteManyOutcome {
+        match self.write_many(operations) {
+            Ok(()) => WriteManyOutcome::Committed,
+            Err(error) => WriteManyOutcome::DefinitelyNotCommitted(error),
+        }
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
