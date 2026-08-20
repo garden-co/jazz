@@ -110,6 +110,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
     fn parts_for(table: &TableSchema, seed: u8, deletion: Option<DeletionEvent>) -> VersionRowParts {
         VersionRowParts {
             table: table.name.clone(),
+            branch_key: BranchKey::default(),
             row_uuid: RowUuid(uuid::Uuid::from_bytes([seed; 16])),
             tx_node_alias: NodeAlias(u64::from(seed) + 10),
             schema_version_alias: SchemaVersionAlias(u64::from(seed) + 20),

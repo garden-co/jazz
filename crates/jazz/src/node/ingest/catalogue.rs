@@ -708,6 +708,18 @@ where
         source: &SchemaVersion,
         target: &SchemaVersion,
     ) -> Result<(), Error> {
+        if target.schema.branch_dimensions.len() < source.schema.branch_dimensions.len()
+            || !source
+                .schema
+                .branch_dimensions
+                .iter()
+                .zip(&target.schema.branch_dimensions)
+                .all(|(source, target)| source == target)
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "branch dimensions may only be appended with immutable identity, type, and default",
+            ));
+        }
         for table_lens in &lens.table_lenses {
             let source_table = source
                 .schema
@@ -721,6 +733,20 @@ where
                 .iter()
                 .find(|table| table.name == table_lens.target_table)
                 .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
+            let target_bindings = target_table
+                .branch_by
+                .iter()
+                .map(|binding| binding.dimension)
+                .collect::<BTreeSet<_>>();
+            if source_table
+                .branch_by
+                .iter()
+                .any(|binding| !target_bindings.contains(&binding.dimension))
+            {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "table branch dimensions cannot be removed",
+                ));
+            }
             let mut columns = source_table
                 .columns
                 .iter()

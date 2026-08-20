@@ -501,6 +501,7 @@ pub(super) fn shared_deletion_history_primary_key(
     version: &VersionRow,
 ) -> PrimaryKeyValue {
     PrimaryKeyValue::Composite(vec![
+        PrimaryKeyValue::Bytes(version.branch_key().canonical_bytes()),
         PrimaryKeyValue::U64(table_id.0),
         PrimaryKeyValue::Uuid(version.row_uuid().0),
         PrimaryKeyValue::U64(version.tx_time().0),
@@ -528,6 +529,7 @@ pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -
     format!("jazz_physical_{}_rejected_versions", table_id.0)
 }
 
+#[allow(dead_code)]
 pub(super) fn physical_branch_history_table_name(
     table_id: PhysicalTableId,
     branch_id: BranchId,
@@ -539,6 +541,7 @@ pub(super) fn physical_branch_history_table_name(
     )
 }
 
+#[allow(dead_code)]
 pub(super) fn physical_branch_register_table_name(
     table_id: PhysicalTableId,
     branch_id: BranchId,
@@ -550,6 +553,7 @@ pub(super) fn physical_branch_register_table_name(
     )
 }
 
+#[allow(dead_code)]
 pub(super) fn physical_branch_version_storage_table_name(
     table_id: PhysicalTableId,
     layer: VersionLayer,

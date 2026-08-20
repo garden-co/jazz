@@ -286,6 +286,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     fn relation_edge_branch_id(
         version_ref: &RowVersionRefEntry,
     ) -> Result<Option<BranchId>, Error> {

@@ -20,7 +20,7 @@ use super::query_engine::{
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
-    ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
+    BranchKey, ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
     ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
 };
 use crate::schema::TableSchema;
@@ -1446,12 +1446,14 @@ fn decode_typed_version_witness(
             .map_err(|_| super::Error::InvalidStoredValue("content witness projection failed"))?;
         return Ok(VersionRow {
             table: groove::Intern::new(table.name.clone()),
+            branch_key: BranchKey::default(),
             record: projected,
         });
     }
     let tx_time = TxTime(record_u64_idx(record, plan.tx_time_idx)?);
     let parts = VersionRowParts {
         table: table.name.clone(),
+        branch_key: BranchKey::default(),
         row_uuid: RowUuid(record.get_uuid(plan.row_idx)?),
         tx_node_alias: NodeAlias(record_u64_idx(record, plan.tx_node_idx)?),
         schema_version_alias: crate::ids::SchemaVersionAlias(record_u64_idx(
@@ -1471,6 +1473,7 @@ fn decode_typed_version_witness(
     let values = register_values_from_parts(&parts)?;
     Ok(VersionRow {
         table: groove::Intern::new(parts.table),
+        branch_key: parts.branch_key,
         record: owned_record_from_storage_values_with_descriptor(plan.descriptor, values)?,
     })
 }
@@ -2420,6 +2423,7 @@ mod tests {
             &table(),
             VersionRowParts {
                 table: "todos".to_owned(),
+                branch_key: BranchKey::default(),
                 row_uuid,
                 tx_node_alias: NodeAlias(10),
                 schema_version_alias: SchemaVersionAlias(0),
@@ -2443,6 +2447,7 @@ mod tests {
             &table(),
             VersionRowParts {
                 table: "todos".to_owned(),
+                branch_key: BranchKey::default(),
                 row_uuid,
                 tx_node_alias: NodeAlias(10),
                 schema_version_alias: SchemaVersionAlias(0),

@@ -271,7 +271,35 @@ where
         let tier = effective_read_tier(&opts);
         let mut node = self.node.node.borrow_mut();
         if !matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
-            ensure_default_read_view(&opts)?;
+            ensure_supported_read_view(&opts)?;
+            if opts.include_deleted {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "branch views do not support include_deleted yet",
+                ));
+            }
+            let snapshot = match authorization_mode {
+                QueryAuthorizationMode::TrustedServing => node
+                    .query_relation_snapshot_for_serving_in_read_view(
+                        &prepared.shape,
+                        &prepared.binding,
+                        tier,
+                        author,
+                        &opts.read_view,
+                    ),
+                QueryAuthorizationMode::ClientLocal => node.query_relation_snapshot_for_client(
+                    &prepared.shape,
+                    &prepared.binding,
+                    tier,
+                    author,
+                    &opts.read_view,
+                ),
+            }?;
+            return Ok(snapshot
+                .rows
+                .into_iter()
+                .take(snapshot.root_count)
+                .collect());
         }
         match (opts.include_deleted, authorization_mode) {
             (true, mode) => node.query_rows_including_deleted_in_authorization_mode(

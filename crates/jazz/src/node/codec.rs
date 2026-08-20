@@ -13,31 +13,33 @@ use groove::schema::TableSchema as GrooveTableSchema;
 
 groove::define_record! {
     pub(super) struct HistoryRowRecord {
-        0 => row_uuid: RowUuid,
-        1 => tx_time: TxTime,
-        2 => tx_node_id: NodeAlias,
-        3 => schema_version: SchemaVersionAlias,
-        4 => parents: ParentRefs,
-        5 => created_by: AuthorId,
-        6 => created_at: TxTime,
-        7 => updated_by: AuthorId,
-        8 => updated_at: TxTime,
+        0 => branch_key: Vec<u8>,
+        1 => row_uuid: RowUuid,
+        2 => tx_time: TxTime,
+        3 => tx_node_id: NodeAlias,
+        4 => schema_version: SchemaVersionAlias,
+        5 => parents: ParentRefs,
+        6 => created_by: AuthorId,
+        7 => created_at: TxTime,
+        8 => updated_by: AuthorId,
+        9 => updated_at: TxTime,
         .. user_cells,
     }
 }
 
 groove::define_record! {
     pub(super) struct RegisterRowRecord {
-        0 => row_uuid: RowUuid,
-        1 => tx_time: TxTime,
-        2 => tx_node_id: NodeAlias,
-        3 => schema_version: SchemaVersionAlias,
-        4 => parents: ParentRefs,
-        5 => created_by: AuthorId,
-        6 => created_at: TxTime,
-        7 => updated_by: AuthorId,
-        8 => updated_at: TxTime,
-        9 => _deletion: DeletionEvent,
+        0 => branch_key: Vec<u8>,
+        1 => row_uuid: RowUuid,
+        2 => tx_time: TxTime,
+        3 => tx_node_id: NodeAlias,
+        4 => schema_version: SchemaVersionAlias,
+        5 => parents: ParentRefs,
+        6 => created_by: AuthorId,
+        7 => created_at: TxTime,
+        8 => updated_by: AuthorId,
+        9 => updated_at: TxTime,
+        10 => _deletion: DeletionEvent,
     }
 }
 
@@ -46,51 +48,52 @@ groove::define_record! {
 // storage boundary where lineage/table routing is attached.
 groove::define_record! {
     pub(super) struct SharedDeletionHistoryRowRecord {
-        0 => branch_kind: u8,
-        1 => branch_id: uuid::Uuid,
-        2 => physical_table_id: u64,
-        3 => row_uuid: RowUuid,
-        4 => tx_time: TxTime,
-        5 => tx_node_id: NodeAlias,
-        6 => schema_version: SchemaVersionAlias,
-        7 => parents: ParentRefs,
-        8 => created_by: AuthorId,
-        9 => created_at: TxTime,
-        10 => updated_by: AuthorId,
-        11 => updated_at: TxTime,
-        12 => _deletion: DeletionEvent,
+        0 => branch_key: Vec<u8>,
+        1 => physical_table_id: u64,
+        2 => row_uuid: RowUuid,
+        3 => tx_time: TxTime,
+        4 => tx_node_id: NodeAlias,
+        5 => schema_version: SchemaVersionAlias,
+        6 => parents: ParentRefs,
+        7 => created_by: AuthorId,
+        8 => created_at: TxTime,
+        9 => updated_by: AuthorId,
+        10 => updated_at: TxTime,
+        11 => _deletion: DeletionEvent,
     }
 }
 
 groove::define_record! {
     pub(super) struct GlobalCurrentRowRecord {
-        0 => row_uuid: RowUuid,
-        1 => tx_time: TxTime,
-        2 => tx_node_id: NodeAlias,
-        3 => schema_version: SchemaVersionAlias,
-        4 => parents: ParentRefs,
-        5 => created_by: AuthorId,
-        6 => created_at: TxTime,
-        7 => updated_by: AuthorId,
-        8 => updated_at: TxTime,
-        9 => global_time: Option<GlobalTime>,
+        0 => branch_key: Vec<u8>,
+        1 => row_uuid: RowUuid,
+        2 => tx_time: TxTime,
+        3 => tx_node_id: NodeAlias,
+        4 => schema_version: SchemaVersionAlias,
+        5 => parents: ParentRefs,
+        6 => created_by: AuthorId,
+        7 => created_at: TxTime,
+        8 => updated_by: AuthorId,
+        9 => updated_at: TxTime,
+        10 => global_time: Option<GlobalTime>,
         .. user_cells,
     }
 }
 
 groove::define_record! {
     pub(super) struct RegisterGlobalCurrentRowRecord {
-        0 => row_uuid: RowUuid,
-        1 => tx_time: TxTime,
-        2 => tx_node_id: NodeAlias,
-        3 => schema_version: SchemaVersionAlias,
-        4 => parents: ParentRefs,
-        5 => created_by: AuthorId,
-        6 => created_at: TxTime,
-        7 => updated_by: AuthorId,
-        8 => updated_at: TxTime,
-        9 => global_time: Option<GlobalTime>,
-        10 => _deletion: DeletionEvent,
+        0 => branch_key: Vec<u8>,
+        1 => row_uuid: RowUuid,
+        2 => tx_time: TxTime,
+        3 => tx_node_id: NodeAlias,
+        4 => schema_version: SchemaVersionAlias,
+        5 => parents: ParentRefs,
+        6 => created_by: AuthorId,
+        7 => created_at: TxTime,
+        8 => updated_by: AuthorId,
+        9 => updated_at: TxTime,
+        10 => global_time: Option<GlobalTime>,
+        11 => _deletion: DeletionEvent,
     }
 }
 
@@ -353,6 +356,7 @@ impl VersionRecord {
             &cells,
             stored.deletion(),
         )
+        .map(|record| record.with_branch_key(stored.branch_key().clone()))
         .map(|record| record.with_authored_columns(authored_columns))
         .map_err(Error::from)
     }
@@ -488,11 +492,13 @@ impl StoredTransaction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VersionRow {
     pub(super) table: groove::Intern<String>,
+    pub(super) branch_key: BranchKey,
     pub(super) record: OwnedRecord,
 }
 
 pub(super) struct VersionRowParts {
     pub(super) table: String,
+    pub(super) branch_key: BranchKey,
     pub(super) row_uuid: RowUuid,
     pub(super) tx_node_alias: NodeAlias,
     pub(super) schema_version_alias: SchemaVersionAlias,
@@ -526,6 +532,7 @@ impl VersionRow {
         };
         Ok(Self {
             table: groove::Intern::new(parts.table),
+            branch_key: parts.branch_key,
             record: owned_record_from_storage_values(&storage_table, values)?,
         })
     }
@@ -563,12 +570,17 @@ impl VersionRow {
         };
         Ok(Self {
             table: groove::Intern::new(version.table().to_owned()),
+            branch_key: version.branch_key().clone(),
             record: owned_record_from_storage_values(&storage_table, values)?,
         })
     }
 
     pub(super) fn table(&self) -> &str {
         self.table.as_str()
+    }
+
+    pub(super) fn branch_key(&self) -> &BranchKey {
+        &self.branch_key
     }
 
     pub(super) fn row_uuid(&self) -> RowUuid {
@@ -1218,6 +1230,7 @@ pub(super) fn history_values_from_parts(
     version: &VersionRowParts,
 ) -> Result<Vec<Value>, Error> {
     let mut values = vec![
+        Value::Bytes(version.branch_key.canonical_bytes()),
         Value::Uuid(version.row_uuid.0),
         Value::U64(version.tx_time.0),
         Value::U64(version.tx_node_alias.0),
@@ -1261,6 +1274,7 @@ fn history_values_from_wire(
     tx_time: TxTime,
 ) -> Result<Vec<Value>, Error> {
     let mut values = Vec::with_capacity(HistoryRowRecord::USER_CELLS + table.columns.len());
+    values.push(Value::Bytes(version.branch_key().canonical_bytes()));
     values.push(Value::Uuid(version.row_uuid().0));
     values.push(Value::U64(tx_time.0));
     values.push(Value::U64(tx_node_alias.0));
@@ -1297,6 +1311,7 @@ pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Ve
         .deletion
         .ok_or(Error::InvalidStoredValue("register row requires deletion"))?;
     Ok(vec![
+        Value::Bytes(version.branch_key.canonical_bytes()),
         Value::Uuid(version.row_uuid.0),
         Value::U64(version.tx_time.0),
         Value::U64(version.tx_node_alias.0),
@@ -1324,6 +1339,7 @@ fn register_values_from_wire(
     deletion: DeletionEvent,
 ) -> Vec<Value> {
     vec![
+        Value::Bytes(version.branch_key().canonical_bytes()),
         Value::Uuid(version.row_uuid().0),
         Value::U64(tx_time.0),
         Value::U64(tx_node_alias.0),
@@ -1352,18 +1368,26 @@ pub(super) fn deletion_event_value(deletion: DeletionEvent) -> Value {
 
 pub(super) fn history_primary_key(version: &VersionRow) -> PrimaryKeyValue {
     PrimaryKeyValue::Composite(vec![
+        PrimaryKeyValue::Bytes(version.branch_key().canonical_bytes()),
         PrimaryKeyValue::Uuid(version.row_uuid().0),
         PrimaryKeyValue::U64(version.tx_time().0),
         PrimaryKeyValue::U64(version.tx_node_alias().0),
     ])
 }
 
-pub(super) fn global_current_primary_key(row_uuid: RowUuid) -> PrimaryKeyValue {
-    PrimaryKeyValue::Composite(vec![PrimaryKeyValue::Uuid(row_uuid.0)])
+pub(super) fn global_current_primary_key(
+    branch_key: &BranchKey,
+    row_uuid: RowUuid,
+) -> PrimaryKeyValue {
+    PrimaryKeyValue::Composite(vec![
+        PrimaryKeyValue::Bytes(branch_key.canonical_bytes()),
+        PrimaryKeyValue::Uuid(row_uuid.0),
+    ])
 }
 
 fn stored_version_prefix_values(version: &VersionRow) -> Vec<Value> {
     vec![
+        Value::Bytes(version.branch_key().canonical_bytes()),
         Value::Uuid(version.row_uuid().0),
         Value::U64(version.tx_time().0),
         Value::U64(version.tx_node_alias().0),

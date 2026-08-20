@@ -216,6 +216,7 @@ where
         ))
     }
 
+    #[allow(dead_code)]
     pub(super) fn physical_branch_history_source_graph_with_projection_target(
         &self,
         schema_version: SchemaVersionId,
@@ -592,6 +593,7 @@ where
     /// compatibility target.  A branch overlay is joined with a frozen base
     /// already materialized in the reader schema, so this boundary belongs
     /// before the overlay/base union rather than after it.
+    #[allow(dead_code)]
     pub(super) fn ensure_physical_branch_history_projection_for_enum_columns(
         &mut self,
         target_schema: SchemaVersionId,
@@ -1168,6 +1170,7 @@ where
         )
     }
 
+    #[allow(dead_code)]
     fn physical_history_projection_case_for_enum_columns(
         &mut self,
         source_schema: SchemaVersionId,

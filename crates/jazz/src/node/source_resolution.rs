@@ -5,11 +5,153 @@
 //! module owns the temporary row materialization behind those graph leaves.
 
 use super::*;
+use crate::node::query_engine::BranchViewSourceBase;
+use crate::protocol::SnapshotRef;
 
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn branch_view_rows_for_schema(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        tier: DurabilityTier,
+        head: &BranchKey,
+        base: Option<&BranchViewSourceBase>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let read_table = self.table_in_schema(table, read_schema_version)?;
+        let mut winners = |key: &BranchKey,
+                           snapshot: Option<&SnapshotRef>|
+         -> Result<
+            (BTreeMap<RowUuid, VersionRow>, BTreeMap<RowUuid, VersionRow>),
+            Error,
+        > {
+            let mut content = BTreeMap::new();
+            let mut deletions = BTreeMap::new();
+            for version in self.query_table_versions_in_branch(table, key)? {
+                let tx_id = self.version_tx_id(&version)?;
+                let Some(tx) = self.query_transaction(tx_id)? else {
+                    continue;
+                };
+                let visible = if let Some(snapshot) = snapshot {
+                    let snapshot = Snapshot {
+                        owner: snapshot.owner,
+                        global_base: snapshot.global_base,
+                        local_base: snapshot.local_base,
+                        dots: snapshot.dots.clone(),
+                    };
+                    self.snapshot_covers(tx_id, &snapshot)
+                } else {
+                    match tier {
+                        DurabilityTier::Global => {
+                            matches!(tx.fate, Fate::Accepted)
+                                && tx.durability >= DurabilityTier::Global
+                        }
+                        DurabilityTier::Edge => {
+                            matches!(tx.fate, Fate::Accepted)
+                                && tx.durability >= DurabilityTier::Edge
+                        }
+                        DurabilityTier::None | DurabilityTier::Local => {
+                            !matches!(tx.fate, Fate::Rejected(_))
+                        }
+                    }
+                };
+                if !visible {
+                    continue;
+                }
+                let target = match version.layer() {
+                    VersionLayer::Content => &mut content,
+                    VersionLayer::Deletion => &mut deletions,
+                };
+                let replace =
+                    target
+                        .get(&version.row_uuid())
+                        .is_none_or(|existing: &VersionRow| {
+                            version.tx_time().sort_key(tx_id.node)
+                                > existing.tx_time().sort_key(
+                                    self.version_tx_id(existing).expect("valid version tx").node,
+                                )
+                        });
+                if replace {
+                    target.insert(version.row_uuid(), version);
+                }
+            }
+            Ok((content, deletions))
+        };
+        let (head_content, head_deletions) = winners(head, None)?;
+        let (base_content, base_deletions) = match base {
+            None => (BTreeMap::new(), BTreeMap::new()),
+            Some(BranchViewSourceBase::Current(key)) if key == head => {
+                (BTreeMap::new(), BTreeMap::new())
+            }
+            Some(BranchViewSourceBase::Current(key)) => winners(key, None)?,
+            Some(BranchViewSourceBase::Snapshot(key, snapshot)) if key == head => {
+                winners(key, Some(snapshot))?
+            }
+            Some(BranchViewSourceBase::Snapshot(key, snapshot)) => winners(key, Some(snapshot))?,
+        };
+        let row_ids = head_content
+            .keys()
+            .chain(base_content.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut rows = Vec::new();
+        for row_uuid in row_ids {
+            let Some(version) = head_content
+                .get(&row_uuid)
+                .or_else(|| base_content.get(&row_uuid))
+            else {
+                continue;
+            };
+            let deletion = head_deletions
+                .get(&row_uuid)
+                .or_else(|| base_deletions.get(&row_uuid));
+            if deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
+                continue;
+            }
+            let source_schema = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "history schema version alias must exist",
+                ))?;
+            let source_table = self.table_in_schema(version.table(), source_schema)?;
+            let mut cells = self.materialized_cells_for_version(&source_table, version)?;
+            let Some(projected_table) = self.translate_cells(
+                source_schema,
+                read_schema_version,
+                version.table(),
+                &mut cells,
+            )?
+            else {
+                continue;
+            };
+            if projected_table != table {
+                continue;
+            }
+            for binding in &read_table.branch_by {
+                let (_, encoded) = head
+                    .dimensions
+                    .iter()
+                    .find(|(dimension, _)| *dimension == binding.dimension)
+                    .ok_or_else(|| {
+                        Error::InvalidBranchKey(
+                            "head branch key missing table dimension".to_owned(),
+                        )
+                    })?;
+                cells.insert(
+                    binding.column.clone(),
+                    encoded.decode().map_err(|_| {
+                        Error::InvalidBranchKey("invalid head branch value".to_owned())
+                    })?,
+                );
+            }
+            rows.push(current_row_from_cells(&read_table, row_uuid, &cells)?);
+        }
+        sort_current_rows(&mut rows);
+        Ok(rows)
+    }
+
     pub(super) fn current_rows_for_schema(
         &mut self,
         table: &str,

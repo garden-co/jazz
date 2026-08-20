@@ -52,8 +52,6 @@ pub const MAX_COMMIT_UNIT_VERSIONS: usize = 4096;
 /// Source: matches the first known-state repair tier; large reconnect holes
 /// should batch exact requests instead of creating unbounded semantic vectors.
 pub const MAX_FETCH_ROW_VERSIONS: usize = 1024;
-/// Maximum branch-routing records requested in one repair message.
-
 /// Maximum exact row-version refs in one slow known-state declaration.
 ///
 /// Source: same count tier as `FetchRowVersions`; larger local holdings should

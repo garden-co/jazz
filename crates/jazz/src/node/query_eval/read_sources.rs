@@ -13,6 +13,7 @@ pub(super) struct CurrentQuerySourceResolver<'a, S> {
     /// branch write materializes a sparse partition.  It receives an empty
     /// process-local source at compile time; the durable partition is still
     /// published only by the first write.
+    #[allow(dead_code)]
     pub(super) prepare_branch_subscription_sources: bool,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
@@ -45,17 +46,30 @@ where
         let Some(source) = self.read_view.sources.get(&request.source) else {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
-        let (projection, graph_tier, history_position, open_tx_overlay) = match source {
+        let (projection, graph_tier, history_position, open_tx_overlay, branch_view) = match source
+        {
             SourceExpr::VisibleCurrent {
                 projection,
                 data: DataSource::Current,
                 tier,
-            } => (projection, Some(*tier), None, None),
+            } => (projection, Some(*tier), None, None, None),
+            SourceExpr::BranchView {
+                projection,
+                head,
+                base,
+                tier,
+            } => (
+                projection,
+                Some(*tier),
+                None,
+                None,
+                Some((head, base.as_ref())),
+            ),
             SourceExpr::HistoryCut {
                 projection,
                 data: DataSource::Current,
                 position,
-            } => (projection, None, Some(*position), None),
+            } => (projection, None, Some(*position), None, None),
             SourceExpr::SettledBindingView {
                 projection,
                 binding_view,
@@ -184,7 +198,7 @@ where
                         None,
                     )
                 }
-                (projection, Some(DurabilityTier::Global), None, None)
+                (projection, Some(DurabilityTier::Global), None, None, None)
             }
             SourceExpr::WithOverlays { input, overlays } => {
                 let (projection, tier) = match input.as_ref() {
@@ -212,7 +226,7 @@ where
                         SourceGap::HistoricalStorageCut,
                     ));
                 };
-                (projection, tier, None, Some(*tx_id))
+                (projection, tier, None, Some(*tx_id), None)
             }
             _ => {
                 return Err(source_resolution_error(
@@ -272,8 +286,33 @@ where
                 deletion_register: None,
             });
         }
-        let (graph, descriptor, metadata, routing_fields) = if let Some(position) = history_position
+        let (graph, descriptor, metadata, routing_fields) = if let Some((head, base)) = branch_view
         {
+            if request.visibility != RowVisibility::Visible
+                || !request.requirements.metadata.is_empty()
+                || !matches!(authorization, SourceAuthorizationRequest::System)
+            {
+                return Err(source_resolution_error(request, SourceGap::Coverage));
+            }
+            let rows = self
+                .node
+                .branch_view_rows_for_schema(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                    graph_tier.expect("branch view has a current tier"),
+                    head,
+                    base,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let graph = inline_current_graph(&table, rows)
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            (
+                graph,
+                current_row_descriptor(&table),
+                BTreeMap::new(),
+                BTreeSet::new(),
+            )
+        } else if let Some(position) = history_position {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
                     request,
@@ -1137,6 +1176,7 @@ pub(super) fn edge_visible_ahead_current_source_graph(
 /// raw history after rejection, so winner selection over the unfiltered table
 /// would expose pending rows at Edge/Global and let a rejected latest version
 /// continue masking an earlier accepted winner.
+#[allow(dead_code)]
 fn tier_visible_branch_history_graph(
     source: GraphBuilder,
     fields: Vec<String>,
@@ -2318,6 +2358,7 @@ fn inline_include_deleted_current_graph(
     Ok(GraphBuilder::inline_records(descriptor, records))
 }
 
+#[allow(dead_code)]
 fn inline_branch_current_graph(
     table: &TableSchema,
     rows: Vec<(CurrentRow, TxTime, NodeAlias, Option<BranchId>)>,
@@ -2399,6 +2440,7 @@ fn inline_branch_current_graph(
     ))
 }
 
+#[allow(dead_code)]
 pub(super) fn inline_branch_current_record(
     table: &TableSchema,
     descriptor: &RecordDescriptor,

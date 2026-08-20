@@ -24,7 +24,7 @@ use groove::schema::ColumnType;
 
 use super::OpenTransactionId;
 use crate::ids::{AuthorId, BranchId, RowUuid, SchemaVersionId};
-use crate::protocol::{BindingViewKey, RegisterShapeOptions};
+use crate::protocol::{BindingViewKey, BranchKey, RegisterShapeOptions, SnapshotRef};
 use crate::query::{BindingId, Query, RecursionBound, RelationQuery, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::GlobalTime;

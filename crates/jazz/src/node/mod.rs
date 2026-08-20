@@ -32,10 +32,11 @@ use crate::ids::{
     RowUuid, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
 };
 use crate::protocol::{
-    BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ProgramFactEntry, ReadViewKey,
-    RealRowMemberEntry, ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication,
-    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
-    VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
+    BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp, MigrationLens,
+    ProgramFactEntry, ReadViewKey, RealRowMemberEntry, ResultMemberEntry, ResultRowEntry,
+    RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
+    SyncMessage, VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry,
+    expand_version_carriers,
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
@@ -1354,6 +1355,8 @@ pub struct MergeableCommit {
     pub table: String,
     /// Target row.
     pub row_uuid: RowUuid,
+    /// Exact named branch coordinate for this row incarnation.
+    pub branch: BranchSelector,
     /// Author making the commit.
     pub made_by: AuthorId,
     /// Identity used for write-policy evaluation.
@@ -1378,6 +1381,7 @@ impl MergeableCommit {
         Self {
             table: table.into(),
             row_uuid,
+            branch: BranchSelector::default(),
             made_by: AuthorId::SYSTEM,
             permission_subject: None,
             now_ms,
@@ -1387,6 +1391,12 @@ impl MergeableCommit {
             parents: Vec::new(),
             user_metadata_json: None,
         }
+    }
+
+    /// Target an exact branch-keyed row incarnation.
+    pub fn branch(mut self, branch: BranchSelector) -> Self {
+        self.branch = branch;
+        self
     }
 
     /// Set the commit author.
@@ -1690,6 +1700,9 @@ pub enum Error {
     /// Mergeable commit shape is invalid.
     #[error("invalid mergeable commit: {0}")]
     InvalidMergeableCommit(&'static str),
+    /// Exact branch selector is missing, malformed, or inconsistent with row cells.
+    #[error("invalid branch key: {0}")]
+    InvalidBranchKey(String),
     /// An exclusive transaction no longer matches its fixed local snapshot.
     #[error("row visible parent changed since transaction write was staged")]
     TransactionConflict,

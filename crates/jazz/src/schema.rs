@@ -20,6 +20,7 @@ use groove::schema::{
 use groove::storage::StorageLayout;
 
 use crate::ids::{BranchDimensionId, SchemaVersionId};
+use crate::protocol::{BranchDimensionValue, BranchKey, BranchSelector};
 use crate::query::{Query, claim, col, eq};
 use crate::tools::public_schema::Schema as PublicSchema;
 
@@ -143,6 +144,86 @@ impl RuntimeSchema {
     pub fn with_branch_dimension(mut self, dimension: BranchDimensionSchema) -> Self {
         self.branch_dimensions.push(dimension);
         self.validated()
+    }
+
+    /// Project a named selector onto one table and validate its exact branch key.
+    pub fn project_branch_selector(
+        &self,
+        table: &TableSchema,
+        selector: &BranchSelector,
+    ) -> Result<(BranchKey, BTreeMap<String, Value>), String> {
+        if selector.dimensions.len() != table.branch_by.len() {
+            return Err(format!(
+                "branch selector for {} must provide exactly {} dimensions",
+                table.name,
+                table.branch_by.len()
+            ));
+        }
+        let mut dimensions = Vec::with_capacity(table.branch_by.len());
+        let mut cells = BTreeMap::new();
+        for binding in &table.branch_by {
+            let dimension = self
+                .branch_dimensions
+                .iter()
+                .find(|candidate| candidate.id == binding.dimension)
+                .ok_or_else(|| format!("unknown branch dimension on {}", table.name))?;
+            let encoded = selector
+                .dimensions
+                .get(&dimension.name)
+                .ok_or_else(|| format!("missing branch dimension {}", dimension.name))?;
+            let value = encoded
+                .decode()
+                .map_err(|_| format!("invalid branch dimension {} encoding", dimension.name))?;
+            if BranchDimensionValue::from(value.clone()) != *encoded {
+                return Err(format!(
+                    "non-canonical branch dimension {} encoding",
+                    dimension.name
+                ));
+            }
+            RecordDescriptor::new([("value", dimension.column_type.clone())])
+                .create(std::slice::from_ref(&value))
+                .map_err(|_| format!("invalid branch dimension {} value", dimension.name))?;
+            dimensions.push((dimension.id, encoded.clone()));
+            cells.insert(binding.column.clone(), value);
+        }
+        dimensions.sort_by_key(|(id, _)| *id);
+        Ok((BranchKey { dimensions }, cells))
+    }
+
+    /// Validate a schema-wide view selector, then project it onto one table's subset.
+    pub fn project_branch_view_selector(
+        &self,
+        table: &TableSchema,
+        selector: &BranchSelector,
+    ) -> Result<(BranchKey, BTreeMap<String, Value>), String> {
+        if selector.dimensions.len() != self.branch_dimensions.len()
+            || self
+                .branch_dimensions
+                .iter()
+                .any(|dimension| !selector.dimensions.contains_key(&dimension.name))
+        {
+            return Err(
+                "branch view selector must provide every schema dimension exactly once".to_owned(),
+            );
+        }
+        let projected = BranchSelector {
+            dimensions: table
+                .branch_by
+                .iter()
+                .map(|binding| {
+                    let dimension = self
+                        .branch_dimensions
+                        .iter()
+                        .find(|dimension| dimension.id == binding.dimension)
+                        .expect("validated table binding");
+                    (
+                        dimension.name.clone(),
+                        selector.dimensions[&dimension.name].clone(),
+                    )
+                })
+                .collect(),
+        };
+        self.project_branch_selector(table, &projected)
     }
 
     fn validated(self) -> Self {
@@ -684,6 +765,7 @@ impl TableSchema {
 
     fn history_storage_table_named(&self, name: String) -> GrooveTableSchema {
         let mut columns = vec![
+            column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
@@ -709,13 +791,14 @@ impl TableSchema {
 
         GrooveTableSchema::new(name, columns)
             .with_primary_key(PrimaryKey::composite([
+                PrimaryKeyColumn::bytes("branch_key"),
                 PrimaryKeyColumn::uuid("row_uuid"),
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
                 PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
             ]))
             .with_index(GrooveIndexSchema::new(
                 "by_tx",
-                ["tx_time", "tx_node_id", "row_uuid"],
+                ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
             ))
     }
 
@@ -728,6 +811,7 @@ impl TableSchema {
         GrooveTableSchema::new(
             name,
             [
+                column("branch_key", GrooveColumnType::Bytes),
                 column("row_uuid", GrooveColumnType::Uuid),
                 column("tx_time", GrooveColumnType::U64),
                 column("tx_node_id", GrooveColumnType::U64),
@@ -741,13 +825,14 @@ impl TableSchema {
             ],
         )
         .with_primary_key(PrimaryKey::composite([
+            PrimaryKeyColumn::bytes("branch_key"),
             PrimaryKeyColumn::uuid("row_uuid"),
             PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
             PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
         ]))
         .with_index(GrooveIndexSchema::new(
             "by_tx",
-            ["tx_time", "tx_node_id", "row_uuid"],
+            ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
         ))
     }
 
@@ -755,6 +840,7 @@ impl TableSchema {
     pub fn global_current_storage_tables(&self) -> Vec<GrooveTableSchema> {
         let indexed_columns = self.global_current_indexed_columns();
         let mut content_columns = vec![
+            column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
@@ -785,11 +871,14 @@ impl TableSchema {
             format!("jazz_{}_global_current", self.name),
             content_columns,
         )
-        .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("row_uuid")]));
+        .with_primary_key(PrimaryKey::composite([
+            PrimaryKeyColumn::bytes("branch_key"),
+            PrimaryKeyColumn::uuid("row_uuid"),
+        ]));
         for indexed in &indexed_columns {
             content_table = content_table.with_index(GrooveIndexSchema::new(
                 global_current_index_name(indexed),
-                [format!("user_{indexed}")],
+                ["branch_key".to_owned(), format!("user_{indexed}")],
             ));
         }
         vec![
@@ -797,6 +886,7 @@ impl TableSchema {
             GrooveTableSchema::new(
                 format!("jazz_{}_register_global_current", self.name),
                 [
+                    column("branch_key", GrooveColumnType::Bytes),
                     column("row_uuid", GrooveColumnType::Uuid),
                     column("tx_time", GrooveColumnType::U64),
                     column("tx_node_id", GrooveColumnType::U64),
@@ -810,13 +900,17 @@ impl TableSchema {
                     column("_deletion", deletion_column()),
                 ],
             )
-            .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("row_uuid")])),
+            .with_primary_key(PrimaryKey::composite([
+                PrimaryKeyColumn::bytes("branch_key"),
+                PrimaryKeyColumn::uuid("row_uuid"),
+            ])),
         ]
     }
 
     /// Return per-layer ahead-of-global candidate tables.
     pub fn ahead_current_storage_tables(&self) -> Vec<GrooveTableSchema> {
         let mut content_columns = vec![
+            column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
@@ -841,17 +935,19 @@ impl TableSchema {
         vec![
             GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
                 .with_primary_key(PrimaryKey::composite([
+                    PrimaryKeyColumn::bytes("branch_key"),
                     PrimaryKeyColumn::uuid("row_uuid"),
                     PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
                     PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
                 ]))
                 .with_index(GrooveIndexSchema::new(
                     "by_tx",
-                    ["tx_time", "tx_node_id", "row_uuid"],
+                    ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
                 )),
             GrooveTableSchema::new(
                 format!("jazz_{}_register_ahead_current", self.name),
                 [
+                    column("branch_key", GrooveColumnType::Bytes),
                     column("row_uuid", GrooveColumnType::Uuid),
                     column("tx_time", GrooveColumnType::U64),
                     column("tx_node_id", GrooveColumnType::U64),
@@ -866,13 +962,14 @@ impl TableSchema {
                 ],
             )
             .with_primary_key(PrimaryKey::composite([
+                PrimaryKeyColumn::bytes("branch_key"),
                 PrimaryKeyColumn::uuid("row_uuid"),
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
                 PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
             ]))
             .with_index(GrooveIndexSchema::new(
                 "by_tx",
-                ["tx_time", "tx_node_id", "row_uuid"],
+                ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
             )),
         ]
     }
@@ -1011,6 +1108,7 @@ pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_deletion_history",
         [
+            column("branch_key", GrooveColumnType::Bytes),
             column("physical_table_id", GrooveColumnType::U64),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
@@ -1025,6 +1123,7 @@ pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
         ],
     )
     .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::bytes("branch_key"),
         PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("row_uuid"),
         PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
@@ -1032,7 +1131,13 @@ pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
     ]))
     .with_index(GrooveIndexSchema::new(
         "by_tx",
-        ["tx_time", "tx_node_id", "physical_table_id", "row_uuid"],
+        [
+            "tx_time",
+            "tx_node_id",
+            "branch_key",
+            "physical_table_id",
+            "row_uuid",
+        ],
     ))
 }
 
@@ -1184,7 +1289,17 @@ fn transactions_table() -> GrooveTableSchema {
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_str(&mut bytes, "jazz-schema-v0");
+    put_str(&mut bytes, "jazz-schema-v1-branch-views");
+    put_u64(&mut bytes, schema.branch_dimensions.len() as u64);
+    for dimension in &schema.branch_dimensions {
+        bytes.extend_from_slice(dimension.id.0.as_bytes());
+        put_str(&mut bytes, &dimension.name);
+        put_column_type(&mut bytes, &dimension.column_type);
+        let default = postcard::to_allocvec(&dimension.migration_default)
+            .expect("branch dimension defaults are encodable");
+        put_u64(&mut bytes, default.len() as u64);
+        bytes.extend(default);
+    }
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     put_u64(&mut bytes, tables.len() as u64);
@@ -1200,6 +1315,13 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
         for (column, target) in &table.references {
             put_str(&mut bytes, column);
             put_str(&mut bytes, target);
+        }
+        let mut branch_by = table.branch_by.iter().collect::<Vec<_>>();
+        branch_by.sort_by_key(|binding| binding.dimension);
+        put_u64(&mut bytes, branch_by.len() as u64);
+        for binding in branch_by {
+            bytes.extend_from_slice(binding.dimension.0.as_bytes());
+            put_str(&mut bytes, &binding.column);
         }
     }
     bytes

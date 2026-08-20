@@ -48,6 +48,7 @@ where
         if version.layer() == VersionLayer::Deletion {
             let table_id = self.physical_table_id_for_version(version)?;
             return Ok(vec![
+                Value::Bytes(version.branch_key().canonical_bytes()),
                 Value::U64(table_id.0),
                 Value::Uuid(version.row_uuid().0),
                 Value::U64(version.tx_time().0),
@@ -443,7 +444,10 @@ where
                 "stored register schema version alias missing while preparing shared deletion write",
             ))?;
         let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
-        let mut values = vec![Value::U64(table_id.0)];
+        let mut values = vec![
+            Value::Bytes(version.branch_key().canonical_bytes()),
+            Value::U64(table_id.0),
+        ];
         values.extend(version.record.to_values()?);
         let descriptor = self
             .database

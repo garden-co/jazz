@@ -502,6 +502,9 @@ pub struct PeerPayloadInventory {
 pub struct VersionRecord {
     table: groove::Intern<String>,
     schema_version: SchemaVersionId,
+    /// Exact branch coordinate of this version's row incarnation.
+    #[serde(default)]
+    branch_key: BranchKey,
     record: OwnedRecord,
     /// `None` denotes a legacy or lens-translated payload whose authored
     /// presence is unavailable; consumers must conservatively treat every
@@ -519,9 +522,20 @@ impl VersionRecord {
         Self {
             table: groove::Intern::new(table.into()),
             schema_version,
+            branch_key: BranchKey::default(),
             record,
             authored_columns: None,
         }
+    }
+
+    pub(crate) fn with_branch_key(mut self, branch_key: BranchKey) -> Self {
+        self.branch_key = branch_key;
+        self
+    }
+
+    /// Exact branch coordinate of this version.
+    pub fn branch_key(&self) -> &BranchKey {
+        &self.branch_key
     }
 
     pub(crate) fn with_authored_columns(
@@ -754,6 +768,7 @@ impl Ord for VersionRecord {
         self.table()
             .cmp(other.table())
             .then_with(|| self.schema_version.cmp(&other.schema_version))
+            .then_with(|| self.branch_key.cmp(&other.branch_key))
             .then_with(|| self.record.raw().cmp(other.record.raw()))
             .then_with(|| self.authored_columns.cmp(&other.authored_columns))
     }
@@ -1565,6 +1580,36 @@ impl BranchDimensionValue {
     /// Decode the value for validation and ordinary column projection.
     pub fn decode(&self) -> Result<Value, postcard::Error> {
         postcard::from_bytes(&self.0)
+    }
+}
+
+/// Exact, table-projected branch coordinate carried by every row version.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub struct BranchKey {
+    /// Values ordered by stable dimension identity, never application column name.
+    pub dimensions: Vec<(crate::ids::BranchDimensionId, BranchDimensionValue)>,
+}
+
+impl BranchKey {
+    /// Canonical bytes used as the physical incarnation-key prefix.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("branch keys are encodable")
+    }
+
+    /// Decode a persisted exact branch key.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
     }
 }
 

@@ -119,6 +119,17 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         /// Local, edge, or global source currency.
         tier: DurabilityTier,
     },
+    /// Effective branch-keyed rows from a live head and optional live/frozen base.
+    BranchView {
+        /// Schema/storage/lens projection used by this source.
+        projection: SchemaProjection<R>,
+        /// Exact table-projected live head key.
+        head: BranchKey,
+        /// Optional exact fallback source.
+        base: Option<BranchViewSourceBase>,
+        /// Local, edge, or global source currency for live inputs.
+        tier: DurabilityTier,
+    },
     /// Historical global cut.
     HistoryCut {
         /// Schema/storage/lens projection used by this source.
@@ -180,7 +191,9 @@ impl<R: SourceResolution> SourceExpr<R> {
     /// current-source expression after transparent projection/overlay nodes.
     pub(crate) fn current_tier(&self) -> Option<DurabilityTier> {
         match self {
-            SourceExpr::VisibleCurrent { tier, .. } => Some(*tier),
+            SourceExpr::VisibleCurrent { tier, .. } | SourceExpr::BranchView { tier, .. } => {
+                Some(*tier)
+            }
             SourceExpr::WithOverlays { input, .. } | SourceExpr::LensProject { input, .. } => {
                 input.current_tier()
             }
@@ -197,6 +210,15 @@ impl<R: SourceResolution> SourceExpr<R> {
             SourceExpr::SettledBindingView { .. } => None,
         }
     }
+}
+
+/// Resolved base of one table source in a branch view.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum BranchViewSourceBase {
+    /// Base remains connected to current storage.
+    Current(BranchKey),
+    /// Base is frozen at one application-resolved snapshot.
+    Snapshot(BranchKey, SnapshotRef),
 }
 
 /// Data branch/prefix selected for a source expression.
@@ -284,7 +306,7 @@ impl SourceResolution for RequestedSourceStage {
     type Storage = StorageSchemaSelection;
     type Lens = LensSelection;
     type Overlay = OverlayRef;
-    type DataBranch = BranchId;
+    type DataBranch = BranchKey;
     type MergedSources = ();
 }
 
@@ -297,7 +319,7 @@ impl SourceResolution for ResolvedSourceStage {
     type Storage = Vec<ResolvedPartitionLens>;
     type Lens = ();
     type Overlay = ResolvedOverlay;
-    type DataBranch = BranchId;
+    type DataBranch = BranchKey;
     type MergedSources = Vec<u8>;
 }
 

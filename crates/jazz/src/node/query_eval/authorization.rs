@@ -285,6 +285,7 @@ where
     /// Insert candidates reinterpret plain `inherits(parent)` as parent
     /// update-using authorization. Existing/update-check rows retain ordinary
     /// read inheritance unless the policy names an explicit write operation.
+    #[allow(dead_code)]
     pub(in crate::node) fn write_policy_query_allows_candidate(
         &mut self,
         table: &TableSchema,
@@ -293,7 +294,6 @@ where
         cells: &BTreeMap<String, Value>,
         identity: AuthorId,
         insert_candidate: bool,
-        branch_id: Option<BranchId>,
     ) -> Result<bool, Error> {
         let policy_schema_version = if self
             .catalogue
@@ -325,7 +325,6 @@ where
             cells,
             identity,
             insert_candidate,
-            branch_id,
         )
     }
 
@@ -338,7 +337,6 @@ where
         cells: &BTreeMap<String, Value>,
         identity: AuthorId,
         insert_candidate: bool,
-        branch_id: Option<BranchId>,
     ) -> Result<bool, Error> {
         let mut policy = policy.clone();
         if insert_candidate {
@@ -409,21 +407,13 @@ where
         };
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
-            reads: match branch_id {
-                Some(branch_id) => branch_query_read_set(
-                    &input.shape,
-                    policy_shape.schema_version(),
-                    DurabilityTier::Local,
-                    branch_id,
-                ),
-                None => current_query_read_set(
-                    &input.shape,
-                    policy_shape.schema_version(),
-                    policy_shape.schema_version(),
-                    DurabilityTier::Local,
-                    None,
-                ),
-            },
+            reads: current_query_read_set(
+                &input.shape,
+                policy_shape.schema_version(),
+                policy_shape.schema_version(),
+                DurabilityTier::Local,
+                None,
+            ),
             policy,
             input,
             output: current_query_output_request(
@@ -433,11 +423,7 @@ where
         };
         let candidate = current_row_from_cells(table, row_uuid, cells)?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
-        let access_paths = if branch_id.is_some() {
-            BTreeMap::new()
-        } else {
-            self.current_query_primary_key_access_paths(&policy_shape, &binding)?
-        };
+        let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
         let program = self.compile_query_program_request_with_inline_sources_and_access_paths(
             request,
             inline_sources,
@@ -950,97 +936,6 @@ where
             .read_policy_authorization_request_cache
             .insert(cache_key, request.clone());
         Ok(request)
-    }
-
-    pub(super) fn branch_table_read_policy_authorization_request(
-        &self,
-        branch_id: BranchId,
-        table: &TableSchema,
-        identity: AuthorId,
-        binding_source_shape: Option<String>,
-        binding_user_params: BTreeMap<String, ColumnType>,
-        binding_claim_params: BTreeMap<String, ProgramClaimParam>,
-    ) -> Result<QueryProgramRequest, Error> {
-        let query = authorization_query_from_read_policy(table);
-        if !query.includes.is_empty() {
-            return Err(Error::InvalidStoredValue(
-                "branch policy source filters do not support include policies",
-            ));
-        }
-        let policy_shape = query.validate(&self.catalogue.schema)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let policy_shape = bind_query_params_with_mode(
-            &policy_shape,
-            &policy_binding,
-            &self.catalogue.schema,
-            ParamBindingMode::InlineAllReachableSeeds,
-        )?;
-        if !policy_shape.params().is_empty() {
-            return Err(Error::QueryCapability(
-                "branch policy source filters with runtime parameters must lower through query-engine binding sources"
-                    .to_owned(),
-            ));
-        }
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let mut claim_params = binding_claim_params;
-        claim_params.extend(binding_claim_params_for_shape(
-            &input_shape,
-            policy_shape.params(),
-        ));
-        collect_reachable_seed_claim_params(
-            &self.catalogue.schema,
-            policy_shape.query(),
-            &mut claim_params,
-        )?;
-        let binding_source_shape = binding_source_shape.clone().or_else(|| {
-            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
-        });
-        if let Some(source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &source_shape);
-        }
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role: PolicyDecisionRole::Read,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape_and_policy(
-                &policy_shape,
-                &binding,
-                binding_source_shape,
-                binding_user_params,
-                claim_params,
-                &policy,
-            )?,
-            shape: input_shape,
-        };
-        Ok(QueryProgramRequest {
-            authorization_mode: QueryAuthorizationMode::TrustedServing,
-            reads: branch_query_read_set(
-                &input.shape,
-                policy_shape.schema_version(),
-                DurabilityTier::Local,
-                branch_id,
-            ),
-            policy,
-            input,
-            output: current_query_output_request(
-                CurrentQueryProgramOutput::AuthorizedRows,
-                policy_shape.query(),
-            ),
-        })
     }
 
     pub(super) fn maintained_view_content_current_with_version(

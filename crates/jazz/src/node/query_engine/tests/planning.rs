@@ -427,7 +427,7 @@ fn read_view_models_propagation_and_schema_lens_without_settled_result_source() 
     };
     let expr = SourceExpr::SnapshotRef {
         projection,
-        data: DataSource::Branch(branch(0x44)),
+        data: DataSource::Branch(BranchKey::default()),
         snapshot: snapshot(),
     };
     let view = ReadView {

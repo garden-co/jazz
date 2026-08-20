@@ -1,6 +1,8 @@
 //! Read-view-specific source selection for query evaluation.
 
 use super::*;
+use crate::node::query_engine::BranchViewSourceBase;
+use crate::protocol::BranchViewBase;
 
 pub(super) fn current_query_read_set(
     shape: &NormalizedRowSetShape,
@@ -183,40 +185,6 @@ pub(super) fn tx_query_read_set(
     })
 }
 
-pub(super) fn branch_query_read_set(
-    shape: &NormalizedRowSetShape,
-    schema_version: SchemaVersionId,
-    tier: DurabilityTier,
-    branch_id: BranchId,
-) -> RequestedReadSet {
-    let projection = SchemaProjection {
-        schema_family: SchemaFamilySelection::Current,
-        storage: StorageSchemaSelection::Single(schema_version),
-        lens: LensSelection::Canonical,
-    };
-    let source_expr = || SourceExpr::VisibleCurrent {
-        projection: projection.clone(),
-        data: DataSource::Branch(branch_id),
-        tier,
-    };
-    let mut sources = shape
-        .nodes
-        .values()
-        .filter_map(|node| match node {
-            RowSetExpr::Source { source, .. } => Some((source.clone(), source_expr())),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>();
-    for source in &shape.auxiliary_sources {
-        sources.insert(source.clone(), source_expr());
-    }
-    QueryReadSet::primary(ReadView {
-        read_schema: schema_version,
-        policy_schema: schema_version,
-        sources,
-    })
-}
-
 pub(super) fn query_read_set_for_read_view(
     shape: &NormalizedRowSetShape,
     read_schema: SchemaVersionId,
@@ -225,6 +193,7 @@ pub(super) fn query_read_set_for_read_view(
     read_view: &ReadViewSpec,
     settled_binding_view: Option<BindingViewKey>,
     aggregate_query: bool,
+    schema: &JazzSchema,
 ) -> Result<RequestedReadSet, Error> {
     // A settled binding view stores aggregate output as synthetic result
     // members, not source-table rows. Re-feeding it through the source graph
@@ -257,8 +226,59 @@ pub(super) fn query_read_set_for_read_view(
         ReadViewSourceSpec::Snapshot { .. } => Err(Error::QueryCapability(
             "snapshot read_view requires unified snapshot source lowering".to_owned(),
         )),
-        ReadViewSourceSpec::BranchView { .. } => Err(Error::QueryCapability(
-            "branch view requires branch-dimension source lowering".to_owned(),
-        )),
+        ReadViewSourceSpec::BranchView { head, base } => {
+            let projection = SchemaProjection {
+                schema_family: SchemaFamilySelection::Current,
+                storage: StorageSchemaSelection::Single(read_schema),
+                lens: LensSelection::Canonical,
+            };
+            let mut sources = BTreeMap::new();
+            for source in shape
+                .nodes
+                .values()
+                .filter_map(|node| match node {
+                    RowSetExpr::Source { source, .. } => Some(source),
+                    _ => None,
+                })
+                .chain(&shape.auxiliary_sources)
+            {
+                let table = schema
+                    .tables
+                    .iter()
+                    .find(|table| table.name == source.table)
+                    .ok_or(Error::InvalidStoredValue(
+                        "branch view source table missing",
+                    ))?;
+                let (head_key, _) = schema
+                    .project_branch_view_selector(table, head)
+                    .map_err(Error::InvalidBranchKey)?;
+                let base = base
+                    .as_ref()
+                    .map(|base| match base {
+                        BranchViewBase::Current(selector) => schema
+                            .project_branch_view_selector(table, selector)
+                            .map(|(key, _)| BranchViewSourceBase::Current(key)),
+                        BranchViewBase::Snapshot { branch, snapshot } => schema
+                            .project_branch_view_selector(table, branch)
+                            .map(|(key, _)| BranchViewSourceBase::Snapshot(key, snapshot.clone())),
+                    })
+                    .transpose()
+                    .map_err(Error::InvalidBranchKey)?;
+                sources.insert(
+                    source.clone(),
+                    SourceExpr::BranchView {
+                        projection: projection.clone(),
+                        head: head_key,
+                        base,
+                        tier,
+                    },
+                );
+            }
+            Ok(QueryReadSet::primary(ReadView {
+                read_schema,
+                policy_schema,
+                sources,
+            }))
+        }
     }
 }

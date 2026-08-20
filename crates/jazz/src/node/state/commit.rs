@@ -157,25 +157,44 @@ where
         for (write_schema_version, commit) in commits {
             let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
+            let schema = &self
+                .catalogue
+                .catalogue_schemas
+                .get(&write_schema_version)
+                .ok_or(Error::InvalidStoredValue("commit schema missing"))?
+                .schema;
+            let (branch_key, dimension_cells) = schema
+                .project_branch_selector(&table_schema, &commit.branch)
+                .map_err(Error::InvalidBranchKey)?;
             let layer = VersionLayer::for_commit(&commit);
             let previous_current =
-                match self.query_local_layer_winner(&table_schema.name, commit.row_uuid, layer)? {
+                match self.query_local_layer_winner_in_branch(
+                    &table_schema.name,
+                    &branch_key,
+                    commit.row_uuid,
+                    layer,
+                )? {
                     Some(previous) => Some(previous),
-                    None => {
-                        self.query_global_layer_winner(&table_schema.name, commit.row_uuid, layer)?
-                    }
+                    None => self.query_global_layer_winner_in_branch(
+                        &table_schema.name,
+                        &branch_key,
+                        commit.row_uuid,
+                        layer,
+                    )?,
                 };
             let creator_source = if let Some(previous) = previous_current.as_ref() {
                 Some(previous.clone())
             } else if layer == VersionLayer::Deletion {
-                match self.query_local_layer_winner(
+                match self.query_local_layer_winner_in_branch(
                     &table_schema.name,
+                    &branch_key,
                     commit.row_uuid,
                     VersionLayer::Content,
                 )? {
                     Some(previous) => Some(previous),
-                    None => self.query_global_layer_winner(
+                    None => self.query_global_layer_winner_in_branch(
                         &table_schema.name,
+                        &branch_key,
                         commit.row_uuid,
                         VersionLayer::Content,
                     )?,
@@ -193,7 +212,17 @@ where
             } else {
                 commit.parents
             };
-            let cells = commit.cells;
+            let mut cells = commit.cells;
+            for (column, value) in dimension_cells {
+                if let Some(authored) = cells.get(&column)
+                    && authored != &value
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "branch dimension column does not match exact branch key",
+                    ));
+                }
+                cells.insert(column, value);
+            }
             let authored_columns = Some(
                 commit
                     .authored_columns
@@ -204,6 +233,7 @@ where
                 &table_schema,
                 VersionRowParts {
                     table: commit.table,
+                    branch_key,
                     row_uuid: commit.row_uuid,
                     tx_node_alias,
                     schema_version_alias,

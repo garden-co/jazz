@@ -1031,7 +1031,7 @@ where
                 let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
                 batch.update_raw(
                     binding.storage_table,
-                    global_current_primary_key(version.row_uuid()),
+                    global_current_primary_key(version.branch_key(), version.row_uuid()),
                     groove::records::VariantRecord::new(
                         u32::try_from(version.schema_version_alias().0)
                             .expect("schema aliases are allocated in Groove's variant-tag space"),
@@ -1046,7 +1046,7 @@ where
                     VersionLayer::Deletion,
                     PhysicalCurrentClass::Global,
                 )?,
-                global_current_primary_key(version.row_uuid()),
+                global_current_primary_key(version.branch_key(), version.row_uuid()),
                 version.bind_groove_record(
                     owned_record_from_storage_values(
                         &self

@@ -70,7 +70,6 @@ fn assert_lowered_write_policy_case(
             &cells,
             identity,
             insert_candidate,
-            None,
         )
         .unwrap_or_else(|error| panic!("{label}: lowered evaluation failed: {error}"));
     assert_eq!(actual, expected, "{label}: lowered verdict");

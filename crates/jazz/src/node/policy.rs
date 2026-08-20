@@ -126,7 +126,6 @@ where
                 &current_cells,
                 author,
                 false,
-                None,
             );
         }
         let is_update = self
@@ -156,7 +155,6 @@ where
                     &previous_cells,
                     author,
                     false,
-                    None,
                 )? {
                     return Ok(false);
                 }
@@ -174,7 +172,6 @@ where
                 &effective_cells,
                 author,
                 false,
-                None,
             );
         }
         let Some(policy) = table.write_policies.insert_check.clone() else {
@@ -188,7 +185,6 @@ where
             &cells,
             author,
             true,
-            None,
         )
     }
 

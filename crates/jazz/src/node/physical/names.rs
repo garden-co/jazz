@@ -37,6 +37,7 @@ fn physical_current_projection_target_for_enum_columns(
 /// this is an authored-descriptor compatibility boundary: branch overlays are
 /// unioned with an already-projected frozen base, so their enum registries
 /// must agree before the union is compiled.
+#[allow(dead_code)]
 fn physical_history_projection_target_for_enum_columns(
     schema_alias: SchemaVersionAlias,
     logical_table: &str,
