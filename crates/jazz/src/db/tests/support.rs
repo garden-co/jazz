@@ -558,18 +558,6 @@ pub(super) fn edge_subscribe_opts() -> ReadOpts {
     }
 }
 
-pub(super) fn branch_read_opts() -> ReadOpts {
-    ReadOpts {
-        read_view: ReadViewSpec {
-            source: ReadViewSourceSpec::Branch {
-                branch: uuid::Uuid::from_bytes([0x42; 16]),
-            },
-            ..ReadViewSpec::default()
-        },
-        ..ReadOpts::default()
-    }
-}
-
 pub(super) fn assert_unsupported_subscription_include_deleted(error: Error) {
     assert_eq!(error.code, ErrorCode::Query);
     assert!(

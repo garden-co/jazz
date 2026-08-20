@@ -69,4 +69,22 @@ These remain compiled until their production dependency is removed:
 | `parked_branch_ingress_role_keeps_authority_precedence_in_both_orders` | `INV-BVIEW-16` | replace | `parked_branch_key_ingress_preserves_authority_precedence` |
 | `lowered_write_policy_covers_branch_metadata_gate` | no core metadata | retire | ordinary reference-policy lowering coverage |
 | `lowered_write_policy_covers_branch_overlay_table_operations` | `INV-BVIEW-18` | replace | `lowered_write_policy_covers_branch_key_operations` |
-
+| `client_local_branch_subscription_survives_sparse_first_write_delete_and_restore` | `INV-BVIEW-5`, `INV-BVIEW-12` | port | `branch_view_subscription_tracks_first_write_delete_restore` |
+| `denied_branch_subscription_does_not_allocate_sparse_source` | `INV-BVIEW-18` | replace | `denied_branch_view_allocates_no_maintained_source` |
+| `branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt` | `INV-BVIEW-12` | port | `branch_view_subscription_reconnects_and_resettles` |
+| `branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity` | `INV-BVIEW-12` | replace | `branch_view_one_shot_keeps_sibling_result_identity` |
+| `empty_branch_subscription_reconnects_with_a_settlement_only_refresh` | `INV-BVIEW-12` | replace | `empty_branch_view_reconnects_with_settlement_only_refresh` |
+| `dropping_a_branch_subscription_releases_its_upstream_coverage` | `INV-BVIEW-12` | port | `dropping_branch_view_releases_upstream_coverage` |
+| `branch_program_tier_filter_preserves_claim_policy_fields` | `INV-BVIEW-18` | replace | `branch_view_tier_filter_preserves_claim_policy_fields` |
+| `prepared_relation_terminal_keeps_branch_discriminator_in_public_payload` | `INV-BVIEW-15` | replace | `prepared_relation_terminal_keeps_branch_source_provenance` |
+| `lowered_groove_graph_differs_for_distinct_read_views` | `INV-BVIEW-12` | port | same scenario using distinct `BranchView` values |
+| `branch_program_maintained_view_provides_branch_deletion_witness_source` | `INV-BVIEW-5` | port | `branch_view_maintains_deletion_witness_source` |
+| `branch_program_maintained_view_tracks_local_overlay_replacement` | `INV-BVIEW-9` | port | `branch_view_maintains_head_replacement` |
+| `branch_program_maintained_view_survives_first_overlay_partition_write` | `INV-BVIEW-5` | replace | `branch_view_maintains_first_branch_key_write` |
+| `branch_program_maintained_views_isolate_sibling_first_writes` | `INV-BVIEW-12` | port | `branch_views_isolate_sibling_first_writes` |
+| `branch_program_maintained_view_settles_overlay_fates_at_every_tier` | `INV-BVIEW-12` | port | `branch_view_settles_fates_at_every_tier` |
+| `branch_program_maintained_view_retracts_rejected_pending_overlay_versions` | `INV-BVIEW-12` | port | `branch_view_retracts_rejected_pending_head_version` |
+| `branch_relation_target_projects_old_renamed_witness` | `INV-BVIEW-1`, `INV-BVIEW-15` | replace | `branch_view_relation_projects_renamed_witness` |
+| `renamed_branch_terminal_resolves_root_target_from_emitted_read_table` | `INV-BVIEW-1`, `INV-BVIEW-15` | replace | `renamed_branch_view_terminal_resolves_emitted_table` |
+| `branch_relation_array_uses_frozen_root_and_overlay_target` | `INV-BVIEW-11`, `INV-BVIEW-15` | replace | `branch_view_relation_array_uses_frozen_base_and_head_target` |
+| `read_view_key_canonicalizes_merged_branch_order` | multiple bases deferred | retire | multiple-base canonicalization is a later capability |

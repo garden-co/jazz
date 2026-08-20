@@ -364,55 +364,6 @@ where
             .set_initial_sync_flush_cadence(cadence.writes())?)
     }
 
-    /// Create a snapshot-base branch immediately in local durable storage.
-    ///
-    /// Branch creation is local-first: no serving node round trip is required.
-    /// The authenticated database identity is recorded as the immutable creator.
-    pub fn create_branch(&self) -> Result<crate::ids::BranchId, Error> {
-        let branch = crate::ids::BranchId(uuid::Uuid::now_v7());
-        self.create_branch_with_id(branch)?;
-        Ok(branch)
-    }
-
-    /// Create a local snapshot-base branch with a caller-supplied stable id.
-    pub fn create_branch_with_id(&self, branch: crate::ids::BranchId) -> Result<(), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .create_branch_as(branch, self.identity.author)?;
-        Ok(())
-    }
-
-    /// Insert a row into a locally-created branch and queue it for ordinary sync.
-    pub fn insert_on_branch(
-        &self,
-        branch: crate::ids::BranchId,
-        table: &str,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        let row = self.row_id_source.borrow_mut().next_row_id();
-        let cells = self.apply_insert_defaults(table, cells)?;
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .commit_mergeable_on_branch_in_schema(
-                branch,
-                self.schema_version_id,
-                MergeableCommit::new(table, row, self.next_now_ms())
-                    .made_by(self.identity.author)
-                    .cells(cells),
-            )?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
     /// Seed a settled mergeable row for server bootstrap/import flows.
     ///
     /// This bypasses the client pending-upload path and immediately finalizes

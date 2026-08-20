@@ -1545,12 +1545,7 @@ impl ReadViewSpec {
 }
 
 impl ReadViewSourceSpec {
-    fn canonicalize(&mut self) {
-        if let Self::MergedBranches { branches } = self {
-            branches.sort();
-            branches.dedup();
-        }
-    }
+    fn canonicalize(&mut self) {}
 }
 
 /// Wire source selected by a read view.
@@ -1570,16 +1565,6 @@ pub enum ReadViewSourceSpec {
     /// Current default branch/source.
     #[default]
     Current,
-    /// Current state of one named branch.
-    Branch {
-        /// Branch identifier to read from.
-        branch: uuid::Uuid,
-    },
-    /// Merge view of several named branches.
-    MergedBranches {
-        /// Branch identifiers participating in the merged read.
-        branches: Vec<uuid::Uuid>,
-    },
     /// Snapshot ref resolved by the receiving node.
     Snapshot {
         /// Historic frontier to read.
@@ -3139,31 +3124,5 @@ mod tests {
         };
 
         assert_ne!(lens.content_id(), changed.content_id());
-    }
-
-    #[test]
-    fn read_view_key_canonicalizes_merged_branch_order() {
-        let a = uuid::uuid!("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa");
-        let b = uuid::uuid!("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");
-        let forward = RegisterShapeOptions {
-            read_view: ReadViewSpec {
-                source: ReadViewSourceSpec::MergedBranches {
-                    branches: vec![a, b],
-                },
-                ..ReadViewSpec::default()
-            },
-            ..RegisterShapeOptions::default()
-        };
-        let reversed = RegisterShapeOptions {
-            read_view: ReadViewSpec {
-                source: ReadViewSourceSpec::MergedBranches {
-                    branches: vec![b, a, a],
-                },
-                ..ReadViewSpec::default()
-            },
-            ..RegisterShapeOptions::default()
-        };
-
-        assert_eq!(forward.read_view_key(), reversed.read_view_key());
     }
 }

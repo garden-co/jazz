@@ -23,7 +23,7 @@ use crate::db::{
 };
 use crate::groove::records::Value;
 use crate::groove::storage::{BoxedStorage, MemoryStorage, StorageFactory};
-use crate::ids::{AuthorId, BranchId, MigrationLensId, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorId, MigrationLensId, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
     CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaLineagePublication, SchemaVersion,
@@ -393,44 +393,6 @@ impl ShellDb {
             Self::Durable(db) => *db = db.register_schema_view(schema)?,
         }
         Ok(())
-    }
-
-    fn seed_branch_row(
-        &self,
-        branch: BranchId,
-        table: String,
-        row_id: RowUuid,
-        cells: RowCells,
-    ) -> ShellResult<()> {
-        match self {
-            Self::Memory(db) => db
-                .seed_branch_mergeable_for_bootstrap(
-                    branch,
-                    &table,
-                    row_id,
-                    AuthorId::SYSTEM,
-                    cells,
-                )
-                .map(|_| ())
-                .map_err(Into::into),
-            Self::Durable(db) => db
-                .seed_branch_mergeable_for_bootstrap(
-                    branch,
-                    &table,
-                    row_id,
-                    AuthorId::SYSTEM,
-                    cells,
-                )
-                .map(|_| ())
-                .map_err(Into::into),
-        }
-    }
-
-    fn create_branch_for_test(&self, branch: BranchId) -> ShellResult<()> {
-        match self {
-            Self::Memory(db) => db.create_branch_with_id(branch).map_err(Into::into),
-            Self::Durable(db) => db.create_branch_with_id(branch).map_err(Into::into),
-        }
     }
 
     fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
@@ -1342,27 +1304,6 @@ impl InMemoryServerShell {
     ) -> ShellResult<()> {
         self.db
             .seed_settled_mergeable_for_bootstrap(table.into(), row_id, AuthorId::SYSTEM, cells)
-    }
-
-    /// Seed a branch-local row for an administrative/bootstrap flow.
-    ///
-    /// Like [`Self::seed_row_with_id`], this installs finalized history rather
-    /// than emulating a client facade write. Reads still traverse the normal
-    /// branch view and query-engine lowering path.
-    pub fn seed_branch_row_with_id(
-        &mut self,
-        branch: BranchId,
-        table: impl Into<String>,
-        row_id: RowUuid,
-        cells: RowCells,
-    ) -> ShellResult<()> {
-        self.db.seed_branch_row(branch, table.into(), row_id, cells)
-    }
-
-    /// Create an empty branch for a public integration test without creating a
-    /// sparse overlay partition. Production creation uses the same DB path.
-    pub fn create_branch_for_test(&mut self, branch: BranchId) -> ShellResult<()> {
-        self.db.create_branch_for_test(branch)
     }
 
     fn is_draining(&self) -> bool {

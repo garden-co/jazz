@@ -1057,7 +1057,7 @@ where
 
     pub(super) fn materialize_relation_edge_target_row(
         &mut self,
-        read_view: &ReadViewSpec,
+        _read_view: &ReadViewSpec,
         read_schema: SchemaVersionId,
         target_table_name: &str,
         target_row: RowUuid,
@@ -1080,42 +1080,9 @@ where
                     "relation edge target version does not project into the read schema",
                 ));
         }
-        let ReadViewSourceSpec::Branch { branch } = read_view.source else {
-            return Err(Error::InvalidStoredValue(
-                "relation edge target version is missing",
-            ));
-        };
-        let target_node = self
-            .node_aliases
-            .iter()
-            .find_map(|(node, alias)| (*alias == target_tx_node).then_some(*node))
-            .ok_or(Error::InvalidStoredValue(
-                "relation edge target node alias is missing",
-            ))?;
-        let tx_id = TxId::new(target_tx_time, target_node);
-        let stored_tx = self
-            .query_transaction(tx_id)?
-            .ok_or(Error::MissingTransaction(tx_id))?;
-        if stored_tx.tx.target_lineage != BranchLineage::Branch(BranchId(branch)) {
-            return Err(Error::InvalidStoredValue(
-                "relation edge target branch does not match its transaction",
-            ));
-        }
-        let version = self
-            .query_versions_for_tx(tx_id)?
-            .into_iter()
-            .find(|version| {
-                version.table() == target_table_name
-                    && version.row_uuid() == target_row
-                    && version.layer() == VersionLayer::Content
-            })
-            .ok_or(Error::InvalidStoredValue(
-                "relation edge target branch version is missing",
-            ))?;
-        self.projected_current_row_from_materialized_version_in_read_schema(read_schema, &version)?
-            .ok_or(Error::InvalidStoredValue(
-                "relation edge target version does not project into the read schema",
-            ))
+        Err(Error::InvalidStoredValue(
+            "relation edge target version is missing",
+        ))
     }
 
     pub(super) fn relation_snapshot_no_order_windows(

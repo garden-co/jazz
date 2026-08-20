@@ -3,10 +3,10 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::db::{CommitUnitTrust, ConnectionSessionContext, DbIdentity, RowCells, Transport};
+use crate::db::{CommitUnitTrust, ConnectionSessionContext, DbIdentity, Transport};
 use crate::groove::records::Value;
 use crate::groove::storage::StorageFactory;
-use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorId, NodeUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{MigrationLens, SyncMessage};
 use crate::schema::JazzSchema;
@@ -424,46 +424,6 @@ impl ServerRuntimeHandle {
             .run(move |shell| {
                 shell
                     .publish_runtime_schema_with_lens(schema, lens, new_tables, dropped_tables)
-                    .map_err(|error| error.to_string())
-            })
-            .await;
-        if result.is_ok() {
-            notify_shell_activity(&activity_tx);
-        }
-        result
-    }
-
-    #[allow(dead_code)] // exercised only by the integration-test server feature
-    #[doc(hidden)]
-    pub async fn seed_branch_row_for_test(
-        &self,
-        branch: BranchId,
-        table: String,
-        row_id: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), String> {
-        let activity_tx = self.inner.activity_tx.clone();
-        let result = self
-            .run(move |shell| {
-                shell
-                    .seed_branch_row_with_id(branch, table, row_id, cells)
-                    .map_err(|error| error.to_string())
-            })
-            .await;
-        if result.is_ok() {
-            notify_shell_activity(&activity_tx);
-        }
-        result
-    }
-
-    #[allow(dead_code)] // exercised only by the integration-test server feature
-    #[doc(hidden)]
-    pub async fn create_branch_for_test(&self, branch: BranchId) -> Result<(), String> {
-        let activity_tx = self.inner.activity_tx.clone();
-        let result = self
-            .run(move |shell| {
-                shell
-                    .create_branch_for_test(branch)
                     .map_err(|error| error.to_string())
             })
             .await;

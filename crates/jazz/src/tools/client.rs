@@ -19,9 +19,7 @@ use crate::db::{
 use crate::groove::records::{BorrowedRecord, OwnedRecord, Value as CoreValue};
 use crate::groove::storage::{BoxedStorage as CoreStorage, MemoryStorage as CoreMemoryStorage};
 use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-use crate::protocol::{
-    ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
-};
+use crate::protocol::ReadViewSpec as CoreReadViewSpec;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
 use crate::tools::OpenTransactionId;
 use crate::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
@@ -2856,9 +2854,7 @@ impl JazzClient {
             self.db
                 .query_transaction_rows(query.clone(), opts, transaction_id, table, author)?
         } else {
-            let wait_for_coverage =
-                matches!(opts.read_view.source, CoreReadViewSourceSpec::Branch { .. })
-                    || matches!(opts.tier, CoreDurabilityTier::Global);
+            let wait_for_coverage = matches!(opts.tier, CoreDurabilityTier::Global);
             self.db
                 .query_rows(query.clone(), opts, table, wait_for_coverage)
                 .await?

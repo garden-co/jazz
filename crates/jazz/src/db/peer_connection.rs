@@ -279,19 +279,6 @@ where
             })
             .collect::<Vec<_>>();
         for (coverage, shape, binding, subscribers) in groups {
-            let branch_metadata = match coverage.opts.read_view.source {
-                ReadViewSourceSpec::Branch { branch } => {
-                    let branch = crate::ids::BranchId(branch);
-                    let mut node = self.node.borrow_mut();
-                    node.branch_metadata_visible_to(branch, identity)?
-                        .then(|| {
-                            node.branch_record(branch)
-                                .map(crate::protocol::BranchMetadata::from)
-                        })
-                        .flatten()
-                }
-                _ => None,
-            };
             let maintained_subscription = SubscriptionKey {
                 shape_id: coverage.shape_id,
                 binding_id: coverage.binding_id,
@@ -307,14 +294,6 @@ where
                     coverage.opts,
                 )?
             };
-            // Route metadata is an explicit prerequisite for branch-target
-            // bundles. Send it before the first view update so a receiver can
-            // create the partition instead of parking the payload forever.
-            if let Some(metadata) = branch_metadata {
-                self.transport
-                    .send(SyncMessage::BranchMetadata(metadata))
-                    .map_err(transport_error)?;
-            }
             for subscription in subscribers {
                 let mut update = retarget_view_update(update.clone(), subscription);
                 stamp_view_update_authorization_progress_from(
@@ -695,14 +674,6 @@ where
                                 values,
                                 known_state,
                             };
-                            if let ReadViewSourceSpec::Branch { branch } =
-                                &pending_subscription.opts.read_view.source
-                            {
-                                branch_views.insert(
-                                    pending_subscription.subscription,
-                                    crate::ids::BranchId(*branch),
-                                );
-                            }
                             #[cfg(feature = "sync-autopsy")]
                             sync_autopsy::record(format!(
                                 "upstream send subscribe {}",
@@ -1686,12 +1657,7 @@ where
                                 // side-effecting preflight until Subscribe,
                                 // where the authenticated branch gate is
                                 // available.
-                                if shape.params().is_empty()
-                                    && !matches!(
-                                        opts.read_view.source,
-                                        ReadViewSourceSpec::Branch { .. }
-                                    )
-                                {
+                                if shape.params().is_empty() {
                                     let binding = shape.bind(BTreeMap::new()).map_err(Error::from);
                                     let binding = match binding {
                                         Ok(binding) => binding,
@@ -1934,34 +1900,6 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
-                            if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source
-                                && !self.node.borrow_mut().branch_metadata_visible_to(
-                                    crate::ids::BranchId(*branch),
-                                    peer.link_identity(),
-                                )?
-                            {
-                                let update = SyncMessage::ViewUpdate {
-                                    subscription,
-                                    settled_through: self.node.borrow().committed_global_time(),
-                                    reset_result_set: true,
-                                    version_carriers: Vec::new(),
-                                    version_bundles: Vec::new(),
-                                    peer_payload_inventory:
-                                        crate::protocol::PeerPayloadInventory::default(),
-                                    result_member_adds: Vec::new(),
-                                    result_member_removes: Vec::new(),
-                                    terminal_operations: Vec::new(),
-                                    program_fact_adds: Vec::new(),
-                                    program_fact_removes: Vec::new(),
-                                };
-                                send_with_sync_context(
-                                    &self.node,
-                                    peer,
-                                    self.transport.as_mut(),
-                                    update,
-                                )?;
-                                continue;
-                            }
                             let supported = self
                                 .node
                                 .borrow_mut()
@@ -2181,26 +2119,6 @@ where
                                     summarize_sync_message(&update)
                                 ));
                                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
-                                if let ReadViewSourceSpec::Branch { branch } =
-                                    &opts.read_view.source
-                                {
-                                    let metadata =
-                                        self.node.borrow_mut().branch_metadata_visible_to(
-                                            crate::ids::BranchId(*branch),
-                                            peer.link_identity(),
-                                        )?;
-                                    if metadata {
-                                        let metadata = self
-                                            .node
-                                            .borrow()
-                                            .branch_record(crate::ids::BranchId(*branch))
-                                            .cloned()
-                                            .expect("visible branch metadata remains present");
-                                        self.transport
-                                            .send(SyncMessage::BranchMetadata((&metadata).into()))
-                                            .map_err(transport_error)?;
-                                    }
-                                }
                                 let receipt =
                                     scope_purposes.get(&subscription).and_then(|purpose| {
                                         aggregate_authorization_scope_receipt_for_view(
@@ -2314,32 +2232,8 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
-                            // A repair request is not a branch-discovery API.  Only
-                            // serve a branch this authenticated link has already
-                            // been admitted to read through one of its views.
-                            for branch in branches {
-                                let admitted = served.values().any(|coverage| {
-                                    matches!(
-                                        coverage.opts.read_view.source,
-                                        ReadViewSourceSpec::Branch { branch: view_branch }
-                                            if crate::ids::BranchId(view_branch) == branch
-                                    )
-                                });
-                                let visible = admitted
-                                    && self
-                                        .node
-                                        .borrow_mut()
-                                        .branch_metadata_visible_to(branch, peer.link_identity())?;
-                                if visible {
-                                    let metadata =
-                                        self.node.borrow().branch_record(branch).cloned();
-                                    if let Some(metadata) = metadata {
-                                        self.transport
-                                            .send(SyncMessage::BranchMetadata((&metadata).into()))
-                                            .map_err(transport_error)?;
-                                    }
-                                }
-                            }
+                            drop_peer_request(&self.node);
+                            continue;
                         }
                         // Branch routing records select persistent partitions.
                         // Sessions may introduce their own locally-authored

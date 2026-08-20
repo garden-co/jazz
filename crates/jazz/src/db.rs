@@ -1145,16 +1145,7 @@ fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
 }
 
 fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
-    match &opts.read_view.source {
-        ReadViewSourceSpec::Current => Ok(()),
-        ReadViewSourceSpec::Branch { .. }
-            if opts.read_view.schema == Default::default()
-                && opts.read_view.overlays.is_empty() =>
-        {
-            Ok(())
-        }
-        _ => ensure_default_read_view(opts),
-    }
+    ensure_default_read_view(opts)
 }
 
 fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {

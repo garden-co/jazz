@@ -232,22 +232,6 @@ pub(super) fn query_read_set_for_read_view(
     // the public row. Its authoritative result is materialized directly by
     // the subscription facade instead.
     let settled_binding_view = (!aggregate_query).then_some(settled_binding_view).flatten();
-    // Branch-current v1 deliberately remains an overlay-first source graph at
-    // every peer. A selected result may belong to a detached usage site,
-    // whereas durable branch history must continue to drive live writes,
-    // deletion, and restoration. BranchId remains in the binding/read-view
-    // key; this only chooses its live data source.
-    if let ReadViewSourceSpec::Branch { branch } = &read_view.source
-        && read_view.schema == Default::default()
-        && read_view.overlays.is_empty()
-    {
-        return Ok(branch_query_read_set(
-            shape,
-            read_schema,
-            tier,
-            BranchId(*branch),
-        ));
-    }
     if settled_binding_view.is_some() {
         if !read_view.is_default() {
             return Err(Error::QueryCapability(
@@ -270,24 +254,8 @@ pub(super) fn query_read_set_for_read_view(
             tier,
             None,
         )),
-        ReadViewSourceSpec::Branch { branch }
-            if read_view.schema == Default::default() && read_view.overlays.is_empty() =>
-        {
-            Ok(branch_query_read_set(
-                shape,
-                read_schema,
-                tier,
-                BranchId(*branch),
-            ))
-        }
-        ReadViewSourceSpec::MergedBranches { .. } => Err(Error::QueryCapability(
-            "merged branch read_view requires unified branch merge source lowering".to_owned(),
-        )),
         ReadViewSourceSpec::Snapshot { .. } => Err(Error::QueryCapability(
             "snapshot read_view requires unified snapshot source lowering".to_owned(),
-        )),
-        ReadViewSourceSpec::Branch { .. } => Err(Error::QueryCapability(
-            "branch read_view does not support schema lenses or overlays yet".to_owned(),
         )),
     }
 }
