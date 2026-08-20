@@ -507,6 +507,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpScheduled = false;
   private serverPumpRunning = false;
   private serverPumpAgain = false;
+  private serverConnectionGeneration = 0;
   private closed = false;
   private nextSubscriptionId = 1;
 
@@ -1325,6 +1326,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // waits are still meaningful across that transition, so only an explicit runtime
     // shutdown is allowed to reject them.
     void this.disconnect({ rejectWaiters: false });
+    const generation = ++this.serverConnectionGeneration;
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
     const carrier = new WebSocketCarrier({
@@ -1332,27 +1334,34 @@ export class NativeRuntimeAdapter implements Runtime {
       peerIdentity: this.peerIdentity,
       authJson,
       onFrame: (frame) => {
+        if (generation !== this.serverConnectionGeneration) return;
         this.pendingInboundServerFrames.push(frame);
         this.notifyServerTransportWork();
         this.scheduleServerPump();
       },
       onError: (error) => {
-        this.handleServerTransportError(error);
+        this.handleServerTransportError(error, generation);
         const reason = wireAuthFailureReason(error);
         if (reason) this.authFailureCallback?.(reason);
       },
     });
     this.serverCarrier = carrier;
     this.serverCarrierPromise = carrier.ready().then((negotiation) => {
+      if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
+        carrier.close();
+        return carrier;
+      }
       const transport = this.connectNegotiatedUpstream(negotiation);
       this.serverTransport = transport;
       this.flushQueuedServerFrames(carrier);
-      void this.pumpServerTransport();
+      void this.pumpServerTransport().catch((error) =>
+        this.handleServerTransportError(error, generation),
+      );
       this.pumpSubscriptions();
       return carrier;
     });
     this.serverCarrierPromise.catch((error) => {
-      this.handleServerTransportError(error);
+      this.handleServerTransportError(error, generation);
     });
   }
 
@@ -1374,6 +1383,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
+    this.serverConnectionGeneration += 1;
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
@@ -2198,7 +2208,9 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private async pumpServerTransport(): Promise<void> {
     const transport = this.serverTransport;
-    if (this.closed || !transport) return;
+    const carrier = this.serverCarrier;
+    const generation = this.serverConnectionGeneration;
+    if (this.closed || !transport || !carrier) return;
     if (this.serverPumpRunning) {
       this.serverPumpAgain = true;
       return;
@@ -2208,9 +2220,17 @@ export class NativeRuntimeAdapter implements Runtime {
       this.drainPendingInboundServerFrames(transport);
       for (let round = 0; round < 32; round += 1) {
         await transport.tick();
+        if (
+          this.closed ||
+          generation !== this.serverConnectionGeneration ||
+          transport !== this.serverTransport ||
+          carrier !== this.serverCarrier
+        ) {
+          return;
+        }
         const frames = normalizeTransportFrames(transport.recvWireFrames());
         if (frames.length > 0) {
-          this.sendServerFrames(frames);
+          this.sendServerFrames(frames, carrier, generation);
         }
         this.pumpSubscriptions();
         if (frames.length === 0) {
@@ -2237,14 +2257,21 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const frame of frames) transport.sendWireFrame(frame);
   }
 
-  private sendServerFrames(frames: Uint8Array[]): void {
-    const carrier = this.serverCarrier;
-    if (!carrier) {
+  private sendServerFrames(
+    frames: Uint8Array[],
+    carrier = this.serverCarrier,
+    generation = this.serverConnectionGeneration,
+  ): void {
+    if (
+      !carrier ||
+      generation !== this.serverConnectionGeneration ||
+      carrier !== this.serverCarrier
+    ) {
       this.queuedServerFrames.push(...frames);
       return;
     }
     void carrier.sendBatch(frames).catch((error) => {
-      this.handleServerTransportError(error);
+      this.handleServerTransportError(error, generation);
     });
   }
 
@@ -2256,7 +2283,11 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private handleServerTransportError(error: unknown): void {
+  private handleServerTransportError(
+    error: unknown,
+    generation = this.serverConnectionGeneration,
+  ): void {
+    if (generation !== this.serverConnectionGeneration) return;
     const message = errorMessage(error);
     if (this.serverTransportError && message === "websocket closed") return;
     this.serverTransportError = error instanceof Error ? error : new Error(message);

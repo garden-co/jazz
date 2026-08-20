@@ -117,7 +117,10 @@ async function initialize(options: BrowserWorkerInitOptions): Promise<void> {
       }
     });
     subscriber = runtime.acceptPeer(options.sessionClaims);
-    relayPump = new BrowserWorkerTransportPump(runtime, subscriber, postFrames);
+    relayPump = new BrowserWorkerTransportPump(runtime, subscriber, postFrames, (error) => {
+      postEvent({ type: "error", message: asError(error).message });
+      void closeRuntime();
+    });
     if (options.serverUrl) runtime.connect(options.serverUrl, options.authJson);
   } catch (error) {
     workerLockLease.release();
@@ -305,14 +308,25 @@ async function handleFollowerMessage(
       }
       const followerSubscriber = activeRuntime.acceptPeer(message.sessionClaims);
       peer.subscriber = followerSubscriber;
-      peer.pump = new BrowserWorkerTransportPump(activeRuntime, followerSubscriber, (frames) => {
-        if (suppressOutboundFrames) return;
-        const copies = transferableFrames(frames);
-        peer.port.postMessage(
-          { type: "frames", frames: copies } satisfies BrowserFollowerPortEvent,
-          copies.map((frame) => frame.buffer),
-        );
-      });
+      peer.pump = new BrowserWorkerTransportPump(
+        activeRuntime,
+        followerSubscriber,
+        (frames) => {
+          if (suppressOutboundFrames) return;
+          const copies = transferableFrames(frames);
+          peer.port.postMessage(
+            { type: "frames", frames: copies } satisfies BrowserFollowerPortEvent,
+            copies.map((frame) => frame.buffer),
+          );
+        },
+        (error) => {
+          peer.port.postMessage({
+            type: "error",
+            message: asError(error).message,
+          } satisfies BrowserFollowerPortEvent);
+          closeFollower(peer.followerTabId, true);
+        },
+      );
       peer.port.postMessage({ type: "result", id: message.id } satisfies BrowserFollowerPortEvent);
       return;
     }

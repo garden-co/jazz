@@ -48,13 +48,18 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     void this.readyPromise.catch((error: unknown) => this.fail(asError(error)));
 
     const transport = runtime.connectUpstreamPeer();
-    this.pump = new BrowserWorkerTransportPump(runtime, transport, (frames) => {
-      const copies = transferableFrames(frames);
-      this.port.postMessage(
-        { type: "frames", frames: copies } satisfies BrowserFollowerPortRequest,
-        copies.map((frame) => frame.buffer),
-      );
-    });
+    this.pump = new BrowserWorkerTransportPump(
+      runtime,
+      transport,
+      (frames) => {
+        const copies = transferableFrames(frames);
+        this.port.postMessage(
+          { type: "frames", frames: copies } satisfies BrowserFollowerPortRequest,
+          copies.map((frame) => frame.buffer),
+        );
+      },
+      (error) => this.fail(asError(error)),
+    );
   }
 
   async ready(): Promise<void> {

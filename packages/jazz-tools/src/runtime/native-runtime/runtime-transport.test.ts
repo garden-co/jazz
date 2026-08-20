@@ -387,6 +387,58 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transport.tickCount).toBe(1);
   });
 
+  it("discards a suspended transport tick after reconnect", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    let releaseFirstTick!: () => void;
+    const first = new FakeTransport([Uint8Array.from([1, 99])]);
+    first.tick = (() =>
+      new Promise<number>((resolve) => {
+        releaseFirstTick = () => resolve(0);
+      })) as never;
+    const second = new FakeTransport([]);
+    const transports = [first, second];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transports.shift()!,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+    runtime.updateAuth(JSON.stringify({ jwt_token: "replacement.jwt" }));
+    await waitForFakeWebSocketNegotiation();
+    releaseFirstTick();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sockets).toHaveLength(2);
+    expect(sockets[0]!.closed).toBe(true);
+    expect(
+      sockets[1]!.sent
+        .filter((frame): frame is Uint8Array => frame instanceof Uint8Array)
+        .flatMap((batch) => decodeWebSocketFrameBatch(batch)),
+    ).not.toContainEqual(Uint8Array.from([1, 99]));
+    runtime.close();
+  });
+
   it("coalesces separate websocket messages that arrive before the server pump timer", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {

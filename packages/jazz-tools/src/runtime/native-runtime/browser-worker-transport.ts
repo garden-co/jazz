@@ -16,6 +16,7 @@ export class BrowserWorkerTransportPump {
     private readonly runtime: PeerTransportRuntime,
     private readonly transport: Transport,
     private readonly sendFrames: (frames: Uint8Array[]) => void,
+    private readonly onError: (error: unknown) => void,
   ) {
     this.removeWorkListener = runtime.onPeerTransportWork(() => this.schedule());
     this.schedule();
@@ -44,7 +45,9 @@ export class BrowserWorkerTransportPump {
     this.scheduled = true;
     queueMicrotask(() => {
       this.scheduled = false;
-      void this.pump();
+      void this.pump().catch((error) => {
+        if (!this.closed) this.onError(error);
+      });
     });
   }
 
@@ -62,6 +65,7 @@ export class BrowserWorkerTransportPump {
     try {
       for (let round = 0; round < 32; round += 1) {
         const work = await this.transport.tick();
+        if (this.closed) return;
         const frames = normalizeTransportFrames(this.transport.recvWireFrames());
         if (frames.length > 0) this.sendFrames(frames);
         if (work === 0 && frames.length === 0) {
