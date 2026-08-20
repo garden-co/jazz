@@ -172,14 +172,17 @@ fn assert_maintained_subscription_view_tick(
 }
 
 fn maintained_view_capture_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("todos", "owner"))])
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("owner", PublicColumnType::Uuid)
+            .policies(
+                PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                    "owner",
+                    vec!["claims".to_owned(), "sub".to_owned()],
+                )),
+            ),
+    ))
 }
 
 fn accept_owner_capture_row(
@@ -802,36 +805,35 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
 }
 
 fn maintained_view_multitable_capture_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "roots",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("target", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("target", "targets")
-        .with_read_policy(Policy::owner_only("roots", "owner")),
-        TableSchema::new(
-            "targets",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::owner_only("targets", "owner")),
-        TableSchema::new(
-            "members",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("root", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("root", "roots")
-        .with_read_policy(Policy::owner_only("members", "owner")),
-    ])
+    let owner_read = || {
+        PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+            "owner",
+            vec!["claims".to_owned(), "sub".to_owned()],
+        ))
+    };
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("roots")
+                    .column("title", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .fk_column("target", "targets")
+                    .policies(owner_read()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("targets")
+                    .column("title", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(owner_read()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .column("title", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .fk_column("root", "roots")
+                    .policies(owner_read()),
+            ),
+    )
 }
 
 fn root_cells(owner: AuthorId, title: &str, target: RowUuid) -> BTreeMap<String, Value> {
@@ -851,48 +853,46 @@ fn member_cells(owner: AuthorId, title: &str, root: RowUuid) -> BTreeMap<String,
 }
 
 fn recursive_rls_capture_schema() -> JazzSchema {
-    let recursive_policy = Query::from("docs").reachable_via(
+    let recursive_policy = crate::test_public_schema::seeded_recursive_access_policy(
         "doc_access",
         "doc",
         "team",
-        claim("sub"),
+        &[],
+        &[],
+        "teams",
         "team_edges",
         "member",
         "parent",
-        [],
+        &[],
+        "teams",
+        "id",
+        &["claims", "sub"],
+        "id",
     );
-    JazzSchema::new([
-        TableSchema::new(
-            "docs",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("kind", ColumnType::String),
-            ],
-        )
-        .with_read_policy(recursive_policy),
-        TableSchema::new(
-            "teams",
-            [ColumnSchema::new("name", ColumnType::String)],
-        ),
-        TableSchema::new(
-            "doc_access",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams"),
-        TableSchema::new(
-            "team_edges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .column("kind", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(recursive_policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teams")
+                    .column("id", PublicColumnType::Uuid)
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("doc_access")
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_edges")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams"),
+            ),
+    )
 }
 
 fn doc_cells(title: &str, kind: &str) -> BTreeMap<String, Value> {
@@ -916,8 +916,11 @@ fn team_edge_cells(member: AuthorId, parent: AuthorId) -> BTreeMap<String, Value
     ])
 }
 
-fn team_cells(name: &str) -> BTreeMap<String, Value> {
-    BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))])
+fn team_cells(id: RowUuid, name: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("id".to_owned(), Value::Uuid(id.0)),
+        ("name".to_owned(), Value::String(name.to_owned())),
+    ])
 }
 
 fn accept_recursive_row(
@@ -978,7 +981,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         &mut parents,
         "teams",
         RowUuid(alice.0),
-        team_cells("alice"),
+        team_cells(RowUuid(alice.0), "alice"),
         900,
     );
     accept_recursive_row(
@@ -986,7 +989,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         &mut parents,
         "teams",
         RowUuid(parent_team.0),
-        team_cells("parent"),
+        team_cells(RowUuid(parent_team.0), "parent"),
         901,
     );
     accept_recursive_row(
@@ -994,7 +997,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         &mut parents,
         "teams",
         RowUuid(other_team.0),
-        team_cells("other"),
+        team_cells(RowUuid(other_team.0), "other"),
         902,
     );
     let direct_doc_tx = accept_recursive_row(

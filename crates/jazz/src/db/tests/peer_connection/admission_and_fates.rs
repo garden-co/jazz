@@ -37,17 +37,15 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
         "ordinary sessions must not receive authority catalogue snapshots"
     );
 
-    let evolved = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())]));
+    let evolved = SchemaVersion::new(build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .column("body", PublicColumnType::Text),
+        ),
+    ));
     let lens = MigrationLens::new(
         base.version_id(),
         evolved.id,
@@ -722,7 +720,7 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     edge_upstream.borrow_mut().tick().unwrap();
     assert_eq!(
         edge_client.borrow().downstream_fates.borrow().as_slice(),
-        [fate.clone()],
+        std::slice::from_ref(&fate),
         "the authority's terminal fate must be queued once for Alice's session"
     );
     assert!(
@@ -1328,22 +1326,16 @@ fn partial_replica_cannot_act_as_permission_advice_authority() {
 
 #[test]
 fn permission_advice_update_evaluates_post_patch_update_check() {
-    let policy = Query::from("todos").filter(eq(col("done"), lit(false)));
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policies(WritePolicies {
-        insert_check: Policy::public(),
-        update_using: Policy::public(),
-        update_check: Some(policy),
-        delete_using: Policy::public(),
-    })]);
+    let policy = public_literal_eq("done", PublicValue::Boolean(false));
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_update(None, policy)),
+        ),
+    );
     let author = AuthorId::from_bytes([0xa1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let target = server

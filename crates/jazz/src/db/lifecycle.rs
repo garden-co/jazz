@@ -711,6 +711,20 @@ where
         Ok(self.node.node.borrow().history_class_bytes_for_test()?)
     }
 
+    /// Apply an in-memory-only mutation to the compiled current schema.
+    ///
+    /// The database must already have opened from a valid public source schema.
+    /// This exists only for tests whose subject is an intentionally invalid
+    /// lowered state; the mutation is never persisted or published.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn mutate_current_compiled_schema_for_test(&self, mutate: impl FnOnce(&mut JazzSchema)) {
+        self.node
+            .node
+            .borrow_mut()
+            .mutate_current_schema_for_testing(mutate);
+    }
+
     #[cfg(feature = "testing")]
     /// Test/bench-only encoded storage byte estimate across Jazz physical
     /// classes.

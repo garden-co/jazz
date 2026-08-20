@@ -2007,10 +2007,9 @@ async fn single_client_operations_reach_server_in_causal_order_inner() {
     for i in 0..500 {
         alice
             .update(doc_id, vec![("title".to_string(), "nope".into())])
-            .expect(&format!(
-                "optimistic local update: title change after lockout {}",
-                i
-            ));
+            .unwrap_or_else(|error| {
+                panic!("optimistic local update: title change after lockout {i}: {error:?}")
+            });
     }
 
     // Marker travels through the same transport; it cannot arrive before the

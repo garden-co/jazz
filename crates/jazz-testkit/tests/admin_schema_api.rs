@@ -3,8 +3,8 @@ use std::net::{SocketAddr, TcpStream};
 
 use jazz::db::DbIdentity;
 use jazz::ids::{AuthorId, NodeUuid};
-use jazz::schema::JazzSchema;
 use jazz::serving::InMemoryServerShellConfig;
+use jazz::tools::SchemaBuilder;
 use jazz_server::loopback::http::LoopbackHttpServer;
 use serde_json::{Value, json};
 
@@ -16,7 +16,10 @@ fn identity() -> DbIdentity {
 }
 
 fn server_config() -> InMemoryServerShellConfig {
-    InMemoryServerShellConfig::new(JazzSchema::new([]), identity())
+    let schema =
+        jazz::tools::public_schema_convert::convert_public_schema(&SchemaBuilder::new().build())
+            .expect("empty public schema compiles");
+    InMemoryServerShellConfig::new(schema, identity())
 }
 
 #[test]

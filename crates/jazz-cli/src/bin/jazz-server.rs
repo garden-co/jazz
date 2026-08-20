@@ -14,6 +14,12 @@ use jazz::serving::{
 use jazz_server::loopback::http::load_latest_admin_schema_for_app;
 use jazz_server::loopback::websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig};
 
+fn empty_runtime_schema() -> JazzSchema {
+    let source = jazz::tools::public_schema::SchemaBuilder::new().build();
+    jazz::tools::public_schema_convert::convert_public_schema(&source)
+        .expect("the empty public schema is valid")
+}
+
 fn start_loopback_server(
     config: LoopbackWebSocketServerConfig,
 ) -> jazz_server::loopback::websocket::LoopbackWebSocketResult<LoopbackWebSocketServer> {
@@ -144,13 +150,13 @@ fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
     let schema = match &options.storage {
         StorageConfig::RocksDb { path } => match load_latest_admin_schema_for_app(path, app_id) {
             Ok(Some(schema)) => schema,
-            Ok(None) => JazzSchema::new([]),
+            Ok(None) => empty_runtime_schema(),
             Err(error) => {
                 eprintln!("error=load_admin_schema_store: {error}");
                 return ExitCode::FAILURE;
             }
         },
-        _ => JazzSchema::new([]),
+        _ => empty_runtime_schema(),
     };
     let schema_catalogue = if schema.tables.is_empty() {
         "empty"

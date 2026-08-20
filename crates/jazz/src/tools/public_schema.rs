@@ -48,7 +48,10 @@ pub(crate) fn validate_json_value(
                 validate_json_value(value, element, &format!("{path}[{index}]"))
             })
         }
-        (Value::Enum { case, values }, ColumnType::EnumPayload { cases }) => {
+        (
+            Value::Enum { case, values },
+            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
+        ) => {
             let Some(selected) = cases.iter().find(|entry| entry.name == *case) else {
                 return Ok(());
             };
@@ -83,14 +86,16 @@ pub(crate) fn validate_json_schemas(column_type: &ColumnType, path: &str) -> Res
         ColumnType::Row { columns } => columns.columns.iter().try_for_each(|field| {
             validate_json_schemas(&field.column_type, &format!("{path}.{}", field.name_str()))
         }),
-        ColumnType::EnumPayload { cases } => cases.iter().try_for_each(|case| {
-            case.fields.iter().try_for_each(|field| {
-                validate_json_schemas(
-                    &field.column_type,
-                    &format!("{path}.{}.{}", case.name, field.name_str()),
-                )
+        ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
+            cases.iter().try_for_each(|case| {
+                case.fields.iter().try_for_each(|field| {
+                    validate_json_schemas(
+                        &field.column_type,
+                        &format!("{path}.{}.{}", case.name, field.name_str()),
+                    )
+                })
             })
-        }),
+        }
         _ => Ok(()),
     }
 }

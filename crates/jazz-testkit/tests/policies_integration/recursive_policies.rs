@@ -720,7 +720,7 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change_inner()
         &alice,
         query.clone(),
         "alice initially sees only owned root without recursive edge",
-        |rows| (rows.len() > 0).then_some(rows),
+        |rows| (!rows.is_empty()).then_some(rows),
     )
     .await;
     assert_eq!(initial_rows.len(), 1);

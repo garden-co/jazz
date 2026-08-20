@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { WasmSchema } from "../../drivers/types.js";
+import type { PolicyExpr, WasmSchema } from "../../drivers/types.js";
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { encodeSchema } from "./schema-codec.js";
@@ -15,7 +15,7 @@ function decode(bytes: Uint8Array): EncodedSchemaSource {
 
 describe("NativeRuntimeAdapter policy source encoding", () => {
   it("preserves PolicyExpr instead of lowering it to Query", () => {
-    const policy = {
+    const policy: PolicyExpr = {
       type: "Or",
       exprs: [
         {
@@ -35,7 +35,7 @@ describe("NativeRuntimeAdapter policy source encoding", () => {
           },
         },
       ],
-    } as const;
+    };
     const encoded = encodeSchema({
       documents: {
         columns: [{ name: "visibility", column_type: { type: "Text" }, nullable: false }],

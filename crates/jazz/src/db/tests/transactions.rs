@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
-    let empty = JazzSchema::new([]);
+    let empty = build_public_db_test_schema(PublicSchemaBuilder::new());
     let refs = empty.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     let owner = block_on(Db::open_history_complete(DbConfig {
@@ -17,13 +17,13 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         id_source: Some(Box::new(SeededRowIdSource::new(91))),
     }))
     .unwrap();
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
-    )]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean),
+        ),
+    );
     let view = owner.register_schema_view(schema.clone()).unwrap();
     let open = OpenTransactionId::new();
     owner.begin_mergeable(open).unwrap();
@@ -41,13 +41,13 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     // Advance the owner's canonical schema after the query view was registered.
     // The historical view still calls this column `title`; resolving projection
     // against the canonical schema would silently omit it after the rename.
-    let renamed_schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("summary", ColumnType::String),
-        ],
-    )]);
+    let renamed_schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("done", PublicColumnType::Boolean)
+                .column("summary", PublicColumnType::Text),
+        ),
+    );
     let renamed = SchemaVersion::new(renamed_schema);
     owner
         .publish_schema_with_lens(
@@ -277,16 +277,10 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
 /// exercise all three with the same row UUID present in two logical tables.
 #[test]
 fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
-    fn table_schema(name: &str) -> TableSchema {
-        TableSchema::new(
-            name,
-            [
-                ColumnSchema::new("status", ColumnType::String),
-                ColumnSchema::new("value", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public())
+    fn table_schema(name: &str) -> PublicTableSchemaBuilder {
+        PublicTableSchemaBuilder::new(name)
+            .column("status", PublicColumnType::Text)
+            .column("value", PublicColumnType::Text)
     }
 
     fn cells(status: &str, value: &str) -> RowCells {
@@ -346,7 +340,11 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
         );
     }
 
-    let schema = JazzSchema::new([table_schema("table_a"), table_schema("table_b")]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(table_schema("table_a"))
+            .table(table_schema("table_b")),
+    );
     let db = open_db(0x5e, AuthorId::SYSTEM, &schema);
     let table_a = schema
         .tables

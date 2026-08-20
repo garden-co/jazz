@@ -643,7 +643,10 @@ fn convert_default_for_column_type(
             ColumnType::Text | ColumnType::Json { .. } | ColumnType::Enum { .. },
             Value::Text(value),
         ) => Ok(GrooveValue::String(value.clone())),
-        (ColumnType::EnumPayload { cases }, Value::Enum { case, values }) => {
+        (
+            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
+            Value::Enum { case, values },
+        ) => {
             let (case_index, entry) = cases
                 .iter()
                 .enumerate()
@@ -747,7 +750,17 @@ fn convert_column_type(
         ColumnType::Uuid => Ok(GrooveColumnType::Uuid),
         ColumnType::Bytea => Ok(GrooveColumnType::Bytes),
         ColumnType::Enum { .. } => Ok(GrooveColumnType::String),
-        ColumnType::EnumPayload { cases } => {
+        ColumnType::ScalarEnum { name, variants } => {
+            groove::records::ScalarEnumSchema::new(name.clone(), variants.iter().cloned())
+                .map(GrooveColumnType::EnumTag)
+                .map_err(|error| {
+                    err(
+                        format!("$.{}.{}", table.as_str(), column),
+                        error.to_string(),
+                    )
+                })
+        }
+        ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
             let mut converted_cases = Vec::with_capacity(cases.len());
             for case in cases {
                 if case.name.is_empty() {
@@ -771,7 +784,11 @@ fn convert_column_type(
                     RecordDescriptor::new(fields),
                 ));
             }
-            EnumSchema::new(format!("{}_{}", table.as_str(), column), converted_cases)
+            let enum_name = match column_type {
+                ColumnType::CatalogueEnumPayload { name, .. } => name.clone(),
+                _ => format!("{}_{}", table.as_str(), column),
+            };
+            EnumSchema::new(enum_name, converted_cases)
                 .map(|schema| GrooveColumnType::Enum(Box::new(schema)))
                 .map_err(|error| {
                     err(
@@ -1333,7 +1350,7 @@ enum LoweredRelValue {
 #[derive(Clone)]
 struct PendingReachable {
     from: Operand,
-    seed: crate::query::ReachableSeed,
+    seed: Option<crate::query::ReachableSeed>,
     edge_table: String,
     edge_member_column: String,
     edge_parent_column: String,
@@ -1409,7 +1426,7 @@ fn append_exists_rel_policy_clause(
             edge_parent_column: pending.edge_parent_column,
             edge_filters: pending.edge_filters,
             bound: crate::query::RecursionBound::MaxDepth(pending.max_depth),
-            seed: Some(pending.seed),
+            seed: pending.seed,
         });
     }
     if !lowered.reachable.is_empty() {
@@ -1517,7 +1534,7 @@ fn lower_exists_rel(
                     edge_parent_column: pending.edge_parent_column,
                     edge_filters: pending.edge_filters,
                     bound: crate::query::RecursionBound::MaxDepth(pending.max_depth),
-                    seed: Some(pending.seed),
+                    seed: pending.seed,
                 };
                 reachable
                     .access_filters
@@ -1575,6 +1592,15 @@ fn lower_gather_rel(
     let (from, seed) = lower_gather_seed(table, path, seed)?;
     let (edge_table, output_table, edge_member_column, edge_parent_column, edge_filters) =
         lower_gather_step(table, path, step)?;
+    let seed = if seed.table == output_table
+        && seed.user_column.as_deref() == Some("id")
+        && seed.team_column == "id"
+        && seed.filters.is_empty()
+    {
+        None
+    } else {
+        Some(seed)
+    };
     let max_depth = match bound {
         RelRecursionBound::MaxDepth(depth) if *depth > 0 => *depth,
         RelRecursionBound::MaxDepth(_) => {

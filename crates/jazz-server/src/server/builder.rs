@@ -774,16 +774,18 @@ mod tests {
             .first()
             .expect("authority has genesis")
             .clone();
-        let evolved = jazz::protocol::SchemaVersion::new(jazz::schema::JazzSchema::new([
-            jazz::schema::TableSchema::new(
-                "notes",
-                [
-                    groove::schema::ColumnSchema::new("id", groove::schema::ColumnType::Uuid),
-                    groove::schema::ColumnSchema::new("body", groove::schema::ColumnType::String),
-                    groove::schema::ColumnSchema::new("extra", groove::schema::ColumnType::String),
-                ],
-            ),
-        ]));
+        let evolved_source = jazz::tools::public_schema::SchemaBuilder::new()
+            .table(
+                jazz::tools::public_schema::TableSchema::builder("notes")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
+                    .column("body", jazz::tools::public_schema::ColumnType::Text)
+                    .column("extra", jazz::tools::public_schema::ColumnType::Text),
+            )
+            .build();
+        let evolved_runtime =
+            jazz::tools::public_schema_convert::convert_public_schema(&evolved_source)
+                .expect("evolved public schema compiles");
+        let evolved = jazz::protocol::SchemaVersion::new(evolved_runtime);
         let mut evolved_snapshot = snapshot;
         evolved_snapshot.schemas.push(evolved.clone());
         evolved_snapshot.lineages.push((

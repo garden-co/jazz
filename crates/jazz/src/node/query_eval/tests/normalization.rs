@@ -64,13 +64,13 @@ fn predicate_params_collects_every_operand_position_and_operator() {
 /// the physical row UUID is retained only for tables that do not declare it.
 #[test]
 fn declared_id_order_and_aggregate_lower_as_source_fields() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "things",
-        [
-            ColumnSchema::new("id", ColumnType::Uuid),
-            ColumnSchema::new("label", ColumnType::String),
-        ],
-    )]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("things")
+                .column("id", PublicColumnType::Uuid)
+                .column("label", PublicColumnType::Text),
+        ),
+    );
     let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([7; 16]), schema.clone());
     let source = root_source_id("things");
 

@@ -108,7 +108,9 @@ mod alloc_metrics {
                 let alloc_index = ALLOCS.fetch_add(1, Ordering::Relaxed) + 1;
                 BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
                 let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed).max(1);
-                if alloc_index % sample_rate == 0 && !IN_SAMPLE.swap(true, Ordering::Relaxed) {
+                if alloc_index.is_multiple_of(sample_rate)
+                    && !IN_SAMPLE.swap(true, Ordering::Relaxed)
+                {
                     sample_stack();
                     IN_SAMPLE.store(false, Ordering::Relaxed);
                 }

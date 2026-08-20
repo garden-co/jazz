@@ -3,18 +3,22 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
+mod common;
+
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
     SubscriptionEvent,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::{JazzSchema, TableSchema};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz_testkit::duplex_transport::duplex;
+
+use common::{compile_schema, session_eq};
 
 #[derive(Clone, Copy, Debug)]
 enum CoverageMode {
@@ -66,17 +70,22 @@ fn row(seed: u64) -> RowUuid {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new(TABLES.map(|table| {
-        TableSchema::new(
-            table,
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::owner_only(table, "owner"))
-        .with_write_policy(Policy::public())
-    }))
+    let mut builder = SchemaBuilder::new();
+    for table in TABLES {
+        builder = builder.table(
+            TableSchemaBuilder::new(table)
+                .column("title", ColumnType::Text)
+                .column("owner", ColumnType::Uuid)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(session_eq("owner", &["claims", "sub"]))
+                        .with_insert(PolicyExpr::True)
+                        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                        .with_delete(PolicyExpr::True),
+                ),
+        );
+    }
+    compile_schema(&builder.build())
 }
 
 fn open_client(seed: u8, author: AuthorId, schema: JazzSchema) -> Db<MemoryStorage> {

@@ -80,6 +80,24 @@ where
         Ok(&self.catalogue.schema)
     }
 
+    /// Apply an in-memory-only mutation for white-box tests of invalid compiled
+    /// policy states. The node must already have been created from a valid
+    /// public schema; this helper never persists or publishes the mutation.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn mutate_current_schema_for_testing(
+        &mut self,
+        mutate: impl FnOnce(&mut JazzSchema),
+    ) {
+        let mut schema = self.catalogue.schema.clone();
+        mutate(&mut schema);
+        self.catalogue.schema = schema.clone();
+        self.catalogue
+            .catalogue_schemas
+            .get_mut(&self.catalogue.current_schema_version_id)
+            .expect("current schema is present in the test catalogue")
+            .schema = schema;
+    }
+
     pub(crate) fn require_catalogue_ready(&self) -> Result<(), Error> {
         self.database.ensure_usable()?;
         if self.catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized {

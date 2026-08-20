@@ -11,15 +11,18 @@ use std::time::Instant;
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::GlobalSeq;
+use jazz::tools::public_schema::{
+    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+};
 use jazz::tx::{DurabilityTier, Fate, RejectionReason};
 use jazz::wire::TransportError;
+use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
@@ -1060,46 +1063,37 @@ fn accept_global(core: &mut NodeState<RocksDbStorage>, tx: jazz::tx::TxId, globa
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            WORKFLOWS,
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("definition", ColumnType::String),
-            ],
-        ),
-        TableSchema::new(
-            INSTANCES,
-            [
-                ColumnSchema::new("workflow", ColumnType::Uuid),
-                ColumnSchema::new("state", ColumnType::String),
-                ColumnSchema::new("currentStep", ColumnType::U64),
-                ColumnSchema::new("wakeAt", ColumnType::U64),
-            ],
-        )
-        .with_reference("workflow", WORKFLOWS),
-        TableSchema::new(
-            STEPS,
-            [
-                ColumnSchema::new("instance", ColumnType::Uuid),
-                ColumnSchema::new("seq", ColumnType::U64),
-                ColumnSchema::new("kind", ColumnType::String),
-                ColumnSchema::new("input", ColumnType::String),
-                ColumnSchema::new("output", ColumnType::String),
-                ColumnSchema::new("status", ColumnType::String),
-            ],
-        )
-        .with_reference("instance", INSTANCES),
-        TableSchema::new(
-            EVENTS,
-            [
-                ColumnSchema::new("instance", ColumnType::Uuid),
-                ColumnSchema::new("seq", ColumnType::U64),
-                ColumnSchema::new("payload", ColumnType::Bytes),
-            ],
-        )
-        .with_reference("instance", INSTANCES),
-    ])
+    compile_public_schema(
+        SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder(WORKFLOWS)
+                    .column("name", PublicColumnType::Text)
+                    .column("definition", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchema::builder(INSTANCES)
+                    .fk_column("workflow", WORKFLOWS)
+                    .column("state", PublicColumnType::Text)
+                    .column("currentStep", PublicColumnType::Timestamp)
+                    .column("wakeAt", PublicColumnType::Timestamp),
+            )
+            .table(
+                PublicTableSchema::builder(STEPS)
+                    .fk_column("instance", INSTANCES)
+                    .column("seq", PublicColumnType::Timestamp)
+                    .column("kind", PublicColumnType::Text)
+                    .column("input", PublicColumnType::Text)
+                    .column("output", PublicColumnType::Text)
+                    .column("status", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchema::builder(EVENTS)
+                    .fk_column("instance", INSTANCES)
+                    .column("seq", PublicColumnType::Timestamp)
+                    .column("payload", PublicColumnType::Bytea),
+            )
+            .build(),
+    )
 }
 
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<RocksDbStorage>) {

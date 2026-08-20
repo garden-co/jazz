@@ -1,16 +1,21 @@
 use std::collections::BTreeMap;
 
+mod common;
+
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::{PeerRole, PeerState};
 use jazz::protocol::{SubscriptionKey, SyncMessage, VersionBundle};
-use jazz::query::{Query, claim, col, eq, param};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
-use jazz::tools::OpenTransactionId;
+use jazz::query::{Query, col, eq, param};
+use jazz::schema::JazzSchema;
+use jazz::tools::{
+    ColumnType, OpenTransactionId, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+};
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
 use jazz_storage_rocksdb::RocksDbStorage;
+
+use common::{compile_schema, exists, outer_eq, session_eq};
 
 fn node(byte: u8) -> NodeUuid {
     NodeUuid::from_bytes([byte; 16])
@@ -21,47 +26,66 @@ fn row(byte: u8) -> RowUuid {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("owner", ColumnType::Uuid)
+                    .policies(
+                        TablePolicies::new().with_select(session_eq("owner", &["claims", "sub"])),
+                    ),
+            )
+            .build(),
     )
-    .with_read_policy(Policy::owner_only("todos", "owner"))])
 }
 
 fn read_write_policy_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
+    let owner = session_eq("owner", &["claims", "sub"]);
+    let policies = TablePolicies::new()
+        .with_select(owner.clone())
+        .with_insert(owner.clone())
+        .with_update(Some(owner.clone()), owner.clone())
+        .with_delete(owner);
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("owner", ColumnType::Uuid)
+                    .policies(policies),
+            )
+            .build(),
     )
-    .with_read_policy(Policy::owner_only("todos", "owner"))
-    .with_write_policy(Policy::owner_only("todos", "owner"))])
 }
 
 fn access_write_policy_schema() -> JazzSchema {
-    let canvas_policy = Policy::shape(Query::from("canvases").join_via(
+    let canvas = exists(
         "canvasInvites",
-        "canvas",
-        [eq(col("userID"), claim("sub"))],
-    ));
-    JazzSchema::new([
-        TableSchema::new("canvases", [ColumnSchema::new("title", ColumnType::String)])
-            .with_read_policy(canvas_policy.clone())
-            .with_write_policy(canvas_policy),
-        TableSchema::new(
-            "canvasInvites",
-            [
-                ColumnSchema::new("canvas", ColumnType::Uuid),
-                ColumnSchema::new("userID", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("canvas", "canvases"),
-    ])
+        vec![
+            outer_eq("canvas", "id"),
+            session_eq("userID", &["claims", "sub"]),
+        ],
+    );
+    let policies = TablePolicies::new()
+        .with_select(canvas.clone())
+        .with_insert(canvas.clone())
+        .with_update(Some(canvas.clone()), canvas.clone())
+        .with_delete(canvas);
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("canvases")
+                    .column("title", ColumnType::Text)
+                    .policies(policies),
+            )
+            .table(
+                TableSchemaBuilder::new("canvasInvites")
+                    .fk_column("canvas", "canvases")
+                    .column("userID", ColumnType::Uuid),
+            )
+            .build(),
+    )
 }
 
 fn open_node(
@@ -1192,7 +1216,11 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
     assert_eq!(fate, Fate::Accepted);
     assert!(global_seq.is_none());
     assert_eq!(durability, DurabilityTier::Edge);
-    let canvas_table = &schema.tables[0];
+    let canvas_table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "canvases")
+        .expect("canvases schema");
     assert_eq!(
         core.current_rows("canvases", DurabilityTier::Edge)
             .unwrap()

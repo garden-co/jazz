@@ -146,10 +146,6 @@ pub(super) fn row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {
     rows.iter().map(CurrentRow::row_uuid).collect()
 }
 
-/// Client writes stage locally before the authority evaluates their policy.
-/// Keep this assertion at the sync boundary so tests do not accidentally
-/// reintroduce synchronous local policy enforcement for ordinary writes.
-
 /// In-memory transport pair: each side's outbound queue is the other's
 /// inbound queue, so a `send` lands directly in the peer's `try_recv`.
 pub(super) struct DuplexTransport {
@@ -657,38 +653,243 @@ impl RecordingScheduler {
     }
 }
 
-pub(super) fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
+pub(super) fn compile_public_db_test_schema(source: &PublicSchema) -> JazzSchema {
+    crate::tools::public_schema_convert::convert_public_schema(source)
+        .expect("db-test public schema compiles")
+}
+
+pub(super) fn build_public_db_test_schema(builder: PublicSchemaBuilder) -> JazzSchema {
+    compile_public_db_test_schema(&builder.build())
+}
+
+pub(super) fn build_public_db_test_schema_with_branch_policies(
+    builder: PublicSchemaBuilder,
+    branch_read_policy: Option<PublicPolicyExpr>,
+    branch_write_policy: Option<PublicPolicyExpr>,
+) -> JazzSchema {
+    let mut source = crate::schema::SourceSchema::new(&builder.build());
+    source.branch_read_policy = branch_read_policy;
+    source.branch_write_policy = branch_write_policy;
+    crate::tools::public_schema_convert::convert_source_schema(&source)
+        .expect("db-test public schema with branch policies compiles")
+}
+
+pub(super) fn public_session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {
+    PublicPolicyExpr::eq_session(
+        column,
+        path.iter().map(|segment| (*segment).to_owned()).collect(),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
+}
+
+pub(super) fn public_outer_eq(column: &str, outer_column: &str) -> PublicPolicyExpr {
+    public_session_eq(column, &["__jazz_outer_row", outer_column])
+}
+
+pub(super) fn public_literal_eq(column: &str, value: PublicValue) -> PublicPolicyExpr {
+    PublicPolicyExpr::Cmp {
+        column: column.to_owned(),
+        op: PublicCmpOp::Eq,
+        value: PublicPolicyValue::Literal(value),
+    }
+}
+
+pub(super) fn public_exists(
+    table: &str,
+    conditions: impl IntoIterator<Item = PublicPolicyExpr>,
+) -> PublicPolicyExpr {
+    PublicPolicyExpr::Exists {
+        table: table.to_owned(),
+        condition: Box::new(PublicPolicyExpr::and(conditions.into_iter().collect())),
+    }
+}
+
+fn public_rel_column(scope: &str, column: &str) -> PublicRelColumnRef {
+    PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: column.to_owned(),
+    }
+}
+
+fn public_rel_eq(scope: &str, column: &str, value: PublicRelValueRef) -> PublicRelPredicateExpr {
+    PublicRelPredicateExpr::Cmp {
+        left: public_rel_column(scope, column),
+        op: PublicRelPredicateCmpOp::Eq,
+        right: value,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn public_recursive_access_policy(
+    access_table: &str,
+    access_row_column: &str,
+    access_team_column: &str,
+    access_filters: &[(&str, PublicValue)],
+    access_in_filters: &[(&str, Vec<PublicValue>)],
+    team_table: &str,
+    edge_table: &str,
+    edge_member_column: &str,
+    edge_parent_column: &str,
+    edge_filters: &[(&str, PublicValue)],
+    seed_table: &str,
+    seed_user_column: &str,
+    seed_claim_path: &[&str],
+    seed_team_column: &str,
+) -> PublicPolicyExpr {
+    let seed_alias = "seed";
+    let edge_alias = "recursive_edge";
+    let target_alias = "recursive_target";
+    let access_alias = "access";
+    let seed = PublicRelExpr::Project {
+        input: Box::new(PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::TableScan {
+                table: seed_table.into(),
+                alias: Some(seed_alias.to_owned()),
+            }),
+            predicate: public_rel_eq(
+                seed_alias,
+                seed_user_column,
+                PublicRelValueRef::SessionRef(
+                    seed_claim_path
+                        .iter()
+                        .map(|segment| (*segment).to_owned())
+                        .collect(),
+                ),
+            ),
+        }),
+        columns: vec![PublicRelProjectColumn {
+            alias: "id".to_owned(),
+            expr: PublicRelProjectExpr::Column(public_rel_column(seed_alias, seed_team_column)),
+        }],
+    };
+    let mut edge_predicates = vec![public_rel_eq(
+        edge_alias,
+        edge_member_column,
+        PublicRelValueRef::RowId(PublicRelRowIdRef::Frontier),
+    )];
+    edge_predicates.extend(edge_filters.iter().map(|(column, value)| {
+        public_rel_eq(
+            edge_alias,
+            column,
+            PublicRelValueRef::Literal(value.clone()),
+        )
+    }));
+    let step = PublicRelExpr::Project {
+        input: Box::new(PublicRelExpr::Join {
+            left: Box::new(PublicRelExpr::Filter {
+                input: Box::new(PublicRelExpr::TableScan {
+                    table: edge_table.into(),
+                    alias: Some(edge_alias.to_owned()),
+                }),
+                predicate: PublicRelPredicateExpr::And(edge_predicates),
+            }),
+            right: Box::new(PublicRelExpr::TableScan {
+                table: team_table.into(),
+                alias: Some(target_alias.to_owned()),
+            }),
+            on: vec![PublicRelJoinCondition {
+                left: public_rel_column(edge_alias, edge_parent_column),
+                right: public_rel_column(target_alias, "id"),
+            }],
+            join_kind: PublicRelJoinKind::Inner,
+        }),
+        columns: vec![PublicRelProjectColumn {
+            alias: "id".to_owned(),
+            expr: PublicRelProjectExpr::Column(public_rel_column(target_alias, "id")),
+        }],
+    };
+    let reachable = PublicRelExpr::Gather {
+        seed: Box::new(seed),
+        step: Box::new(step),
+        frontier_key: PublicRelKeyRef::RowId(PublicRelRowIdRef::Current),
+        bound: PublicRelRecursionBound::MaxDepth(8),
+        dedupe_key: vec![PublicRelKeyRef::RowId(PublicRelRowIdRef::Current)],
+    };
+    let mut access_predicates = vec![public_rel_eq(
+        access_alias,
+        access_row_column,
+        PublicRelValueRef::RowId(PublicRelRowIdRef::Outer),
+    )];
+    access_predicates.extend(access_filters.iter().map(|(column, value)| {
+        public_rel_eq(
+            access_alias,
+            column,
+            PublicRelValueRef::Literal(value.clone()),
+        )
+    }));
+    access_predicates.extend(access_in_filters.iter().map(|(column, values)| {
+        PublicRelPredicateExpr::In {
+            left: public_rel_column(access_alias, column),
+            values: values
+                .iter()
+                .cloned()
+                .map(PublicRelValueRef::Literal)
+                .collect(),
+        }
+    }));
+    PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(reachable),
+                right: Box::new(PublicRelExpr::TableScan {
+                    table: access_table.into(),
+                    alias: Some(access_alias.to_owned()),
+                }),
+                on: vec![PublicRelJoinCondition {
+                    left: PublicRelColumnRef {
+                        scope: None,
+                        column: "id".to_owned(),
+                    },
+                    right: public_rel_column(access_alias, access_team_column),
+                }],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::And(access_predicates),
+        },
+    }
+}
+
+pub(super) fn public_legacy_write_policy(expr: PublicPolicyExpr) -> PublicTablePolicies {
+    PublicTablePolicies::new()
+        .with_insert(expr.clone())
+        .with_update(Some(expr.clone()), expr.clone())
+        .with_delete(expr)
+}
+
+pub(super) fn schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid),
+        ),
+    )
 }
 
 pub(super) fn payload_enum_query_schema() -> JazzSchema {
-    let event = ColumnType::Enum(Box::new(
-        EnumSchema::new(
+    build_public_db_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("events").column(
             "event",
-            [
-                EnumCase::new(
-                    "message",
-                    RecordDescriptor::new([("level", ValueType::I32)]),
-                ),
-                EnumCase::new("closed", RecordDescriptor::new([("code", ValueType::I32)])),
-            ],
-        )
-        .unwrap(),
-    ));
-    JazzSchema::new([
-        TableSchema::new("events", [ColumnSchema::new("event", event)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-    ])
+            PublicColumnType::EnumPayload {
+                cases: vec![
+                    PublicEnumCaseDescriptor {
+                        name: "message".to_owned(),
+                        fields: vec![PublicColumnDescriptor::new(
+                            "level",
+                            PublicColumnType::Integer,
+                        )],
+                    },
+                    PublicEnumCaseDescriptor {
+                        name: "closed".to_owned(),
+                        fields: vec![PublicColumnDescriptor::new(
+                            "code",
+                            PublicColumnType::Integer,
+                        )],
+                    },
+                ],
+            },
+        ),
+    ))
 }
 
 pub(super) fn payload_message(level: i32) -> Value {
@@ -713,17 +914,30 @@ pub(super) fn payload_closed(code: i32) -> Value {
     )
 }
 
-pub(super) fn owner_read_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
+pub(super) fn empty_payload_case(discriminant: u32) -> Value {
+    Value::Enum(
+        EnumValue::create(
+            discriminant,
+            RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+            &[],
+        )
+        .unwrap(),
     )
-    .with_read_policy(Policy::owner_only("todos", "owner"))
-    .with_write_policy(Policy::public())])
+}
+
+pub(super) fn owner_read_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"])),
+                ),
+        ),
+    )
 }
 
 pub(super) fn created_by_read_schema() -> JazzSchema {
@@ -731,835 +945,604 @@ pub(super) fn created_by_read_schema() -> JazzSchema {
 }
 
 pub(super) fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("$createdBy", &["claims", claim_name])),
+                ),
+        ),
     )
-    .with_read_policy(Policy::shape(
-        Query::from("todos").filter(eq(col("$createdBy"), claim(claim_name))),
-    ))
-    .with_write_policy(Policy::public())])
 }
 
 pub(super) fn owner_write_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(public_legacy_write_policy(public_session_eq(
+                    "owner",
+                    &["claims", "sub"],
+                ))),
+        ),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::owner_only("todos", "owner"))])
 }
 
 pub(super) fn editor_claim_write_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
+    let editor = PublicPolicyExpr::SessionCmp {
+        path: vec!["claims".to_owned(), "role".to_owned()],
+        op: PublicCmpOp::Eq,
+        value: PublicValue::Text("editor".to_owned()),
+    };
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(public_legacy_write_policy(editor)),
+        ),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::shape(
-        Query::from("todos").filter(eq(claim("role"), lit("editor"))),
-    ))])
 }
 
 pub(super) fn owner_id_read_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "messages",
-        [
-            ColumnSchema::new("body", ColumnType::String),
-            ColumnSchema::new("owner_id", ColumnType::String),
-        ],
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("messages")
+                .column("body", PublicColumnType::Text)
+                .column("owner_id", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner_id", &["user_id"])),
+                ),
+        ),
     )
-    .with_read_policy(Policy::shape(
-        Query::from("messages").filter(eq(col("owner_id"), crate::query::claim("user_id"))),
-    ))
-    .with_write_policy(Policy::public())])
 }
 
 pub(super) fn owner_id_public_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "messages",
-        [
-            ColumnSchema::new("body", ColumnType::String),
-            ColumnSchema::new("owner_id", ColumnType::String),
-        ],
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("messages")
+                .column("body", PublicColumnType::Text)
+                .column("owner_id", PublicColumnType::Text),
+        ),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
 }
 
 pub(super) fn owner_id_session_write_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "messages",
-        [
-            ColumnSchema::new("body", ColumnType::String),
-            ColumnSchema::new("owner_id", ColumnType::String),
-        ],
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("messages")
+                .column("body", PublicColumnType::Text)
+                .column("owner_id", PublicColumnType::Text)
+                .policies(public_legacy_write_policy(public_session_eq(
+                    "owner_id",
+                    &["user_id"],
+                ))),
+        ),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::shape(
-        Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
-    ))])
 }
 
 pub(super) fn owner_uuid_session_write_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "messages",
-        [
-            ColumnSchema::new("body", ColumnType::String),
-            ColumnSchema::new("owner_id", ColumnType::Uuid),
-        ],
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("messages")
+                .column("body", PublicColumnType::Text)
+                .column("owner_id", PublicColumnType::Uuid)
+                .policies(public_legacy_write_policy(public_session_eq(
+                    "owner_id",
+                    &["user_id"],
+                ))),
+        ),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::shape(
-        Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
-    ))])
 }
 
 pub(super) fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
-    let resource_policy = Policy::shape(
-        Query::from("res_a")
-            .reachable_via_with_access_filters(
-                "res_a_access_edges",
-                "resource",
-                "team",
-                lit("relation-seeded"),
-                [eq(col("administrator"), lit(false))],
-                "group_entry",
-                "member_id",
-                "target_id",
-                [eq(col("administrator"), lit(false))],
-            )
-            .seeded_by("group_access_edges", "user_id", "sub", "group_id"),
+    let resource_policy = public_recursive_access_policy(
+        "res_a_access_edges",
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        &[],
+        "group",
+        "group_entry",
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        "group_access_edges",
+        "user_id",
+        &["claims", "sub"],
+        "group_id",
     );
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(public_resource_table_builder(
+                "res_a",
+                resource_policy,
+                false,
+            ))
+            .table(PublicTableSchemaBuilder::new("group").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("group_access_edges")
+                    .fk_column("group_id", "group")
+                    .column("user_id", PublicColumnType::Uuid)
+                    .column("role", PublicColumnType::Text),
+            )
+            .table(public_resource_access_table_builder(
+                "res_a_access_edges",
+                "res_a",
+            ))
+            .table(public_group_entry_table_builder()),
+    )
+}
 
-    JazzSchema::new([
-        TableSchema::new(
-            "res_a",
-            [
-                ColumnSchema::new("org_id", ColumnType::Uuid),
-                ColumnSchema::new("created_by", ColumnType::Uuid),
-                ColumnSchema::new("updated_by", ColumnType::Uuid),
-                ColumnSchema::new("archived", ColumnType::Bool),
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("date_created", ColumnType::U64),
-                ColumnSchema::new("date_updated", ColumnType::U64),
-                ColumnSchema::new("col_text_a", ColumnType::String.nullable()),
-                ColumnSchema::new("col_text_b", ColumnType::String.nullable()),
-                ColumnSchema::new("col_float", ColumnType::F64.nullable()),
-                ColumnSchema::new("col_int", ColumnType::U64.nullable()),
-                ColumnSchema::new("col_json", ColumnType::String.nullable()),
-                ColumnSchema::new("col_tags", ColumnType::String.nullable()),
-            ],
-        )
-        .with_reference("created_by", "group")
-        .with_reference("updated_by", "group")
-        .with_read_policy(resource_policy)
-        .with_write_policy(Policy::public()),
-        TableSchema::new("group", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "group_access_edges",
-            [
-                ColumnSchema::new("group_id", ColumnType::Uuid),
-                ColumnSchema::new("user_id", ColumnType::Uuid),
-                ColumnSchema::new("role", ColumnType::String),
-            ],
-        )
-        .with_reference("group_id", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "res_a_access_edges",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("grant_role", ColumnType::String),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("resource", "res_a")
-        .with_reference("team", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "group_entry",
-            [
-                ColumnSchema::new("member_id", ColumnType::Uuid),
-                ColumnSchema::new("target_id", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-                ColumnSchema::new("date_added", ColumnType::U64),
-            ],
-        )
-        .with_reference("member_id", "group")
-        .with_reference("target_id", "group")
-        .with_write_policy(Policy::public()),
-    ])
+fn public_resource_table_builder(
+    name: &str,
+    read_policy: PublicPolicyExpr,
+    references_org: bool,
+) -> PublicTableSchemaBuilder {
+    let table = PublicTableSchemaBuilder::new(name);
+    let table = if references_org {
+        table.fk_column("org_id", "org")
+    } else {
+        table.column("org_id", PublicColumnType::Uuid)
+    };
+    table
+        .fk_column("created_by", "group")
+        .fk_column("updated_by", "group")
+        .column("archived", PublicColumnType::Boolean)
+        .column("label", PublicColumnType::Text)
+        .column("date_created", PublicColumnType::Timestamp)
+        .column("date_updated", PublicColumnType::Timestamp)
+        .nullable_column("col_text_a", PublicColumnType::Text)
+        .nullable_column("col_text_b", PublicColumnType::Text)
+        .nullable_column("col_float", PublicColumnType::Double)
+        .nullable_column("col_int", PublicColumnType::Timestamp)
+        .nullable_column("col_json", PublicColumnType::Text)
+        .nullable_column("col_tags", PublicColumnType::Text)
+        .policies(PublicTablePolicies::new().with_select(read_policy))
+}
+
+fn public_resource_access_table_builder(
+    name: &str,
+    resource_table: &str,
+) -> PublicTableSchemaBuilder {
+    PublicTableSchemaBuilder::new(name)
+        .fk_column("resource", resource_table)
+        .fk_column("team", "group")
+        .column("grant_role", PublicColumnType::Text)
+        .column("administrator", PublicColumnType::Boolean)
+}
+
+fn public_group_entry_table_builder() -> PublicTableSchemaBuilder {
+    PublicTableSchemaBuilder::new("group_entry")
+        .fk_column("member_id", "group")
+        .fk_column("target_id", "group")
+        .column("administrator", PublicColumnType::Boolean)
+        .column("date_added", PublicColumnType::Timestamp)
 }
 
 pub(super) fn customer_resource_policy_minimal_schema() -> JazzSchema {
-    let resource_policy = Policy::shape(
-        Query::from("res_i")
-            .reachable_via_with_access_filters(
-                "res_i_access_edges",
-                "resource",
-                "team",
-                lit("relation-seeded"),
-                [eq(col("administrator"), lit(false))],
-                "group_entry",
-                "member_id",
-                "target_id",
-                [eq(col("administrator"), lit(false))],
-            )
-            .seeded_by("group_access_edges", "user_id", "sub", "group_id"),
+    let resource_policy = public_recursive_access_policy(
+        "res_i_access_edges",
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        &[],
+        "group",
+        "group_entry",
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        "group_access_edges",
+        "user_id",
+        &["claims", "sub"],
+        "group_id",
     );
-
-    JazzSchema::new([
-        TableSchema::new("org", [ColumnSchema::new("label", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new("group", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "group_access_edges",
-            [
-                ColumnSchema::new("group_id", ColumnType::Uuid),
-                ColumnSchema::new("user_id", ColumnType::Uuid),
-                ColumnSchema::new("role", ColumnType::String),
-            ],
-        )
-        .with_reference("group_id", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "group_entry",
-            [
-                ColumnSchema::new("member_id", ColumnType::Uuid),
-                ColumnSchema::new("target_id", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-                ColumnSchema::new("date_added", ColumnType::U64),
-            ],
-        )
-        .with_reference("member_id", "group")
-        .with_reference("target_id", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new("res_i", resource_columns_for_customer_fixture())
-            .with_reference("org_id", "org")
-            .with_reference("created_by", "group")
-            .with_reference("updated_by", "group")
-            .with_read_policy(resource_policy)
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "res_i_access_edges",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("grant_role", ColumnType::String),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("resource", "res_i")
-        .with_reference("team", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("org").column("label", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("group").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("group_access_edges")
+                    .fk_column("group_id", "group")
+                    .column("user_id", PublicColumnType::Uuid)
+                    .column("role", PublicColumnType::Text),
+            )
+            .table(public_group_entry_table_builder())
+            .table(public_resource_table_builder(
+                "res_i",
+                resource_policy,
+                true,
+            ))
+            .table(public_resource_access_table_builder(
+                "res_i_access_edges",
+                "res_i",
+            )),
+    )
 }
 
 pub(super) fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
-    let res_i_policy = Policy::shape(
-        Query::from("res_i")
-            .reachable_via_with_access_filters(
+    let res_i_policy = public_recursive_access_policy(
+        "res_i_access_edges",
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        &[],
+        "group",
+        "group_entry",
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        "group_access_edges",
+        "user_id",
+        &["claims", "sub"],
+        "group_id",
+    );
+    let res_j_policy = public_recursive_access_policy(
+        "res_j_access_edges",
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        &[],
+        "group",
+        "group_entry",
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        "group_access_edges",
+        "user_id",
+        &["claims", "sub"],
+        "group_id",
+    );
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("org").column("label", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("group").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("group_access_edges")
+                    .fk_column("group_id", "group")
+                    .column("user_id", PublicColumnType::Uuid)
+                    .column("role", PublicColumnType::Text),
+            )
+            .table(public_group_entry_table_builder())
+            .table(public_resource_table_builder("res_i", res_i_policy, true))
+            .table(public_resource_access_table_builder(
                 "res_i_access_edges",
-                "resource",
-                "team",
-                lit("relation-seeded"),
-                [eq(col("administrator"), lit(false))],
-                "group_entry",
-                "member_id",
-                "target_id",
-                [eq(col("administrator"), lit(false))],
-            )
-            .seeded_by("group_access_edges", "user_id", "sub", "group_id"),
-    );
-    let res_j_policy = Policy::shape(
-        Query::from("res_j")
-            .reachable_via_with_access_filters(
+                "res_i",
+            ))
+            .table(public_resource_table_builder("res_j", res_j_policy, true))
+            .table(public_resource_access_table_builder(
                 "res_j_access_edges",
-                "resource",
-                "team",
-                lit("relation-seeded"),
-                [eq(col("administrator"), lit(false))],
-                "group_entry",
-                "member_id",
-                "target_id",
-                [eq(col("administrator"), lit(false))],
-            )
-            .seeded_by("group_access_edges", "user_id", "sub", "group_id"),
-    );
-
-    JazzSchema::new([
-        TableSchema::new("org", [ColumnSchema::new("label", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new("group", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "group_access_edges",
-            [
-                ColumnSchema::new("group_id", ColumnType::Uuid),
-                ColumnSchema::new("user_id", ColumnType::Uuid),
-                ColumnSchema::new("role", ColumnType::String),
-            ],
-        )
-        .with_reference("group_id", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "group_entry",
-            [
-                ColumnSchema::new("member_id", ColumnType::Uuid),
-                ColumnSchema::new("target_id", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-                ColumnSchema::new("date_added", ColumnType::U64),
-            ],
-        )
-        .with_reference("member_id", "group")
-        .with_reference("target_id", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new("res_i", resource_columns_for_customer_fixture())
-            .with_reference("org_id", "org")
-            .with_reference("created_by", "group")
-            .with_reference("updated_by", "group")
-            .with_read_policy(res_i_policy)
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "res_i_access_edges",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("grant_role", ColumnType::String),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("resource", "res_i")
-        .with_reference("team", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new("res_j", resource_columns_for_customer_fixture())
-            .with_reference("org_id", "org")
-            .with_reference("created_by", "group")
-            .with_reference("updated_by", "group")
-            .with_read_policy(res_j_policy)
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "res_j_access_edges",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("grant_role", ColumnType::String),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("resource", "res_j")
-        .with_reference("team", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+                "res_j",
+            )),
+    )
 }
 
 pub(super) fn same_table_seeded_resource_policy_schema() -> JazzSchema {
-    let resource_policy = Policy::shape(
-        Query::from("resources")
-            .reachable_via_with_access_filters(
-                "resource_access",
-                "resource",
-                "team",
-                lit("relation-seeded"),
-                [eq(col("administrator"), lit(false))],
-                "team_entries",
-                "member_id",
-                "target_id",
-                [eq(col("administrator"), lit(false))],
-            )
-            .seeded_by("teams", "identity_key", "sub", "id"),
+    let resource_policy = public_recursive_access_policy(
+        "resource_access",
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        &[],
+        "teams",
+        "team_entries",
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        "teams",
+        "identity_key",
+        &["claims", "sub"],
+        "id",
     );
-
-    JazzSchema::new([
-        TableSchema::new(
-            "teams",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("identity_key", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "team_entries",
-            [
-                ColumnSchema::new("member_id", ColumnType::Uuid),
-                ColumnSchema::new("target_id", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("member_id", "teams")
-        .with_reference("target_id", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "resources",
-            [ColumnSchema::new("label", ColumnType::String)],
-        )
-        .with_read_policy(resource_policy)
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "resource_access",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("resource", "resources")
-        .with_reference("team", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    same_table_seeded_public_schema(PublicColumnType::Uuid, resource_policy)
 }
 
 pub(super) fn same_table_string_seeded_resource_policy_schema() -> JazzSchema {
-    let resource_policy = Policy::shape(
-        Query::from("resources")
-            .reachable_via_with_access_filters(
-                "resource_access",
-                "resource",
-                "team",
-                lit("relation-seeded"),
-                [eq(col("administrator"), lit(false))],
-                "team_entries",
-                "member_id",
-                "target_id",
-                [eq(col("administrator"), lit(false))],
-            )
-            .seeded_by("teams", "identity_key", "user_id", "id"),
+    let resource_policy = public_recursive_access_policy(
+        "resource_access",
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        &[],
+        "teams",
+        "team_entries",
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        "teams",
+        "identity_key",
+        &["user_id"],
+        "id",
     );
+    same_table_seeded_public_schema(PublicColumnType::Text, resource_policy)
+}
 
-    JazzSchema::new([
-        TableSchema::new(
-            "teams",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("identity_key", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "team_entries",
-            [
-                ColumnSchema::new("member_id", ColumnType::Uuid),
-                ColumnSchema::new("target_id", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("member_id", "teams")
-        .with_reference("target_id", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "resources",
-            [ColumnSchema::new("label", ColumnType::String)],
-        )
-        .with_read_policy(resource_policy)
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "resource_access",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("resource", "resources")
-        .with_reference("team", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+fn same_table_seeded_public_schema(
+    identity_type: PublicColumnType,
+    resource_policy: PublicPolicyExpr,
+) -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("teams")
+                    .column("name", PublicColumnType::Text)
+                    .column("identity_key", identity_type),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_entries")
+                    .fk_column("member_id", "teams")
+                    .fk_column("target_id", "teams")
+                    .column("administrator", PublicColumnType::Boolean),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(resource_policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resource_access")
+                    .fk_column("resource", "resources")
+                    .fk_column("team", "teams")
+                    .column("administrator", PublicColumnType::Boolean),
+            ),
+    )
 }
 
 pub(super) fn customer_inherited_child_policy_schema() -> JazzSchema {
-    let resource_policy = Query::from("res_i")
-        .reachable_via_with_access_filters(
-            "res_i_access_edges",
-            "resource",
-            "team",
-            lit("relation-seeded"),
-            [eq(col("administrator"), lit(false))],
-            "group_entry",
-            "member_id",
-            "target_id",
-            [eq(col("administrator"), lit(false))],
-        )
-        .seeded_by("group_access_edges", "user_id", "sub", "group_id");
-    JazzSchema::new([
-        TableSchema::new("org", [ColumnSchema::new("label", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new("group", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "group_access_edges",
-            [
-                ColumnSchema::new("group_id", ColumnType::Uuid),
-                ColumnSchema::new("user_id", ColumnType::Uuid),
-                ColumnSchema::new("role", ColumnType::String),
-            ],
-        )
-        .with_reference("group_id", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "group_entry",
-            [
-                ColumnSchema::new("member_id", ColumnType::Uuid),
-                ColumnSchema::new("target_id", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-                ColumnSchema::new("date_added", ColumnType::U64),
-            ],
-        )
-        .with_reference("member_id", "group")
-        .with_reference("target_id", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new("res_i", resource_columns_for_customer_fixture())
-            .with_reference("org_id", "org")
-            .with_reference("created_by", "group")
-            .with_reference("updated_by", "group")
-            .with_read_policy(Policy::shape(resource_policy))
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "res_i_access_edges",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("grant_role", ColumnType::String),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("resource", "res_i")
-        .with_reference("team", "group")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "res_i_child",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("status", ColumnType::String),
-                ColumnSchema::new("label", ColumnType::String),
-            ],
-        )
-        .with_reference("resource", "res_i")
-        .with_read_policy(Policy::shape(
-            Query::from("res_i_child")
-                .inherits("resource")
-                .filter(eq(col("status"), lit("open"))),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "res_i_grandchild",
-            [
-                ColumnSchema::new("child", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-            ],
-        )
-        .with_reference("child", "res_i_child")
-        .with_read_policy(Policy::shape(
-            Query::from("res_i_grandchild").inherits("child"),
-        ))
-        .with_write_policy(Policy::public()),
-    ])
+    let resource_policy = public_recursive_access_policy(
+        "res_i_access_edges",
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        &[],
+        "group",
+        "group_entry",
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        "group_access_edges",
+        "user_id",
+        &["claims", "sub"],
+        "group_id",
+    );
+    let child_read = PublicPolicyExpr::and(vec![
+        PublicPolicyExpr::Inherits {
+            operation: PublicOperation::Select,
+            via_column: "resource".to_owned(),
+            max_depth: None,
+        },
+        public_literal_eq("status", PublicValue::Text("open".to_owned())),
+    ]);
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("org").column("label", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("group").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("group_access_edges")
+                    .fk_column("group_id", "group")
+                    .column("user_id", PublicColumnType::Uuid)
+                    .column("role", PublicColumnType::Text),
+            )
+            .table(public_group_entry_table_builder())
+            .table(public_resource_table_builder(
+                "res_i",
+                resource_policy,
+                true,
+            ))
+            .table(public_resource_access_table_builder(
+                "res_i_access_edges",
+                "res_i",
+            ))
+            .table(
+                PublicTableSchemaBuilder::new("res_i_child")
+                    .fk_column("resource", "res_i")
+                    .column("status", PublicColumnType::Text)
+                    .column("label", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(child_read)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("res_i_grandchild")
+                    .fk_column("child", "res_i_child")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::Inherits {
+                            operation: PublicOperation::Select,
+                            via_column: "child".to_owned(),
+                            max_depth: None,
+                        }),
+                    ),
+            ),
+    )
 }
 
 pub(super) fn inherited_insert_policy_schema() -> JazzSchema {
-    let parent_update_using = Query::from("parents").filter(eq(col("owner"), claim("sub")));
-    let parent_update_check = Query::from("parents").filter(eq(col("locked"), lit(false)));
-    JazzSchema::new([
-        TableSchema::new(
-            "parents",
-            [
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("locked", ColumnType::Bool),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policies(WritePolicies {
-            insert_check: Policy::public(),
-            update_using: Some(parent_update_using),
-            update_check: Some(parent_update_check),
-            delete_using: None,
-        }),
-        TableSchema::new(
-            "children",
-            [
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-            ],
-        )
-        .with_reference("parent_id", "parents")
-        .with_read_policy(Policy::public())
-        .with_write_policies(WritePolicies {
-            insert_check: Some(Query::from("children").inherits("parent_id")),
-            update_using: None,
-            update_check: None,
-            delete_using: None,
-        }),
-    ])
-}
-
-pub(super) fn resource_columns_for_customer_fixture() -> [ColumnSchema; 13] {
-    [
-        ColumnSchema::new("org_id", ColumnType::Uuid),
-        ColumnSchema::new("created_by", ColumnType::Uuid),
-        ColumnSchema::new("updated_by", ColumnType::Uuid),
-        ColumnSchema::new("archived", ColumnType::Bool),
-        ColumnSchema::new("label", ColumnType::String),
-        ColumnSchema::new("date_created", ColumnType::U64),
-        ColumnSchema::new("date_updated", ColumnType::U64),
-        ColumnSchema::new("col_text_a", ColumnType::String.nullable()),
-        ColumnSchema::new("col_text_b", ColumnType::String.nullable()),
-        ColumnSchema::new("col_float", ColumnType::F64.nullable()),
-        ColumnSchema::new("col_int", ColumnType::U64.nullable()),
-        ColumnSchema::new("col_json", ColumnType::String.nullable()),
-        ColumnSchema::new("col_tags", ColumnType::String.nullable()),
-    ]
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("parents")
+                    .column("owner", PublicColumnType::Uuid)
+                    .column("locked", PublicColumnType::Boolean)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(
+                                Some(public_session_eq("owner", &["claims", "sub"])),
+                                public_literal_eq("locked", PublicValue::Boolean(false)),
+                            ),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("children")
+                    .fk_column("parent_id", "parents")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new().with_insert(PublicPolicyExpr::Inherits {
+                            operation: PublicOperation::Select,
+                            via_column: "parent_id".to_owned(),
+                            max_depth: None,
+                        }),
+                    ),
+            ),
+    )
 }
 
 pub(super) fn relation_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("owner_id", "users")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "comments",
-            [
-                ColumnSchema::new("body", ColumnType::String),
-                ColumnSchema::new("todo_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("todo_id", "todos")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("owner_id", "users"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("comments")
+                    .column("body", PublicColumnType::Text)
+                    .fk_column("todo_id", "todos"),
+            ),
+    )
 }
 
 pub(super) fn membership_scoped_relation_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("is_public", ColumnType::Bool),
-                ColumnSchema::new("created_by", ColumnType::String),
-                ColumnSchema::new("join_code", ColumnType::String.nullable()),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("chats")
-                .filter(any_of([]))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").filter(eq(col("is_public"), lit(true))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").filter(eq(col("join_code"), claim("join_code"))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").join_via_column(
-                        "chat_members",
-                        "chat_id",
-                        "id",
-                        [eq(col("user_id"), claim("user_id"))],
-                    ),
-                )),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
+    let chats_read = PublicPolicyExpr::or(vec![
+        public_literal_eq("is_public", PublicValue::Boolean(true)),
+        public_session_eq("join_code", &["claims", "join_code"]),
+        public_exists(
             "chat_members",
             [
-                ColumnSchema::new("chat_id", ColumnType::Uuid),
-                ColumnSchema::new("user_id", ColumnType::String),
-                ColumnSchema::new("join_code", ColumnType::String.nullable()),
+                public_outer_eq("chat_id", "id"),
+                public_session_eq("user_id", &["user_id"]),
             ],
-        )
-        .with_reference("chat_id", "chats")
-        .with_read_policy(Policy::shape(
-            Query::from("chat_members")
-                .filter(any_of([]))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chat_members").filter(eq(col("user_id"), claim("user_id"))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chat_members").join_via_column(
-                        "chat_members",
-                        "chat_id",
-                        "chat_id",
-                        [eq(col("user_id"), claim("user_id"))],
-                    ),
-                )),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "profiles",
+        ),
+    ]);
+    let members_read = PublicPolicyExpr::or(vec![
+        public_session_eq("user_id", &["user_id"]),
+        public_exists(
+            "chat_members",
             [
-                ColumnSchema::new("user_id", ColumnType::String),
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("avatar", ColumnType::String.nullable()),
+                public_outer_eq("chat_id", "chat_id"),
+                public_session_eq("user_id", &["user_id"]),
             ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "messages",
+        ),
+    ]);
+    let messages_read = PublicPolicyExpr::or(vec![
+        public_exists(
+            "chats",
             [
-                ColumnSchema::new("chat_id", ColumnType::Uuid),
-                ColumnSchema::new("sender_id", ColumnType::Uuid),
-                ColumnSchema::new("text", ColumnType::String),
-                ColumnSchema::new("created_at", ColumnType::U64),
+                public_outer_eq("id", "chat_id"),
+                public_literal_eq("is_public", PublicValue::Boolean(true)),
             ],
-        )
-        .with_reference("chat_id", "chats")
-        .with_reference("sender_id", "profiles")
-        .with_read_policy(Policy::shape(
-            Query::from("messages")
-                .filter(any_of([]))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("messages").join_via_column(
-                        "chats",
-                        "id",
-                        "chat_id",
-                        [eq(col("is_public"), lit(true))],
-                    ),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("messages").join_via_column(
-                        "chat_members",
-                        "chat_id",
-                        "chat_id",
-                        [eq(col("user_id"), claim("user_id"))],
-                    ),
-                )),
-        ))
-        .with_write_policy(Policy::public()),
-    ])
+        ),
+        public_exists(
+            "chat_members",
+            [
+                public_outer_eq("chat_id", "chat_id"),
+                public_session_eq("user_id", &["user_id"]),
+            ],
+        ),
+    ]);
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("chats")
+                    .column("name", PublicColumnType::Text)
+                    .column("is_public", PublicColumnType::Boolean)
+                    .column("created_by", PublicColumnType::Text)
+                    .nullable_column("join_code", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(chats_read)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("chat_members")
+                    .fk_column("chat_id", "chats")
+                    .column("user_id", PublicColumnType::Text)
+                    .nullable_column("join_code", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(members_read)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("profiles")
+                    .column("user_id", PublicColumnType::Text)
+                    .column("name", PublicColumnType::Text)
+                    .nullable_column("avatar", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("messages")
+                    .fk_column("chat_id", "chats")
+                    .fk_column("sender_id", "profiles")
+                    .column("text", PublicColumnType::Text)
+                    .column("created_at", PublicColumnType::Timestamp)
+                    .policies(PublicTablePolicies::new().with_select(messages_read)),
+            ),
+    )
 }
 
 pub(super) fn relation_hop_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("orgs", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "teams",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("org_id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
-                ColumnSchema::new(
-                    "parent_id",
-                    ColumnType::Nullable(Box::new(ColumnType::Uuid)),
-                ),
-            ],
-        )
-        .with_reference("org_id", "orgs")
-        .with_reference("parent_id", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "users",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("team_id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
-            ],
-        )
-        .with_reference("team_id", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("orgs").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("teams")
+                    .column("name", PublicColumnType::Text)
+                    .nullable_fk_column("org_id", "orgs")
+                    .nullable_fk_column("parent_id", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("users")
+                    .column("name", PublicColumnType::Text)
+                    .nullable_fk_column("team_id", "teams"),
+            ),
+    )
 }
 
 pub(super) fn access_edge_include_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "team_access_edges",
-            [
-                ColumnSchema::new("resource_id", ColumnType::Uuid),
-                ColumnSchema::new("team_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("resource_id", "teams")
-        .with_reference("team_id", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("team_access_edges")
+                    .fk_column("resource_id", "teams")
+                    .fk_column("team_id", "teams"),
+            ),
+    )
 }
 
 pub(super) fn policy_relation_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "comments",
-            [
-                ColumnSchema::new("body", ColumnType::String),
-                ColumnSchema::new("todo_id", ColumnType::Uuid),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::owner_only("comments", "owner"))
-        .with_write_policy(Policy::public()),
-    ])
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("comments")
+                    .column("body", PublicColumnType::Text)
+                    .column("todo_id", PublicColumnType::Uuid)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(public_session_eq("owner", &["claims", "sub"])),
+                    ),
+            ),
+    )
 }
 
 pub(super) fn evolved_owner_write_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .column("body", PublicColumnType::Text)
+                .policies(public_legacy_write_policy(public_session_eq(
+                    "owner",
+                    &["claims", "sub"],
+                ))),
+        ),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::owner_only("todos", "owner"))])
 }
 
 pub(super) fn row(byte: u8) -> RowUuid {
@@ -1586,36 +1569,30 @@ pub(super) fn cells(title: &str, done: bool, owner: AuthorId) -> RowCells {
 }
 
 pub(super) fn issue_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("projects", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "issues",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("state", ColumnType::String),
-                ColumnSchema::new("assignee", ColumnType::Uuid),
-                ColumnSchema::new("project", ColumnType::Uuid),
-                ColumnSchema::new("priority", ColumnType::U64),
-                ColumnSchema::new("labels", ColumnType::String.array_of()),
-                ColumnSchema::new("snoozed_until", ColumnType::U64.nullable()),
-            ],
-        )
-        .with_reference("project", "projects")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "issue_tags",
-            [
-                ColumnSchema::new("issue", ColumnType::Uuid),
-                ColumnSchema::new("tag", ColumnType::String),
-            ],
-        )
-        .with_reference("issue", "issues")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .column("assignee", PublicColumnType::Uuid)
+                    .fk_column("project", "projects")
+                    .column("priority", PublicColumnType::Timestamp)
+                    .column(
+                        "labels",
+                        PublicColumnType::Array {
+                            element: Box::new(PublicColumnType::Text),
+                        },
+                    )
+                    .nullable_column("snoozed_until", PublicColumnType::Timestamp),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text),
+            ),
+    )
 }
 
 pub(super) fn issue_cells(

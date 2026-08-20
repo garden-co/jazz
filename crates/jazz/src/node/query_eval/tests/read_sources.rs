@@ -56,14 +56,14 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
     // This is intentionally an internal assertion: the public subscription
     // regression proves the observable row result, while this checks that
     // both inputs to its content-version semi-join select the same source.
-    let base = JazzSchema::new([TableSchema::new(
-        "users",
-        [ColumnSchema::new("email", ColumnType::String)],
-    )]);
-    let evolved = JazzSchema::new([TableSchema::new(
-        "people",
-        [ColumnSchema::new("email", ColumnType::String)],
-    )]);
+    let base = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("email", PublicColumnType::Text)),
+    );
+    let evolved = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("people").column("email", PublicColumnType::Text)),
+    );
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), base.clone());
     node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
@@ -157,13 +157,10 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
 
 #[test]
 fn historical_cut_bounded_source_matches_full_scan_graph() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "docs",
-        [crate::schema::ColumnSchema::new(
-            "title",
-            ColumnType::String,
-        )],
-    )]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text)),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0x31; 16]), schema);
     let table = node.table("docs").expect("docs table").clone();
     let first = row(0x31);
@@ -227,13 +224,10 @@ fn historical_cut_bounded_source_matches_full_scan_graph() {
 
 #[test]
 fn historical_cut_reads_only_table_global_seq_range() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "docs",
-        [crate::schema::ColumnSchema::new(
-            "title",
-            ColumnType::String,
-        )],
-    )]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text)),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0x32; 16]), schema);
     let table = node.table("docs").expect("docs table").clone();
     let shape = Query::from("docs")

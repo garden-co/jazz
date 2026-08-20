@@ -337,7 +337,7 @@ async fn select_policies_boolean_inner() {
         &bob,
         query,
         "bob does not see row denied by select policy",
-        |rows| Some(rows),
+        Some,
     )
     .await;
     assert_eq!(bob_rows.len(), 0);

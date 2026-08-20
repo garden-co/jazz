@@ -85,6 +85,18 @@ pub enum ColumnType {
     Text,
     /// Enumerated text constrained to a closed set of variants.
     Enum { variants: Vec<String> },
+    /// Catalogue-native scalar enum whose declaration order assigns durable
+    /// compact tags. This is retained for core schema-evolution fixtures and
+    /// catalogue source round-tripping; ordinary application enums use `Enum`.
+    #[doc(hidden)]
+    ScalarEnum { name: String, variants: Vec<String> },
+    /// Catalogue-native payload enum with an explicit compiled type name.
+    /// Ordinary application payload enums use `EnumPayload`.
+    #[doc(hidden)]
+    CatalogueEnumPayload {
+        name: String,
+        cases: Vec<EnumCaseDescriptor>,
+    },
     /// Discriminated enum whose selected case carries a named record payload.
     /// This is a column type, never a top-level Jazz row union.
     EnumPayload { cases: Vec<EnumCaseDescriptor> },
@@ -124,8 +136,15 @@ impl ColumnType {
             ColumnType::Text => None,
             ColumnType::Bytea => None,
             ColumnType::Json { .. } => None,
-            ColumnType::Enum { variants } if variants.len() <= u8::MAX as usize + 1 => Some(1),
-            ColumnType::Enum { .. } | ColumnType::EnumPayload { .. } => None,
+            ColumnType::Enum { variants } | ColumnType::ScalarEnum { variants, .. }
+                if variants.len() <= u8::MAX as usize + 1 =>
+            {
+                Some(1)
+            }
+            ColumnType::Enum { .. }
+            | ColumnType::ScalarEnum { .. }
+            | ColumnType::EnumPayload { .. }
+            | ColumnType::CatalogueEnumPayload { .. } => None,
             ColumnType::Array { .. } => None, // Arrays are variable-length
             ColumnType::Row { .. } => None,   // Rows are variable-length
         }

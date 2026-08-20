@@ -299,8 +299,10 @@ const TYPE_ENUM: u8 = 9;
 const TYPE_DOUBLE: u8 = 10;
 const TYPE_BYTEA: u8 = 11;
 const TYPE_JSON: u8 = 12;
-const TYPE_BATCH_ID: u8 = 13;
+const TYPE_TRANSACTION_ID: u8 = 13;
 const TYPE_ENUM_PAYLOAD: u8 = 14;
+const TYPE_SCALAR_ENUM: u8 = 15;
+const TYPE_CATALOGUE_ENUM_PAYLOAD: u8 = 16;
 
 fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
     match col_type {
@@ -311,7 +313,7 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
         ColumnType::Text => buf.push(TYPE_TEXT),
         ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
         ColumnType::Uuid => buf.push(TYPE_UUID),
-        ColumnType::TransactionId => buf.push(TYPE_BATCH_ID),
+        ColumnType::TransactionId => buf.push(TYPE_TRANSACTION_ID),
         ColumnType::Bytea => buf.push(TYPE_BYTEA),
         ColumnType::Json { schema } => {
             buf.push(TYPE_JSON);
@@ -335,8 +337,25 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
                 write_string(buf, variant);
             }
         }
+        ColumnType::ScalarEnum { name, variants } => {
+            buf.push(TYPE_SCALAR_ENUM);
+            write_string(buf, name);
+            write_u32(buf, variants.len() as u32);
+            for variant in variants {
+                write_string(buf, variant);
+            }
+        }
         ColumnType::EnumPayload { cases } => {
             buf.push(TYPE_ENUM_PAYLOAD);
+            write_u32(buf, cases.len() as u32);
+            for case in cases {
+                write_string(buf, &case.name);
+                encode_row_descriptor(buf, &RowDescriptor::new(case.fields.clone()));
+            }
+        }
+        ColumnType::CatalogueEnumPayload { name, cases } => {
+            buf.push(TYPE_CATALOGUE_ENUM_PAYLOAD);
+            write_string(buf, name);
             write_u32(buf, cases.len() as u32);
             for case in cases {
                 write_string(buf, &case.name);
@@ -368,7 +387,7 @@ fn decode_column_type(
         TYPE_TEXT => Ok(ColumnType::Text),
         TYPE_TIMESTAMP => Ok(ColumnType::Timestamp),
         TYPE_UUID => Ok(ColumnType::Uuid),
-        TYPE_BATCH_ID => Ok(ColumnType::TransactionId),
+        TYPE_TRANSACTION_ID => Ok(ColumnType::TransactionId),
         TYPE_BYTEA => Ok(ColumnType::Bytea),
         TYPE_JSON => {
             let has_schema = read_u8(data, offset)? != 0;
@@ -395,6 +414,15 @@ fn decode_column_type(
             }
             Ok(ColumnType::Enum { variants })
         }
+        TYPE_SCALAR_ENUM => {
+            let name = read_string(data, offset, "scalar_enum_name")?;
+            let variant_count = read_u32(data, offset)? as usize;
+            let mut variants = Vec::with_capacity(variant_count);
+            for _ in 0..variant_count {
+                variants.push(read_string(data, offset, "scalar_enum_variant")?);
+            }
+            Ok(ColumnType::ScalarEnum { name, variants })
+        }
         TYPE_ENUM_PAYLOAD => {
             let count = read_u32(data, offset)? as usize;
             let mut cases = Vec::with_capacity(count);
@@ -404,6 +432,17 @@ fn decode_column_type(
                 cases.push(EnumCaseDescriptor { name, fields });
             }
             Ok(ColumnType::EnumPayload { cases })
+        }
+        TYPE_CATALOGUE_ENUM_PAYLOAD => {
+            let name = read_string(data, offset, "catalogue_enum_payload_name")?;
+            let count = read_u32(data, offset)? as usize;
+            let mut cases = Vec::with_capacity(count);
+            for _ in 0..count {
+                let name = read_string(data, offset, "catalogue_enum_payload_case")?;
+                let fields = decode_row_descriptor(data, offset, schema_version)?.columns;
+                cases.push(EnumCaseDescriptor { name, fields });
+            }
+            Ok(ColumnType::CatalogueEnumPayload { name, cases })
         }
         TYPE_ARRAY => {
             let elem = decode_column_type(data, offset, schema_version)?;
@@ -1890,6 +1929,39 @@ mod tests {
                     "todo".to_string(),
                 ]
             }
+        );
+    }
+
+    #[test]
+    fn schema_roundtrip_with_catalogue_native_enums() {
+        let scalar_enum = ColumnType::ScalarEnum {
+            name: "status".to_owned(),
+            variants: vec!["todo".to_owned(), "done".to_owned()],
+        };
+        let payload_enum = ColumnType::CatalogueEnumPayload {
+            name: "event".to_owned(),
+            cases: vec![EnumCaseDescriptor {
+                name: "renamed".to_owned(),
+                fields: vec![ColumnDescriptor::new("title", ColumnType::Text)],
+            }],
+        };
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("events")
+                    .column("status", scalar_enum.clone())
+                    .column("event", payload_enum.clone()),
+            )
+            .build();
+
+        let decoded = decode_schema(&encode_schema(&schema)).unwrap();
+        let events = decoded.get(&TableName::new("events")).unwrap();
+        assert_eq!(
+            events.columns.column("status").unwrap().column_type,
+            scalar_enum
+        );
+        assert_eq!(
+            events.columns.column("event").unwrap().column_type,
+            payload_enum
         );
     }
 

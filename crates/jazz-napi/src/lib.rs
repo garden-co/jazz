@@ -3057,14 +3057,12 @@ mod tests {
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
     use jazz::groove::records::{RecordDescriptor, ValueType};
-    use jazz::groove::schema::ColumnType as GrooveColumnType;
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-    use jazz::schema::{
-        ColumnSchema as CoreColumnSchema, JazzSchema, Policy, TableSchema as CoreTableSchema,
-    };
     use jazz::tools::OpenTransactionId as CoreOpenBatchId;
-    use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
+    use jazz::tools::{
+        ColumnType, PolicyExpr, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
+    };
     use jazz::tx::DurabilityTier;
     use napi::bindgen_prelude::{BigInt, Either, Either3, Either4};
     use serde_json::json;
@@ -3492,12 +3490,21 @@ mod tests {
     /// owner-wide OpenBatch lifetime when its JS wrapper is collected.
     #[test]
     fn attached_tx_drop_preserves_owner_batch() {
-        let schema = JazzSchema::new([CoreTableSchema::new(
-            "items",
-            [CoreColumnSchema::new("label", GrooveColumnType::String)],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public())]);
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("label", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = jazz::tools::public_schema_convert::convert_public_schema(&source)
+            .expect("NAPI transaction fixture public schema compiles");
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let owner = Rc::new(

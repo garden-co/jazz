@@ -3,20 +3,25 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
+mod common;
+
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::{PeerMetrics, PeerState};
 use jazz::protocol::SyncMessage;
-use jazz::schema::{JazzSchema, Policy, TableSchema};
-use jazz::tools::OpenTransactionId;
+use jazz::schema::{JazzSchema, TableSchema};
+use jazz::tools::{
+    ColumnType, OpenTransactionId, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+};
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, TxId};
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, decode_frame,
     decode_sync_message, encode_frame, encode_sync_message,
 };
 use jazz_storage_rocksdb::RocksDbStorage;
+
+use common::{compile_schema, session_eq};
 
 const TABLE: &str = "todos";
 const REFRESH_EVERY: usize = 25;
@@ -87,14 +92,18 @@ fn row(idx: u8) -> RowUuid {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        TABLE,
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(TABLE)
+                    .column("title", ColumnType::Text)
+                    .column("owner", ColumnType::Uuid)
+                    .policies(
+                        TablePolicies::new().with_select(session_eq("owner", &["claims", "sub"])),
+                    ),
+            )
+            .build(),
     )
-    .with_read_policy(Policy::owner_only("todos", "owner"))])
 }
 
 fn open_node(

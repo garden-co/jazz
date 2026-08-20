@@ -54,7 +54,7 @@ fn trusted_snapshot_carries_policy_source_and_edge_recompiles_it_after_reopen() 
     let snapshot: crate::protocol::CatalogueSnapshot =
         postcard::from_bytes(&encoded).expect("decode and compile source snapshot");
 
-    let empty = JazzSchema::new([]);
+    let empty = empty_public_test_schema();
     let edge_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -465,7 +465,7 @@ fn fresh_dynamic_edge_open(
     path: &std::path::Path,
     node_uuid: NodeUuid,
 ) -> Result<NodeState<RocksDbStorage>, Error> {
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(path, &refs)?;
@@ -643,14 +643,14 @@ fn reopen_rejects_gapped_active_catalogue_sequences() {
     receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
 
     let v2 = SchemaVersion::new(catalogue_evolved_schema());
-    let v3 = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-            ColumnSchema::new("archived", ColumnType::Bool),
-        ],
-    )]));
+    let v3 = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .column("archived", PublicColumnType::Boolean),
+        ),
+    ));
     publish_schema_lineage(
         &mut receiver,
         v3.clone(),
@@ -881,7 +881,7 @@ fn reopen_rejects_staged_table_partition_mismatch() {
 /// ```
 #[test]
 fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready() {
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let temp_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -973,7 +973,7 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
 /// ```
 #[test]
 fn dynamic_edge_bootstrap_failure_never_persists_a_partial_authority_catalogue() {
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let temp_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1033,7 +1033,7 @@ fn dynamic_edge_bootstrap_failure_never_persists_a_partial_authority_catalogue()
 /// empty local schema.
 #[test]
 fn dynamic_edge_reopen_rejects_catalogue_prefix_without_bootstrap_marker() {
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let temp_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1091,7 +1091,7 @@ fn dynamic_edge_reopen_rejects_catalogue_stripped_history() {
 /// fresh recovery before normal catalogue open can repair missing metadata.
 #[test]
 fn dynamic_edge_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let temp_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1144,7 +1144,7 @@ fn dynamic_edge_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
 /// when it carries an otherwise valid physical mapping.
 #[test]
 fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let temp_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1154,10 +1154,12 @@ fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
     edge.apply_trusted_catalogue_snapshot(catalogue_snapshot_fixture())
         .unwrap();
 
-    let smuggled = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "unrelated",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]));
+    let smuggled = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("unrelated")
+                .column("title", PublicColumnType::Text),
+        ),
+    ));
     let mut next_table_id = 100;
     let mut next_column_id = 100;
     let mapping = allocate_provisional_physical_mapping(
@@ -1192,7 +1194,7 @@ fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
 #[test]
 fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
     let base = schema();
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let temp_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1267,7 +1269,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
 /// ```
 #[test]
 fn dynamic_edge_bootstrap_rejects_snapshot_with_ambiguous_genesis() {
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let temp_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1275,12 +1277,14 @@ fn dynamic_edge_bootstrap_rejects_snapshot_with_ambiguous_genesis() {
     let mut edge = NodeState::new_catalogue_uninitialized(node(0x94), storage)
         .expect("open explicit uninitialized edge");
     let mut snapshot = catalogue_snapshot_fixture();
-    snapshot.schemas.push(SchemaVersion::new(JazzSchema::new([
-        TableSchema::new(
-            "other",
-            [ColumnSchema::new("title", ColumnType::String)],
-        ),
-    ])));
+    snapshot
+        .schemas
+        .push(SchemaVersion::new(build_public_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("other")
+                    .column("title", PublicColumnType::Text),
+            ),
+        )));
 
     assert!(matches!(
         edge.apply_trusted_catalogue_snapshot(snapshot),
@@ -1307,7 +1311,7 @@ fn dynamic_edge_bootstrap_rejects_snapshot_with_ambiguous_genesis() {
 /// ```
 #[test]
 fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue() {
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let temp_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1350,7 +1354,7 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
         panic!("commit unit expected");
     };
 
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let temp_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1410,7 +1414,7 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
 /// ```
 #[test]
 fn dynamic_edge_bootstrap_rejects_branch_creation_without_residue() {
-    let empty_schema = JazzSchema::new([]);
+    let empty_schema = empty_public_test_schema();
     let temp_dir = tempfile::tempdir().expect("create edge store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();

@@ -14,8 +14,7 @@ use jazz::db::{
 use jazz::groove::db::{
     StorageReadBucket, StorageReadMetrics, StorageWriteBucket, StorageWriteMetrics,
 };
-use jazz::groove::records::{ScalarEnumSchema, Value};
-use jazz::groove::schema::{ColumnSchema, ColumnType};
+use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
@@ -23,11 +22,18 @@ use jazz::protocol::{
     RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
     VersionRecord,
 };
-use jazz::query::{Binding, Query, ValidatedQuery, claim, col, eq, lit};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit};
+use jazz::schema::JazzSchema;
 use jazz::time::TxTime;
+use jazz::tools::public_schema::{
+    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+    Value as PublicValue,
+};
 use jazz::tx::{BranchLineage, DeletionEvent, DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::TransportError;
+use jazz_sim::public_schema_fixture::{
+    all_operation_policies, compile_public_schema, seeded_recursive_access_policy,
+};
 use jazz_sim::{
     DeterministicDriver, DriverContext, NodeRole, PeerProfile, ThreadedDriver, Topology,
     bench_profile, emit_json_line, metadata_fields, profiling,
@@ -1636,22 +1642,21 @@ fn flush_headline_versions(
 }
 
 fn block_tree_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(PAGES, [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new(
-            BLOCKS,
-            [
-                ColumnSchema::new("page", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid.nullable()),
-                ColumnSchema::new("depth", ColumnType::U64),
-                ColumnSchema::new("ordinal", ColumnType::U64),
-                ColumnSchema::new("visibleClaim", ColumnType::String),
-                ColumnSchema::new("locked", ColumnType::Bool),
-            ],
-        )
-        .with_reference("page", PAGES)
-        .with_indexed_columns(["visibleClaim", "locked"]),
-    ])
+    compile_public_schema(
+        SchemaBuilder::new()
+            .table(PublicTableSchema::builder(PAGES).column("title", PublicColumnType::Text))
+            .table(
+                PublicTableSchema::builder(BLOCKS)
+                    .fk_column("page", PAGES)
+                    .nullable_column("parent", PublicColumnType::Uuid)
+                    .column("depth", PublicColumnType::Timestamp)
+                    .column("ordinal", PublicColumnType::Timestamp)
+                    .column("visibleClaim", PublicColumnType::Text)
+                    .column("locked", PublicColumnType::Boolean)
+                    .index_only(["visibleClaim", "locked"]),
+            )
+            .build(),
+    )
 }
 
 fn block_subscription(schema: &JazzSchema, claim_value: &str) -> (ValidatedQuery, Binding) {
@@ -2370,69 +2375,65 @@ fn seed_fixture_db(config: &Config, core: &CoreDb) -> Fixture {
 }
 
 fn schema() -> JazzSchema {
-    let enum_like = ColumnType::EnumTag(
-        ScalarEnumSchema::new("resource_enum", ["alpha", "beta", "gamma", "delta"]).unwrap(),
-    );
-    let permission = ColumnType::EnumTag(
-        ScalarEnumSchema::new("resource_permission", ["read", "write", "delete"]).unwrap(),
-    );
-    let policy = Policy::shape(Query::from(RESOURCES).reachable_via_with_access_filters(
+    let enum_like = PublicColumnType::ScalarEnum {
+        name: "resource_enum".to_owned(),
+        variants: ["alpha", "beta", "gamma", "delta"]
+            .map(str::to_owned)
+            .to_vec(),
+    };
+    let permission = PublicColumnType::ScalarEnum {
+        name: "resource_permission".to_owned(),
+        variants: ["read", "write", "delete"].map(str::to_owned).to_vec(),
+    };
+    let policy = seeded_recursive_access_policy(
         ACCESS,
         "resource",
         "team",
-        claim("sub"),
-        [eq(col("adminsOnly"), lit(false))],
+        &[("adminsOnly", PublicValue::Boolean(false))],
+        TEAMS,
         MEMBERSHIPS,
         "member",
         "parent",
-        [eq(col("onlyAdmins"), lit(false))],
-    ));
-    JazzSchema::new([
-        TableSchema::new(ORGS, [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            TEAMS,
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("isAdmin", ColumnType::Bool),
-                ColumnSchema::new("isUserTeam", ColumnType::Uuid.nullable()),
-                ColumnSchema::new("org", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("org", ORGS),
-        TableSchema::new(
-            MEMBERSHIPS,
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("onlyAdmins", ColumnType::Bool),
-            ],
-        )
-        .with_reference("member", TEAMS)
-        .with_reference("parent", TEAMS),
-        TableSchema::new(
-            RESOURCES,
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("enumLikeField", enum_like),
-                ColumnSchema::new("intField", ColumnType::U64),
-                ColumnSchema::new("floatField", ColumnType::F64),
-                ColumnSchema::new("jsonField", ColumnType::String),
-            ],
-        )
-        .with_read_policy(policy.clone())
-        .with_write_policy(policy),
-        TableSchema::new(
-            ACCESS,
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("adminsOnly", ColumnType::Bool),
-                ColumnSchema::new("permission", permission),
-            ],
-        )
-        .with_reference("resource", RESOURCES)
-        .with_reference("team", TEAMS),
-    ])
+        &[("onlyAdmins", PublicValue::Boolean(false))],
+        TEAMS,
+        "id",
+        &["sub"],
+        "id",
+    );
+    compile_public_schema(
+        SchemaBuilder::new()
+            .table(PublicTableSchema::builder(ORGS).column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchema::builder(TEAMS)
+                    .column("name", PublicColumnType::Text)
+                    .column("isAdmin", PublicColumnType::Boolean)
+                    .nullable_column("isUserTeam", PublicColumnType::Uuid)
+                    .fk_column("org", ORGS),
+            )
+            .table(
+                PublicTableSchema::builder(MEMBERSHIPS)
+                    .fk_column("member", TEAMS)
+                    .fk_column("parent", TEAMS)
+                    .column("onlyAdmins", PublicColumnType::Boolean),
+            )
+            .table(
+                PublicTableSchema::builder(RESOURCES)
+                    .column("name", PublicColumnType::Text)
+                    .column("enumLikeField", enum_like)
+                    .column("intField", PublicColumnType::Timestamp)
+                    .column("floatField", PublicColumnType::Double)
+                    .column("jsonField", PublicColumnType::Text)
+                    .policies(all_operation_policies(policy)),
+            )
+            .table(
+                PublicTableSchema::builder(ACCESS)
+                    .fk_column("resource", RESOURCES)
+                    .fk_column("team", TEAMS)
+                    .column("adminsOnly", PublicColumnType::Boolean)
+                    .column("permission", permission),
+            )
+            .build(),
+    )
 }
 
 fn resource_subscription(schema: &JazzSchema) -> (ValidatedQuery, Binding) {

@@ -1,9 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 
-use jazz::groove::records::ScalarEnumSchema;
-use jazz::groove::schema::ColumnType;
-use jazz::schema::{ColumnSchema, JazzSchema, MergeStrategy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::public_schema::{
+    ColumnDescriptor as PublicColumnDescriptor, ColumnMergeStrategy as PublicMergeStrategy,
+    ColumnName as PublicColumnName, ColumnType as PublicColumnType,
+    RowDescriptor as PublicRowDescriptor, Schema as PublicSchema, TableName as PublicTableName,
+    TableSchema as PublicTableSchema,
+};
+use jazz::tools::public_schema_convert::convert_public_schema;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,11 +42,15 @@ pub(crate) fn convert_admin_schema(
     schema: &Value,
 ) -> Result<JazzSchema, AdminSchemaConversionError> {
     let tables = table_entries(schema)?;
-    let mut converted = Vec::with_capacity(tables.len());
+    let mut source = PublicSchema::new();
     for (table_name, table_value) in tables {
-        converted.push(convert_table(&table_name, table_value)?);
+        source.insert(
+            PublicTableName::new(&table_name),
+            convert_table(&table_name, table_value)?,
+        );
     }
-    Ok(JazzSchema::new(converted))
+    convert_public_schema(&source)
+        .map_err(|error| err("$", format!("public schema conversion failed: {error}")))
 }
 
 fn table_entries(schema: &Value) -> Result<Vec<(String, &Value)>, AdminSchemaConversionError> {
@@ -78,7 +87,10 @@ fn table_entries(schema: &Value) -> Result<Vec<(String, &Value)>, AdminSchemaCon
         .collect()
 }
 
-fn convert_table(name: &str, value: &Value) -> Result<TableSchema, AdminSchemaConversionError> {
+fn convert_table(
+    name: &str,
+    value: &Value,
+) -> Result<PublicTableSchema, AdminSchemaConversionError> {
     let object = value
         .as_object()
         .ok_or_else(|| err(format!("$.{name}"), "table definition must be an object"))?;
@@ -94,36 +106,24 @@ fn convert_table(name: &str, value: &Value) -> Result<TableSchema, AdminSchemaCo
         .as_array()
         .ok_or_else(|| err(format!("$.{name}.columns"), "columns must be an array"))?;
     let mut converted_columns = Vec::with_capacity(columns.len());
-    let mut references = BTreeMap::new();
     let mut column_indexed = BTreeSet::new();
-    let mut merge_strategies = BTreeMap::new();
     for (index, column) in columns.iter().enumerate() {
         let path = format!("$.{name}.columns[{index}]");
-        let (column, reference, indexed, merge_strategy) = convert_column(name, column, &path)?;
-        if let Some(reference) = reference {
-            references.insert(column.name.clone(), reference);
-        }
-        if let Some(merge_strategy) = merge_strategy {
-            merge_strategies.insert(column.name.clone(), merge_strategy);
-        }
+        let (column, indexed) = convert_column(name, column, &path)?;
         if indexed {
-            column_indexed.insert(column.name.clone());
+            column_indexed.insert(column.name.as_str().to_owned());
         }
         converted_columns.push(column);
     }
-    let mut table = TableSchema::new(name, converted_columns);
-    table.references = references;
-    table.merge_strategies = merge_strategies;
-    table.indexed_columns = indexed_columns(
+    let mut selected_indexes = indexed_columns(
         object.get("indexed_columns"),
         format!("$.{name}.indexed_columns"),
     )?;
-    table.indexed_columns.extend(column_indexed);
-    for column in &table.indexed_columns {
-        if !table
-            .columns
+    selected_indexes.extend(column_indexed);
+    for column in &selected_indexes {
+        if !converted_columns
             .iter()
-            .any(|candidate| candidate.name == *column)
+            .any(|candidate| candidate.name.as_str() == column)
         {
             return Err(err(
                 format!("$.{name}.indexed_columns"),
@@ -131,6 +131,13 @@ fn convert_table(name: &str, value: &Value) -> Result<TableSchema, AdminSchemaCo
             ));
         }
     }
+    let mut table = PublicTableSchema::new(PublicRowDescriptor::new(converted_columns));
+    table.indexed_columns = Some(
+        selected_indexes
+            .into_iter()
+            .map(PublicColumnName::new)
+            .collect(),
+    );
     Ok(table)
 }
 
@@ -138,8 +145,7 @@ fn convert_column(
     table: &str,
     value: &Value,
     path: &str,
-) -> Result<(ColumnSchema, Option<String>, bool, Option<MergeStrategy>), AdminSchemaConversionError>
-{
+) -> Result<(PublicColumnDescriptor, bool), AdminSchemaConversionError> {
     let object = value
         .as_object()
         .ok_or_else(|| err(path, "column definition must be an object"))?;
@@ -152,12 +158,10 @@ fn convert_column(
         .get("column_type")
         .or_else(|| object.get("type"))
         .ok_or_else(|| err(format!("{path}.column_type"), "column_type is required"))?;
-    let mut column = convert_column_type(
-        table,
+    let mut column = PublicColumnDescriptor::new(
         name,
-        column_type_value,
-        &format!("{path}.column_type"),
-    )?;
+        convert_column_type(column_type_value, &format!("{path}.column_type"))?,
+    );
     if object.contains_key("large_value") {
         return Err(err(
             format!("{path}.large_value"),
@@ -178,7 +182,7 @@ fn convert_column(
         .get("timestamp")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        && !matches!(column.column_type, ColumnType::String)
+        && !matches!(column.column_type, PublicColumnType::Text)
     {
         return Err(err(
             format!("{path}.timestamp"),
@@ -190,19 +194,19 @@ fn convert_column(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        column.column_type = column.column_type.nullable();
+        column.nullable = true;
     }
     if let Some(variants) = object.get("enum") {
         let variants = string_array(variants, format!("{path}.enum"))?;
-        column.column_type = ColumnType::EnumTag(
-            ScalarEnumSchema::new(format!("{table}_{name}"), variants)
-                .map_err(|error| err(format!("{path}.enum"), error.to_string()))?,
-        );
+        column.column_type = PublicColumnType::ScalarEnum {
+            name: format!("{table}_{name}"),
+            variants,
+        };
     }
-    let reference = object
+    column.references = object
         .get("references")
         .map(|value| {
-            value.as_str().map(str::to_owned).ok_or_else(|| {
+            value.as_str().map(PublicTableName::new).ok_or_else(|| {
                 err(
                     format!("{path}.references"),
                     "references must be a table name string",
@@ -217,37 +221,39 @@ fn convert_column(
     let merge_strategy = object
         .get("merge_strategy")
         .map(|value| convert_merge_strategy(value, &format!("{path}.merge_strategy")))
-        .transpose()?;
-    if merge_strategy == Some(MergeStrategy::GSet)
-        && !matches!(column.column_type, ColumnType::Array(_))
+        .transpose()?
+        .flatten();
+    if merge_strategy == Some(PublicMergeStrategy::GSet)
+        && (column.nullable || !matches!(column.column_type, PublicColumnType::Array { .. }))
     {
         return Err(err(
             format!("{path}.merge_strategy"),
             "GSet merge strategy requires a non-nullable ARRAY column",
         ));
     }
-    Ok((column, reference, indexed, merge_strategy))
+    column.merge_strategy = merge_strategy;
+    Ok((column, indexed))
 }
 
 fn convert_merge_strategy(
     value: &Value,
     path: &str,
-) -> Result<MergeStrategy, AdminSchemaConversionError> {
+) -> Result<Option<PublicMergeStrategy>, AdminSchemaConversionError> {
     match value.as_str() {
-        Some("Counter") => Ok(MergeStrategy::Counter),
-        Some("Lww") | Some("LWW") => Ok(MergeStrategy::Lww),
-        Some("GSet") => Ok(MergeStrategy::GSet),
+        Some("Counter") => Ok(Some(PublicMergeStrategy::Counter)),
+        // LWW is the public schema's default and therefore has no explicit
+        // source-level marker.
+        Some("Lww") | Some("LWW") => Ok(None),
+        Some("GSet") => Ok(Some(PublicMergeStrategy::GSet)),
         Some(other) => Err(err(path, format!("unsupported merge strategy {other:?}"))),
         None => Err(err(path, "merge_strategy must be a string")),
     }
 }
 
 fn convert_column_type(
-    table: &str,
-    column: &str,
     value: &Value,
     path: &str,
-) -> Result<ColumnSchema, AdminSchemaConversionError> {
+) -> Result<PublicColumnType, AdminSchemaConversionError> {
     let kind = match value {
         Value::String(kind) => kind.as_str(),
         Value::Object(object) => {
@@ -265,22 +271,21 @@ fn convert_column_type(
                     )
                 })?;
                 let element = convert_scalar_type(element, &format!("{path}.element"))?;
-                return Ok(ColumnSchema::new(column, element.array_of()));
+                return Ok(PublicColumnType::Array {
+                    element: Box::new(element),
+                });
             }
             kind
         }
         _ => return Err(err(path, "column_type must be a string or object")),
     };
-    let column_type = convert_scalar_kind(kind, path)?;
-    let column_schema = ColumnSchema::new(column, column_type);
-    let _ = table;
-    Ok(column_schema)
+    convert_scalar_kind(kind, path)
 }
 
 fn convert_scalar_type(
     value: &Value,
     path: &str,
-) -> Result<ColumnType, AdminSchemaConversionError> {
+) -> Result<PublicColumnType, AdminSchemaConversionError> {
     match value {
         Value::String(kind) => convert_scalar_kind(kind, path),
         Value::Object(object) => {
@@ -302,21 +307,23 @@ fn convert_scalar_type(
     }
 }
 
-fn convert_scalar_kind(kind: &str, path: &str) -> Result<ColumnType, AdminSchemaConversionError> {
+fn convert_scalar_kind(
+    kind: &str,
+    path: &str,
+) -> Result<PublicColumnType, AdminSchemaConversionError> {
     match kind {
-        "Text" | "String" | "string" => Ok(ColumnType::String),
-        "Boolean" | "Bool" | "boolean" => Ok(ColumnType::Bool),
-        "Uuid" | "UUID" | "uuid" => Ok(ColumnType::Uuid),
-        "Bytea" | "Bytes" | "bytea" => Ok(ColumnType::Bytes),
-        "Double" | "Float64" | "F64" | "double" => Ok(ColumnType::F64),
-        "Integer" | "Int" | "I32" => Ok(ColumnType::I32),
-        "Number" => Ok(ColumnType::U32),
+        "Text" | "String" | "string" => Ok(PublicColumnType::Text),
+        "Boolean" | "Bool" | "boolean" => Ok(PublicColumnType::Boolean),
+        "Uuid" | "UUID" | "uuid" => Ok(PublicColumnType::Uuid),
+        "Bytea" | "Bytes" | "bytea" => Ok(PublicColumnType::Bytea),
+        "Double" | "Float64" | "F64" | "double" => Ok(PublicColumnType::Double),
+        "Integer" | "Int" | "I32" | "Number" => Ok(PublicColumnType::Integer),
         "I64" => Err(err(
             path,
             "I64 columns are not supported by this alpha slice",
         )),
-        "Json" | "JSON" => Ok(ColumnType::String),
-        "Timestamp" | "timestamp" => Ok(ColumnType::U64),
+        "Json" | "JSON" => Ok(PublicColumnType::Text),
+        "Timestamp" | "timestamp" => Ok(PublicColumnType::Timestamp),
         "Row" => Err(err(
             path,
             "Row columns are not supported by this alpha slice",
@@ -375,6 +382,7 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> AdminSchemaConver
 mod tests {
     use super::*;
     use jazz::groove::schema::ColumnType;
+    use jazz::schema::MergeStrategy;
     use serde_json::json;
 
     #[test]

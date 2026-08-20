@@ -302,14 +302,7 @@ fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging(
 fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
     let v1 = schema();
     let v2 = SchemaVersion::new(catalogue_evolved_schema());
-    let v3 = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-            ColumnSchema::new("archived", ColumnType::Bool),
-        ],
-    )]));
+    let v3 = SchemaVersion::new(catalogue_v3_schema());
     let lens_12 = MigrationLens::new(
         v1.version_id(),
         v2.id,
@@ -397,14 +390,7 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
 fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
     let v1 = schema();
     let v2 = SchemaVersion::new(catalogue_evolved_schema());
-    let v3 = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-            ColumnSchema::new("archived", ColumnType::Bool),
-        ],
-    )]));
+    let v3 = SchemaVersion::new(catalogue_v3_schema());
     let parent = SchemaLineagePublication::new(
         v2.clone(),
         MigrationLens::new(
@@ -594,10 +580,11 @@ fn publishing_lens_reconciles_target_table_and_column_identities_durably() {
 
     let mut reopened = reopen_node_at(&dir, node(0x2f), base);
     assert_eq!(reopened.catalogue.physical_mappings[&target.id], mapping);
-    let later = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "notes",
-        [ColumnSchema::new("text", ColumnType::String)],
-    )]));
+    let later = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("notes").column("text", PublicColumnType::Text),
+        ),
+    ));
     publish_schema_lineage(
         &mut reopened,
         later.clone(),
@@ -718,24 +705,7 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
 /// ```
 #[test]
 fn dropped_history_receiver_allows_cold_registry_rebuild() {
-    let schema = |statuses: &[&str]| {
-        JazzSchema::new([TableSchema::new(
-            "items",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new(
-                    "status",
-                    ColumnType::EnumTag(
-                        groove::records::ScalarEnumSchema::new(
-                            "status",
-                            statuses.iter().copied(),
-                        )
-                        .unwrap(),
-                    ),
-                ),
-            ],
-        )])
-    };
+    let schema = enum_projection_schema;
     let base = schema(&["open"]);
     let evolved = SchemaVersion::new(schema(&["open", "archived"]));
     let evolved_id = evolved.id;
@@ -795,4 +765,3 @@ fn dropped_history_receiver_allows_cold_registry_rebuild() {
     .unwrap();
     assert_eq!(core.query_table_versions("items").unwrap().len(), 2);
 }
-

@@ -5,19 +5,24 @@
 
 use std::collections::BTreeMap;
 
+mod common;
+
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
 
-use groove::schema::{ColumnSchema, ColumnType};
 use jazz_storage_rocksdb::RocksDbStorage;
 
+use common::compile_schema;
+
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+            .build(),
+    )
 }
 
 fn open_node(byte: u8) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {

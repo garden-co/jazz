@@ -951,21 +951,17 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
 
 #[test]
 fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered_binding() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "chats",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("joinCode", ColumnType::String.nullable()),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("chats").filter(any_of([])).policy_branch(
-            crate::query::PolicyBranch::single_alternative_from_query(
-                Query::from("chats").filter(eq(col("joinCode"), crate::query::claim("join_code"))),
-            ),
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("chats")
+                .column("title", PublicColumnType::Text)
+                .nullable_column("joinCode", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("joinCode", &["claims", "join_code"])),
+                ),
         ),
-    ))
-    .with_write_policy(Policy::public())]);
+    );
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let reader = AuthorId::from_bytes([0xc1; 16]);
     let client = open_db(0xc1, reader, &schema);
@@ -1040,21 +1036,17 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
 
 #[test]
 fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "chats",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("joinCode", ColumnType::String.nullable()),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("chats").filter(any_of([])).policy_branch(
-            crate::query::PolicyBranch::single_alternative_from_query(
-                Query::from("chats").filter(eq(col("joinCode"), crate::query::claim("join_code"))),
-            ),
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("chats")
+                .column("title", PublicColumnType::Text)
+                .nullable_column("joinCode", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("joinCode", &["claims", "join_code"])),
+                ),
         ),
-    ))
-    .with_write_policy(Policy::public())]);
+    );
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let reader = AuthorId::from_bytes([0xc1; 16]);
     let client = open_db(0xc1, reader, &schema);

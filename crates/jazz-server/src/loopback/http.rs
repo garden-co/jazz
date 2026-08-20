@@ -25,6 +25,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jazz::db::DbIdentity;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::schema::JazzSchema;
+use jazz::tools::public_schema::Schema;
+use jazz::tools::public_schema_convert::convert_public_schema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -284,8 +286,10 @@ struct PublishSchemaRequest {
 }
 
 fn default_config() -> InMemoryServerShellConfig {
+    let schema =
+        convert_public_schema(&Schema::new()).expect("empty loopback public schema compiles");
     InMemoryServerShellConfig::new(
-        JazzSchema::new([]),
+        schema,
         DbIdentity {
             node: NodeUuid::from_bytes([0x5e; 16]),
             author: AuthorId::SYSTEM,

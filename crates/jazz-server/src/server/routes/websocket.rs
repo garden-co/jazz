@@ -994,12 +994,10 @@ mod tests {
         Db, DbConfig, DbIdentity, PreparedQuery, QueryAttachment, ReadOpts, RowCells,
         SeededRowIdSource, WireTransportAdapter,
     };
-    use jazz::groove::schema::ColumnType as CoreColumnType;
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::NodeUuid;
     use jazz::protocol::SyncMessage;
-    use jazz::query::{Query, claim, col, eq};
-    use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
+    use jazz::schema::{JazzSchema, TableSchema};
     use jazz::tx::{DurabilityTier, TxId};
     use jazz::wire::FEATURE_STRUCTURED_ERRORS;
     use jazz::wire::{TransportError, WireTransport};
@@ -1009,7 +1007,10 @@ mod tests {
     use crate::middleware::AuthConfig;
     use crate::server::{ServerBuilder, StorageBackend};
     use jazz::tools::AppId;
-    use jazz::tools::public_schema::Schema;
+    use jazz::tools::public_schema::{
+        ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies,
+        TableSchema as PublicTableSchema,
+    };
 
     const WS_STORM_SIZE: usize = 24;
     const WS_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
@@ -1165,38 +1166,59 @@ mod tests {
             .state
     }
 
-    fn ws_todos_table_schema() -> TableSchema {
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", CoreColumnType::String),
-                ColumnSchema::new("done", CoreColumnType::Bool),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public())
+    fn public_table_policies() -> TablePolicies {
+        TablePolicies::new()
+            .with_select(PolicyExpr::True)
+            .with_insert(PolicyExpr::True)
+            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+            .with_delete(PolicyExpr::True)
     }
 
     fn ws_public_schema_convert() -> JazzSchema {
-        JazzSchema::new([ws_todos_table_schema()])
+        let source = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean)
+                    .policies(public_table_policies()),
+            )
+            .build();
+        jazz::tools::public_schema_convert::convert_public_schema(&source)
+            .expect("websocket public schema compiles")
     }
 
-    fn ws_private_docs_table_schema() -> TableSchema {
-        TableSchema::new(
-            "docs",
-            [
-                ColumnSchema::new("title", CoreColumnType::String),
-                ColumnSchema::new("owner", CoreColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("docs").filter(eq(col("owner"), claim("user_id"))),
-        ))
-        .with_write_policy(Policy::public())
+    fn compiled_table(schema: &JazzSchema, table: &str) -> TableSchema {
+        schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .unwrap_or_else(|| panic!("compiled websocket schema contains {table}"))
+            .clone()
+    }
+
+    fn ws_todos_table_schema() -> TableSchema {
+        compiled_table(&ws_public_schema_convert(), "todos")
     }
 
     fn ws_private_docs_schema_convert() -> JazzSchema {
-        JazzSchema::new([ws_private_docs_table_schema()])
+        let source =
+            SchemaBuilder::new()
+                .table(
+                    PublicTableSchema::builder("docs")
+                        .column("title", ColumnType::Text)
+                        .column("owner", ColumnType::Text)
+                        .policies(public_table_policies().with_select(PolicyExpr::eq_session(
+                            "owner",
+                            vec!["user_id".to_owned()],
+                        ))),
+                )
+                .build();
+        jazz::tools::public_schema_convert::convert_public_schema(&source)
+            .expect("websocket private docs public schema compiles")
+    }
+
+    fn ws_private_docs_table_schema() -> TableSchema {
+        compiled_table(&ws_private_docs_schema_convert(), "docs")
     }
 
     async fn make_ws_convergence_test_state() -> Arc<ServerState> {

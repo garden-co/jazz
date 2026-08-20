@@ -581,15 +581,13 @@ fn flat_subscription_inserts_at_declared_root_position() {
 
 #[test]
 fn flat_subscription_updates_with_nullable_sort_payload() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "users",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("rank", ColumnType::Nullable(Box::new(ColumnType::I32))),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("users")
+                .column("name", PublicColumnType::Text)
+                .nullable_column("rank", PublicColumnType::Integer),
+        ),
+    );
     let db = open_db(0xd6, AuthorId::from_bytes([0xd6; 16]), &schema);
     db.insert_with_id(
         "users",
@@ -1210,7 +1208,7 @@ fn ordered_suffix_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows(
         &previous,
         &[left.clone(), right.clone()],
         &current,
-        &[right.clone()],
+        std::slice::from_ref(&right),
     )
     .expect("sidecar-preserving ordered suffix delta");
     let SubscriptionEvent::Delta { removed, added, .. } = event else {

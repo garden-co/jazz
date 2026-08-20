@@ -1043,12 +1043,12 @@ pub mod doctest_support {
     use std::future::Future;
 
     use groove::records::Value;
-    use groove::schema::{ColumnSchema, ColumnType};
     pub use groove::storage::MemoryStorage;
 
     use crate::db::{Db, DbConfig, DbIdentity, Error, RowCells, SeededRowIdSource};
     use crate::ids::{AuthorId, NodeUuid};
-    use crate::schema::{JazzSchema, Policy, TableSchema};
+    use crate::schema::JazzSchema;
+    use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
     /// Poll a ready-immediate Db future in examples.
     pub fn block_on<F: Future>(future: F) -> F::Output {
@@ -1057,15 +1057,15 @@ pub mod doctest_support {
 
     /// Example schema used by Db doctests.
     pub fn schema() -> JazzSchema {
-        JazzSchema::new([TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("done", ColumnType::Bool),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public())])
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .build();
+        crate::tools::public_schema_convert::convert_public_schema(&source)
+            .expect("Db doctest public schema compiles")
     }
 
     /// Open a fresh Db over in-memory storage.

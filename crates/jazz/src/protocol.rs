@@ -2486,26 +2486,32 @@ struct SchemaVersionWire {
     source_json: Vec<u8>,
 }
 
+fn durable_schema_source_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
+    let source = schema.source().ok_or_else(|| {
+        "cannot persist a compiled schema without its public schema source".to_owned()
+    })?;
+    let recompiled = crate::tools::public_schema_convert::convert_source_schema(source)
+        .map_err(|error| error.to_string())?;
+    if recompiled != *schema {
+        return Err("compiled schema no longer matches its retained source".to_owned());
+    }
+    serde_json::to_vec(source).map_err(|error| error.to_string())
+}
+
+fn compile_schema_source_json(bytes: &[u8]) -> Result<JazzSchema, String> {
+    crate::tools::public_schema_convert::decode_public_schema_json(bytes)
+}
+
 impl serde::Serialize for SchemaVersion {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let source = self.schema.source().ok_or_else(|| {
-            serde::ser::Error::custom(
-                "cannot persist a compiled schema without its public schema source",
-            )
-        })?;
-        let recompiled = crate::tools::public_schema_convert::convert_source_schema(source)
-            .map_err(serde::ser::Error::custom)?;
-        if recompiled != self.schema {
-            return Err(serde::ser::Error::custom(
-                "compiled schema no longer matches its retained source",
-            ));
-        };
+        let source_json =
+            durable_schema_source_json(&self.schema).map_err(serde::ser::Error::custom)?;
         let wire = SchemaVersionWire {
             id: self.id,
-            source_json: serde_json::to_vec(source).map_err(serde::ser::Error::custom)?,
+            source_json,
         };
         wire.serialize(serializer)
     }
@@ -2517,14 +2523,9 @@ impl<'de> serde::Deserialize<'de> for SchemaVersion {
         D: serde::Deserializer<'de>,
     {
         let SchemaVersionWire { id, source_json } = SchemaVersionWire::deserialize(deserializer)?;
-        let source = serde_json::from_slice(&source_json).map_err(serde::de::Error::custom)?;
-        let schema = crate::tools::public_schema_convert::convert_source_schema(&source)
-            .map_err(serde::de::Error::custom)?;
-        if schema.version_id() != id {
-            return Err(serde::de::Error::custom(
-                "schema version id does not match compiled source schema",
-            ));
-        }
+        let schema = compile_schema_source_json(&source_json).map_err(serde::de::Error::custom)?;
+        // Keep identity validation at catalogue admission/open, where callers
+        // receive the established domain error rather than a codec error.
         Ok(Self { id, schema })
     }
 }
@@ -3010,18 +3011,16 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_rejects_persisting_a_source_less_compiled_schema() {
+    fn durable_schema_source_rejects_a_source_less_compiled_schema() {
         let version = SchemaVersion::new(JazzSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("title", ColumnType::String)],
         )]));
 
-        let error = serde_json::to_string(&version)
-            .expect_err("compiled schemas must never become a durable representation");
+        let error = durable_schema_source_json(&version.schema)
+            .expect_err("compiled schemas must never become a production durable representation");
         assert!(
-            error
-                .to_string()
-                .contains("without its public schema source"),
+            error.contains("without its public schema source"),
             "unexpected serialization error: {error}"
         );
     }

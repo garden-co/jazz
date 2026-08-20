@@ -6,14 +6,23 @@ use jazz::db::{
     SubscriptionEvent,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion, TableLens,
 };
-use jazz::query::{OrderDirection, PolicyBranch, Query, claim, col, eq, lit, param};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::query::{OrderDirection, Query, col, eq, param};
+use jazz::schema::JazzSchema;
+use jazz::tools::public_schema::{
+    CmpOp as PublicCmpOp, PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue,
+    RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
+    RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelValueRef,
+    RowIdRef as RelRowIdRef, Value as PublicValue,
+};
+use jazz::tools::{
+    ColumnType as PublicColumnType, Schema as PublicSchema, SchemaBuilder, TablePolicies,
+    TableSchemaBuilder,
+};
 use jazz::tx::DurabilityTier;
 
 const DOCUMENTS: &str = "documents";
@@ -36,188 +45,325 @@ fn row(tag: u8) -> RowUuid {
     RowUuid::from_bytes([tag; 16])
 }
 
-fn schema() -> JazzSchema {
-    schema_with_membership_policy(Policy::public())
+fn compile_schema(source: &PublicSchema) -> JazzSchema {
+    jazz::tools::public_schema_convert::convert_public_schema(source)
+        .expect("prepared claim routing source schema compiles")
 }
 
-fn schema_with_membership_policy(membership_policy: Option<Query>) -> JazzSchema {
-    let policy = Query::from(DOCUMENTS).join_via_column(
+fn allow_all_policies() -> TablePolicies {
+    TablePolicies::new()
+        .with_select(PublicPolicyExpr::True)
+        .with_insert(PublicPolicyExpr::True)
+        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+        .with_delete(PublicPolicyExpr::True)
+}
+
+fn read_and_allow_all_writes(read: PublicPolicyExpr) -> TablePolicies {
+    TablePolicies::new()
+        .with_select(read)
+        .with_insert(PublicPolicyExpr::True)
+        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+        .with_delete(PublicPolicyExpr::True)
+}
+
+fn session_value(path: &[&str]) -> PublicPolicyValue {
+    PublicPolicyValue::SessionRef(path.iter().map(|segment| (*segment).to_owned()).collect())
+}
+
+fn session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {
+    PublicPolicyExpr::Cmp {
+        column: column.to_owned(),
+        op: PublicCmpOp::Eq,
+        value: session_value(path),
+    }
+}
+
+fn outer_eq(column: &str, outer_column: &str) -> PublicPolicyExpr {
+    session_eq(column, &["__jazz_outer_row", outer_column])
+}
+
+fn text_eq(column: &str, value: &str) -> PublicPolicyExpr {
+    PublicPolicyExpr::Cmp {
+        column: column.to_owned(),
+        op: PublicCmpOp::Eq,
+        value: PublicPolicyValue::Literal(PublicValue::Text(value.to_owned())),
+    }
+}
+
+fn exists(table: &str, conditions: Vec<PublicPolicyExpr>) -> PublicPolicyExpr {
+    PublicPolicyExpr::Exists {
+        table: table.to_owned(),
+        condition: Box::new(PublicPolicyExpr::And(conditions)),
+    }
+}
+
+fn schema() -> JazzSchema {
+    schema_with_membership_policy(Some(PublicPolicyExpr::True))
+}
+
+fn schema_with_membership_policy(membership_policy: Option<PublicPolicyExpr>) -> JazzSchema {
+    let document_policy = exists(
         MEMBERSHIPS,
-        "team",
-        "team",
-        [
-            eq(col("user"), claim("sub")),
-            eq(col("region"), claim("region")),
+        vec![
+            outer_eq("team", "team"),
+            session_eq("user", &["user_id"]),
+            session_eq("region", &["claims", "region"]),
         ],
     );
-    JazzSchema::new([
-        TableSchema::new(TEAMS, [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            MEMBERSHIPS,
-            [
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-                ColumnSchema::new("region", ColumnType::String),
-            ],
-        )
-        .with_reference("team", TEAMS)
-        .with_read_policy(membership_policy)
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            DOCUMENTS,
-            [
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("updated_at", ColumnType::U64),
-            ],
-        )
-        .with_reference("team", TEAMS)
-        .with_read_policy(Policy::shape(policy))
-        .with_write_policy(Policy::public()),
-    ])
+    let membership_policies = membership_policy
+        .map(read_and_allow_all_writes)
+        .unwrap_or_else(|| {
+            TablePolicies::new()
+                .with_insert(PublicPolicyExpr::True)
+                .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                .with_delete(PublicPolicyExpr::True)
+        });
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(TEAMS)
+                    .column("name", PublicColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new(MEMBERSHIPS)
+                    .fk_column("team", TEAMS)
+                    .column("user", PublicColumnType::Uuid)
+                    .column("region", PublicColumnType::Text)
+                    .policies(membership_policies),
+            )
+            .table(
+                TableSchemaBuilder::new(DOCUMENTS)
+                    .fk_column("team", TEAMS)
+                    .column("updated_at", PublicColumnType::Timestamp)
+                    .policies(read_and_allow_all_writes(document_policy)),
+            )
+            .build(),
+    )
 }
 
 fn two_hop_seeded_policy_schema() -> JazzSchema {
-    let document_policy = Query::from(DOCUMENTS).join_via_column(MEMBERSHIPS, "document", "id", []);
-    let membership_policy = Query::from(MEMBERSHIPS).join_via_row_id(PROJECTS, "project", []);
-    let project_policy = Query::from(PROJECTS)
-        .reachable_via(
-            PROJECT_ACCESS,
-            "project",
-            "group",
-            lit("seeded"),
-            GROUP_EDGES,
-            "member",
-            "parent",
-            [],
-        )
-        .seeded_by(GROUP_MEMBERS, "user", "sub", "group");
+    let document_policy = exists(MEMBERSHIPS, vec![outer_eq("document", "id")]);
+    let membership_policy = exists(PROJECTS, vec![outer_eq("id", "project")]);
+    let seed = RelExpr::Project {
+        input: Box::new(RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: GROUP_MEMBERS.into(),
+                alias: None,
+            }),
+            predicate: RelPredicateExpr::Cmp {
+                left: RelColumnRef {
+                    scope: None,
+                    column: "user".to_owned(),
+                },
+                op: RelPredicateCmpOp::Eq,
+                right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+            },
+        }),
+        columns: vec![RelProjectColumn {
+            alias: "id".to_owned(),
+            expr: RelProjectExpr::Column(RelColumnRef {
+                scope: None,
+                column: "group".to_owned(),
+            }),
+        }],
+    };
+    let step = RelExpr::Project {
+        input: Box::new(RelExpr::Join {
+            left: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: GROUP_EDGES.into(),
+                    alias: Some("edges".to_owned()),
+                }),
+                predicate: RelPredicateExpr::Cmp {
+                    left: RelColumnRef {
+                        scope: Some("edges".to_owned()),
+                        column: "member".to_owned(),
+                    },
+                    op: RelPredicateCmpOp::Eq,
+                    right: RelValueRef::RowId(RelRowIdRef::Frontier),
+                },
+            }),
+            right: Box::new(RelExpr::TableScan {
+                table: GROUPS.into(),
+                alias: Some("target".to_owned()),
+            }),
+            on: vec![RelJoinCondition {
+                left: RelColumnRef {
+                    scope: Some("edges".to_owned()),
+                    column: "parent".to_owned(),
+                },
+                right: RelColumnRef {
+                    scope: Some("target".to_owned()),
+                    column: "id".to_owned(),
+                },
+            }],
+            join_kind: RelJoinKind::Inner,
+        }),
+        columns: vec![RelProjectColumn {
+            alias: "id".to_owned(),
+            expr: RelProjectExpr::Column(RelColumnRef {
+                scope: Some("target".to_owned()),
+                column: "id".to_owned(),
+            }),
+        }],
+    };
+    let project_policy = PublicPolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::Gather {
+                    seed: Box::new(seed),
+                    step: Box::new(step),
+                    frontier_key: RelKeyRef::RowId(RelRowIdRef::Current),
+                    bound: RelRecursionBound::MaxDepth(8),
+                    dedupe_key: vec![RelKeyRef::RowId(RelRowIdRef::Current)],
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: PROJECT_ACCESS.into(),
+                    alias: Some("access".to_owned()),
+                }),
+                on: vec![RelJoinCondition {
+                    left: RelColumnRef {
+                        scope: None,
+                        column: "id".to_owned(),
+                    },
+                    right: RelColumnRef {
+                        scope: Some("access".to_owned()),
+                        column: "group".to_owned(),
+                    },
+                }],
+                join_kind: RelJoinKind::Inner,
+            }),
+            predicate: RelPredicateExpr::Cmp {
+                left: RelColumnRef {
+                    scope: Some("access".to_owned()),
+                    column: "project".to_owned(),
+                },
+                op: RelPredicateCmpOp::Eq,
+                right: RelValueRef::RowId(RelRowIdRef::Outer),
+            },
+        },
+    };
 
-    JazzSchema::new([
-        TableSchema::new(
-            DOCUMENTS,
-            [
-                ColumnSchema::new("project", ColumnType::Uuid),
-                ColumnSchema::new("updated_at", ColumnType::U64),
-            ],
-        )
-        .with_reference("project", PROJECTS)
-        .with_read_policy(Policy::shape(document_policy))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            MEMBERSHIPS,
-            [
-                ColumnSchema::new("document", ColumnType::Uuid),
-                ColumnSchema::new("project", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("document", DOCUMENTS)
-        .with_reference("project", PROJECTS)
-        .with_read_policy(Policy::shape(membership_policy))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(PROJECTS, [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::shape(project_policy))
-            .with_write_policy(Policy::public()),
-        TableSchema::new(GROUPS, [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            PROJECT_ACCESS,
-            [
-                ColumnSchema::new("project", ColumnType::Uuid),
-                ColumnSchema::new("group", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("project", PROJECTS)
-        .with_reference("group", GROUPS)
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            GROUP_MEMBERS,
-            [
-                ColumnSchema::new("group", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("group", GROUPS)
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            GROUP_EDGES,
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("member", GROUPS)
-        .with_reference("parent", GROUPS)
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(DOCUMENTS)
+                    .fk_column("project", PROJECTS)
+                    .column("updated_at", PublicColumnType::Timestamp)
+                    .policies(read_and_allow_all_writes(document_policy)),
+            )
+            .table(
+                TableSchemaBuilder::new(MEMBERSHIPS)
+                    .fk_column("document", DOCUMENTS)
+                    .fk_column("project", PROJECTS)
+                    .policies(read_and_allow_all_writes(membership_policy)),
+            )
+            .table(
+                TableSchemaBuilder::new(PROJECTS)
+                    .column("name", PublicColumnType::Text)
+                    .policies(read_and_allow_all_writes(project_policy)),
+            )
+            .table(
+                TableSchemaBuilder::new(GROUPS)
+                    .column("name", PublicColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new(PROJECT_ACCESS)
+                    .fk_column("project", PROJECTS)
+                    .fk_column("group", GROUPS)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new(GROUP_MEMBERS)
+                    .fk_column("group", GROUPS)
+                    .column("user", PublicColumnType::Uuid)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new(GROUP_EDGES)
+                    .fk_column("member", GROUPS)
+                    .fk_column("parent", GROUPS)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
 }
 
 fn policy_proof_cycle_schema() -> JazzSchema {
-    let a_policy = Query::from(CYCLE_A).join_via_column(CYCLE_B, "id", "b", []);
-    let b_policy = Query::from(CYCLE_B).join_via_column(CYCLE_A, "id", "a", []);
-    JazzSchema::new([
-        TableSchema::new(CYCLE_A, [ColumnSchema::new("b", ColumnType::Uuid)])
-            .with_reference("b", CYCLE_B)
-            .with_read_policy(Policy::shape(a_policy))
-            .with_write_policy(Policy::public()),
-        TableSchema::new(CYCLE_B, [ColumnSchema::new("a", ColumnType::Uuid)])
-            .with_reference("a", CYCLE_A)
-            .with_read_policy(Policy::shape(b_policy))
-            .with_write_policy(Policy::public()),
-    ])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(CYCLE_A)
+                    .fk_column("b", CYCLE_B)
+                    .policies(read_and_allow_all_writes(exists(
+                        CYCLE_B,
+                        vec![outer_eq("id", "b")],
+                    ))),
+            )
+            .table(
+                TableSchemaBuilder::new(CYCLE_B)
+                    .fk_column("a", CYCLE_A)
+                    .policies(read_and_allow_all_writes(exists(
+                        CYCLE_A,
+                        vec![outer_eq("id", "a")],
+                    ))),
+            )
+            .build(),
+    )
 }
 
 fn evolved_schema() -> JazzSchema {
-    let mut schema = schema();
-    schema
-        .tables
-        .iter_mut()
-        .find(|table| table.name == DOCUMENTS)
+    let mut source = schema()
+        .source()
+        .expect("schema retains public source")
+        .public_schema();
+    source
+        .get_mut(&DOCUMENTS.into())
         .expect("documents table")
         .columns
+        .columns
         .push(
-            jazz::schema::ColumnSchema::new("generation", ColumnType::U64)
-                .with_default(Value::U64(0)),
+            jazz::tools::ColumnDescriptor::new("generation", PublicColumnType::Timestamp)
+                .default(PublicValue::Timestamp(0)),
         );
-    schema
+    compile_schema(&source)
 }
 
 fn public_join_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(TEAMS, [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            DOCUMENTS,
-            [
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("updated_at", ColumnType::U64),
-            ],
-        )
-        .with_reference("team", TEAMS)
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(TEAMS)
+                    .column("name", PublicColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new(DOCUMENTS)
+                    .fk_column("team", TEAMS)
+                    .column("updated_at", PublicColumnType::Timestamp)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
 }
 
 fn evolved_public_join_schema() -> JazzSchema {
-    let mut schema = public_join_schema();
-    schema
-        .tables
-        .iter_mut()
-        .find(|table| table.name == DOCUMENTS)
+    let mut source = public_join_schema()
+        .source()
+        .expect("schema retains public source")
+        .public_schema();
+    source
+        .get_mut(&DOCUMENTS.into())
         .expect("documents table")
         .columns
+        .columns
         .push(
-            jazz::schema::ColumnSchema::new("generation", ColumnType::U64)
-                .with_default(Value::U64(0)),
+            jazz::tools::ColumnDescriptor::new("generation", PublicColumnType::Timestamp)
+                .default(PublicValue::Timestamp(0)),
         );
-    schema
+    compile_schema(&source)
 }
 
 fn open_db() -> BenchDb {
@@ -459,24 +605,22 @@ fn prepared_policy_claims_route_per_identity_and_application_binding() {
 // part of the unlanded fix rather than of INV-RLS-21 itself. It returns with the implementation.
 #[test]
 fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
-    let policy = Query::from(DOCUMENTS)
-        .filter(eq(col("visibility"), lit("public")))
-        .policy_branch(PolicyBranch::single_alternative_from_query(
-            Query::from(DOCUMENTS).filter(eq(col("owner"), claim("sub"))),
-        ))
-        .policy_branch(PolicyBranch::single_alternative_from_query(
-            Query::from(DOCUMENTS).filter(eq(col("region"), claim("region"))),
-        ));
-    let schema = JazzSchema::new([TableSchema::new(
-        DOCUMENTS,
-        [
-            ColumnSchema::new("visibility", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-            ColumnSchema::new("region", ColumnType::String),
-        ],
-    )
-    .with_read_policy(policy)
-    .with_write_policy(Policy::public())]);
+    let policy = PublicPolicyExpr::Or(vec![
+        text_eq("visibility", "public"),
+        session_eq("owner", &["user_id"]),
+        session_eq("region", &["claims", "region"]),
+    ]);
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(DOCUMENTS)
+                    .column("visibility", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .column("region", PublicColumnType::Text)
+                    .policies(read_and_allow_all_writes(policy)),
+            )
+            .build(),
+    );
     let db = open_db_with_schema(schema);
     let public = row(0x51);
     let private = row(0x52);
@@ -625,43 +769,33 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
     const CHATS: &str = "chats";
     const CHAT_MEMBERS: &str = "chat_members";
 
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            CHATS,
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("joinCode", ColumnType::String.nullable()),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from(CHATS)
-                .filter(eq(col("name"), lit("never-visible")))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from(CHATS).filter(eq(col("joinCode"), claim("join_code"))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from(CHATS).join_via_column(
-                        CHAT_MEMBERS,
-                        "chatId",
-                        "id",
-                        [eq(col("userId"), claim("user_id"))],
-                    ),
-                )),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
+    let chat_policy = PublicPolicyExpr::Or(vec![
+        text_eq("name", "never-visible"),
+        session_eq("joinCode", &["claims", "join_code"]),
+        exists(
             CHAT_MEMBERS,
-            [
-                ColumnSchema::new("chatId", ColumnType::Uuid),
-                ColumnSchema::new("userId", ColumnType::String),
-            ],
-        )
-        .with_reference("chatId", CHATS)
-        .with_read_policy(Policy::shape(
-            Query::from(CHAT_MEMBERS).filter(eq(col("userId"), claim("user_id"))),
-        ))
-        .with_write_policy(Policy::public()),
+            vec![outer_eq("chatId", "id"), session_eq("userId", &["user_id"])],
+        ),
     ]);
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(CHATS)
+                    .column("name", PublicColumnType::Text)
+                    .nullable_column("joinCode", PublicColumnType::Text)
+                    .policies(read_and_allow_all_writes(chat_policy)),
+            )
+            .table(
+                TableSchemaBuilder::new(CHAT_MEMBERS)
+                    .fk_column("chatId", CHATS)
+                    .column("userId", PublicColumnType::Text)
+                    .policies(read_and_allow_all_writes(session_eq(
+                        "userId",
+                        &["user_id"],
+                    ))),
+            )
+            .build(),
+    );
     let db = open_db_with_schema(schema);
     let chat_a = row(0xc1);
     let chat_b = row(0xc2);
@@ -791,10 +925,8 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
 
 #[test]
 fn policy_dependency_reads_do_not_expose_dependency_rows() {
-    let membership_policy = Policy::shape(
-        Query::from(MEMBERSHIPS).filter(eq(col("region"), claim("membership_region"))),
-    );
-    let db = open_db_with_schema(schema_with_membership_policy(membership_policy));
+    let membership_policy = session_eq("region", &["claims", "membership_region"]);
+    let db = open_db_with_schema(schema_with_membership_policy(Some(membership_policy)));
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, "region-a", "region-b");
@@ -1318,27 +1450,31 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
 #[test]
 #[ignore = "future shared-prepared-descriptor claim-name/type collision guard; INV-RLS-21 keeps dependency-policy descriptors separate today"]
 fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
-    let root_policy = Query::from(DOCUMENTS)
-        .filter(eq(col("team"), claim("shared_scope")))
-        .join_via_column(MEMBERSHIPS, "team", "team", [eq(col("user"), claim("sub"))]);
-    let membership_policy =
-        Query::from(MEMBERSHIPS).filter(eq(col("region"), claim("shared_scope")));
-    let schema = JazzSchema::new([
-        TableSchema::new(TEAMS, [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
+    let root_policy = PublicPolicyExpr::And(vec![
+        session_eq("team", &["claims", "shared_scope"]),
+        exists(
             MEMBERSHIPS,
-            [
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-                ColumnSchema::new("region", ColumnType::String),
-            ],
-        )
-        .with_reference("team", TEAMS)
-        .with_read_policy(membership_policy),
-        TableSchema::new(DOCUMENTS, [ColumnSchema::new("team", ColumnType::Uuid)])
-            .with_reference("team", TEAMS)
-            .with_read_policy(root_policy),
+            vec![outer_eq("team", "team"), session_eq("user", &["user_id"])],
+        ),
     ]);
+    let membership_policy = session_eq("region", &["claims", "shared_scope"]);
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new(TEAMS).column("name", PublicColumnType::Text))
+            .table(
+                TableSchemaBuilder::new(MEMBERSHIPS)
+                    .fk_column("team", TEAMS)
+                    .column("user", PublicColumnType::Uuid)
+                    .column("region", PublicColumnType::Text)
+                    .policies(TablePolicies::new().with_select(membership_policy)),
+            )
+            .table(
+                TableSchemaBuilder::new(DOCUMENTS)
+                    .fk_column("team", TEAMS)
+                    .policies(TablePolicies::new().with_select(root_policy)),
+            )
+            .build(),
+    );
     let db = open_db_with_schema(schema);
     db.set_identity_claims(
         USER_A,

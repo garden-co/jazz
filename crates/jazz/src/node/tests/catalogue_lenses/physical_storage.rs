@@ -3,10 +3,7 @@
 #[test]
 fn table_and_column_rename_reuses_the_existing_physical_identities() {
     let base = schema();
-    let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "tasks",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]));
+    let renamed = SchemaVersion::new(renamed_tasks_schema());
     let (_dir, mut core) = open_node_with_schema(node(0x30), base.clone());
     let source = core.catalogue.physical_mappings[&base.version_id()].tables["todos"].clone();
     publish_schema_lineage(
@@ -45,10 +42,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
     // Rejected payload storage is intentionally not public API, so this test
     // inspects its physical identity and stored schema discriminator directly.
     let base = schema();
-    let renamed_schema = JazzSchema::new([TableSchema::new(
-        "tasks",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]);
+    let renamed_schema = renamed_tasks_schema();
     let renamed = SchemaVersion::new(renamed_schema.clone());
     let (dir, mut core) = open_node_with_schema(node(0x34), base.clone());
     publish_schema_lineage(
@@ -161,10 +155,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
 #[test]
 fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
     let base = schema();
-    let renamed_schema = JazzSchema::new([TableSchema::new(
-        "tasks",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]);
+    let renamed_schema = renamed_tasks_schema();
     let renamed = SchemaVersion::new(renamed_schema.clone());
     let (dir, mut core) = open_node_with_schema(node(0x2b), base.clone());
     let row_uuid = row(0x4b);
@@ -312,10 +303,7 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
 #[test]
 fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
     let base = schema();
-    let renamed_schema = JazzSchema::new([TableSchema::new(
-        "tasks",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]);
+    let renamed_schema = renamed_tasks_schema();
     let renamed = SchemaVersion::new(renamed_schema.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x6d), base.clone());
     let row_uuid = row(0x6e);
@@ -399,10 +387,7 @@ fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
 
 #[test]
 fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
-    let schema = JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
-    ]);
+    let schema = todos_notes_schema();
     let (dir, mut core) = open_node_with_schema(node(0x2c), schema.clone());
     let shared_row = row(0x4c);
     core.commit_mergeable(
@@ -495,15 +480,23 @@ fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
 fn changed_merge_semantics_start_a_new_physical_column_epoch() {
     // The stored scalar representation remains U64, but counter and LWW cells
     // cannot share one physical column identity or its derived indexes.
-    let base = JazzSchema::new([TableSchema::new(
-        "counts",
-        [ColumnSchema::new("value", ColumnType::U64)],
-    )]);
-    let evolved = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "counts",
-        [ColumnSchema::new("value", ColumnType::U64)],
-    )
-    .with_column_merge_strategy("value", MergeStrategy::Counter)]));
+    let base = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("counts")
+                .column("value", PublicColumnType::Timestamp),
+        ),
+    );
+    let evolved = SchemaVersion::new(compile_public_test_schema(
+        &[(
+            PublicTableName::new("counts"),
+            PublicTableSchema::new(PublicRowDescriptor::new(vec![
+                PublicColumnDescriptor::new("value", PublicColumnType::Timestamp)
+                    .merge_strategy(PublicColumnMergeStrategy::Counter),
+            ])),
+        )]
+        .into_iter()
+        .collect::<PublicSchema>(),
+    ));
     let (_dir, mut core) = open_node_with_schema(node(0x2c), base.clone());
     let source = core.catalogue.physical_mappings[&base.version_id()].tables["counts"].clone();
     publish_schema_lineage(

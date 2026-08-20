@@ -67,11 +67,19 @@ fn strict_bootstrap_receive_rejects_bad_physical_frame_before_later_valid_messag
 #[test]
 fn schema_lineage_publication_fragments_before_atomic_admission() {
     let base = schema();
-    let mut evolved_schema = base.clone();
     let large_default = Value::String("x".repeat(MAX_WIRE_FRAME_BYTES + 1024));
-    evolved_schema.tables[0].columns.push(
-        crate::schema::ColumnSchema::new("large_default", ColumnType::String)
-            .with_default(large_default.clone()),
+    let evolved_schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .column_with_default(
+                    "large_default",
+                    PublicColumnType::Text,
+                    PublicValue::Text("x".repeat(MAX_WIRE_FRAME_BYTES + 1024)),
+                ),
+        ),
     );
     let evolved = crate::protocol::SchemaVersion::new(evolved_schema);
     let publication = crate::protocol::SchemaLineagePublication::new(

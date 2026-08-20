@@ -1,13 +1,7 @@
 #[test]
 fn maintained_projected_current_picks_winner_before_lens_projection() {
     let base = schema();
-    let evolved = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]);
+    let evolved = evolved_todos_name_body_schema();
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x4d), base.clone());
     let shared_row = row(0x4e);
@@ -136,10 +130,11 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
 #[test]
 fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
     let base = schema();
-    let evolved = JazzSchema::new([TableSchema::new(
-        "tasks",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
+    let evolved = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text),
+        ),
+    );
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x5d), base.clone());
     let shared_row = row(0x5e);
@@ -231,14 +226,22 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
 /// maintained wire witness must fail closed rather than selecting by name/key.
 #[test]
 fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
-    let base = JazzSchema::new([
-        TableSchema::new("tasks", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
-    ]);
-    let evolved = JazzSchema::new([TableSchema::new(
-        "tasks",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
+    let base = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text),
+            ),
+    );
+    let evolved = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text),
+        ),
+    );
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x5f), base.clone());
     let shared_row = row(0x60);
