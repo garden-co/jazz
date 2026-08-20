@@ -47,15 +47,32 @@ pub struct DatabaseBatch {
     pub(super) operations: Vec<BatchOperation>,
     pub(super) txn_operations: RefCell<StagedWriteState>,
     pub(super) txn_indexed_operations: Cell<usize>,
+    pub(super) notification_timing: NotificationTiming,
 }
 
 impl PartialEq for DatabaseBatch {
     fn eq(&self, other: &Self) -> bool {
-        self.operations == other.operations
+        self.operations == other.operations && self.notification_timing == other.notification_timing
     }
 }
 
+/// When subscription notifications produced by a batch become observable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NotificationTiming {
+    /// Publish every resident terminal reached before [`Database::apply_batch`]
+    /// returns.
+    #[default]
+    Immediate,
+    /// Hold notifications until the batch's persistence receipt is finished;
+    /// discard them if persistence fails.
+    AfterPersistence,
+}
+
 impl DatabaseBatch {
+    pub fn deliver_notifications(&mut self, timing: NotificationTiming) {
+        self.notification_timing = timing;
+    }
+
     pub fn reserve(&mut self, additional: usize) {
         self.operations.reserve(additional);
     }
