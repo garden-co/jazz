@@ -2,13 +2,12 @@ use jazz_testkit as support;
 
 use std::time::Duration;
 
+use jazz::query::{OrderDirection, col, gt, lit, lt};
 use jazz::row_input;
-use jazz::tools::{
-    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use support::{
-    TestingClient, has_added, wait_for_edge_query_ready, wait_for_query,
+    TestingClient, has_added_id, wait_for_edge_query_ready, wait_for_query,
     wait_for_subscription_update,
 };
 
@@ -57,10 +56,9 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                     .expect("bigint row settles");
             }
 
-            let ordered_query = QueryBuilder::new("metrics")
-                .select(&["label", "amount"])
-                .order_by("amount")
-                .build();
+            let ordered_query = jazz::query::Query::from("metrics")
+                .select(["label", "amount"])
+                .order_by("amount", OrderDirection::Asc);
             wait_for_query(
                 &client,
                 ordered_query,
@@ -89,12 +87,11 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
             )
             .await;
 
-            let filtered_query = QueryBuilder::new("metrics")
-                .select(&["label", "amount"])
-                .filter_gt("amount", Value::Integer(9))
-                .filter_lt("amount", Value::BigInt(BIG_SAFE_PLUS_ONE + 1))
-                .order_by("amount")
-                .build();
+            let filtered_query = jazz::query::Query::from("metrics")
+                .select(["label", "amount"])
+                .filter(gt(col("amount"), lit(9)))
+                .filter(lt(col("amount"), lit(BIG_SAFE_PLUS_ONE + 1)))
+                .order_by("amount", OrderDirection::Asc);
             wait_for_query(
                 &client,
                 filtered_query,
@@ -119,9 +116,8 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
             )
             .await;
 
-            let subscription_query = QueryBuilder::new("metrics")
-                .filter_gt("amount", Value::BigInt(BIG_SAFE_PLUS_ONE))
-                .build();
+            let subscription_query = jazz::query::Query::from("metrics")
+                .filter(gt(col("amount"), lit(BIG_SAFE_PLUS_ONE)));
             let mut stream = client
                 .subscribe(subscription_query)
                 .await
@@ -147,7 +143,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                 &mut log,
                 QUERY_TIMEOUT,
                 "BIGINT subscription predicate receives inserted row",
-                |log| has_added(log, late_id),
+                |log| has_added_id(log, late_id),
             )
             .await;
 

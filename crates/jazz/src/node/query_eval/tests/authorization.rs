@@ -883,6 +883,104 @@ fn missing_policy_relation_seed_claim_fails_closed_without_breaking_prepared_bin
 }
 
 #[test]
+fn declared_id_point_read_prepares_claim_policy_bindings() {
+    // This deliberately exercises the internal point-read helper because it
+    // is the authorization-support path used by PermissionAdvice and repair,
+    // rather than a public client query. A declared `id` forces that helper to
+    // select by physical row UUID while the read policy requires a claim
+    // binding. The owner and denied reader must see the policy result, not a
+    // Groove binding-source execution error; changing ownership must reverse
+    // those results.
+    let schema = JazzSchema::new([TableSchema::new(
+        "documents",
+        [
+            ColumnSchema::new("id", ColumnType::Uuid),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("title", ColumnType::String),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("documents").filter(eq(col("owner"), claim("user_id"))),
+    ))
+    .with_write_policy(Policy::public())]);
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xd1; 16]), schema);
+    let alice = author(0xd2);
+    let bob = author(0xd3);
+    let document = row(0xd4);
+
+    node.set_session_claims(
+        alice,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(alice.0))]),
+    );
+    node.set_session_claims(
+        bob,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(bob.0))]),
+    );
+    commit_global_cells(
+        &mut node,
+        "documents",
+        document,
+        BTreeMap::from([
+            ("id".to_owned(), Value::Uuid(row(0xd5).0)),
+            ("owner".to_owned(), Value::Uuid(alice.0)),
+            ("title".to_owned(), Value::String("private".to_owned())),
+        ]),
+        1,
+        1,
+    );
+    let prepared_shape_baseline = node.runtime_stats_for_test().active_prepared_shapes;
+
+    assert!(
+        node.dry_run_read_current_allows("documents", document, alice)
+            .expect("owner point read must bind policy claims")
+    );
+    assert_eq!(
+        node.runtime_stats_for_test().active_prepared_shapes,
+        prepared_shape_baseline,
+        "the one-shot owner point read must retire its prepared graph"
+    );
+    assert!(
+        !node
+            .dry_run_read_current_allows("documents", document, bob)
+            .expect("denied point read must be an empty result, not a binding error")
+    );
+    assert_eq!(
+        node.runtime_stats_for_test().active_prepared_shapes,
+        prepared_shape_baseline,
+        "the one-shot denied point read must retire its prepared graph"
+    );
+
+    commit_global_cells(
+        &mut node,
+        "documents",
+        document,
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.0))]),
+        2,
+        2,
+    );
+
+    assert!(
+        !node
+            .dry_run_read_current_allows("documents", document, alice)
+            .expect("former owner must lose access after ownership changes")
+    );
+    assert_eq!(
+        node.runtime_stats_for_test().active_prepared_shapes,
+        prepared_shape_baseline,
+        "ownership changes must not retain point-read graphs"
+    );
+    assert!(
+        node.dry_run_read_current_allows("documents", document, bob)
+            .expect("new owner must gain access after ownership changes")
+    );
+    assert_eq!(
+        node.runtime_stats_for_test().active_prepared_shapes,
+        prepared_shape_baseline,
+        "repeated point reads must retain no prepared graph"
+    );
+}
+
+#[test]
 fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
     // Terminal CommitUnit admission rehydrates a compiled read-policy
     // support subscription. This is distinct from the one-shot policy

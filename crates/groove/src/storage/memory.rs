@@ -214,41 +214,46 @@ impl OrderedKvStorage for MemoryStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            {
-                let inner = self.inner.lock().expect("memory storage mutex poisoned");
-                for operation in &operations {
-                    let cf = match operation {
-                        OwnedWriteOperation::Set { cf, .. }
-                        | OwnedWriteOperation::Delete { cf, .. }
-                        | OwnedWriteOperation::Delta { cf, .. } => cf,
-                    };
-                    if !inner.contains_key(cf) {
-                        return Err(Error::ColumnFamilyNotFound(cf.clone()));
-                    }
-                }
-            }
-
             let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
+            let mut planned = BTreeMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
             for operation in operations {
                 match operation {
                     OwnedWriteOperation::Set { cf, key, value } => {
-                        inner
-                            .get_mut(&cf)
-                            .expect("validated column family")
-                            .insert(key, value);
+                        if !inner.contains_key(&cf) {
+                            return Err(Error::ColumnFamilyNotFound(cf));
+                        }
+                        planned.insert((cf, key), Some(value));
                     }
                     OwnedWriteOperation::Delete { cf, key } => {
-                        inner
-                            .get_mut(&cf)
-                            .expect("validated column family")
-                            .remove(&key);
+                        if !inner.contains_key(&cf) {
+                            return Err(Error::ColumnFamilyNotFound(cf));
+                        }
+                        planned.insert((cf, key), None);
                     }
                     OwnedWriteOperation::Delta { cf, key, delta } => {
-                        let values = inner.get_mut(&cf).expect("validated column family");
+                        let Some(values) = inner.get(&cf) else {
+                            return Err(Error::ColumnFamilyNotFound(cf));
+                        };
+                        let planned_key = (cf, key);
                         let encoded = delta.encode()?;
-                        let merged =
-                            apply_storage_delta(values.get(&key).map(Vec::as_slice), &encoded)?;
-                        values.insert(key, merged);
+                        let existing = match planned.get(&planned_key) {
+                            Some(Some(value)) => Some(value.as_slice()),
+                            Some(None) => None,
+                            None => values.get(&planned_key.1).map(Vec::as_slice),
+                        };
+                        let merged = apply_storage_delta(existing, &encoded)?;
+                        planned.insert(planned_key, Some(merged));
+                    }
+                }
+            }
+            for ((cf, key), value) in planned {
+                let values = inner.get_mut(&cf).expect("column family was validated");
+                match value {
+                    Some(value) => {
+                        values.insert(key, value);
+                    }
+                    None => {
+                        values.remove(&key);
                     }
                 }
             }

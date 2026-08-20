@@ -160,11 +160,18 @@ impl ArraySubquery {
         inner_column: impl Into<String>,
         outer_column: impl Into<String>,
     ) -> Self {
+        fn local_column(column: impl Into<String>) -> String {
+            let column = column.into();
+            column
+                .rsplit_once('.')
+                .map_or(column.clone(), |(_, local)| local.to_owned())
+        }
+
         Self {
             column_name: column_name.into(),
             table: table.into(),
-            inner_column: inner_column.into(),
-            outer_column: outer_column.into(),
+            inner_column: local_column(inner_column),
+            outer_column: local_column(outer_column),
             filters: Vec::new(),
             select: None,
             order_by: Vec::new(),

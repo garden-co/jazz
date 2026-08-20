@@ -695,6 +695,16 @@ impl Database {
             .unwrap_or(false)
     }
 
+    /// Retire a prepared graph after all bindings have been unsubscribed.
+    /// Long-lived callers should retain and reuse their shapes; one-shot
+    /// callers must retire dynamically compiled shapes to release graph nodes.
+    pub fn retire_prepared_shape(&mut self, shape: PreparedShapeId) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .retire_prepared_shape(shape)
+            .map_err(Error::IvmRuntime)
+    }
+
     /// Retire subscriptions whose receiving handles have already been
     /// dropped, even when no later data delta exists to discover the closed
     /// notification channel.

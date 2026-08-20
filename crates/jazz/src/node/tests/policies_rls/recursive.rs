@@ -124,6 +124,43 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
 }
 
 #[test]
+fn update_policy_point_check_does_not_scan_unrelated_current_rows() {
+    // Internal storage metrics are required because the defect is cost-only:
+    // the public authorization answer is correct while its work is O(table).
+    let schema = JazzSchema::new([TableSchema::new(
+        "docs",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let target = row(0x20);
+    for index in 0..40_u8 {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("docs", row(index), u64::from(index) + 1).cells(
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String(format!("doc {index}")),
+                )]),
+            ),
+        );
+    }
+
+    core.reset_storage_read_metrics();
+    let _allowed = core
+        .dry_run_write_current_allows("docs", target, user(0xb2))
+        .unwrap();
+    let reads = core.take_storage_read_metrics();
+
+    assert!(
+        reads.global_current_rows.reads <= 2,
+        "one point authorization read touched {} current rows",
+        reads.global_current_rows.reads
+    );
+}
+
+#[test]
 fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
     // Internal node coverage is intentional here: this pins sync-unit admission
     // fates for proposed insert rows before the public client layer has a
@@ -430,5 +467,3 @@ fn missing_read_or_write_policy_is_public_for_that_operation() {
         BTreeSet::from([row(0x85)]),
     );
 }
-
-

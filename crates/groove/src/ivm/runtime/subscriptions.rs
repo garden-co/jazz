@@ -2851,6 +2851,41 @@ impl IvmRuntime {
         self.prune_unreferenced_arrangements();
     }
 
+    /// Remove a caller-owned prepared shape after all bindings are gone.
+    pub fn retire_prepared_shape(
+        &mut self,
+        shape_id: PreparedShapeId,
+    ) -> Result<(), IvmRuntimeError> {
+        if self.multisink_subscriptions.values().any(|subscription| {
+            matches!(
+                subscription.target,
+                MultisinkSubscriptionTarget::RoutedShape { shape_id: active, .. }
+                    if active == shape_id
+            )
+        }) {
+            return Err(IvmRuntimeError::PreparedShapeHasActiveBindings(shape_id));
+        }
+        let shape = self
+            .prepared_shapes
+            .remove(&shape_id)
+            .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
+        for output_node in shape
+            .terminals
+            .values()
+            .map(|terminal| terminal.output.node)
+        {
+            self.remove_retainer(
+                output_node,
+                &Retainer::PreparedShape(shape_id.retainer_key()),
+            );
+        }
+        for node in self.gc_ephemeral_nodes(0) {
+            self.remove_node_runtime(node);
+        }
+        self.prune_unreferenced_arrangements();
+        Ok(())
+    }
+
     pub(super) fn advance_tick(&mut self) -> u64 {
         self.current_tick += 1;
         self.current_tick

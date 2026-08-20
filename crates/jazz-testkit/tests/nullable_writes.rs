@@ -1,7 +1,6 @@
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-    WriteContext,
+    ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value, WriteContext,
 };
 use uuid::Uuid;
 
@@ -24,10 +23,15 @@ fn nullable_schema() -> Schema {
         .build()
 }
 
-fn profiles_query() -> jazz::tools::Query {
-    QueryBuilder::new("profiles")
-        .select(&["name", "age", "visits", "active", "manager_id", "tags"])
-        .build()
+fn profiles_query() -> jazz::query::Query {
+    jazz::query::Query::from("profiles").select([
+        "name",
+        "age",
+        "visits",
+        "active",
+        "manager_id",
+        "tags",
+    ])
 }
 
 async fn profile_values(client: &JazzClient, row_id: ObjectId) -> Vec<Value> {

@@ -36,9 +36,9 @@ use thiserror::Error;
 pub use app_id::AppId;
 pub use public_schema::{
     AuthMode, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, OrderedRowDelta,
-    PolicyExpr, Query, QueryBuilder, QueryResult, QueryResultField, Row, RowDelta, RowDescriptor,
-    Schema, SchemaBuilder, SchemaHash, Session, TableName, TablePolicies, TableSchema,
-    TransactionId, Value, WriteContext, permissions, policy_expr,
+    PolicyExpr, QueryResult, QueryResultField, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder,
+    SchemaHash, Session, TableName, TablePolicies, TableSchema, TransactionId, Value, WriteContext,
+    permissions, policy_expr,
 };
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenTransactionId;

@@ -107,7 +107,11 @@ lexicographic byte order. Scans return keys in that order, and `scan_range`
 includes keys `>= start` while excluding keys `>= end` (`INV-STORAGE-1`). Batch
 writes are atomic: `write_many` applies every operation in the batch or none of
 them; if any operation is invalid, no operation partially applies
-(`INV-STORAGE-4`).
+(`INV-STORAGE-4`). Its completion outcome also distinguishes a failure known to
+have left the batch unapplied from a failure that may have followed a durable
+commit. Backends must classify an uncertain acknowledgement conservatively as
+possibly committed; only a definitely-uncommitted outcome permits callers to
+roll back in-process state or retry the same batch.
 
 _Further invariants._ `INV-STORAGE-2` — `scan_prefix` returns exactly the keys
 with the given byte prefix, in order, including prefixes with no finite upper
@@ -248,13 +252,14 @@ boundary (`INV-STORAGE-18`, `INV-STORAGE-19`).
 
 During the tick, reads through the runtime storage handle first observe staged
 set/delete operations and then fall through to committed storage. This gives
-same-tick read-your-writes behavior for staged base and durable entries. If the
-final storage batch fails after in-memory runtime state has advanced, the
-`Database` instance is **permanently poisoned**: every subsequent operation
+same-tick read-your-writes behavior for staged base and durable entries. A
+definitely-uncommitted final batch may roll back the just-applied in-memory tick.
+If the final storage batch is possibly committed after runtime state advances,
+the `Database` instance is **permanently poisoned**: every subsequent operation
 fails, and recovery requires discarding the instance and reopening the database.
 Reopening means a fresh open over the same storage, which rebuilds in-memory
 state from the durable data. This is a deliberate fail-stop behavior; no partial
-rollback is attempted (`INV-OK-14`).
+rollback or retry is attempted for an ambiguous outcome (`INV-OK-14`).
 
 **Open question — ownership of read-your-writes batches.** Atomic
 `write_many` is a required ordered-storage property. It is less clear that a

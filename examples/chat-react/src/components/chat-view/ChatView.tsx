@@ -29,7 +29,10 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
 
   const [showNLastMessages, setShowNLastMessages] = useState(INITIAL_MESSAGES_TO_SHOW);
 
-  const chatRowsResult = useAll(app.chats.where({ id: chatId }));
+  // Wait for the authority-tier snapshot before treating an empty result as an
+  // access denial. A local empty snapshot can merely mean the chat has not
+  // synced to this client yet.
+  const chatRowsResult = useAll(app.chats.where({ id: chatId }), sharedWriteOptions);
   const chatRows = chatRowsResult.data ?? [];
   const chat = chatRows[0];
   const chatKnown = chatRows.length > 0;
@@ -55,13 +58,11 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   // joined in a previous session); otherwise becomes true only after the
   // auto-join insert is durably persisted at edge tier.
   const [membershipReady, setMembershipReady] = useState(false);
-  const [autoJoinFailed, setAutoJoinFailed] = useState(false);
 
   useEffect(() => {
     autoJoined.current = false;
     autoJoinPending.current = false;
     setMembershipReady(false);
-    setAutoJoinFailed(false);
   }, [chatId]);
 
   useEffect(() => {
@@ -79,7 +80,6 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
       return;
     autoJoined.current = true;
     autoJoinPending.current = true;
-    setAutoJoinFailed(false);
 
     waitForWrite(db.insert(app.chatMembers, { chatId, userId }), sharedWriteOptions)
       .then(() => {
@@ -90,7 +90,6 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
         console.error("auto-join failed", error);
         autoJoined.current = false;
         autoJoinPending.current = false;
-        setAutoJoinFailed(true);
       });
   }, [
     userId,
@@ -137,7 +136,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     fireAndReport(db.delete(app.messages, messageId), "failed to delete message");
   };
 
-  if (chatRowsResult !== undefined && !chatKnown && userId && autoJoinFailed) {
+  if (!chatRowsResult.isLoading && !chatKnown && userId) {
     return (
       <div className="flex-1 flex items-center justify-center p-8 text-center text-muted-foreground">
         <p>You don't have permission to access this chat.</p>

@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use jazz::query::{col, eq, lit};
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, QueryBuilder, ResultKey, Schema, SchemaBuilder,
-    SubscriptionStreamItem, TableSchema, Value,
+    ColumnType, DurabilityTier, ResultKey, Schema, SchemaBuilder, SubscriptionStreamItem,
+    TableSchema,
 };
 use jazz_server::JazzServer;
 
@@ -52,7 +53,7 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
                 .await
                 .expect("second initial item settles");
 
-            let query = QueryBuilder::new("items").build();
+            let query = jazz::query::Query::from("items");
             let expected_ids = BTreeSet::from([first_id, second_id]);
             let rows = client
                 .query(query.clone(), Some(DurabilityTier::EdgeServer))
@@ -120,9 +121,7 @@ async fn fresh_empty_subscription_waits_for_and_reports_the_settled_empty_view()
             )
             .await
             .expect("connect subscriber");
-            let query = QueryBuilder::new("items")
-                .filter_eq("label", Value::Text("absent".to_owned()))
-                .build();
+            let query = jazz::query::Query::from("items").filter(eq(col("label"), lit("absent")));
             let mut stream = client
                 .subscribe(query)
                 .await
