@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jazz::query::Query;
 use jazz::tools::sync::ClientId;
 use jazz::tools::{
-    AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Schema,
-    SubscriptionStream, SubscriptionStreamItem, TransactionId, Value,
+    AppContext, ClientStorage, DurabilityTier, JazzClient, JazzError, ObjectId, OrderedRowDelta,
+    Schema, SubscriptionStream, SubscriptionStreamItem, TransactionId, Value,
 };
 use jazz_server::JazzServer;
 use jsonwebtoken::{EncodingKey, Header, encode};
@@ -451,6 +451,32 @@ pub async fn wait_for_edge_txs(client: &JazzClient, transaction_ids: &[Transacti
                 "transaction {transaction_id} failed waiting for edge-server durability: {error}"
             )
         });
+    }
+}
+
+/// Waits until a transaction is authoritatively rejected by the edge server's
+/// permission check.
+pub async fn wait_for_edge_tx_rejection(client: &JazzClient, transaction_id: TransactionId) {
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        client.wait_for_transaction(transaction_id, DurabilityTier::EdgeServer),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("transaction {transaction_id} timed out waiting for edge-server rejection")
+    });
+
+    match result {
+        Err(JazzError::Sync(message))
+            if message
+                == "transaction was rejected before reaching EdgeServer durability: authorization_denied" =>
+            {}
+        Err(error) => panic!(
+            "transaction {transaction_id} failed for a reason other than edge-server permission rejection: {error}"
+        ),
+        Ok(()) => panic!(
+            "transaction {transaction_id} unexpectedly reached edge-server durability instead of being rejected"
+        ),
     }
 }
 

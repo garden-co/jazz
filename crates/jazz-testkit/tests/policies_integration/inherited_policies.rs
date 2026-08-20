@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz::query::Query;
+use jazz::query::{Query, col, eq, lit};
 
 use super::support::{
     TestingClient, collect_stream_deltas, connect_ready_client, connect_ready_user, has_added_id,
-    has_any_change, has_removed, has_row, lacks_row, wait_for_edge_txs, wait_for_query,
-    wait_for_rows, wait_for_subscription_update,
+    has_any_change, has_removed, has_row, lacks_row, wait_for_edge_tx_rejection, wait_for_edge_txs,
+    wait_for_query, wait_for_rows, wait_for_subscription_update,
 };
-use super::{assert_client_policy_denied, pe, permissions};
+use super::{pe, permissions};
 use jazz::tools::{ColumnDescriptor, RowDescriptor, Schema, TableName};
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, TablePolicies, TableSchema,
@@ -2677,161 +2677,6 @@ async fn inherits_select_denies_when_parent_operation_policy_is_missing_inner() 
     server.shutdown().await;
 }
 
-/// Verifies the permissive-local behavior for an INSERT policy that inherits
-/// through a parent FK.
-///
-/// In local permissive mode, the child table has an explicit INSERT policy, but
-/// the parent table has no INSERT policy. This covers the local-only branch
-/// where a missing parent operation policy is treated as allowed while
-/// evaluating `allowedTo.insert(folder_id)`.
-#[tokio::test]
-#[ignore = "permissive-local policy mode is no longer exposed by the Rust public API"]
-async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
-    tokio::task::LocalSet::new().run_until(local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local_inner()).await;
-}
-
-async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local_inner()
-{
-    let documents_policies = permissions(|p| {
-        p.allow_insert().where_(pe::allowed_to_insert("folder_id"));
-    });
-    let schema = SchemaBuilder::new()
-        .table(TableSchema::builder("folders").column("title", ColumnType::Text))
-        .table(
-            TableSchema::builder("documents")
-                .column("title", ColumnType::Text)
-                .nullable_fk_column("folder_id", "folders")
-                .policies(documents_policies),
-        )
-        .build();
-
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let admin = connect_ready_client(
-        &server,
-        &schema,
-        "inherits-admin",
-        "documents",
-        READY_TIMEOUT,
-    )
-    .await;
-    let alice = connect_ready_user(
-        &server,
-        &schema,
-        super::ALICE_ID,
-        "documents",
-        READY_TIMEOUT,
-    )
-    .await;
-
-    let (folder_id, _, folder_tx) = admin
-        .insert("folders", crate::row_input!("title" => "alice folder"))
-        .expect("seed folder row");
-    wait_for_edge_txs(
-        &admin,
-        &[folder_tx.expect("folder insert should commit immediately")],
-    )
-    .await;
-
-    let document_tx = alice
-        .insert(
-            "documents",
-            crate::row_input!("title" => "draft doc", "folder_id" => folder_id),
-        )
-        .expect(
-            "permissive local runtimes should treat missing parent INSERT policy as allow for INHERITS",
-        )
-        .2
-        .expect("document insert should commit immediately");
-    wait_for_edge_txs(&alice, &[document_tx]).await;
-
-    admin.shutdown().await.expect("shutdown admin");
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
-}
-
-/// Verifies the permissive-local behavior for reverse inherited UPDATE access.
-///
-/// The `files` UPDATE policy is delegated through rows in `todos` that
-/// reference the file. `todos` intentionally has no UPDATE policy, so this
-/// covers the local-only branch where missing source-table UPDATE policy is
-/// treated as allowed for `allowedTo.updateReferencing(...)`.
-#[tokio::test]
-#[ignore = "permissive-local policy mode is no longer exposed by the Rust public API"]
-async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
-    tokio::task::LocalSet::new().run_until(local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local_inner()).await;
-}
-
-async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local_inner()
- {
-    let files_policies = permissions(|p| {
-        p.allow_update()
-            .where_old(pe::allowed_to_update_referencing("todos", "file_id"))
-            .where_new(pe::always());
-    });
-    let schema = SchemaBuilder::new()
-        .table(
-            TableSchema::builder("files")
-                .column("owner_id", ColumnType::Text)
-                .column("name", ColumnType::Text)
-                .policies(files_policies),
-        )
-        .table(
-            TableSchema::builder("todos")
-                .column("owner_id", ColumnType::Text)
-                .column("title", ColumnType::Text)
-                .nullable_fk_column("file_id", "files"),
-        )
-        .build();
-
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let admin =
-        connect_ready_client(&server, &schema, "inherits-admin", "files", READY_TIMEOUT).await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "files", READY_TIMEOUT).await;
-
-    let (file_id, _, file_tx) = admin
-        .insert(
-            "files",
-            crate::row_input!("owner_id" => super::BOB_ID, "name" => "shared-file"),
-        )
-        .expect("seed file row");
-    let (_, _, todo_tx) = admin
-        .insert(
-            "todos",
-            crate::row_input!(
-                "owner_id" => super::ALICE_ID,
-                "title" => "todo referencing file",
-                "file_id" => file_id,
-            ),
-        )
-        .expect("seed referencing todo row");
-    wait_for_edge_txs(
-        &admin,
-        &[
-            file_tx.expect("file insert should commit immediately"),
-            todo_tx.expect("todo insert should commit immediately"),
-        ],
-    )
-    .await;
-
-    let update_tx = alice
-        .update(
-            file_id,
-            vec![
-                ("owner_id".into(), Value::Text(super::BOB_ID.into())),
-                ("name".into(), Value::Text("updated by alice".into())),
-            ],
-        )
-        .expect(
-            "permissive local runtimes should treat missing source UPDATE policy as allow for INHERITS_REFERENCING",
-        )
-        .expect("file update should commit immediately");
-    wait_for_edge_txs(&alice, &[update_tx]).await;
-
-    admin.shutdown().await.expect("shutdown admin");
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
-}
-
 /// Verifies that inherited WITH CHECK constraints evaluate the proposed new
 /// row state and deny updates when the referenced parent is not updateable.
 ///
@@ -2839,15 +2684,15 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
 /// folder, but Bob cannot update that root folder. The child's update must
 /// therefore fail the inherited `allowedTo.update(parent_id)` check.
 #[tokio::test]
-#[ignore = "the public client cannot observe the update-only child row before exercising inherited WITH CHECK"]
-async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
+async fn update_with_check_inherits_denies_when_parent_is_not_updateable_at_edge() {
     tokio::task::LocalSet::new()
-        .run_until(local_update_with_check_inherits_denies_when_parent_is_not_updateable_inner())
+        .run_until(update_with_check_inherits_denies_when_parent_is_not_updateable_at_edge_inner())
         .await;
 }
 
-async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_inner() {
+async fn update_with_check_inherits_denies_when_parent_is_not_updateable_at_edge_inner() {
     let folders_policies = permissions(|p| {
+        p.allow_read().always();
         p.allow_update()
             .where_old(pe::eq("owner_id", pe::session("user_id")))
             .where_new(pe::allowed_to_update_with_depth("parent_id", 10));
@@ -2887,7 +2732,17 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_i
     )
     .await;
 
-    let update_err = bob
+    wait_for_rows(
+        &bob,
+        Query::from("folders")
+            .filter(eq(col("id"), lit(*child_id.uuid())))
+            .select(["name"]),
+        "bob observes the child before attempting the update",
+        |rows| (rows == [(child_id, vec![Value::Text("Child".into())])]).then_some(()),
+    )
+    .await;
+
+    let update_tx = bob
         .update(
             child_id,
             vec![
@@ -2896,8 +2751,19 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_i
                 ("parent_id".into(), Value::Uuid(root_id)),
             ],
         )
-        .expect_err("update should fail inherited WITH CHECK");
-    assert_client_policy_denied(update_err, "folders", Operation::Update);
+        .expect("client should accept the update optimistically")
+        .expect("update should commit locally");
+    wait_for_edge_tx_rejection(&bob, update_tx).await;
+
+    wait_for_rows(
+        &admin,
+        Query::from("folders")
+            .filter(eq(col("id"), lit(*child_id.uuid())))
+            .select(["name"]),
+        "rejected inherited WITH CHECK update leaves the child unchanged at the edge",
+        |rows| (rows == [(child_id, vec![Value::Text("Child".into())])]).then_some(()),
+    )
+    .await;
 
     admin.shutdown().await.expect("shutdown admin");
     bob.shutdown().await.expect("shutdown bob");

@@ -3,12 +3,12 @@ use std::time::Duration;
 
 pub use jazz::query::{Query, col, eq, lit};
 pub use jazz::row_input;
+use jazz::tools::WriteContext;
 pub use jazz::tools::metadata::SYSTEM_PRINCIPAL_ID;
 pub use jazz::tools::{
-    AppContext, ColumnType, JazzClient, JazzError, ObjectId, OrderedRowDelta, Schema,
-    SchemaBuilder, SubscriptionStream, TableSchema, Value,
+    AppContext, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Schema, SchemaBuilder,
+    SubscriptionStream, TableSchema, Value,
 };
-use jazz::tools::{Operation, Session, WriteContext};
 use jazz::tools::{permissions, policy_expr as pe};
 
 // The server requires UUID principals
@@ -100,17 +100,6 @@ fn authorship_permissions_schema() -> Schema {
                 .policies(notes_policies),
         )
         .build()
-}
-
-fn assert_client_policy_denied(err: crate::JazzError, table: &str, operation: Operation) {
-    let crate::JazzError::Write(message) = err else {
-        panic!("expected policy denial write error, got {err:?}");
-    };
-    let expected = format!("policy denied {operation} on table {table}");
-    assert!(
-        message.ends_with(&expected),
-        "expected denial ending in {expected:?}, got {message:?}",
-    );
 }
 
 fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {

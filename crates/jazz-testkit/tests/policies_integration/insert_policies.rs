@@ -1,6 +1,6 @@
 use jazz::tools::DurabilityTier;
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_user, wait_for_edge_txs};
+use jazz_testkit::{connect_ready_user, wait_for_edge_tx_rejection, wait_for_edge_txs};
 
 use super::*;
 
@@ -45,8 +45,8 @@ async fn rebac_insert_allowed_by_simple_policy_inner() {
     server.shutdown().await;
 }
 
-/// Verifies local INSERT denial when a simple owner policy does not match the
-/// session user.
+/// Verifies edge-server INSERT denial when a simple owner policy does not match
+/// the session user.
 #[tokio::test]
 async fn rebac_insert_denied_by_simple_policy() {
     tokio::task::LocalSet::new()
@@ -78,43 +78,42 @@ async fn rebac_insert_denied_by_simple_policy_inner() {
         .expect("the current client accepts the optimistic insert")
         .2
         .expect("denied insert should commit locally");
-    let rejected = alice
-        .wait_for_transaction(transaction_id, DurabilityTier::EdgeServer)
-        .await;
-    assert!(
-        rejected.is_err(),
-        "insert should be denied when owner_id does not match the session user"
-    );
+    wait_for_edge_tx_rejection(&alice, transaction_id).await;
 
     alice.shutdown().await.expect("shutdown alice");
     server.shutdown().await;
 }
 
-/// Verifies that permissive local runtimes allow direct writes to tables with
-/// no loaded permission bundle or explicit row policies.
+/// Verifies that the edge server allows writes to tables with no loaded
+/// permission bundle or explicit row policies.
 #[tokio::test]
-async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_write_without_policy()
-{
-    tokio::task::LocalSet::new().run_until(permissive_local_runtime_without_loaded_policies_allows_sync_pending_write_without_policy_inner()).await;
+async fn server_without_loaded_policies_allows_write_without_explicit_policy() {
+    tokio::task::LocalSet::new()
+        .run_until(server_without_loaded_policies_allows_write_without_explicit_policy_inner())
+        .await;
 }
 
-async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_write_without_policy_inner()
- {
+async fn server_without_loaded_policies_allows_write_without_explicit_policy_inner() {
     let notes_table = TableSchema::builder("notes").column("content", ColumnType::Text);
     let schema = SchemaBuilder::new().table(notes_table).build();
     let server = JazzServer::start_with_schema(schema.clone()).await;
     let client =
         connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
 
-    let (note_id, _, _) = client
+    let (note_id, _, transaction_id) = client
         .insert("notes", crate::row_input!("content" => "A note"))
-        .expect("table without explicit policies should allow local writes");
+        .expect("client should accept a write without explicit policies");
+    wait_for_edge_txs(
+        &client,
+        &[transaction_id.expect("write should commit locally")],
+    )
+    .await;
     let rows = client
         .query(
             Query::from("notes")
                 .filter(eq(col("id"), lit(*note_id.uuid())))
                 .select(["content"]),
-            None,
+            Some(DurabilityTier::EdgeServer),
         )
         .await
         .expect("query inserted note");
@@ -128,8 +127,8 @@ async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_wr
     server.shutdown().await;
 }
 
-/// Verifies that an enforcing local runtime with an empty loaded permissions
-/// bundle denies writes that lack an explicit INSERT policy.
+/// Verifies that the edge server denies writes when a loaded permissions bundle
+/// lacks an explicit INSERT policy.
 #[tokio::test]
 #[ignore = "the server currently allows INSERT when a table has no explicit policy bundle"]
 async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy() {
@@ -153,13 +152,7 @@ async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_expli
         .expect("the current client accepts the optimistic insert")
         .2
         .expect("denied insert should commit locally");
-    let rejected = client
-        .wait_for_transaction(transaction_id, DurabilityTier::EdgeServer)
-        .await;
-    assert!(
-        rejected.is_err(),
-        "server should deny writes without an explicit insert policy"
-    );
+    wait_for_edge_tx_rejection(&client, transaction_id).await;
 
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
@@ -264,15 +257,16 @@ async fn rebac_two_clients_different_sessions_inner() {
 /// Verifies that INSERT policies using a NULL literal distinguish explicit NULL
 /// values from non-null values.
 #[tokio::test]
-async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows() {
+async fn insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows_at_edge() {
     tokio::task::LocalSet::new()
         .run_until(
-            local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows_inner(),
+            insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows_at_edge_inner(
+            ),
         )
         .await;
 }
 
-async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows_inner() {
+async fn insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows_at_edge_inner() {
     let tasks_policies = permissions(|p| {
         p.allow_insert().where_(pe::eq("deleted_at", pe::null()));
     });
@@ -307,13 +301,7 @@ async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_n
         .expect("the current client accepts the optimistic insert")
         .2
         .expect("denied insert should commit locally");
-    let rejected = client
-        .wait_for_transaction(archived_tx, DurabilityTier::EdgeServer)
-        .await;
-    assert!(
-        rejected.is_err(),
-        "non-null row should fail deleted_at = NULL policy"
-    );
+    wait_for_edge_tx_rejection(&client, archived_tx).await;
 
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;

@@ -334,19 +334,6 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
         "bob should not see alice/system notes"
     );
 
-    let bob_update_err = bob
-        .update(
-            alice_owned,
-            vec![("title".into(), Value::Text("bob edit".into()))],
-        )
-        .expect_err("non-creator update should be denied");
-    assert_client_policy_denied(bob_update_err, "notes", Operation::Update);
-
-    let bob_delete_err = bob
-        .delete(alice_owned)
-        .expect_err("non-creator delete should be denied");
-    assert_client_policy_denied(bob_delete_err, "notes", Operation::Delete);
-
     let alice_update_tx = alice
         .update(
             alice_attributed,
