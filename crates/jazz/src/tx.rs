@@ -40,6 +40,9 @@ pub struct Transaction {
     pub predicate_read_set: Option<Vec<PredicateRead>>,
     /// Optional application metadata attached at commit time.
     pub user_metadata_json: Option<String>,
+    /// Non-causal field-grained provenance for a calculated branch-view merge.
+    #[serde(default)]
+    pub contribution_merge: Option<ContributionMergeProvenance>,
 }
 
 /// Non-causal evidence attached to an ordinary calculated merge transaction.
@@ -253,6 +256,8 @@ pub struct TransactionRecord {
     pub durability: DurabilityTier,
     /// Optional application metadata attached at commit time.
     pub user_metadata_json: Option<String>,
+    /// Non-causal field-grained provenance for a calculated branch-view merge.
+    pub contribution_merge: Option<ContributionMergeProvenance>,
 }
 
 /// Stored edit-history entry for a row.

@@ -14,10 +14,10 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-/// Version 9 removes the specialized large-value sync messages and schema
-/// metadata. This is an intentional breaking baseline: older peers cannot
-/// safely decode the reduced payload vocabulary, so negotiation rejects them.
-pub const WIRE_PROTOCOL_VERSION: u16 = 9;
+/// Version 10 carries optional field-grained contribution provenance on
+/// transactions. This is an intentional breaking baseline: older peers cannot
+/// safely decode the extended transaction payload, so negotiation rejects them.
+pub const WIRE_PROTOCOL_VERSION: u16 = 10;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -1006,6 +1006,7 @@ mod tests {
                         absent_read_set: None,
                         predicate_read_set: None,
                         user_metadata_json: None,
+                        contribution_merge: None,
                     },
                     versions: vec![
                         VersionRecord::from_cells(
@@ -1270,6 +1271,7 @@ mod tests {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
+                    contribution_merge: None,
                 },
                 versions: Vec::new(),
             },

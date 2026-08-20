@@ -1389,6 +1389,7 @@ where
             permission_subject,
             base_snapshot,
             user_metadata_json,
+            contribution_merge,
             ..
         } = stored_tx.tx.clone();
         let tx_payload = Transaction {
@@ -1402,6 +1403,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
+            contribution_merge,
         };
         let mut versions = Vec::with_capacity(tx_versions.len());
         for version in tx_versions {

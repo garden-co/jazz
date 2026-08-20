@@ -356,6 +356,7 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
+                    contribution_merge: None,
                 },
                 vec![version_record(
                     row(row_byte),
@@ -390,6 +391,7 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
+                contribution_merge: None,
             },
             vec![version_record(
                 row(2),

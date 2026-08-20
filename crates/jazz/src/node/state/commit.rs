@@ -139,6 +139,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
+            contribution_merge: None,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let mut batch = self.database.open_batch();

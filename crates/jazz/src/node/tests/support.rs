@@ -1305,6 +1305,7 @@ fn ingest_relay_version(
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
+            contribution_merge: None,
         },
         vec![version_record(
             row_uuid,

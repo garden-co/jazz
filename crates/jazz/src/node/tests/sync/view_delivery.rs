@@ -365,6 +365,7 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
+        contribution_merge: None,
     };
     let versions = vec![
         version_record(row(1), Vec::new(), title_cells("a"), None),

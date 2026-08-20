@@ -231,16 +231,17 @@ groove::define_record! {
         7 => absent_read_set: Option<Value>,
         8 => predicate_read_set: Option<Value>,
         9 => user_metadata: Option<String>,
-        10 => permission_subject: Option<AuthorId>,
+        10 => contribution_merge: Option<Vec<u8>>,
+        11 => permission_subject: Option<AuthorId>,
         // Retained as an inert physical slot so existing transaction records
         // keep their fixed descriptor alignment. No core API writes or reads it.
-        11 => merge_strategy: Option<String>,
-        12 => fate: FateTag,
-        13 => global_time: Option<GlobalTime>,
-        14 => rejection_reason: Option<RejectionReasonTag>,
-        15 => cascade_root: Option<Value>,
-        16 => reason_detail: Option<String>,
-        17 => durability: DurabilityTier,
+        12 => merge_strategy: Option<String>,
+        13 => fate: FateTag,
+        14 => global_time: Option<GlobalTime>,
+        15 => rejection_reason: Option<RejectionReasonTag>,
+        16 => cascade_root: Option<Value>,
+        17 => reason_detail: Option<String>,
+        18 => durability: DurabilityTier,
     }
 }
 
@@ -486,6 +487,7 @@ impl StoredTransaction {
             global_time: self.global_time,
             durability: self.durability,
             user_metadata_json: self.tx.user_metadata_json.clone(),
+            contribution_merge: self.tx.contribution_merge.clone(),
         }
     }
 }
@@ -802,6 +804,7 @@ impl VersionRow {
                 global_time: tx.global_time,
                 durability: tx.durability,
                 user_metadata_json: tx.tx.user_metadata_json.clone(),
+                contribution_merge: tx.tx.contribution_merge.clone(),
             },
             is_locally_current,
             is_globally_current,
@@ -1010,6 +1013,12 @@ pub(super) fn transaction_values(
                 .clone()
                 .map(|value| Box::new(Value::String(value))),
         ),
+        Value::Nullable(tx.contribution_merge.as_ref().map(|provenance| {
+            Box::new(Value::Bytes(
+                postcard::to_allocvec(provenance)
+                    .expect("contribution provenance is serializable"),
+            ))
+        })),
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
         Value::Nullable(None),
         Value::String(fate_string(&fate)),

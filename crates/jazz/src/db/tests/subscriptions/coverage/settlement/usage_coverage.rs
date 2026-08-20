@@ -661,6 +661,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
+                contribution_merge: None,
             },
             versions: Vec::new(),
             fate: crate::tx::Fate::Accepted,

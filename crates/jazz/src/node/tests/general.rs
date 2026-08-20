@@ -456,6 +456,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
+                contribution_merge: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
             u64::MAX - SKEW_TOLERANCE_MS,
@@ -484,6 +485,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
+                contribution_merge: None,
             },
             vec![version_record(
                 row,
@@ -536,6 +538,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
+                contribution_merge: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
             u64::MAX - SKEW_TOLERANCE_MS,
@@ -563,6 +566,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
+                contribution_merge: None,
             },
             vec![version_record(
                 row,

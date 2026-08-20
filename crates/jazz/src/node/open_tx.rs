@@ -665,6 +665,7 @@ where
             absent_read_set: Some(open_tx.absent_reads),
             predicate_read_set: Some(open_tx.predicate_reads),
             user_metadata_json: open_tx.user_metadata_json,
+            contribution_merge: None,
         };
         self.ingest_transaction_and_versions(
             tx.clone(),
