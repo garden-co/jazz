@@ -1,27 +1,32 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+mod common;
+
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, col, eq, lit};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz_testkit::duplex_transport::duplex;
 
+use common::{allow_all_policies, compile_schema};
+
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("route", ColumnType::U32),
-            ColumnSchema::new("label", ColumnType::String),
-        ],
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column("route", ColumnType::BigInt)
+                    .column("label", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
 }
 
 fn open_client(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
@@ -92,7 +97,7 @@ fn measure_unrelated_coverage_group_refresh(group_count: usize) -> Duration {
         .map(|route| {
             let prepared = client
                 .prepare_query(
-                    &Query::from("items").filter(eq(col("route"), lit(Value::U32(route as u32)))),
+                    &Query::from("items").filter(eq(col("route"), lit(Value::I64(route as i64)))),
                 )
                 .unwrap_or_else(|error| panic!("prepare coverage group {route}: {error}"));
             client
@@ -125,7 +130,7 @@ fn measure_unrelated_coverage_group_refresh(group_count: usize) -> Duration {
             row(1_000_000 + group_count as u64),
             AuthorId::SYSTEM,
             BTreeMap::from([
-                ("route".to_owned(), Value::U32(u32::MAX)),
+                ("route".to_owned(), Value::I64(i64::from(u32::MAX))),
                 ("label".to_owned(), Value::String("unrelated".to_owned())),
             ]),
         )

@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::ops::{Deref, DerefMut};
 use std::sync::OnceLock;
 
 use internment::Intern;
@@ -71,6 +72,18 @@ impl PartialEq<String> for TableName {
     }
 }
 
+impl PartialOrd for TableName {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TableName {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
 /// Column data type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
@@ -85,6 +98,18 @@ pub enum ColumnType {
     Text,
     /// Enumerated text constrained to a closed set of variants.
     Enum { variants: Vec<String> },
+    /// Catalogue-native scalar enum whose declaration order assigns durable
+    /// compact tags. This is retained for core schema-evolution fixtures and
+    /// catalogue source round-tripping; ordinary application enums use `Enum`.
+    #[doc(hidden)]
+    ScalarEnum { name: String, variants: Vec<String> },
+    /// Catalogue-native payload enum with an explicit compiled type name.
+    /// Ordinary application payload enums use `EnumPayload`.
+    #[doc(hidden)]
+    CatalogueEnumPayload {
+        name: String,
+        cases: Vec<EnumCaseDescriptor>,
+    },
     /// Discriminated enum whose selected case carries a named record payload.
     /// This is a column type, never a top-level Jazz row union.
     EnumPayload { cases: Vec<EnumCaseDescriptor> },
@@ -124,8 +149,15 @@ impl ColumnType {
             ColumnType::Text => None,
             ColumnType::Bytea => None,
             ColumnType::Json { .. } => None,
-            ColumnType::Enum { variants } if variants.len() <= u8::MAX as usize + 1 => Some(1),
-            ColumnType::Enum { .. } | ColumnType::EnumPayload { .. } => None,
+            ColumnType::Enum { variants } | ColumnType::ScalarEnum { variants, .. }
+                if variants.len() <= u8::MAX as usize + 1 =>
+            {
+                Some(1)
+            }
+            ColumnType::Enum { .. }
+            | ColumnType::ScalarEnum { .. }
+            | ColumnType::EnumPayload { .. }
+            | ColumnType::CatalogueEnumPayload { .. } => None,
             ColumnType::Array { .. } => None, // Arrays are variable-length
             ColumnType::Row { .. } => None,   // Rows are variable-length
         }
@@ -589,6 +621,8 @@ impl TableSchemaBuilder {
 #[derive(Debug, Clone, Default)]
 pub struct SchemaBuilder {
     tables: Vec<TableSchemaBuilder>,
+    branch_read_policy: Option<Box<PolicyExpr>>,
+    branch_write_policy: Option<Box<PolicyExpr>>,
 }
 
 impl SchemaBuilder {
@@ -603,9 +637,25 @@ impl SchemaBuilder {
         self
     }
 
+    /// Set the policy controlling access to branch metadata.
+    pub fn branch_read_policy(mut self, policy: PolicyExpr) -> Self {
+        self.branch_read_policy = Some(Box::new(policy));
+        self
+    }
+
+    /// Set the policy controlling branch creation, updates, discard, and merge.
+    pub fn branch_write_policy(mut self, policy: PolicyExpr) -> Self {
+        self.branch_write_policy = Some(Box::new(policy));
+        self
+    }
+
     /// Build the complete schema.
     pub fn build(self) -> Schema {
-        self.tables.into_iter().map(|t| t.build_named()).collect()
+        Schema {
+            tables: self.tables.into_iter().map(|t| t.build_named()).collect(),
+            branch_read_policy: self.branch_read_policy,
+            branch_write_policy: self.branch_write_policy,
+        }
     }
 
     /// Compute the schema hash.
@@ -615,5 +665,105 @@ impl SchemaBuilder {
     }
 }
 
-/// Schema mapping table names to their table schemas.
-pub type Schema = HashMap<TableName, TableSchema>;
+/// Developer-authored schema persisted in the catalogue.
+///
+/// Tables are stored in name order so serialization and content hashing are
+/// deterministic. Branch policies are part of the same public schema source;
+/// the compiled runtime representation is derived from this value.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Schema {
+    tables: BTreeMap<TableName, TableSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch_read_policy: Option<Box<PolicyExpr>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch_write_policy: Option<Box<PolicyExpr>>,
+}
+
+impl Schema {
+    /// Create an empty schema.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the policy controlling access to branch metadata.
+    pub fn branch_read_policy(&self) -> Option<&PolicyExpr> {
+        self.branch_read_policy.as_deref()
+    }
+
+    /// Return the policy controlling branch creation, updates, discard, and merge.
+    pub fn branch_write_policy(&self) -> Option<&PolicyExpr> {
+        self.branch_write_policy.as_deref()
+    }
+
+    /// Attach policies controlling branch metadata reads and branch mutations.
+    ///
+    /// This is primarily useful when rebuilding an admitted public schema from
+    /// durable catalogue data. Table policies are managed by the separate
+    /// permissions catalogue; branch policies remain part of the schema source.
+    pub fn with_branch_policies(
+        mut self,
+        branch_read_policy: Option<PolicyExpr>,
+        branch_write_policy: Option<PolicyExpr>,
+    ) -> Self {
+        self.branch_read_policy = branch_read_policy.map(Box::new);
+        self.branch_write_policy = branch_write_policy.map(Box::new);
+        self
+    }
+}
+
+impl Deref for Schema {
+    type Target = BTreeMap<TableName, TableSchema>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tables
+    }
+}
+
+impl DerefMut for Schema {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.tables
+    }
+}
+
+impl FromIterator<(TableName, TableSchema)> for Schema {
+    fn from_iter<T: IntoIterator<Item = (TableName, TableSchema)>>(iter: T) -> Self {
+        Self {
+            tables: iter.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+}
+
+impl<const N: usize> From<[(TableName, TableSchema); N]> for Schema {
+    fn from(tables: [(TableName, TableSchema); N]) -> Self {
+        tables.into_iter().collect()
+    }
+}
+
+impl IntoIterator for Schema {
+    type Item = (TableName, TableSchema);
+    type IntoIter = std::collections::btree_map::IntoIter<TableName, TableSchema>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.tables.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Schema {
+    type Item = (&'a TableName, &'a TableSchema);
+    type IntoIter = std::collections::btree_map::Iter<'a, TableName, TableSchema>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.tables.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Schema {
+    type Item = (&'a TableName, &'a mut TableSchema);
+    type IntoIter = std::collections::btree_map::IterMut<'a, TableName, TableSchema>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.tables.iter_mut()
+    }
+}

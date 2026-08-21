@@ -171,10 +171,10 @@ fn relation_edge_target_uses_non_base_partition_descriptor() {
 
 #[test]
 fn relation_edge_target_projects_old_witness_into_read_schema() {
-    let base = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
+    let base = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe4; 16]), base.clone());
     let todo = row(0xe5);
     let tx_id = node
@@ -186,14 +186,15 @@ fn relation_edge_target_projects_old_witness_into_read_schema() {
         )
         .expect("commit v1 todo");
 
-    let evolved_table = TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
+    let evolved_schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
+        ),
     );
-    let evolved = SchemaVersion::new(JazzSchema::new([evolved_table.clone()]));
+    let evolved_table = evolved_schema.tables[0].clone();
+    let evolved = SchemaVersion::new(evolved_schema);
     node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
@@ -243,10 +244,10 @@ fn relation_edge_target_projects_old_witness_into_read_schema() {
 
 #[test]
 fn authoritative_reset_relation_target_projects_old_renamed_witness() {
-    let base = JazzSchema::new([TableSchema::new(
-        "users",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]);
+    let base = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe7; 16]), base.clone());
     let user = row(0xe8);
     let tx_id = node
@@ -258,14 +259,15 @@ fn authoritative_reset_relation_target_projects_old_renamed_witness() {
         )
         .expect("commit v1 user");
 
-    let people = TableSchema::new(
-        "people",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("label", ColumnType::String),
-        ],
+    let evolved_schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("people")
+                .column("name", PublicColumnType::Text)
+                .column("label", PublicColumnType::Text),
+        ),
     );
-    let evolved = SchemaVersion::new(JazzSchema::new([people.clone()]));
+    let people = evolved_schema.tables[0].clone();
+    let evolved = SchemaVersion::new(evolved_schema);
     node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
@@ -352,10 +354,10 @@ fn authoritative_reset_relation_target_projects_old_renamed_witness() {
 
 #[test]
 fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
-    let v1 = JazzSchema::new([TableSchema::new(
-        "users",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]);
+    let v1 = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf0; 16]), v1.clone());
     let user = row(0xf1);
     let tx_id = node
@@ -367,10 +369,9 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
         )
         .expect("commit v1 user");
 
-    let v2 = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "people",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]));
+    let v2 = SchemaVersion::new(public_query_eval_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("people").column("name", PublicColumnType::Text),
+    )));
     node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
@@ -394,14 +395,15 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
     })
     .expect("publish v2 rename");
 
-    let members = TableSchema::new(
-        "members",
-        [
-            ColumnSchema::new("display_name", ColumnType::String),
-            ColumnSchema::new("origin", ColumnType::String),
-        ],
+    let v3_schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("members")
+                .column("display_name", PublicColumnType::Text)
+                .column("origin", PublicColumnType::Text),
+        ),
     );
-    let v3 = SchemaVersion::new(JazzSchema::new([members.clone()]));
+    let members = v3_schema.tables[0].clone();
+    let v3 = SchemaVersion::new(v3_schema);
     node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 2,
@@ -508,41 +510,34 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
 
 #[test]
 fn flat_join_correlates_projected_v1_sources_across_table_rename() {
-    let v1 = JazzSchema::new([
-        TableSchema::new(
-            "users",
-            [
-                ColumnSchema::new("id", ColumnType::Uuid),
-                ColumnSchema::new("name", ColumnType::String),
-            ],
-        ),
-        TableSchema::new(
-            "posts",
-            [
-                ColumnSchema::new("id", ColumnType::Uuid),
-                ColumnSchema::new("author_id", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-            ],
-        ),
-    ]);
-    let people = TableSchema::new(
-        "people",
-        [
-            ColumnSchema::new("id", ColumnType::Uuid),
-            ColumnSchema::new("name", ColumnType::String),
-        ],
+    let v1 = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("users")
+                    .column("id", PublicColumnType::Uuid)
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("posts")
+                    .column("id", PublicColumnType::Uuid)
+                    .column("author_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text),
+            ),
     );
-    let v2 = SchemaVersion::new(JazzSchema::new([
-        people,
-        TableSchema::new(
-            "posts",
-            [
-                ColumnSchema::new("id", ColumnType::Uuid),
-                ColumnSchema::new("author_id", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-            ],
-        ),
-    ]));
+    let v2 = SchemaVersion::new(public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("people")
+                    .column("id", PublicColumnType::Uuid)
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("posts")
+                    .column("id", PublicColumnType::Uuid)
+                    .column("author_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text),
+            ),
+    ));
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf6; 16]), v1.clone());
     let (_client_dir, mut client) =
         open_node_with_uuid(NodeUuid::from_bytes([0xf9; 16]), v1.clone());
@@ -953,10 +948,10 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
 
 #[test]
 fn branch_relation_target_projects_old_renamed_witness() {
-    let base = JazzSchema::new([TableSchema::new(
-        "users",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]);
+    let base = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xea; 16]), base.clone());
     let branch = BranchId::from_bytes([0xeb; 16]);
     node.create_branch(branch).expect("create branch");
@@ -971,8 +966,12 @@ fn branch_relation_target_projects_old_renamed_witness() {
         )
         .expect("commit branch-only v1 user");
 
-    let people = TableSchema::new("people", [ColumnSchema::new("name", ColumnType::String)]);
-    let evolved = SchemaVersion::new(JazzSchema::new([people.clone()]));
+    let evolved_schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("people").column("name", PublicColumnType::Text)),
+    );
+    let people = evolved_schema.tables[0].clone();
+    let evolved = SchemaVersion::new(evolved_schema);
     node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
@@ -1071,22 +1070,19 @@ fn branch_relation_target_projects_old_renamed_witness() {
 #[test]
 fn renamed_branch_terminal_resolves_root_target_from_emitted_read_table() {
     let issue = row(0xf8);
-    let v1 = JazzSchema::new([
-        TableSchema::new(
-            "issues",
-            [
-                ColumnSchema::new("assignee", ColumnType::Uuid),
-                ColumnSchema::new("key", ColumnType::Uuid),
-            ],
-        ),
-        TableSchema::new(
-            "users",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("issue", ColumnType::Uuid),
-            ],
-        ),
-    ]);
+    let v1 = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("assignee", PublicColumnType::Uuid)
+                    .column("key", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("users")
+                    .column("name", PublicColumnType::Text)
+                    .column("issue", PublicColumnType::Uuid),
+            ),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf5; 16]), v1.clone());
     let user = row(0xf6);
     let user_tx = node
@@ -1105,21 +1101,19 @@ fn renamed_branch_terminal_resolves_root_target_from_emitted_read_table() {
     )
     .expect("settle root user before branch snapshot");
 
-    let issues = TableSchema::new(
-        "issues",
-        [
-            ColumnSchema::new("assignee", ColumnType::Uuid),
-            ColumnSchema::new("key", ColumnType::Uuid),
-        ],
-    );
-    let people = TableSchema::new(
-        "people",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("issue", ColumnType::Uuid),
-        ],
-    );
-    let v2 = SchemaVersion::new(JazzSchema::new([issues, people]));
+    let v2 = SchemaVersion::new(public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("assignee", PublicColumnType::Uuid)
+                    .column("key", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("people")
+                    .column("name", PublicColumnType::Text)
+                    .column("issue", PublicColumnType::Uuid),
+            ),
+    ));
     node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,

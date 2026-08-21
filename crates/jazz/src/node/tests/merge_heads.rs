@@ -199,10 +199,7 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
     // assertion is intentionally internal. The history oracle verifies that
     // the shared row keeps the merge behavior correct across the rename.
     let base = schema();
-    let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "tasks",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]));
+    let renamed = SchemaVersion::new(renamed_tasks_schema());
     let (dir, mut core) = open_node_with_schema(node(0xcb), base.clone());
     let row_uuid = row(0xcb);
     let before = core

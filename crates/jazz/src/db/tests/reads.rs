@@ -863,19 +863,13 @@ fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscript
     // This is an integration-level facade test: the public relation-query read
     // and subscription APIs must both use the same maintained reachability
     // program for the canonical gather IR emitted by the TypeScript builder.
-    let schema = JazzSchema::new([TableSchema::new(
-        "teams",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new(
-                "parent_id",
-                ColumnType::Nullable(Box::new(ColumnType::Uuid)),
-            ),
-        ],
-    )
-    .with_reference("parent_id", "teams")
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("teams")
+                .column("name", PublicColumnType::Text)
+                .nullable_fk_column("parent_id", "teams"),
+        ),
+    );
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let query = teams_gather_relation_query();
     let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
@@ -1233,22 +1227,16 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
 
 #[test]
 fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() {
-    let schema = JazzSchema::new([
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("done", ColumnType::Bool),
-                ColumnSchema::new("ownerId", ColumnType::nullable(ColumnType::Uuid)),
-            ],
-        )
-        .with_reference("ownerId", "users")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .nullable_fk_column("ownerId", "users"),
+            ),
+    );
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
         "users",
@@ -1373,21 +1361,15 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
 
 #[test]
 fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
-    let schema = JazzSchema::new([
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("ownerId", ColumnType::nullable(ColumnType::Uuid)),
-            ],
-        )
-        .with_reference("ownerId", "users")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_fk_column("ownerId", "users"),
+            ),
+    );
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let user = db
         .insert(
@@ -1429,21 +1411,15 @@ fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
 
 #[test]
 fn relation_snapshot_reverse_array_limit_reads_local_child() {
-    let schema = JazzSchema::new([
-        TableSchema::new("projects", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("projectId", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("projectId", "projects")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("projectId", "projects"),
+            ),
+    );
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let project = db
         .insert(
@@ -1525,33 +1501,25 @@ fn relation_snapshot_unordered_array_offset_uses_child_row_id_order() {
 
 #[test]
 fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
-    let schema = JazzSchema::new([
-        TableSchema::new("projects", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("done", ColumnType::Bool),
-                ColumnSchema::new("tags", ColumnType::Array(Box::new(ColumnType::String))),
-                ColumnSchema::new("projectId", ColumnType::Uuid),
-                ColumnSchema::new("ownerId", ColumnType::nullable(ColumnType::Uuid)),
-                ColumnSchema::new(
-                    "assigneesIds",
-                    ColumnType::Array(Box::new(ColumnType::Uuid)),
-                ),
-            ],
-        )
-        .with_reference("projectId", "projects")
-        .with_reference("ownerId", "users")
-        .with_reference("assigneesIds", "users")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-    ]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column(
+                        "tags",
+                        PublicColumnType::Array {
+                            element: Box::new(PublicColumnType::Text),
+                        },
+                    )
+                    .fk_column("projectId", "projects")
+                    .nullable_fk_column("ownerId", "users")
+                    .array_fk_column("assigneesIds", "users"),
+            )
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
+    );
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
         "projects",

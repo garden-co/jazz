@@ -4,13 +4,13 @@ use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::TxTime;
 use jazz::tools::OpenTransactionId;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{BranchLineage, DeletionEvent, DurabilityTier, Fate, Transaction};
 use jazz_sim::{emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
@@ -496,17 +496,19 @@ fn commit_unit_bytes(unit: &SyncMessage) -> u64 {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([table_schema()])
+    jazz_sim::public_schema_fixture::compile_public_schema(
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(TABLE)
+                    .column("title", ColumnType::Text)
+                    .column("owner", ColumnType::Uuid),
+            )
+            .build(),
+    )
 }
 
 fn table_schema() -> TableSchema {
-    TableSchema::new(
-        TABLE,
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
+    schema().tables()[0].clone()
 }
 
 fn open_node(

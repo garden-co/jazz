@@ -14,7 +14,7 @@ use jazz::tools::public_schema::PolicyExpr;
 use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::public_schema::TablePolicies;
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
-use jazz::tools::{ColumnType, DurabilityTier, JazzClient, SchemaBuilder, TableSchema, Value};
+use jazz::tools::{ColumnType, DurabilityTier, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -593,36 +593,6 @@ async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
         StatusCode::CREATED,
         "v2 must be admitted through its explicit v1-to-v2 lineage"
     );
-}
-
-async fn assert_edge_query_does_not_include_row(
-    client: &JazzClient,
-    query: jazz::query::Query,
-    row_id: jazz::tools::ObjectId,
-    timeout: Duration,
-    description: &str,
-) {
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    loop {
-        if let Ok(Ok(rows)) = tokio::time::timeout(
-            Duration::from_millis(500),
-            client.query(query.clone(), Some(DurabilityTier::EdgeServer)),
-        )
-        .await
-        {
-            assert!(
-                rows.iter().all(|(id, _)| *id != row_id),
-                "{description}: query unexpectedly included row {row_id}; rows: {rows:?}"
-            );
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            return;
-        }
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 }
 
 // Test topology:
@@ -1933,7 +1903,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         )
         .await;
         assert!(
-            matches!(attempt, Err(_)),
+            attempt.is_err(),
             "v2 draft must remain unready and expose no query result before its lineage lens: {attempt:?}"
         );
     }

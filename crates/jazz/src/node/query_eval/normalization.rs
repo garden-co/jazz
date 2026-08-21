@@ -170,7 +170,7 @@ pub(super) fn required_field_idx(
 }
 
 fn normalize_predicates(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     predicates: &[Predicate],
     flat_join_physical_alias: bool,
@@ -329,7 +329,7 @@ pub(super) fn static_scan_for_prefix(prefix: Vec<Value>, full_key_len: usize) ->
 }
 
 fn normalize_predicate(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     predicate: &Predicate,
     flat_join_physical_alias: bool,
@@ -692,7 +692,7 @@ fn enum_payload_contains_needle_type(
 }
 
 fn normalize_compare(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     left: &Operand,
     op: NormalizedComparisonOp,
@@ -725,7 +725,7 @@ fn normalize_operand(source: &SourceId, operand: &Operand) -> Result<NormalizedV
     normalize_operand_with_target_type(source, operand, None)
 }
 
-fn source_has_declared_id(schema: &JazzSchema, source: &SourceId) -> bool {
+fn source_has_declared_id(schema: &RuntimeSchema, source: &SourceId) -> bool {
     schema
         .tables
         .iter()
@@ -734,7 +734,7 @@ fn source_has_declared_id(schema: &JazzSchema, source: &SourceId) -> bool {
 }
 
 fn normalize_operand_for_schema(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     operand: &Operand,
 ) -> Result<NormalizedValueRef, Error> {
@@ -747,7 +747,7 @@ fn normalize_operand_for_schema(
 }
 
 fn normalize_predicate_operand_for_schema(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     operand: &Operand,
     target_type: Option<&ColumnType>,
@@ -827,7 +827,7 @@ fn normalize_operand_with_target_type_and_declared_id_and_flat_join_alias(
 }
 
 fn predicate_operand_column_type(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     operand: &Operand,
     flat_join_physical_alias: bool,
@@ -839,7 +839,7 @@ fn predicate_operand_column_type(
 }
 
 pub(super) fn operand_column_type(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     operand: &Operand,
 ) -> Result<Option<ColumnType>, Error> {
@@ -872,7 +872,7 @@ pub(super) fn operand_column_type(
 }
 
 pub(super) fn contains_needle_type(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     value: &Operand,
 ) -> Result<Option<ColumnType>, Error> {
@@ -931,7 +931,7 @@ fn provenance_field(column: &str) -> Option<ProvenanceField> {
 }
 
 fn normalize_order_key(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     order: &crate::query::OrderBy,
 ) -> Result<NormalizedOrderKey, Error> {
@@ -949,7 +949,7 @@ fn normalize_order_key(
 }
 
 fn normalized_aggregate_group_by(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     aggregate: &AggregateQuery,
 ) -> Result<Vec<NormalizedValueRef>, Error> {
@@ -963,7 +963,7 @@ fn normalized_aggregate_group_by(
 }
 
 fn normalized_aggregate_outputs(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     aggregate: &AggregateQuery,
 ) -> Result<Vec<NormalizedAggregateExpr>, Error> {
@@ -1139,7 +1139,7 @@ where
 fn normalize_array_subquery(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     current: RowSetNodeId,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     owner_source: &SourceId,
     subquery: &ArraySubquery,
     path: &[usize],
@@ -1260,7 +1260,7 @@ fn normalize_array_subquery(
 fn normalize_reachable(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     current: RowSetNodeId,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     root_source: &SourceId,
     reachable: &crate::query::ReachableVia,
     index: usize,
@@ -1474,7 +1474,7 @@ fn normalize_reachable(
 }
 
 pub(super) fn source_column_value(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     column: &str,
     target: JoinTarget,
@@ -1490,7 +1490,7 @@ pub(super) fn source_column_value(
 }
 
 fn reachable_access_key(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     access_source: &SourceId,
     column: &str,
     target: JoinTarget,
@@ -1501,7 +1501,7 @@ fn reachable_access_key(
 fn normalize_join_via_right(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     join: &JoinVia,
     path: &str,
 ) -> Result<(RowSetNodeId, SourceId), Error> {
@@ -1623,7 +1623,7 @@ fn reachable_dedupe_keys(
 
 fn normalize_reachable_seed(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     reachable: &crate::query::ReachableVia,
     reachable_id: &str,
     binding_source_shape: &str,
@@ -1767,7 +1767,7 @@ fn reachable_edge_route_columns(
 }
 
 fn reachable_seed_frontier_columns(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     source: &SourceId,
     seed: &crate::query::ReachableSeed,
 ) -> Result<Vec<ValueSourceColumn>, Error> {
@@ -1901,7 +1901,7 @@ fn typed_output_field(name: impl Into<String>, ty: ColumnType) -> TypedOutputFie
 }
 
 pub(super) fn table_schema<'a>(
-    schema: &'a JazzSchema,
+    schema: &'a RuntimeSchema,
     table: &str,
 ) -> Result<&'a TableSchema, Error> {
     schema
@@ -1911,7 +1911,11 @@ pub(super) fn table_schema<'a>(
         .ok_or_else(|| Error::QueryLowering(format!("unknown query table {table}")))
 }
 
-fn schema_column_type(schema: &JazzSchema, table: &str, column: &str) -> Result<ColumnType, Error> {
+fn schema_column_type(
+    schema: &RuntimeSchema,
+    table: &str,
+    column: &str,
+) -> Result<ColumnType, Error> {
     let schema_table = table_schema(schema, table)?;
     if let Some(column) = schema_table
         .columns
@@ -1948,7 +1952,7 @@ fn source_public_field_projections(table: &TableSchema, source: &SourceId) -> Ve
 }
 
 fn join_via_root_key(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     root_source: &SourceId,
     join: &JoinVia,
 ) -> NormalizedValueRef {
@@ -1978,7 +1982,7 @@ fn join_via_target_key(join_source: &SourceId, join: &JoinVia) -> NormalizedValu
 }
 
 fn join_via_predicate(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     left_source: &SourceId,
     right_source: &SourceId,
     join: &JoinVia,
@@ -2161,7 +2165,7 @@ fn normalize_filter_join_chain(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     root_source: &SourceId,
     start: RowSetNodeId,
     prefix: &str,
@@ -2219,7 +2223,7 @@ fn normalize_policy_atom_chain(
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
     reachable_contributions: &mut Vec<ReachableContribution>,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     root_source: &SourceId,
     start: RowSetNodeId,
     prefix: &str,
@@ -2284,7 +2288,7 @@ fn normalize_inherited_parent_policy(
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
     reachable_contributions: &mut Vec<ReachableContribution>,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     child_source: &SourceId,
     child_current: RowSetNodeId,
     inherits: &crate::query::InheritsVia,
@@ -2397,7 +2401,7 @@ fn normalize_policy_branch_authorization(
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
     reachable_contributions: &mut Vec<ReachableContribution>,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     root_source: &SourceId,
     current: RowSetNodeId,
     prefix: &str,
@@ -2578,7 +2582,7 @@ where
 {
     pub(super) fn collect_policy_dependency_claim_params(
         &self,
-        schema: &JazzSchema,
+        schema: &RuntimeSchema,
         policy: &PolicyContext,
         input: &NormalizedRowSetShape,
         params: &mut BTreeMap<String, ProgramClaimParam>,

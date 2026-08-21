@@ -162,17 +162,15 @@ fn offline_branch_creation_and_commit_sync_metadata_before_data() {
 #[test]
 fn fixed_schema_db_branch_and_bootstrap_writes_retain_authored_schema() {
     let base = schema();
-    let evolved_schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())]);
+    let evolved_schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .column("body", PublicColumnType::Text),
+        ),
+    );
     let evolved = SchemaVersion::new(evolved_schema.clone());
     let identity = AuthorId::from_bytes([0xc2; 16]);
     let writer = open_db(0xc2, identity, &base);

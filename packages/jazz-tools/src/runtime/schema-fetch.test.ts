@@ -23,7 +23,7 @@ describe("schema-fetch", () => {
       status: 200,
       statusText: "OK",
       json: async () => ({
-        schema: { users: { columns: [] } },
+        schema: { tables: { users: { columns: [] } } },
         publishedAt: 1_744_011_200_000,
       }),
     });
@@ -54,7 +54,7 @@ describe("schema-fetch", () => {
       status: 200,
       statusText: "OK",
       json: async () => ({
-        schema: { users: { columns: [] } },
+        schema: { tables: { users: { columns: [] } } },
         publishedAt: 1_744_011_200_000_000,
       }),
     });
@@ -158,7 +158,7 @@ describe("schema-fetch", () => {
       status: 200,
       statusText: "OK",
       json: async () => ({
-        schema: { users: { columns: [] } },
+        schema: { tables: { users: { columns: [] } } },
         publishedAt: null,
       }),
     });
@@ -203,7 +203,7 @@ describe("schema-fetch", () => {
       },
     });
     expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({
-      schema: { users: { columns: [] } },
+      schema: { tables: { users: { columns: [] } } },
     });
   });
 

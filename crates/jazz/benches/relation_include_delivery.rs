@@ -3,16 +3,17 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+mod schema_fixture;
 mod support;
 
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use serde_json::json;
 use support::{csv_usizes, emit_json_line, env_usize, phase_fields};
 
@@ -258,28 +259,20 @@ fn stop_alloc_counter() -> (u64, u64) {
 }
 
 fn relation_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "parents",
-            [
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("ordinal", ColumnType::U32),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "children",
-            [
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("ordinal", ColumnType::U32),
-            ],
-        )
-        .with_reference("parent_id", "parents")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    schema_fixture::compile(
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("parents")
+                    .column("label", ColumnType::Text)
+                    .column("ordinal", ColumnType::Integer),
+            )
+            .table(
+                TableSchemaBuilder::new("children")
+                    .fk_column("parent_id", "parents")
+                    .column("label", ColumnType::Text)
+                    .column("ordinal", ColumnType::Integer),
+            ),
+    )
 }
 
 fn open_db(scale: usize, sample: usize) -> Db<MemoryStorage> {
@@ -327,7 +320,7 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
                 "label".to_owned(),
                 Value::String("measured-child".to_owned()),
             ),
-            ("ordinal".to_owned(), Value::U32(1)),
+            ("ordinal".to_owned(), Value::I32(1)),
         ]),
     )
     .expect("insert exactly one measured child");
@@ -354,7 +347,7 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
                 "label".to_owned(),
                 Value::String("receipt-parent".to_owned()),
             ),
-            ("ordinal".to_owned(), Value::U32(0)),
+            ("ordinal".to_owned(), Value::I32(0)),
         ]),
     )
     .expect("insert parent");
@@ -365,7 +358,7 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
             BTreeMap::from([
                 ("parent_id".to_owned(), Value::Uuid(parent.0)),
                 ("label".to_owned(), Value::String(format!("child-{index}"))),
-                ("ordinal".to_owned(), Value::U32(index as u32)),
+                ("ordinal".to_owned(), Value::I32(index as i32)),
             ]),
         )
         .unwrap_or_else(|error| panic!("seed child {index}: {error}"));

@@ -104,8 +104,30 @@ impl SchemaHash {
             }
         }
 
+        hash_branch_policy(
+            &mut hasher,
+            b"branch_read_policy",
+            schema.branch_read_policy(),
+        );
+        hash_branch_policy(
+            &mut hasher,
+            b"branch_write_policy",
+            schema.branch_write_policy(),
+        );
+
         Self(*hasher.finalize().as_bytes())
     }
+}
+
+fn hash_branch_policy(hasher: &mut blake3::Hasher, field: &[u8], policy: Option<&PolicyExpr>) {
+    let Some(policy) = policy else {
+        return;
+    };
+    hasher.update(field);
+    hasher.update(&[0]);
+    let encoded = serde_json::to_vec(policy).expect("PolicyExpr always serializes");
+    hasher.update(&encoded);
+    hasher.update(&[0]);
 }
 
 impl std::fmt::Display for SchemaHash {
@@ -278,6 +300,33 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
             for variant in variants {
                 hasher.update(variant.as_bytes());
                 hasher.update(&[0]);
+            }
+        }
+        ColumnType::ScalarEnum { name, variants } => {
+            hasher.update(&[14]);
+            hasher.update(name.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(&(variants.len() as u64).to_le_bytes());
+            for variant in variants {
+                hasher.update(variant.as_bytes());
+                hasher.update(&[0]);
+            }
+        }
+        ColumnType::CatalogueEnumPayload { name, cases } => {
+            hasher.update(&[15]);
+            hasher.update(name.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(&(cases.len() as u64).to_le_bytes());
+            for case in cases {
+                hasher.update(case.name.as_bytes());
+                hasher.update(&[0]);
+                hasher.update(&(case.fields.len() as u64).to_le_bytes());
+                for field in &case.fields {
+                    hasher.update(field.name.as_str().as_bytes());
+                    hasher.update(&[0]);
+                    hash_column_type(hasher, &field.column_type);
+                    hasher.update(&[u8::from(field.nullable)]);
+                }
             }
         }
         ColumnType::EnumPayload { cases } => {

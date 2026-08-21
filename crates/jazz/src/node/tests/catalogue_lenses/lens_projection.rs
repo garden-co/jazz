@@ -3,13 +3,7 @@
 #[test]
 fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
     let base = schema();
-    let evolved = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]);
+    let evolved = evolved_todos_name_body_schema();
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x3d), base.clone());
     let old_row = row(0x41);
@@ -142,20 +136,12 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
 #[test]
 fn agreeing_cross_lens_keeps_the_authoritative_physical_mapping() {
     let v1 = schema();
-    let v2 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]);
-    let v3 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("search_name", ColumnType::String),
-        ],
-    )]);
+    let v2 = evolved_todos_name_body_schema();
+    let v3 = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("name", PublicColumnType::Text)
+            .column("search_name", PublicColumnType::Text),
+    ));
     let v2_payload = SchemaVersion::new(v2.clone());
     let v3_payload = SchemaVersion::new(v3.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x3e), v1.clone());
@@ -251,13 +237,7 @@ fn agreeing_cross_lens_keeps_the_authoritative_physical_mapping() {
 #[test]
 fn old_schema_commit_units_stay_in_authored_variant_after_pointer_flip() {
     let base = schema();
-    let evolved = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]);
+    let evolved = evolved_todos_name_body_schema();
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x43), base.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0x44), base.clone());
@@ -350,14 +330,12 @@ fn old_schema_commit_units_stay_in_authored_variant_after_pointer_flip() {
 #[test]
 fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
     let pinned = owner_policy_schema();
-    let evolved = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("extra_owner", ColumnType::Uuid),
-            ColumnSchema::new("owner_id", ColumnType::Uuid),
-        ],
-    )]);
+    let evolved = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("name", PublicColumnType::Text)
+            .column("extra_owner", PublicColumnType::Uuid)
+            .column("owner_id", PublicColumnType::Uuid),
+    ));
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x46), evolved.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0x47), pinned.clone());

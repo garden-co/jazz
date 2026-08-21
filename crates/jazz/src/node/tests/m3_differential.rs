@@ -847,148 +847,121 @@ fn m3_inherited_child_delete_with_concurrent_insert_reconciles_authoritatively()
 }
 
 fn m3_differential_schema() -> JazzSchema {
-    let same_table_policy = Query::from("resources")
-        .reachable_via_with_access_filters(
-            "resource_access",
-            "resource",
-            "team",
-            lit("same-table-seed"),
-            [eq(col("administrator"), lit(false))],
-            "team_edges",
-            "member",
-            "parent",
-            [eq(col("administrator"), lit(false))],
-        )
-        .seeded_by("teams", "identity_key", "sub", "id");
-    let string_same_table_policy = Query::from("string_resources")
-        .reachable_via_with_access_filters(
-            "string_resource_access",
-            "resource",
-            "team",
-            lit("same-table-string-seed"),
-            [eq(col("administrator"), lit(false))],
-            "team_edges",
-            "member",
-            "parent",
-            [eq(col("administrator"), lit(false))],
-        )
-        .seeded_by("teams", "identity_key_text", "sub", "id");
+    let same_table_policy = crate::test_public_schema::seeded_recursive_access_policy(
+        "resource_access",
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        &[],
+        "teams",
+        "team_edges",
+        "member",
+        "parent",
+        &[("administrator", PublicValue::Boolean(false))],
+        "teams",
+        "identity_key",
+        &["claims", "sub"],
+        "id",
+    );
+    let string_same_table_policy = crate::test_public_schema::seeded_recursive_access_policy(
+        "string_resource_access",
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        &[],
+        "teams",
+        "team_edges",
+        "member",
+        "parent",
+        &[("administrator", PublicValue::Boolean(false))],
+        "teams",
+        "identity_key_text",
+        &["claims", "sub"],
+        "id",
+    );
 
-    JazzSchema::new([
-        TableSchema::new(
-            "docs",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("kind", ColumnType::String),
-                ColumnSchema::new("createdBy", ColumnType::Uuid),
-                ColumnSchema::new("createdAt", ColumnType::U64),
-                ColumnSchema::new("bucket", ColumnType::U64),
-                ColumnSchema::new("f64_value", ColumnType::F64),
-                ColumnSchema::new("nullable_f64_value", ColumnType::F64.nullable()),
-                ColumnSchema::new("i64_value", ColumnType::I64),
-                ColumnSchema::new("u64_value", ColumnType::U64),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "children",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("status", ColumnType::String),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "grandchildren",
-            [ColumnSchema::new("child", ColumnType::Uuid)],
-        )
-        .with_reference("child", "children")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "teams",
-            [
-                ColumnSchema::new("id", ColumnType::Uuid),
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("identity_key", ColumnType::Uuid),
-                ColumnSchema::new("identity_key_text", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "team_edges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "group_access_edges",
-            [
-                ColumnSchema::new("user_id", ColumnType::Uuid),
-                ColumnSchema::new("group_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("group_id", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "doc_access",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "resources",
-            [ColumnSchema::new("label", ColumnType::String)],
-        )
-        .with_read_policy(Policy::shape(same_table_policy))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "string_resources",
-            [ColumnSchema::new("label", ColumnType::String)],
-        )
-        .with_read_policy(Policy::shape(string_same_table_policy))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "resource_access",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("resource", "resources")
-        .with_reference("team", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "string_resource_access",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("resource", "string_resources")
-        .with_reference("team", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .column("kind", PublicColumnType::Text)
+                    .column("createdBy", PublicColumnType::Uuid)
+                    .column("createdAt", PublicColumnType::Timestamp)
+                    .column("bucket", PublicColumnType::Timestamp)
+                    .column("f64_value", PublicColumnType::Double)
+                    .nullable_column("nullable_f64_value", PublicColumnType::Double)
+                    .column("i64_value", PublicColumnType::BigInt)
+                    .column("u64_value", PublicColumnType::Timestamp)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("children")
+                    .fk_column("doc", "docs")
+                    .column("status", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("grandchildren")
+                    .fk_column("child", "children")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teams")
+                    .column("id", PublicColumnType::Uuid)
+                    .column("name", PublicColumnType::Text)
+                    .column("identity_key", PublicColumnType::Uuid)
+                    .column("identity_key_text", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_edges")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .column("administrator", PublicColumnType::Boolean)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("group_access_edges")
+                    .column("user_id", PublicColumnType::Uuid)
+                    .fk_column("group_id", "teams")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("doc_access")
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        public_all_policies().with_select(same_table_policy),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("string_resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        public_all_policies().with_select(string_same_table_policy),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resource_access")
+                    .fk_column("resource", "resources")
+                    .fk_column("team", "teams")
+                    .column("administrator", PublicColumnType::Boolean)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("string_resource_access")
+                    .fk_column("resource", "string_resources")
+                    .fk_column("team", "teams")
+                    .column("administrator", PublicColumnType::Boolean)
+                    .policies(public_all_policies()),
+            ),
+    )
 }
 
 fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {

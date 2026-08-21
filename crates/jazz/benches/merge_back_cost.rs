@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+mod schema_fixture;
 mod support;
 
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{BranchId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::query::Query;
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use support::{emit_json_line, env_usize, insert_node_metrics, phase_fields, reset_phase_counters};
@@ -83,10 +84,10 @@ fn emit_phase(
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        TABLE,
-        [ColumnSchema::new("title", ColumnType::String)],
-    )])
+    schema_fixture::compile(
+        SchemaBuilder::new()
+            .table(TableSchemaBuilder::new(TABLE).column("title", ColumnType::Text)),
+    )
 }
 
 fn open_node(uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {

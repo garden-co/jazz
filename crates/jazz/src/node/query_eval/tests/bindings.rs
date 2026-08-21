@@ -125,20 +125,21 @@ fn prepared_nullable_integer_bindings_normalize_exactly_once() {
 
 #[test]
 fn prepared_claim_descriptor_uses_validated_param_type_for_both_equality_orders() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "text_owners",
-            [ColumnSchema::new("owner", ColumnType::String)],
-        ),
-        TableSchema::new(
-            "nullable_owners",
-            [ColumnSchema::new("owner", ColumnType::String.nullable())],
-        ),
-        TableSchema::new(
-            "uuid_owners",
-            [ColumnSchema::new("owner", ColumnType::Uuid)],
-        ),
-    ]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("text_owners")
+                    .column("owner", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("nullable_owners")
+                    .nullable_column("owner", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("uuid_owners")
+                    .column("owner", PublicColumnType::Uuid),
+            ),
+    );
     let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0xb4; 16]), schema.clone());
     let claim_param = claim_param_field(&ClaimPath(vec!["user_id".to_owned()]));
     let cases = [
@@ -218,20 +219,21 @@ fn nested_read_policies_reuse_an_outer_equivalent_claim_slot() {
     // source validates the same claim as Text and must reuse that slot
     // rather than add a redundant typed alias under the already-active
     // source name.
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "public_profiles",
-            [ColumnSchema::new("name", ColumnType::String)],
-        )
-        .with_read_policy(Policy::public()),
-        TableSchema::new(
-            "private_chats",
-            [ColumnSchema::new("owner", ColumnType::String)],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("private_chats").filter(eq(col("owner"), claim("user_id"))),
-        )),
-    ]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("public_profiles")
+                    .column("name", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("private_chats")
+                    .column("owner", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new().with_select(public_claim_eq("owner", "user_id")),
+                    ),
+            ),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf4; 16]), schema.clone());
     let identity = author(0xf5);
     node.set_session_claims(
@@ -349,13 +351,13 @@ fn lowered_groove_graph_differs_for_distinct_identity_claims() {
 
 #[test]
 fn lowered_groove_graph_differs_for_distinct_session_claim_values() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "issues",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("requiresAdmin", ColumnType::Bool),
-        ],
-    )]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("issues")
+                .column("title", PublicColumnType::Text)
+                .column("requiresAdmin", PublicColumnType::Boolean),
+        ),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), schema.clone());
     let identity = author(0xa3);
     let shape = Query::from("issues")

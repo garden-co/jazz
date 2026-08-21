@@ -239,17 +239,17 @@ fn branch_read_filter_shape_uses_shared_branch_source_lowering() {
 
 #[test]
 fn branch_read_join_uses_shared_branch_sources() {
-    let schema = JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new(
-            "todo_members",
-            [
-                ColumnSchema::new("todo", ColumnType::Uuid),
-                ColumnSchema::new("member", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("todo", "todos"),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todo_members")
+                    .fk_column("todo", "todos")
+                    .column("member", PublicColumnType::Uuid),
+            ),
+    );
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema.clone());
     let mut oracle = Oracle::new();
@@ -314,29 +314,26 @@ fn branch_read_join_uses_shared_branch_sources() {
 
 #[test]
 fn branch_read_reachable_uses_shared_branch_sources() {
-    let schema = JazzSchema::new([
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new("resources", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "resourceAccess",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("resource", "resources")
-        .with_reference("team", "teams"),
-        TableSchema::new(
-            "teamTeamMemberships",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("onlyAdmins", ColumnType::Bool),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resources").column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resourceAccess")
+                    .fk_column("resource", "resources")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teamTeamMemberships")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .column("onlyAdmins", PublicColumnType::Boolean),
+            ),
+    );
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema.clone());
     let mut oracle = Oracle::new();
@@ -640,32 +637,31 @@ fn branch_write_requires_branch_row_write_then_branch_local_write_policy() {
 }
 
 fn branch_rls_schema() -> JazzSchema {
-    let branch_policy = Policy::shape(Query::from("jazz_branches").join_via(
+    let branch_policy = public_outer_exists(
         "branchAccess",
         "branch_id",
-        [eq(col("userID"), claim("sub"))],
-    ));
-    JazzSchema::new([
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::owner_only("todos", "owner"))
-        .with_write_policy(Policy::owner_only("todos", "owner")),
-        TableSchema::new(
-            "branchAccess",
-            [
-                ColumnSchema::new("branch_id", ColumnType::Uuid),
-                ColumnSchema::new("userID", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("branch_id", "jazz_branches"),
-    ])
-    .with_branch_read_policy(branch_policy.clone())
-    .with_branch_write_policy(branch_policy)
+        "id",
+        [PublicPolicyExpr::eq_session(
+            "userID",
+            vec!["claims".to_owned(), "sub".to_owned()],
+        )],
+    );
+    build_public_test_schema_with_branch_policies(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(public_owner_policies("owner")),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("branchAccess")
+                    .fk_column("branch_id", "jazz_branches")
+                    .column("userID", PublicColumnType::Uuid),
+            ),
+        Some(branch_policy.clone()),
+        Some(branch_policy),
+    )
 }
 
 fn seed_branch_acl(
@@ -760,20 +756,18 @@ fn branch_overlay_partition_creation_rebuilds_live_database_without_storage_reop
 fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     // Physical branch partition identity is internal storage topology; the
     // branch read and merge-back assertions cover its user-visible semantics.
-    let base = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("obsolete", ColumnType::String),
-        ],
-    )]);
-    let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "tasks",
-        [
-            ColumnSchema::new("added", ColumnType::String),
-            ColumnSchema::new("name", ColumnType::String),
-        ],
-    )]));
+    let base = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("obsolete", PublicColumnType::Text),
+    ));
+    let renamed = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks")
+                .column("added", PublicColumnType::Text)
+                .column("name", PublicColumnType::Text),
+        ),
+    ));
     let (dir, mut core) = open_history_complete_node_with_schema(node(0x23), base.clone());
     let branch_id = branch(0x23);
     core.create_root_branch(branch_id).unwrap();
@@ -1262,13 +1256,11 @@ fn merge_back_parents_every_concurrent_target_head() {
 /// authored set. The merged transaction would then lose `title=branch`.
 #[test]
 fn merge_back_accumulates_authored_columns_across_successive_branch_patches() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("completed", ColumnType::Bool),
-        ],
-    )]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("completed", PublicColumnType::Boolean),
+    ));
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x83), schema.clone());
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0x84), schema.clone());
     let mut oracle = Oracle::new();
@@ -1853,33 +1845,37 @@ fn identity_merge_back_of_public_deleted_row_preserves_initiator() {
 fn deleted_merge_witness_uses_inherited_select_not_update_permission() {
     let reader = user(0x74);
     let editor = user(0x75);
-    let parent_policy = Query::from("parents").filter(eq(col("editor"), claim("sub")));
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "parents",
-            [
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("editor", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::owner_only("parents", "owner"))
-        .with_write_policies(crate::schema::WritePolicies {
-            insert_check: Some(parent_policy.clone()),
-            update_using: Some(parent_policy.clone()),
-            update_check: Some(parent_policy.clone()),
-            delete_using: Some(parent_policy),
-        }),
-        TableSchema::new(
-            "docs",
-            [
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-            ],
-        )
-        .with_reference("parent_id", "parents")
-        .with_read_policy(Policy::shape(Query::from("docs").inherits("parent_id")))
-        .with_write_policy(Policy::public()),
-    ]);
+    let editor_policy = PublicPolicyExpr::eq_session(
+        "editor",
+        vec!["claims".to_owned(), "sub".to_owned()],
+    );
+    let parent_policies = PublicTablePolicies::new()
+        .with_select(PublicPolicyExpr::eq_session(
+            "owner",
+            vec!["claims".to_owned(), "sub".to_owned()],
+        ))
+        .with_insert(editor_policy.clone())
+        .with_update(Some(editor_policy.clone()), editor_policy.clone())
+        .with_delete(editor_policy);
+    let docs_policies = public_all_policies().with_select(PublicPolicyExpr::inherits(
+        crate::tools::public_schema::Operation::Select,
+        "parent_id",
+    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("parents")
+                    .column("owner", PublicColumnType::Uuid)
+                    .column("editor", PublicColumnType::Uuid)
+                    .policies(parent_policies),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .fk_column("parent_id", "parents")
+                    .column("title", PublicColumnType::Text)
+                    .policies(docs_policies),
+            ),
+    );
     let (_dir, mut core) = open_history_complete_node_with_schema(node(0x76), schema);
     let parent = row(0x74);
     let parent_tx = core
@@ -1937,7 +1933,7 @@ fn merge_back_fails_closed_for_strategy_without_contribution_capabilities() {
     core.commit_mergeable_on_branch(
         branch_id,
         MergeableCommit::new("counters", row(0x43), 10)
-            .cell("count", Value::U64(1))
+            .cell("count", Value::I32(1))
             .cell("title", v("branch")),
     )
     .unwrap();

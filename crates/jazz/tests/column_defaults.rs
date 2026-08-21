@@ -1,11 +1,18 @@
 use std::collections::BTreeMap;
 
+mod common;
+
 use jazz::db::{Db, DbConfig, DbIdentity};
 use jazz::groove::records::Value;
-use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{
+    ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema,
+    Value as PublicValue,
+};
+
+use common::{allow_all_policies, compile_schema};
 
 const BIG_DEFAULT: i64 = 9_007_199_254_740_993;
 
@@ -14,19 +21,21 @@ fn row(byte: u8) -> RowUuid {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "events",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("count", ColumnType::I64).with_default(Value::I64(BIG_DEFAULT)),
-            ColumnSchema::new("status", ColumnType::String)
-                .with_default(Value::String("queued".to_owned())),
-            ColumnSchema::new("note", ColumnType::String.nullable())
-                .with_default(Value::String("default note".to_owned())),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
+    let columns = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("count", ColumnType::BigInt)
+            .default(PublicValue::BigInt(BIG_DEFAULT)),
+        ColumnDescriptor::new("status", ColumnType::Text)
+            .default(PublicValue::Text("queued".to_owned())),
+        ColumnDescriptor::new("note", ColumnType::Text)
+            .nullable()
+            .default(PublicValue::Text("default note".to_owned())),
+    ]);
+    let source = Schema::from([(
+        TableName::new("events"),
+        TableSchema::with_policies(columns, allow_all_policies()),
+    )]);
+    compile_schema(&source)
 }
 
 fn open_db() -> Db<MemoryStorage> {
@@ -54,10 +63,11 @@ fn cells(values: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<St
 
 fn stored_row(db: &Db<MemoryStorage>, row_id: RowUuid) -> BTreeMap<String, Value> {
     let table = schema()
-        .tables
-        .into_iter()
+        .tables()
+        .iter()
         .find(|table| table.name == "events")
-        .expect("events table");
+        .expect("events table")
+        .clone();
     let prepared = db
         .prepare_query(&db.table("events"))
         .expect("prepare query");

@@ -216,7 +216,7 @@ describe("startLocalJazzServer", () => {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": adminSecret,
         },
-        body: JSON.stringify({ schema: testApp.wasmSchema }),
+        body: JSON.stringify({ schema: { tables: testApp.wasmSchema } }),
       });
 
       expect(response.status).toBe(201);
@@ -242,7 +242,7 @@ describe("startLocalJazzServer", () => {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": "wrong-admin-secret",
         },
-        body: JSON.stringify({ schema: testApp.wasmSchema }),
+        body: JSON.stringify({ schema: { tables: testApp.wasmSchema } }),
       });
 
       expect(response.status).toBe(401);

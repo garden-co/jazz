@@ -293,77 +293,66 @@ fn group_access_test_cells(group: RowUuid, user: AuthorId) -> RowCells {
 }
 
 fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
-    let resource_policy = Policy::shape(
-        Query::from("docs")
-            .reachable_via_with_access_filters(
-                "doc_access_edges",
-                "resource_id",
-                "team_id",
-                lit("relation-seeded"),
-                [in_list(col("grant_role"), [lit(Value::Uuid(role))])],
-                "team_entry",
-                "member_id",
-                "target_id",
-                [],
-            )
-            .seeded_by("teams", "identity_key", "sub", "id"),
+    let resource_policy = public_recursive_access_policy(
+        "doc_access_edges",
+        "resource_id",
+        "team_id",
+        &[],
+        &[(
+            "grant_role",
+            vec![PublicValue::Uuid(PublicObjectId::from_uuid(role))],
+        )],
+        "teams",
+        "team_entry",
+        "member_id",
+        "target_id",
+        &[],
+        "teams",
+        "identity_key",
+        &["claims", "sub"],
+        "id",
     );
-    let access_branch = PolicyBranch::single_alternative_from_query(
-        Query::from("doc_access_edges")
-            .reachable_via(
-                "doc_access_edges",
-                "id",
-                "team_id",
-                lit("relation-seeded"),
-                "team_entry",
-                "member_id",
-                "target_id",
-                [],
-            )
-            .seeded_by("teams", "identity_key", "sub", "id"),
+    let access_policy = public_recursive_access_policy(
+        "doc_access_edges",
+        "id",
+        "team_id",
+        &[],
+        &[],
+        "teams",
+        "team_entry",
+        "member_id",
+        "target_id",
+        &[],
+        "teams",
+        "identity_key",
+        &["claims", "sub"],
+        "id",
     );
-    let mut access_query = Query::from("doc_access_edges");
-    access_query.filters = vec![Predicate::Any(Vec::new())];
-    access_query.policy_branches = vec![access_branch];
-    let access_policy = Policy::shape(access_query);
-
-    JazzSchema::new([
-        TableSchema::new(
-            "teams",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("identity_key", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "team_entry",
-            [
-                ColumnSchema::new("member_id", ColumnType::Uuid),
-                ColumnSchema::new("target_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("member_id", "teams")
-        .with_reference("target_id", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new("docs", [ColumnSchema::new("title", ColumnType::String)])
-            .with_read_policy(resource_policy)
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "doc_access_edges",
-            [
-                ColumnSchema::new("resource_id", ColumnType::Uuid),
-                ColumnSchema::new("team_id", ColumnType::Uuid),
-                ColumnSchema::new("grant_role", ColumnType::String),
-            ],
-        )
-        .with_reference("resource_id", "docs")
-        .with_reference("team_id", "teams")
-        .with_read_policy(access_policy)
-        .with_write_policy(Policy::public()),
-    ])
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("teams")
+                    .column("name", PublicColumnType::Text)
+                    .column("identity_key", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_entry")
+                    .fk_column("member_id", "teams")
+                    .fk_column("target_id", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(resource_policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("doc_access_edges")
+                    .fk_column("resource_id", "docs")
+                    .fk_column("team_id", "teams")
+                    .column("grant_role", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(access_policy)),
+            ),
+    )
 }
 
 #[test]

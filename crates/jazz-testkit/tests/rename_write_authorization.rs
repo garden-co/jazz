@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
@@ -13,12 +12,11 @@ use jazz::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion,
     SyncMessage, TableLens,
 };
-use jazz::query::{claim, col, eq};
 use jazz::row_input;
-use jazz::schema::{JazzSchema, Policy, TableSchema, WritePolicies};
-use jazz::tools::SchemaBuilder;
+use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::schema_lens::{Lens, LensTransform};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate, RejectionReason};
 use jazz_server::JazzServer;
 use support::{publish_allow_all_permissions, push_catalogue_in_memory, wait_for_edge_query_ready};
@@ -36,54 +34,51 @@ fn row(byte: u8) -> RowUuid {
 }
 
 fn v1_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "users",
-        [
-            ColumnSchema::new("id", ColumnType::Uuid),
-            ColumnSchema::new("email", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
+    compile_public_schema(
+        SchemaBuilder::new().table(
+            TableSchemaBuilder::new("users")
+                .column("id", ColumnType::Uuid)
+                .column("email", ColumnType::Text)
+                .column("owner", ColumnType::Uuid)
+                .policies(owner_write_policies(PolicyExpr::True)),
+        ),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policies(WritePolicies {
-        insert_check: Some(QueryPolicy::owner("users")),
-        update_using: Some(QueryPolicy::owner("users")),
-        update_check: Some(QueryPolicy::owner("users")),
-        delete_using: Some(QueryPolicy::owner("users")),
-    })])
 }
 
 fn v2_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "people",
-        [
-            ColumnSchema::new("id", ColumnType::Uuid),
-            ColumnSchema::new("email", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policies(WritePolicies {
-        insert_check: Some(
-            jazz::query::Query::from("people").filter(jazz::query::Predicate::Not(Box::new(
-                jazz::query::Predicate::Eq(
-                    jazz::query::Operand::Claim("sub".to_string()),
-                    jazz::query::Operand::Claim("sub".to_string()),
+    let owner = owner_policy();
+    compile_public_schema(
+        SchemaBuilder::new().table(
+            TableSchemaBuilder::new("people")
+                .column("id", ColumnType::Uuid)
+                .column("email", ColumnType::Text)
+                .column("owner", ColumnType::Uuid)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::False)
+                        .with_update(Some(owner.clone()), owner.clone())
+                        .with_delete(owner),
                 ),
-            ))),
         ),
-        update_using: Some(QueryPolicy::owner("people")),
-        update_check: Some(QueryPolicy::owner("people")),
-        delete_using: Some(QueryPolicy::owner("people")),
-    })])
+    )
 }
 
-struct QueryPolicy;
+fn compile_public_schema(builder: SchemaBuilder) -> JazzSchema {
+    jazz::schema::JazzSchema::new(&builder.build()).expect("test public schema compiles")
+}
 
-impl QueryPolicy {
-    fn owner(table: &str) -> jazz::query::Query {
-        jazz::query::Query::from(table).filter(eq(col("owner"), claim("sub")))
-    }
+fn owner_policy() -> PolicyExpr {
+    PolicyExpr::eq_session("owner", vec!["claims".to_owned(), "sub".to_owned()])
+}
+
+fn owner_write_policies(select: PolicyExpr) -> TablePolicies {
+    let owner = owner_policy();
+    TablePolicies::new()
+        .with_select(select)
+        .with_insert(owner.clone())
+        .with_update(Some(owner.clone()), owner.clone())
+        .with_delete(owner)
 }
 
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
@@ -125,7 +120,7 @@ fn client_person_values(
 fn client_v1_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
-            jazz::tools::TableSchema::builder("users")
+            TableSchemaBuilder::new("users")
                 .column("id", jazz::tools::ColumnType::Uuid)
                 .column("email", jazz::tools::ColumnType::Text),
         )
@@ -135,7 +130,7 @@ fn client_v1_schema() -> jazz::tools::Schema {
 fn client_v2_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
-            jazz::tools::TableSchema::builder("people")
+            TableSchemaBuilder::new("people")
                 .column("id", jazz::tools::ColumnType::Uuid)
                 .column("email", jazz::tools::ColumnType::Text),
         )

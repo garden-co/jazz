@@ -584,7 +584,7 @@ pub(super) async fn publish_schema_handler(
     }
 
     if (state.runtime().is_some() || state.core_server_shell_storage_config.is_some())
-        && let Err(err) = jazz::tools::public_schema_convert::convert_public_schema(&request.schema)
+        && let Err(err) = jazz::schema::JazzSchema::new(&request.schema)
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -857,8 +857,7 @@ pub(super) async fn publish_permissions_handler(
     }
 
     if (state.runtime().is_some() || state.core_server_shell_storage_config.is_some())
-        && let Err(err) =
-            jazz::tools::public_schema_convert::convert_public_schema(&schema_with_permissions)
+        && let Err(err) = jazz::schema::JazzSchema::new(&schema_with_permissions)
     {
         return (
             StatusCode::BAD_REQUEST,

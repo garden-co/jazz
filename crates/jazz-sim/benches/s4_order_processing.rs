@@ -9,15 +9,18 @@ use std::time::Instant;
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::GlobalSeq;
+use jazz::tools::public_schema::{
+    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
+use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields, profiling};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
@@ -1621,92 +1624,67 @@ fn sqlite_totals(config: &Config, conn: &Connection) -> Totals {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            WAREHOUSES,
-            [col("name", ColumnType::String), col("ytd", ColumnType::F64)],
-        ),
-        TableSchema::new(
-            DISTRICTS,
-            [
-                col("warehouse", ColumnType::Uuid),
-                col("districtNo", ColumnType::U64),
-                col("nextOrderNumber", ColumnType::U64),
-                col("ytd", ColumnType::F64),
-            ],
-        )
-        .with_reference("warehouse", WAREHOUSES),
-        TableSchema::new(
-            CUSTOMERS,
-            [
-                col("warehouse", ColumnType::Uuid),
-                col("district", ColumnType::Uuid),
-                col("customerNo", ColumnType::U64),
-                col("balance", ColumnType::F64),
-                col("paymentCount", ColumnType::U64),
-            ],
-        )
-        .with_reference("warehouse", WAREHOUSES)
-        .with_reference("district", DISTRICTS),
-        TableSchema::new(
-            ITEMS,
-            [
-                col("name", ColumnType::String),
-                col("price", ColumnType::F64),
-            ],
-        ),
-        TableSchema::new(
-            STOCK,
-            [
-                col("warehouse", ColumnType::Uuid),
-                col("item", ColumnType::Uuid),
-                col("quantity", ColumnType::U64),
-                col("ytd", ColumnType::U64),
-            ],
-        )
-        .with_reference("warehouse", WAREHOUSES)
-        .with_reference("item", ITEMS),
-        TableSchema::new(
-            ORDERS,
-            [
-                col("warehouse", ColumnType::Uuid),
-                col("district", ColumnType::Uuid),
-                col("customer", ColumnType::Uuid),
-                col("orderNumber", ColumnType::U64),
-                col("lineCount", ColumnType::U64),
-                col("delivered", ColumnType::Bool),
-            ],
-        )
-        .with_reference("warehouse", WAREHOUSES)
-        .with_reference("district", DISTRICTS)
-        .with_reference("customer", CUSTOMERS),
-        TableSchema::new(
-            ORDER_LINES,
-            [
-                col("order", ColumnType::Uuid),
-                col("item", ColumnType::Uuid),
-                col("stock", ColumnType::Uuid),
-                col("quantity", ColumnType::U64),
-                col("amount", ColumnType::F64),
-                col("delivered", ColumnType::Bool),
-            ],
-        )
-        .with_reference("order", ORDERS)
-        .with_reference("item", ITEMS)
-        .with_reference("stock", STOCK),
-        TableSchema::new(
-            PAYMENTS,
-            [
-                col("warehouse", ColumnType::Uuid),
-                col("district", ColumnType::Uuid),
-                col("customer", ColumnType::Uuid),
-                col("amount", ColumnType::F64),
-            ],
-        )
-        .with_reference("warehouse", WAREHOUSES)
-        .with_reference("district", DISTRICTS)
-        .with_reference("customer", CUSTOMERS),
-    ])
+    compile_public_schema(
+        SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder(WAREHOUSES)
+                    .column("name", PublicColumnType::Text)
+                    .column("ytd", PublicColumnType::Double),
+            )
+            .table(
+                PublicTableSchema::builder(DISTRICTS)
+                    .fk_column("warehouse", WAREHOUSES)
+                    .column("districtNo", PublicColumnType::Timestamp)
+                    .column("nextOrderNumber", PublicColumnType::Timestamp)
+                    .column("ytd", PublicColumnType::Double),
+            )
+            .table(
+                PublicTableSchema::builder(CUSTOMERS)
+                    .fk_column("warehouse", WAREHOUSES)
+                    .fk_column("district", DISTRICTS)
+                    .column("customerNo", PublicColumnType::Timestamp)
+                    .column("balance", PublicColumnType::Double)
+                    .column("paymentCount", PublicColumnType::Timestamp),
+            )
+            .table(
+                PublicTableSchema::builder(ITEMS)
+                    .column("name", PublicColumnType::Text)
+                    .column("price", PublicColumnType::Double),
+            )
+            .table(
+                PublicTableSchema::builder(STOCK)
+                    .fk_column("warehouse", WAREHOUSES)
+                    .fk_column("item", ITEMS)
+                    .column("quantity", PublicColumnType::Timestamp)
+                    .column("ytd", PublicColumnType::Timestamp),
+            )
+            .table(
+                PublicTableSchema::builder(ORDERS)
+                    .fk_column("warehouse", WAREHOUSES)
+                    .fk_column("district", DISTRICTS)
+                    .fk_column("customer", CUSTOMERS)
+                    .column("orderNumber", PublicColumnType::Timestamp)
+                    .column("lineCount", PublicColumnType::Timestamp)
+                    .column("delivered", PublicColumnType::Boolean),
+            )
+            .table(
+                PublicTableSchema::builder(ORDER_LINES)
+                    .fk_column("order", ORDERS)
+                    .fk_column("item", ITEMS)
+                    .fk_column("stock", STOCK)
+                    .column("quantity", PublicColumnType::Timestamp)
+                    .column("amount", PublicColumnType::Double)
+                    .column("delivered", PublicColumnType::Boolean),
+            )
+            .table(
+                PublicTableSchema::builder(PAYMENTS)
+                    .fk_column("warehouse", WAREHOUSES)
+                    .fk_column("district", DISTRICTS)
+                    .fk_column("customer", CUSTOMERS)
+                    .column("amount", PublicColumnType::Double),
+            )
+            .build(),
+    )
 }
 
 fn emit_summary(
@@ -2014,10 +1992,6 @@ fn cells<const N: usize>(items: [(&str, Value); N]) -> BTreeMap<String, Value> {
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value))
         .collect()
-}
-
-fn col(name: &str, ty: ColumnType) -> ColumnSchema {
-    ColumnSchema::new(name, ty)
 }
 
 fn row(tag: u8, value: u64) -> RowUuid {

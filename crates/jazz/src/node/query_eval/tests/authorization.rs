@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
-    let schema = JazzSchema::new([
+    let schema = RuntimeSchema::new([
         TableSchema::new(
             "uuid_owners",
             [ColumnSchema::new("owner", ColumnType::Uuid)],
@@ -49,7 +49,7 @@ fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
     );
     assert!(
         query
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap()
             .params()
             .contains_key(&uuid_slot),
@@ -116,89 +116,59 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     // while Groove prepared its shared binding descriptor, before any
     // observable query could run. Keeping the reproducer here makes the
     // descriptor contract cheap to validate without NAPI or a browser.
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("name", ColumnType::String.nullable()),
-                ColumnSchema::new("isPublic", ColumnType::Bool),
-                ColumnSchema::new("createdBy", ColumnType::String),
-                ColumnSchema::new("joinCode", ColumnType::String.nullable()),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("chats")
-                .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").filter(eq(col("isPublic"), lit(true))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").filter(eq(col("joinCode"), claim("join_code"))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").join_via_column(
-                        "chatMembers",
-                        "chatId",
-                        "id",
-                        [eq(col("userId"), claim("user_id"))],
-                    ),
-                )),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "chatMembers",
-            [
-                ColumnSchema::new("chatId", ColumnType::Uuid),
-                ColumnSchema::new("userId", ColumnType::String),
-                ColumnSchema::new("joinCode", ColumnType::String.nullable()),
-            ],
-        )
-        .with_reference("chatId", "chats")
-        .with_read_policy(Policy::shape(
-            Query::from("chatMembers")
-                .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chatMembers").filter(eq(col("userId"), claim("user_id"))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chatMembers").join_via_column(
-                        "chatMembers",
-                        "chatId",
-                        "chatId",
-                        [eq(col("userId"), claim("user_id"))],
-                    ),
-                )),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "profiles",
-            [
-                ColumnSchema::new("userId", ColumnType::String),
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("avatar", ColumnType::String.nullable()),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "messages",
-            [
-                ColumnSchema::new("chatId", ColumnType::Uuid),
-                ColumnSchema::new("senderId", ColumnType::Uuid),
-                ColumnSchema::new("text", ColumnType::String),
-                ColumnSchema::new("createdAt", ColumnType::U64),
-            ],
-        )
-        .with_reference("chatId", "chats")
-        .with_reference("senderId", "profiles")
-        .with_read_policy(Policy::shape(Query::from("messages").join_via_column(
+    let chat_member = |outer_column: &str| {
+        public_outer_exists(
             "chatMembers",
             "chatId",
-            "chatId",
-            [eq(col("userId"), claim("user_id"))],
-        )))
-        .with_write_policy(Policy::public()),
-    ]);
+            outer_column,
+            [public_claim_eq("userId", "user_id")],
+        )
+    };
+    let schema =
+        public_query_eval_schema(
+            PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("chats")
+                        .nullable_column("name", PublicColumnType::Text)
+                        .column("isPublic", PublicColumnType::Boolean)
+                        .column("createdBy", PublicColumnType::Text)
+                        .nullable_column("joinCode", PublicColumnType::Text)
+                        .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::Or(
+                            vec![
+                                PublicPolicyExpr::eq_literal(
+                                    "isPublic",
+                                    crate::tools::Value::Boolean(true),
+                                ),
+                                public_claim_eq("joinCode", "join_code"),
+                                chat_member("id"),
+                            ],
+                        ))),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("chatMembers")
+                        .fk_column("chatId", "chats")
+                        .column("userId", PublicColumnType::Text)
+                        .nullable_column("joinCode", PublicColumnType::Text)
+                        .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::Or(
+                            vec![public_claim_eq("userId", "user_id"), chat_member("chatId")],
+                        ))),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("profiles")
+                        .column("userId", PublicColumnType::Text)
+                        .column("name", PublicColumnType::Text)
+                        .nullable_column("avatar", PublicColumnType::Text)
+                        .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("messages")
+                        .fk_column("chatId", "chats")
+                        .fk_column("senderId", "profiles")
+                        .column("text", PublicColumnType::Text)
+                        .column("createdAt", PublicColumnType::Timestamp)
+                        .policies(PublicTablePolicies::new().with_select(chat_member("chatId"))),
+                ),
+        );
     let identity = author(0xa9);
     let (_client_dir, mut client) =
         open_node_with_uuid(NodeUuid::from_bytes([0xa7; 16]), schema.clone());
@@ -211,7 +181,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     );
     let client_shape = Query::from("chats")
         .filter(eq(col("id"), param("id")))
-        .validate(&schema)
+        .validate_runtime(&schema)
         .unwrap();
     let client_binding = client_shape
         .bind(BTreeMap::from([(
@@ -525,7 +495,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .filter(eq(col("chatId"), param("chat_id")))
         .array_subquery(ArraySubquery::new("sender", "profiles", "id", "senderId"))
         .order_by("createdAt", OrderDirection::Asc)
-        .validate(&schema)
+        .validate_runtime(&schema)
         .expect("validate normal-member message query");
     let message_binding = message_shape
         .bind(BTreeMap::from([(
@@ -574,7 +544,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .expect("normal client applies its accepted membership before querying messages");
     let simple_message_shape = Query::from("messages")
         .filter(eq(col("chatId"), param("chat_id")))
-        .validate(&schema)
+        .validate_runtime(&schema)
         .expect("validate normal-member message query without include");
     let simple_message_binding = simple_message_shape
         .bind(BTreeMap::from([(
@@ -831,7 +801,7 @@ fn missing_policy_relation_seed_claim_fails_closed_without_breaking_prepared_bin
         3,
     );
 
-    let shape = Query::from("resources").validate(&schema).unwrap();
+    let shape = Query::from("resources").validate_runtime(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let missing_rows = node
         .query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
@@ -884,18 +854,17 @@ fn declared_id_point_read_prepares_claim_policy_bindings() {
     // binding. The owner and denied reader must see the policy result, not a
     // Groove binding-source execution error; changing ownership must reverse
     // those results.
-    let schema = JazzSchema::new([TableSchema::new(
-        "documents",
-        [
-            ColumnSchema::new("id", ColumnType::Uuid),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-            ColumnSchema::new("title", ColumnType::String),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("documents").filter(eq(col("owner"), claim("user_id"))),
-    ))
-    .with_write_policy(Policy::public())]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("id", PublicColumnType::Uuid)
+                .column("owner", PublicColumnType::Uuid)
+                .column("title", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new().with_select(public_claim_eq("owner", "user_id")),
+                ),
+        ),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xd1; 16]), schema);
     let alice = author(0xd2);
     let bob = author(0xd3);
@@ -1053,17 +1022,17 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
 
 #[test]
 fn branch_program_tier_filter_preserves_claim_policy_fields() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "rooms",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("join_code", ColumnType::String),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("rooms").filter(eq(col("join_code"), claim("join_code"))),
-    ))
-    .with_write_policy(Policy::public())]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("rooms")
+                .column("name", PublicColumnType::Text)
+                .column("join_code", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_claim_eq("join_code", "join_code")),
+                ),
+        ),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0x71; 16]), schema.clone());
     let identity = author(0x72);
     node.set_session_claims(
@@ -1095,7 +1064,7 @@ fn branch_program_tier_filter_preserves_claim_policy_fields() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let shape = Query::from("rooms").validate(&schema).unwrap();
+    let shape = Query::from("rooms").validate_runtime(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let rows = node
         .query_rows_on_branch_query_engine(branch_id, &shape, &binding, identity)
@@ -1156,22 +1125,23 @@ fn branch_program_tier_filter_preserves_claim_policy_fields() {
 
 #[test]
 fn policy_claim_array_string_ids_bind_as_uuid_array() {
-    let schema = JazzSchema::new([
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "issues",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("state", ColumnType::String),
-                ColumnSchema::new("assignee", ColumnType::Uuid),
-                ColumnSchema::new("priority", ColumnType::U64),
-            ],
-        )
-        .with_reference("assignee", "users")
-        .with_read_policy(
-            Query::from("issues").filter(contains(claim("team_ids"), col("assignee"))),
-        ),
-    ]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .fk_column("assignee", "users")
+                    .column("priority", PublicColumnType::Timestamp)
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::In {
+                            column: "assignee".to_owned(),
+                            session_path: vec!["claims".to_owned(), "team_ids".to_owned()],
+                        }),
+                    ),
+            ),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([8; 16]), schema.clone());
     let alice = author(1);
     let bob = author(2);
@@ -1186,7 +1156,7 @@ fn policy_claim_array_string_ids_bind_as_uuid_array() {
             Value::Array(vec![Value::String(alice.0.to_string())]),
         )]),
     );
-    let shape = Query::from("issues").validate(&schema).unwrap();
+    let shape = Query::from("issues").validate_runtime(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let visible = node
         .query_rows_for_link(&shape, &binding, DurabilityTier::Local, reader)
@@ -1200,18 +1170,19 @@ fn policy_claim_array_string_ids_bind_as_uuid_array() {
 
 #[test]
 fn prepared_policy_plan_is_recompiled_after_same_identity_claim_revision_changes() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "issues",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("state", ColumnType::String),
-            ColumnSchema::new("assignee", ColumnType::Uuid),
-            ColumnSchema::new("priority", ColumnType::U64),
-        ],
-    )
-    .with_read_policy(
-        Query::from("issues").filter(eq(col("assignee"), claim("selected_assignee"))),
-    )]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("issues")
+                .column("title", PublicColumnType::Text)
+                .column("state", PublicColumnType::Text)
+                .column("assignee", PublicColumnType::Uuid)
+                .column("priority", PublicColumnType::Timestamp)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_claim_eq("assignee", "selected_assignee")),
+                ),
+        ),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0x81; 16]), schema.clone());
     let alice = author(0x82);
     let bob = author(0x83);
@@ -1219,7 +1190,7 @@ fn prepared_policy_plan_is_recompiled_after_same_identity_claim_revision_changes
     commit_issue(&mut node, 2, "open", bob);
 
     let identity = author(0x84);
-    let shape = Query::from("issues").validate(&schema).unwrap();
+    let shape = Query::from("issues").validate_runtime(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let visible_for = |node: &mut NodeState<RocksDbStorage>| {
         node.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)
@@ -1259,7 +1230,7 @@ fn production_policy_union_labels_survive_reorder_and_unrelated_insertion() {
     fn labels(node: &NodeState<RocksDbStorage>, branches: &[&str]) -> BTreeSet<String> {
         let mut query = Query::from("issues");
         query.policy_branches = branches.iter().map(|state| branch(state)).collect();
-        let shape = query.validate(&schema()).unwrap();
+        let shape = query.validate_runtime(&schema()).unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
         let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
         normalized

@@ -547,10 +547,15 @@ fn exclusive_predicate_phantom_conflict_rejects() {
 
 #[test]
 fn exclusive_whole_table_predicate_ignores_other_table_changes() {
-    let schema = JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("notes", [ColumnSchema::new("title", ColumnType::String)]),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text),
+            ),
+    );
     let (_client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
     let (_other_dir, mut other) = open_node_with_schema(node(2), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
@@ -785,14 +790,12 @@ fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration()
 #[test]
 fn district_scoped_predicate_rejects_same_district_phantom_only() {
     fn orders_schema() -> JazzSchema {
-        JazzSchema::new([TableSchema::new(
-            "orders",
-            [
-                ColumnSchema::new("district", ColumnType::Uuid),
-                ColumnSchema::new("orderNumber", ColumnType::U64),
-                ColumnSchema::new("delivered", ColumnType::Bool),
-            ],
-        )])
+        build_public_test_schema(PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("orders")
+                .column("district", PublicColumnType::Uuid)
+                .column("orderNumber", PublicColumnType::Timestamp)
+                .column("delivered", PublicColumnType::Boolean),
+        ))
     }
 
     fn order_cells(
@@ -1390,7 +1393,7 @@ fn exclusive_set_serializes_counter_base_before_mergeable_deltas() {
         &mut base_writer,
         &mut core,
         MergeableCommit::new("counters", row, 10).cells(BTreeMap::from([
-            ("count".to_owned(), Value::U64(10)),
+            ("count".to_owned(), Value::I32(10)),
             ("title".to_owned(), v("base")),
         ])),
     );
@@ -1407,7 +1410,7 @@ fn exclusive_set_serializes_counter_base_before_mergeable_deltas() {
             "counters",
             row,
             BTreeMap::from([
-                ("count".to_owned(), Value::U64(100)),
+                ("count".to_owned(), Value::I32(100)),
                 ("title".to_owned(), v("exclusive")),
             ]),
             None,
@@ -1427,14 +1430,14 @@ fn exclusive_set_serializes_counter_base_before_mergeable_deltas() {
         .commit_mergeable_unit(
             MergeableCommit::new("counters", row, 30)
                 .parents(vec![exclusive])
-                .cells(BTreeMap::from([("count".to_owned(), Value::U64(105))])),
+                .cells(BTreeMap::from([("count".to_owned(), Value::I32(105))])),
         )
         .unwrap();
     let (right, right_message) = writer_b
         .commit_mergeable_unit(
             MergeableCommit::new("counters", row, 31)
                 .parents(vec![exclusive])
-                .cells(BTreeMap::from([("count".to_owned(), Value::U64(107))])),
+                .cells(BTreeMap::from([("count".to_owned(), Value::I32(107))])),
         )
         .unwrap();
 
@@ -1453,7 +1456,7 @@ fn exclusive_set_serializes_counter_base_before_mergeable_deltas() {
         })
         .expect("core should create a post-exclusive counter merge version");
     let cells = merge.cells(&schema.tables[0]).unwrap();
-    assert_eq!(cells.get("count"), Some(&Value::U64(112)));
+    assert_eq!(cells.get("count"), Some(&Value::I32(112)));
     assert_eq!(cells.get("title"), Some(&v("exclusive")));
 }
 #[test]

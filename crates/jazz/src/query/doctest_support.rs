@@ -1,46 +1,40 @@
 #[doc(hidden)]
 pub mod doctest_support {
-    use groove::schema::{ColumnSchema, ColumnType};
-
-    use crate::schema::{JazzSchema, TableSchema};
+    use crate::schema::JazzSchema;
+    use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
     /// Example schema used by query-builder doctests.
     pub fn schema() -> JazzSchema {
-        JazzSchema::new([
-            TableSchema::new(
-                "issues",
-                [
-                    ColumnSchema::new("title", ColumnType::String),
-                    ColumnSchema::new("state", ColumnType::String),
-                    ColumnSchema::new("assignee", ColumnType::Uuid),
-                    ColumnSchema::new("project", ColumnType::Uuid),
-                    ColumnSchema::new("priority", ColumnType::U64),
-                    ColumnSchema::new("labels", ColumnType::String.array_of()),
-                    ColumnSchema::new("snoozed_until", ColumnType::U64.nullable()),
-                ],
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("issues")
+                    .column("title", ColumnType::Text)
+                    .column("state", ColumnType::Text)
+                    .fk_column("assignee", "users")
+                    .fk_column("project", "projects")
+                    .column("priority", ColumnType::Timestamp)
+                    .column(
+                        "labels",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Text),
+                        },
+                    )
+                    .nullable_column("snoozed_until", ColumnType::Timestamp),
             )
-            .with_reference("assignee", "users")
-            .with_reference("project", "projects"),
-            TableSchema::new(
-                "issue_tags",
-                [
-                    ColumnSchema::new("issue", ColumnType::Uuid),
-                    ColumnSchema::new("tag", ColumnType::Uuid),
-                ],
+            .table(
+                TableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .fk_column("tag", "tags"),
             )
-            .with_reference("issue", "issues")
-            .with_reference("tag", "tags"),
-            TableSchema::new(
-                "projects",
-                [
-                    ColumnSchema::new("name", ColumnType::String),
-                    ColumnSchema::new("org", ColumnType::Uuid),
-                ],
+            .table(
+                TableSchemaBuilder::new("projects")
+                    .column("name", ColumnType::Text)
+                    .fk_column("org", "orgs"),
             )
-            .with_reference("org", "orgs"),
-            TableSchema::new("orgs", [ColumnSchema::new("name", ColumnType::String)]),
-            TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
-            TableSchema::new("tags", [ColumnSchema::new("name", ColumnType::String)]),
-        ])
+            .table(TableSchemaBuilder::new("orgs").column("name", ColumnType::Text))
+            .table(TableSchemaBuilder::new("users").column("name", ColumnType::Text))
+            .table(TableSchemaBuilder::new("tags").column("name", ColumnType::Text))
+            .build();
+        JazzSchema::new(&source).expect("query doctest public schema compiles")
     }
 }

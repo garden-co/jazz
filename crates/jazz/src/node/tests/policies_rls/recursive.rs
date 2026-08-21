@@ -1,53 +1,63 @@
 // Recursive, reverse-reference, and public-default policy behavior.
 
-fn recursive_doc_write_policy_schema() -> JazzSchema {
-    let policy = Policy::shape(Query::from("docs").reachable_via(
+fn recursive_doc_access_policy() -> PublicPolicyExpr {
+    crate::test_public_schema::seeded_recursive_access_policy(
         "doc_access",
         "doc",
         "team",
-        claim("sub"),
+        &[],
+        &[],
+        "teams",
         "team_edges",
         "member",
         "parent",
-        [],
-    ));
+        &[],
+        "teams",
+        "id",
+        &["claims", "sub"],
+        "id",
+    )
+}
 
-    JazzSchema::new([
-        TableSchema::new(
-            "docs",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("kind", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(policy),
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "doc_access",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "team_edges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+fn recursive_doc_policy_schema(select_policy: PublicPolicyExpr) -> JazzSchema {
+    let policy = recursive_doc_access_policy();
+    let protected = PublicTablePolicies::new()
+        .with_select(select_policy)
+        .with_insert(policy.clone())
+        .with_update(Some(policy.clone()), policy.clone())
+        .with_delete(policy);
+
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .column("kind", PublicColumnType::Text)
+                    .policies(protected),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teams")
+                    .column("id", PublicColumnType::Uuid)
+                    .column("name", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("doc_access")
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_edges")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .policies(public_all_policies()),
+            ),
+    )
+}
+
+fn recursive_doc_write_policy_schema() -> JazzSchema {
+    recursive_doc_policy_schema(PublicPolicyExpr::True)
 }
 
 fn recursive_doc_cells(title: &str, kind: &str) -> BTreeMap<String, Value> {
@@ -75,10 +85,10 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
     ] {
         accept_global(
             &mut core,
-            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([(
-                "name".to_owned(),
-                Value::String(name.to_owned()),
-            )])),
+            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([
+                ("id".to_owned(), Value::Uuid(team.0)),
+                ("name".to_owned(), Value::String(name.to_owned())),
+            ])),
         );
     }
     for (doc, title, kind) in [
@@ -127,12 +137,11 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
 fn update_policy_point_check_does_not_scan_unrelated_current_rows() {
     // Internal storage metrics are required because the defect is cost-only:
     // the public authorization answer is correct while its work is O(table).
-    let schema = JazzSchema::new([TableSchema::new(
-        "docs",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let target = row(0x20);
     for index in 0..40_u8 {
@@ -182,10 +191,10 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
     ] {
         accept_global(
             &mut core,
-            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([(
-                "name".to_owned(),
-                Value::String(name.to_owned()),
-            )])),
+            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([
+                ("id".to_owned(), Value::Uuid(team.0)),
+                ("name".to_owned(), Value::String(name.to_owned())),
+            ])),
         );
     }
     for (idx, doc, team) in [
@@ -251,18 +260,7 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
 
 #[test]
 fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() {
-    let mut schema = recursive_doc_write_policy_schema();
-    let policy = Policy::shape(Query::from("docs").reachable_via(
-        "doc_access",
-        "doc",
-        "team",
-        claim("sub"),
-        "team_edges",
-        "member",
-        "parent",
-        [],
-    ));
-    schema.tables[0].read_policy = policy;
+    let schema = recursive_doc_policy_schema(recursive_doc_access_policy());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let reader = user(0xb2);
     let direct_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000001"));
@@ -278,10 +276,10 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
     ] {
         accept_global(
             &mut core,
-            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([(
-                "name".to_owned(),
-                Value::String(name.to_owned()),
-            )])),
+            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([
+                ("id".to_owned(), Value::Uuid(team.0)),
+                ("name".to_owned(), Value::String(name.to_owned())),
+            ])),
         );
     }
     for (doc, title, kind, tx_time) in [
@@ -341,25 +339,25 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
 
 #[test]
 fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
-    let schema = JazzSchema::new([
-        TableSchema::new("files", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::shape(Query::from("files").join_via(
-                "attachments",
-                "fileId",
-                [eq(col("ownerId"), claim("user_id"))],
-            )))
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "attachments",
-            [
-                ColumnSchema::new("fileId", ColumnType::Uuid),
-                ColumnSchema::new("ownerId", ColumnType::String),
-            ],
-        )
-        .with_reference("fileId", "files")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("files")
+                    .column("name", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(public_outer_exists(
+                        "attachments",
+                        "fileId",
+                        "id",
+                        [public_claim_eq("ownerId", "user_id")],
+                    ))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("attachments")
+                    .fk_column("fileId", "files")
+                    .column("ownerId", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
     let bob = user(0xb2);
@@ -401,16 +399,15 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
 
 #[test]
 fn unbound_is_admin_claim_in_read_policy_denies_as_false() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("requiresAdmin", ColumnType::Bool),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("todos").filter(eq(col("requiresAdmin"), claim("isAdmin"))),
-    ))]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("requiresAdmin", PublicColumnType::Boolean)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_select(public_claim_eq("requiresAdmin", "isAdmin")),
+            ),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let tx = core
         .commit_mergeable(
@@ -436,13 +433,13 @@ fn unbound_is_admin_claim_in_read_policy_denies_as_false() {
 
 #[test]
 fn missing_read_or_write_policy_is_public_for_that_operation() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid),
+        ),
+    );
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let (_tx_id, unit) = writer

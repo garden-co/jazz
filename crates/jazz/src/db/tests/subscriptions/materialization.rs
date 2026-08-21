@@ -536,27 +536,15 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
 
 #[test]
 fn client_settled_file_member_reads_bytes_for_bound_id_read() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "files",
-            [
-                crate::schema::ColumnSchema::new("mime_type", ColumnType::String),
-                crate::schema::ColumnSchema::new("data", ColumnType::Bytes),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "attachments",
-            [crate::schema::ColumnSchema::new(
-                "file_id",
-                ColumnType::Uuid,
-            )],
-        )
-        .with_reference("file_id", "files")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("files")
+                    .column("mime_type", PublicColumnType::Text)
+                    .column("data", PublicColumnType::Bytea),
+            )
+            .table(PublicTableSchemaBuilder::new("attachments").fk_column("file_id", "files")),
+    );
     let client_author = AuthorId::from_bytes([0xc2; 16]);
     let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
     let db = open_db(0xc2, client_author, &schema);

@@ -44,7 +44,7 @@ fn compile_permission_scope_policy(
     mut query: JazzQuery,
     claims: Option<&BTreeMap<String, Value>>,
     claim_values: &BTreeMap<String, Value>,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
 ) -> Result<(ValidatedQuery, Binding), Error> {
     query.filters = query
         .filters
@@ -81,7 +81,7 @@ fn compile_permission_scope_policy(
         .collect();
     let mut values = BTreeMap::new();
     bind_scope_claim_operands(&mut query, claim_values, &mut values);
-    let shape = query.validate(schema)?;
+    let shape = query.validate_runtime(schema)?;
     coerce_binding_values_for_shape(&shape, &mut values);
     let binding = shape.bind(values)?;
     Ok((shape, binding))
@@ -1358,8 +1358,18 @@ mod authorization_scope_compiler_tests {
     use crate::node::NodeState;
     use crate::protocol::TableLens;
     use crate::schema::WritePolicies;
-    use groove::schema::ColumnType;
+    use crate::tools::public_schema::OperationPolicy as PublicOperationPolicy;
+    use crate::tools::{
+        ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
+        SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
+        TableSchemaBuilder as PublicTableSchemaBuilder, Value as PublicValue,
+    };
     use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+
+    fn public_schema(builder: PublicSchemaBuilder) -> JazzSchema {
+        crate::schema::JazzSchema::new(&builder.build())
+            .expect("authorization-scope test public schema compiles")
+    }
 
     fn table() -> crate::schema::TableSchema {
         crate::schema::TableSchema::new("protected", Vec::<ColumnSchema>::new())
@@ -1434,22 +1444,21 @@ mod authorization_scope_compiler_tests {
 
     #[test]
     fn actual_compiler_uses_claims_and_access_edge_parent_inheritance() {
-        let schema = JazzSchema::new([
-            crate::schema::TableSchema::new(
-                "resources",
-                [ColumnSchema::new("owner", ColumnType::Uuid)],
-            )
-            .with_read_policy(JazzQuery::from("resources").filter(crate::query::eq(
-                crate::query::col("owner"),
-                crate::query::claim("sub"),
-            ))),
-            crate::schema::TableSchema::new(
-                "document_access_edges",
-                [ColumnSchema::new("resource_id", ColumnType::Uuid)],
-            )
-            .with_reference("resource_id", "resources")
-            .with_read_policy(JazzQuery::from("document_access_edges")),
-        ]);
+        let schema = public_schema(
+            PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("resources")
+                        .column("owner", PublicColumnType::Uuid)
+                        .policies(PublicTablePolicies::new().with_select(
+                            PublicPolicyExpr::eq_session("owner", vec!["user_id".to_owned()]),
+                        )),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("document_access_edges")
+                        .fk_column("resource_id", "resources")
+                        .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+                ),
+        );
         let dir = tempfile::tempdir().unwrap();
         let cfs = schema.column_families();
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1514,31 +1523,29 @@ mod authorization_scope_compiler_tests {
 
     #[test]
     fn actual_compiler_selects_write_clauses_and_skips_public_read_support() {
-        let claim_policy = |column: &str| {
-            JazzQuery::from("protected").filter(crate::query::eq(
-                crate::query::col(column),
-                crate::query::claim("sub"),
-            ))
-        };
-        let schema = JazzSchema::new([
-            crate::schema::TableSchema::new("public", Vec::<ColumnSchema>::new()),
-            crate::schema::TableSchema::new(
-                "protected",
-                [
-                    ColumnSchema::new("value", ColumnType::String),
-                    ColumnSchema::new("insert_owner", ColumnType::Uuid),
-                    ColumnSchema::new("old_owner", ColumnType::Uuid),
-                    ColumnSchema::new("new_owner", ColumnType::Uuid),
-                    ColumnSchema::new("delete_owner", ColumnType::Uuid),
-                ],
-            )
-            .with_write_policies(WritePolicies {
-                insert_check: Some(claim_policy("insert_owner")),
-                update_using: Some(claim_policy("old_owner")),
-                update_check: Some(claim_policy("new_owner")),
-                delete_using: Some(claim_policy("delete_owner")),
-            }),
-        ]);
+        let claim_policy =
+            |column: &str| PublicPolicyExpr::eq_session(column, vec!["user_id".to_owned()]);
+        let schema = public_schema(
+            PublicSchemaBuilder::new()
+                .table(PublicTableSchemaBuilder::new("public"))
+                .table(
+                    PublicTableSchemaBuilder::new("protected")
+                        .column("value", PublicColumnType::Text)
+                        .column("insert_owner", PublicColumnType::Uuid)
+                        .column("old_owner", PublicColumnType::Uuid)
+                        .column("new_owner", PublicColumnType::Uuid)
+                        .column("delete_owner", PublicColumnType::Uuid)
+                        .policies(PublicTablePolicies {
+                            select: PublicOperationPolicy::default(),
+                            insert: PublicOperationPolicy::with_check(claim_policy("insert_owner")),
+                            update: PublicOperationPolicy::using_and_check(
+                                claim_policy("old_owner"),
+                                claim_policy("new_owner"),
+                            ),
+                            delete: PublicOperationPolicy::using(claim_policy("delete_owner")),
+                        }),
+                ),
+        );
         let dir = tempfile::tempdir().unwrap();
         let cfs = schema.column_families();
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1610,30 +1617,27 @@ mod authorization_scope_compiler_tests {
         // A structural v2 schema gains a restrictive read policy without any
         // write policy. Read advice must compile v2's support query rather
         // than treating the base v1 table as public.
-        let base = JazzSchema::new([crate::schema::TableSchema::new(
-            "notes",
-            [ColumnSchema::new("owner", ColumnType::Uuid)],
-        )
-        .with_write_policies(WritePolicies {
-            insert_check: Some(JazzQuery::from("notes").filter(crate::query::eq(
-                crate::query::col("owner"),
-                crate::query::claim("sub"),
-            ))),
-            update_using: None,
-            update_check: None,
-            delete_using: None,
-        })]);
-        let evolved = JazzSchema::new([crate::schema::TableSchema::new(
-            "notes",
-            [
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("body", ColumnType::String),
-            ],
-        )
-        .with_read_policy(JazzQuery::from("notes").filter(crate::query::eq(
-            crate::query::col("body"),
-            crate::query::lit(Value::String("private".to_owned())),
-        )))]);
+        let owner_policy = PublicPolicyExpr::eq_session("owner", vec!["user_id".to_owned()]);
+        let base = public_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("notes")
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(PublicTablePolicies::new().with_insert(owner_policy)),
+            ),
+        );
+        let evolved = public_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("notes")
+                    .column("owner", PublicColumnType::Uuid)
+                    .column("body", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_literal(
+                            "body",
+                            PublicValue::Text("private".to_owned()),
+                        ),
+                    )),
+            ),
+        );
         let dir = tempfile::tempdir().unwrap();
         let refs = base.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1712,26 +1716,23 @@ mod authorization_scope_compiler_tests {
     /// alice v1 write ──rename lens──► people action ──► bob's v2 support proof
     #[test]
     fn projected_rename_action_uses_terminal_policy_schema_for_support() {
-        let base = JazzSchema::new([crate::schema::TableSchema::new(
-            "users",
-            [ColumnSchema::new("owner", ColumnType::Uuid)],
-        )]);
-        let evolved = JazzSchema::new([crate::schema::TableSchema::new(
-            "people",
-            [
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("body", ColumnType::String),
-            ],
-        )
-        .with_write_policies(WritePolicies {
-            insert_check: Some(JazzQuery::from("people").filter(crate::query::eq(
-                crate::query::col("body"),
-                crate::query::lit(Value::String("migrated".to_owned())),
-            ))),
-            update_using: None,
-            update_check: None,
-            delete_using: None,
-        })]);
+        let base =
+            public_schema(PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("users").column("owner", PublicColumnType::Uuid),
+            ));
+        let evolved = public_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("people")
+                    .column("owner", PublicColumnType::Uuid)
+                    .column("body", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_insert(
+                        PublicPolicyExpr::eq_literal(
+                            "body",
+                            PublicValue::Text("migrated".to_owned()),
+                        ),
+                    )),
+            ),
+        );
         let dir = tempfile::tempdir().unwrap();
         let refs = base.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();

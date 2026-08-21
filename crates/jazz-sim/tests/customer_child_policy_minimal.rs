@@ -6,13 +6,17 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, Transport,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::protocol::SyncMessage;
-use jazz::query::{Query, claim, col, eq, lit};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::query::Query;
+use jazz::schema::JazzSchema;
+use jazz::tools::public_schema::{
+    ColumnType as PublicColumnType, SchemaBuilder, TablePolicies, TableSchema as PublicTableSchema,
+    Value as PublicValue,
+};
 use jazz::wire::TransportError;
+use jazz_sim::public_schema_fixture::{compile_public_schema, seeded_recursive_access_policy};
 
 const GROUP: &str = "group";
 const GROUP_ENTRY: &str = "group_entry";
@@ -69,81 +73,71 @@ fn duplex() -> Duplex {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(GROUP, [ColumnSchema::new("label", ColumnType::String)]),
-        TableSchema::new(
-            GROUP_ENTRY,
-            [
-                ColumnSchema::new("member_id", ColumnType::Uuid),
-                ColumnSchema::new("target_id", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("member_id", GROUP)
-        .with_reference("target_id", GROUP),
-        TableSchema::new(
-            PARENT,
-            [
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("team", GROUP)
-        .with_read_policy(Policy::shape(
-            Query::from(PARENT).reachable_via_with_access_filters(
-                PARENT_ACCESS,
-                "resource",
-                "team",
-                claim("sub"),
-                [eq(col("administrator"), lit(false))],
-                GROUP_ENTRY,
-                "member_id",
-                "target_id",
-                [eq(col("administrator"), lit(false))],
-            ),
-        )),
-        TableSchema::new(
-            PARENT_ACCESS,
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("resource", PARENT)
-        .with_reference("team", GROUP),
-        TableSchema::new(
-            CHILD,
-            [
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-            ],
-        )
-        .with_reference("parent_id", PARENT)
-        .with_read_policy(Policy::shape(
-            Query::from(CHILD).reachable_via_with_access_filters(
-                CHILD_ACCESS,
-                "child",
-                "team",
-                claim("sub"),
-                [eq(col("administrator"), lit(false))],
-                GROUP_ENTRY,
-                "member_id",
-                "target_id",
-                [eq(col("administrator"), lit(false))],
-            ),
-        )),
-        TableSchema::new(
-            CHILD_ACCESS,
-            [
-                ColumnSchema::new("child", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("administrator", ColumnType::Bool),
-            ],
-        )
-        .with_reference("child", CHILD)
-        .with_reference("team", GROUP),
-    ])
+    let parent_policy = seeded_recursive_access_policy(
+        PARENT_ACCESS,
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        GROUP,
+        GROUP_ENTRY,
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        GROUP,
+        "id",
+        &["sub"],
+        "id",
+    );
+    let child_policy = seeded_recursive_access_policy(
+        CHILD_ACCESS,
+        "child",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        GROUP,
+        GROUP_ENTRY,
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        GROUP,
+        "id",
+        &["sub"],
+        "id",
+    );
+    compile_public_schema(
+        SchemaBuilder::new()
+            .table(PublicTableSchema::builder(GROUP).column("label", PublicColumnType::Text))
+            .table(
+                PublicTableSchema::builder(GROUP_ENTRY)
+                    .fk_column("member_id", GROUP)
+                    .fk_column("target_id", GROUP)
+                    .column("administrator", PublicColumnType::Boolean),
+            )
+            .table(
+                PublicTableSchema::builder(PARENT)
+                    .column("label", PublicColumnType::Text)
+                    .fk_column("team", GROUP)
+                    .policies(TablePolicies::new().with_select(parent_policy)),
+            )
+            .table(
+                PublicTableSchema::builder(PARENT_ACCESS)
+                    .fk_column("resource", PARENT)
+                    .fk_column("team", GROUP)
+                    .column("administrator", PublicColumnType::Boolean),
+            )
+            .table(
+                PublicTableSchema::builder(CHILD)
+                    .fk_column("parent_id", PARENT)
+                    .column("label", PublicColumnType::Text)
+                    .policies(TablePolicies::new().with_select(child_policy)),
+            )
+            .table(
+                PublicTableSchema::builder(CHILD_ACCESS)
+                    .fk_column("child", CHILD)
+                    .fk_column("team", GROUP)
+                    .column("administrator", PublicColumnType::Boolean),
+            )
+            .build(),
+    )
 }
 
 fn row(byte: u8) -> RowUuid {

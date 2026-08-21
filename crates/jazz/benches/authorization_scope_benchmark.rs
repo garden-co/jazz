@@ -8,16 +8,18 @@
 
 use std::collections::BTreeMap;
 
+mod schema_fixture;
+
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use jazz::db::{
     Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, block_on,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::query::Query;
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 type DirectDb = Db<MemoryStorage>;
@@ -26,20 +28,17 @@ const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-000000000
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
 fn authorization_schema(extra_columns: usize) -> JazzSchema {
-    let mut columns = vec![
-        ColumnSchema::new("owner_id", ColumnType::Uuid),
-        ColumnSchema::new("name", ColumnType::String),
-        ColumnSchema::new("score", ColumnType::U64),
-    ];
-
-    columns.extend(
-        (0..extra_columns)
-            .map(|index| ColumnSchema::new(format!("metadata_{index}"), ColumnType::String)),
-    );
-
-    JazzSchema::new([TableSchema::new("items", columns)
-        .with_read_policy(Policy::owner_only("items", "owner_id"))
-        .with_write_policy(Policy::public())])
+    let mut table = TableSchemaBuilder::new("items")
+        .column("owner_id", ColumnType::Uuid)
+        .column("name", ColumnType::Text)
+        .column("score", ColumnType::Timestamp)
+        .policies(
+            TablePolicies::new().with_select(schema_fixture::session_column("owner_id", "sub")),
+        );
+    for index in 0..extra_columns {
+        table = table.column(&format!("metadata_{index}"), ColumnType::Text);
+    }
+    schema_fixture::compile(SchemaBuilder::new().table(table))
 }
 
 fn open_db(seed: u64, extra_columns: usize) -> DirectDb {

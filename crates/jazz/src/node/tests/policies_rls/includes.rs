@@ -1,45 +1,42 @@
 // Required and holes include semantics under row-level security.
 
 fn required_include_rls_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "roots",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("target", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("target", "targets"),
-        TableSchema::new(
-            "targets",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::owner_only("targets", "owner")),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("roots")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("target", "targets"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("targets")
+                    .column("title", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["claims".to_owned(), "sub".to_owned()],
+                        )),
+                    ),
+            ),
+    )
 }
 
 #[test]
 fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "memberships",
-            [
-                ColumnSchema::new("chat", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-            ],
-        )
-        .with_reference("chat", "chats"),
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("id", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-            ],
-        ),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("memberships")
+                    .fk_column("chat", "chats")
+                    .column("label", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("chats")
+                    .column("id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let physical_chat = row(0xc1);
     let declared_chat_id = row(0xaa);
@@ -84,15 +81,21 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
 #[test]
 fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
     let alice = user(0xa1);
-    let schema = JazzSchema::new([TableSchema::new(
-        "documents",
-        [
-            ColumnSchema::new("id", ColumnType::Uuid),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("documents", "owner"))
-    .with_write_policy(Some(Query::from("documents")))]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("documents")
+            .column("id", PublicColumnType::Uuid)
+            .column("owner", PublicColumnType::Uuid)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_select(PublicPolicyExpr::eq_session(
+                        "owner",
+                        vec!["claims".to_owned(), "sub".to_owned()],
+                    ))
+                    .with_insert(PublicPolicyExpr::True)
+                    .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                    .with_delete(PublicPolicyExpr::True),
+            ),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(0xa9), schema);
     let physical_row = row(0xc1);
     let declared_id = row(0xd1);
@@ -231,32 +234,30 @@ fn seed_null_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
 }
 
 fn multi_segment_required_include_rls_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "roots",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("project", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("project", "projects"),
-        TableSchema::new(
-            "projects",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("org", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("org", "orgs"),
-        TableSchema::new(
-            "orgs",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::owner_only("orgs", "owner")),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("roots")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("project", "projects"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("projects")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("org", "orgs"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("orgs")
+                    .column("title", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["claims".to_owned(), "sub".to_owned()],
+                        )),
+                    ),
+            ),
+    )
 }
 
 fn seed_multi_segment_include_fixture(

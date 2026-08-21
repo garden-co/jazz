@@ -298,7 +298,7 @@ impl ShellDb {
         storage_factory: Option<&dyn StorageFactory>,
         row_id_seed: Option<u64>,
     ) -> ShellResult<Self> {
-        let schema = JazzSchema::new([]);
+        let schema = JazzSchema::empty();
         match storage_config {
             StorageConfig::InMemory => {
                 let refs = schema.column_families();
@@ -1986,35 +1986,48 @@ impl std::error::Error for ConfigError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::groove::schema::ColumnType;
-    use crate::schema::{ColumnSchema, Policy, TableSchema};
+    use crate::tools::{
+        ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
+        SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
+        TableSchemaBuilder as PublicTableSchemaBuilder,
+    };
+
+    fn public_schema(builder: PublicSchemaBuilder) -> JazzSchema {
+        crate::schema::JazzSchema::new(&builder.build())
+            .expect("serving test public schema compiles")
+    }
 
     fn simple_schema() -> JazzSchema {
-        JazzSchema::new([TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("done", ColumnType::Bool),
-            ],
-        )])
+        public_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean),
+            ),
+        )
     }
 
     #[test]
     fn permission_payload_updates_keep_structural_genesis_and_survive_reopen() {
-        let structural = JazzSchema::new([TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("editor", ColumnType::Uuid),
-            ],
-        )]);
-        let first = JazzSchema::new([structural.tables[0]
-            .clone()
-            .with_read_policy(Policy::owner_only("todos", "owner"))]);
-        let second = JazzSchema::new([structural.tables[0]
-            .clone()
-            .with_read_policy(Policy::owner_only("todos", "editor"))]);
+        let structural_builder = || {
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .column("editor", PublicColumnType::Uuid)
+        };
+        let structural = public_schema(PublicSchemaBuilder::new().table(structural_builder()));
+        let owner_policy = |column: &str| {
+            PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                column,
+                vec!["claims".to_owned(), "sub".to_owned()],
+            ))
+        };
+        let first = public_schema(
+            PublicSchemaBuilder::new().table(structural_builder().policies(owner_policy("owner"))),
+        );
+        let second = public_schema(
+            PublicSchemaBuilder::new().table(structural_builder().policies(owner_policy("editor"))),
+        );
         let schema_id = structural.version_id();
         assert_eq!(first.version_id(), schema_id);
         assert_eq!(second.version_id(), schema_id);

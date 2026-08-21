@@ -2,15 +2,13 @@
 
 #[test]
 fn unsupported_policy_predicates_deny_instead_of_allowing() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("owner", PublicColumnType::Uuid),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
-    core.catalogue.schema.tables[0].read_policy =
+    core.catalogue.schema.runtime_mut_for_testing().tables[0].read_policy =
         Some(Query::from("todos").filter(not(contains(col("title"), lit("a")))));
     let tx = core
         .commit_mergeable(
@@ -35,12 +33,13 @@ fn unsupported_policy_predicates_deny_instead_of_allowing() {
 
 #[test]
 fn unresolved_policy_operands_deny_instead_of_allowing() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
-    core.catalogue.schema.tables[0].read_policy =
+    core.catalogue.schema.runtime_mut_for_testing().tables[0].read_policy =
         Some(Query::from("todos").filter(eq(col("title"), claim("missing"))));
     let tx = core
         .commit_mergeable(MergeableCommit::new("todos", row(0x84), 10).cells(title_cells("z")))
@@ -63,16 +62,17 @@ fn unresolved_policy_operands_deny_instead_of_allowing() {
 
 #[test]
 fn unbound_team_claim_in_composed_read_policy_denies_without_binding_error() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("team", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("todos").filter(eq(col("team"), claim("team"))),
-    ))]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("team", PublicColumnType::Uuid)
+            .policies(
+                PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                    "team",
+                    vec!["claims".to_owned(), "team".to_owned()],
+                )),
+            ),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let tx = core
         .commit_mergeable(
@@ -99,16 +99,17 @@ fn unbound_team_claim_in_composed_read_policy_denies_without_binding_error() {
 
 #[test]
 fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("team", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("todos").filter(eq(col("team"), claim("team"))),
-    ))]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("team", PublicColumnType::Uuid)
+            .policies(
+                PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                    "team",
+                    vec!["claims".to_owned(), "team".to_owned()],
+                )),
+            ),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let team_a = user(0xa1);
     let team_b = user(0xb2);
@@ -157,23 +158,15 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
 #[test]
 fn nullable_claim_equality_policy_branch_allows_matching_row() {
     let reader = user(0xa1);
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("joinCode", ColumnType::String.nullable()),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("chats")
-                .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").filter(eq(col("joinCode"), claim("join_code"))),
-                )),
-        ))
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("chats")
+            .column("title", PublicColumnType::Text)
+            .nullable_column("joinCode", PublicColumnType::Text)
+            .policies(public_all_policies().with_select(PublicPolicyExpr::eq_session(
+                "joinCode",
+                vec!["claims".to_owned(), "join_code".to_owned()],
+            ))),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let matching = row(0x91);
     let other = row(0x92);
@@ -227,4 +220,3 @@ fn nullable_claim_equality_policy_branch_allows_matching_row() {
         BTreeSet::from([matching]),
     );
 }
-

@@ -8,12 +8,13 @@ use jazz::db::{
     SeededRowIdSource, Transport, WriteState,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::public_schema::{CmpOp, PolicyValue};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate, RejectionReason};
 use jazz::wire::TransportError;
 
@@ -21,17 +22,27 @@ fn author(byte: u8) -> AuthorId {
     AuthorId::from_bytes([byte; 16])
 }
 
-fn todo_table() -> TableSchema {
-    TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("todos", "owner"))
-    .with_write_policy(Policy::owner_only("todos", "owner"))
+fn todo_schema() -> JazzSchema {
+    let owner = PolicyExpr::Cmp {
+        column: "owner".to_owned(),
+        op: CmpOp::Eq,
+        value: PolicyValue::SessionRef(vec!["sub".to_owned()]),
+    };
+    let policies = TablePolicies::new()
+        .with_select(owner.clone())
+        .with_insert(owner.clone())
+        .with_update(Some(owner.clone()), owner.clone())
+        .with_delete(owner);
+    let source = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean)
+                .column("owner", ColumnType::Uuid)
+                .policies(policies),
+        )
+        .build();
+    JazzSchema::new(&source).expect("permissions public schema compiles")
 }
 
 fn todo_cells(title: &str, done: bool, owner: AuthorId) -> RowCells {
@@ -170,7 +181,7 @@ fn sync_client_to_core(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let schema = JazzSchema::new([todo_table()]);
+    let schema = todo_schema();
     let column_families = schema.column_families();
     let column_family_refs = column_families
         .iter()
