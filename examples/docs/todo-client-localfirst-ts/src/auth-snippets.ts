@@ -25,7 +25,7 @@ export async function createJwtDb() {
 
 // #region auth-localfirst-ts-backup
 export async function getRecoveryPhrase(): Promise<string | null> {
-  const secret = await BrowserAuthSecretStore.loadSecret();
+  const secret = await BrowserAuthSecretStore.loadSecret({ appId: "my-app" });
   return secret ? RecoveryPhrase.fromSecret(secret) : null;
 }
 // #endregion auth-localfirst-ts-backup
@@ -33,7 +33,7 @@ export async function getRecoveryPhrase(): Promise<string | null> {
 // #region auth-localfirst-ts-restore
 export async function restoreFromRecoveryPhrase(userInput: string): Promise<void> {
   const restoredSecret = RecoveryPhrase.toSecret(userInput);
-  await BrowserAuthSecretStore.saveSecret(restoredSecret);
+  await BrowserAuthSecretStore.saveSecret(restoredSecret, { appId: "my-app" });
   // Reload so the live Jazz client picks up the restored secret.
   location.reload();
 }
@@ -48,7 +48,7 @@ const passkeyBackup = new BrowserPasskeyBackup({
 });
 
 export async function backupToPasskey(displayName: string): Promise<void> {
-  const secret = await BrowserAuthSecretStore.loadSecret();
+  const secret = await BrowserAuthSecretStore.loadSecret({ appId: "my-app" });
   if (!secret) throw new Error("No local secret to back up yet");
   await passkeyBackup.backup(secret, displayName);
 }
@@ -57,7 +57,7 @@ export async function backupToPasskey(displayName: string): Promise<void> {
 // #region auth-localfirst-ts-passkey-restore
 export async function restoreFromPasskey(): Promise<void> {
   const restoredSecret = await passkeyBackup.restore();
-  await BrowserAuthSecretStore.saveSecret(restoredSecret);
+  await BrowserAuthSecretStore.saveSecret(restoredSecret, { appId: "my-app" });
   location.reload();
 }
 // #endregion auth-localfirst-ts-passkey-restore

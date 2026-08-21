@@ -1,13 +1,19 @@
 // #region context-setup-expo-minimal
 import { JazzProvider } from "jazz-tools/react-native";
+import { useLocalFirstAuth } from "jazz-tools/expo";
 import { SafeAreaView, Text, View } from "react-native";
 import { TodoList } from "./TodoList";
 
 export function App() {
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  if (isLoading || !secret) return null;
+
   return (
     <JazzProvider
       config={{
         appId: "<your-app-id>",
+        secret,
       }}
     >
       <SafeAreaView style={{ flex: 1 }}>

@@ -1,7 +1,7 @@
 ---
 title: "Real-time collaborative list"
 description: Multiple users subscribing to the same data and seeing each other's changes in real-time.
-reviewedAt: "f7048c19"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -36,7 +36,7 @@ When Alice inserts a task it appears in her UI instantly, syncs to the server, a
 
 <Accordions type="single">
 <Accordion title="How sync and conflicts work">
-When two users edit the same row concurrently, Jazz uses last-writer-wins (LWW) per column. Each column resolves independently, so if Alice updates `title` while Bob updates `done`, both changes are preserved. If they both update `title`, the last write (by wall-clock time) wins.
+When two users edit the same row concurrently, Jazz uses last-writer-wins (LWW) per column. Each column resolves independently, so if Alice updates `title` while Bob updates `done`, both changes are preserved. If they both update `title`, Jazz's deterministic [hybrid logical clock](/docs/concepts/how-sync-works#hybrid-logical-clock) ordering decides the winner.
 
 For most applications this is the right default. See [How sync works](/docs/concepts/how-sync-works) for more detail.
 

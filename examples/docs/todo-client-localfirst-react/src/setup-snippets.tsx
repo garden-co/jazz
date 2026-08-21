@@ -8,6 +8,7 @@ export default function App() {
       config={{
         appId: "<your-app-id>",
       }}
+      auth="local-first"
     >
       <h1>Todos</h1>
       <TodoList />

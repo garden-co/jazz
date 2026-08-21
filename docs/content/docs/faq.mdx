@@ -1,7 +1,7 @@
 ---
 title: FAQ
 description: Frequently asked questions about Jazz.
-reviewedAt: "f6535a533"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -38,13 +38,14 @@ This is useful when iterating on your schema during development.
 
 <Accordion id="undefined-vs-empty-array" title="Why does useAll return undefined?">
 
-`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
+`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The loading state](/docs/reading/queries#the-loading-state) for details.
 
 </Accordion>
 
 <Accordion id="offline-only" title="Can I use Jazz without a server?">
 
-Yes. Omit `serverUrl` from your config — data will be persisted locally only.
+Yes. Omit `serverUrl` from your config. Jazz will not try to sync: browser clients keep their data
+in local persistent storage, while other runtimes use their configured local driver.
 
 </Accordion>
 
@@ -56,25 +57,21 @@ Yes. When a user signs up with an external provider, their identity carries over
 
 <Accordion id="rust-migrations" title="Do Rust apps need separate migration files?">
 
-No. Rust services use the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Migrations](/docs/schemas/migrations) for details.
+No. Define and publish migrations with the TypeScript tooling. The server stores the compiled
+migrations that the Rust runtime uses. See [Migrations](/docs/schemas/migrations) for details.
 
 </Accordion>
 
-<Accordion id="common-errors" title="What do the sync error messages mean?">
+<Accordion id="common-errors" title="How do I handle a rejected write?">
 
-Jazz may return the following errors when a client's request is rejected by the server:
+Keep the result of the write and call `wait()` when your app needs to know whether the server
+accepted it. A rejected write throws `PersistedWriteRejectedError`, which provides the server's
+`code`, `reason`, and `transactionId`.
 
-- **`PermissionDenied`**&hairsp;—&hairsp;a write was rejected because it failed the table's
-  [permission policy](/docs/auth/permissions). Check that the session has the right to perform
-  that operation on the row.
-- **`SessionRequired`**&hairsp;—&hairsp;a write was attempted without an authenticated session.
-  Make sure the client is using a valid auth mode (local-first or external JWT).
-- **`CatalogueWriteDenied`**&hairsp;—&hairsp;a client attempted to write a schema or lens
-  catalogue object without the required admin secret. In production, catalogue writes require
-  `--admin-secret`.
-- **`QuerySubscriptionRejected`**&hairsp;—&hairsp;a query subscription was rejected by the
-  server, typically because the query references a table or schema the server doesn't know about.
-  This can happen if the schema hasn't synced yet or if there's a version mismatch.
+Use `db.onMutationError()` as a fallback for rejected writes that do not have an active `wait()`
+call. The callback receives the rejection `code`, `reason`, and local transaction record. See
+[Writing data](/docs/writing/writing-data#durability-tiers) for an example and
+[Permissions](/docs/auth/permissions) for how the server decides whether to accept a write.
 
 </Accordion>
 

@@ -1,7 +1,12 @@
 //! Documentation snippet sources compiled with the example crate.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
+
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
+use jazz::db::{Db, ExclusiveTxOps, MergeableTxOps};
+use jazz::groove::records::Value as DbValue;
+use jazz::ids::RowUuid;
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, Gather, OrderDirection, Query, col, contains, eq, gt,
     gte, is_null, lit, lt, ne, not,
@@ -9,6 +14,7 @@ use jazz::query::{
 use jazz::tools::{
     DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, Session, TablePolicies, Value,
 };
+use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::json;
 
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
@@ -21,6 +27,14 @@ fn todo_values(
     description: impl Into<String>,
 ) -> std::collections::HashMap<String, Value> {
     jazz::row_input!("title" => title.into(), "done" => false, "description" => description.into())
+}
+
+fn transaction_todo_values(title: impl Into<String>) -> jazz::db::RowCells {
+    BTreeMap::from([
+        ("title".to_string(), DbValue::String(title.into())),
+        ("done".to_string(), DbValue::Bool(false)),
+        ("description".to_string(), DbValue::String(String::new())),
+    ])
 }
 
 // #region backend-request-session-rust
@@ -159,6 +173,7 @@ pub async fn read_todo_page(
     let query = Query::from("todos")
         .filter(eq(col("done"), lit(false)))
         .order_by("title", OrderDirection::Asc)
+        .order_by("id", OrderDirection::Asc)
         .limit(page_size)
         .offset(offset);
 
@@ -221,7 +236,10 @@ pub fn build_todo_lineage_query() -> Query {
 // #endregion reading-recursive-rust
 
 // #region writing-crud-rust
-pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz::tools::Result<()> {
+pub async fn write_todo_crud(
+    client: &JazzClient,
+    existing_id: ObjectId,
+) -> jazz::tools::Result<()> {
     let values = todo_values("Write docs", "");
 
     let _new_row = client.insert("todos", values)?;
@@ -248,6 +266,46 @@ pub async fn write_todo_with_default_durability(
     Ok(id)
 }
 // #endregion writing-durability-tier-rust
+
+// #region writing-transaction-rust
+pub fn group_todo_writes(
+    db: &Db<RocksDbStorage>,
+    existing_todo_id: RowUuid,
+) -> Result<RowUuid, jazz::db::Error> {
+    let (created_id, _transaction_id) = db.transaction(|tx| {
+        let created_id = tx.insert("todos", transaction_todo_values("Write transaction docs"))?;
+        tx.update(
+            "todos",
+            existing_todo_id,
+            BTreeMap::from([("done".to_string(), DbValue::Bool(true))]),
+        )?;
+
+        let _staged = tx.read("todos", created_id)?;
+
+        Ok(created_id)
+    })?;
+
+    Ok(created_id)
+}
+// #endregion writing-transaction-rust
+
+// #region writing-exclusive-transaction-rust
+pub fn finish_todo_exclusively(
+    db: &Db<RocksDbStorage>,
+    todo_id: RowUuid,
+) -> Result<(), jazz::db::Error> {
+    let tx = db.exclusive_tx()?;
+    let _todo = tx.read("todos", todo_id)?;
+
+    tx.update(
+        "todos",
+        todo_id,
+        BTreeMap::from([("done".to_string(), DbValue::Bool(true))]),
+    )?;
+    let _transaction_id = tx.commit()?;
+    Ok(())
+}
+// #endregion writing-exclusive-transaction-rust
 
 pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result<()> {
     let search_term = "milk";

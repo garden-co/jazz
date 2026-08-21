@@ -1,7 +1,7 @@
 ---
 title: "User-owned data"
 description: "End-to-end walkthrough of the most common Jazz pattern: data that belongs to the user who created it."
-reviewedAt: "f7048c19"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -10,7 +10,7 @@ This recipe covers building an app where users own their own data and no-one els
 
 ## Schema
 
-There's no need to add an explicit owner column needed&hairsp;—&hairsp;Jazz tracks who created each row automatically via `$createdBy`.
+There's no need to add an explicit owner column&hairsp;—&hairsp;Jazz tracks who created each row automatically via `$createdBy`.
 
 <include cwd lang="ts" meta='title="schema.ts"'>
   ../examples/docs/todo-client-localfirst-react/src/user-owned-snippets.tsx#owned-schema

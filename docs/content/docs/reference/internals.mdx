@@ -1,7 +1,7 @@
 ---
 title: Advanced Internals
 description: "How Jazz works under the hood: raw tables, row histories, sync, the query pipeline, and the browser architecture."
-reviewedAt: "2b1e2e78b"
+reviewedAt: "b29b48d1a"
 ---
 
 This page describes Jazz's internal architecture. You do not need any of this to use Jazz, but it
@@ -126,8 +126,10 @@ ordering straightforward within a single device or process.
 
 ### Merge strategies
 
-By default, Jazz adopts a per-column last-writer-wins strategy to resolve concurrent edits. This means that if
-two clients update the same column of the same row simultaneously, the one with the later timestamp overwrites the earlier one.
+By default, Jazz adopts a per-column last-writer-wins strategy to resolve concurrent edits. If two
+clients update the same column of the same row simultaneously, Jazz's deterministic
+[hybrid logical clock](/docs/concepts/how-sync-works#hybrid-logical-clock) ordering chooses the
+winner.
 
 This is a sensible default, but can cause some unexpected behaviour with certain types of data. For example,
 imagine a voting app. Alice and Bob both read the current `voteCount` value as 2. They each want to increment
@@ -217,19 +219,14 @@ In the browser, Jazz uses the direct Rust/WASM core for reads, writes, subscript
 `driver: { type: "memory" }`, the database runs in the main thread and syncs to the configured
 server over the core WebSocket protocol.
 
-With `driver: { type: "persistent" }`, OPFS requires worker ownership, so Jazz starts one dedicated
-module worker for that database namespace. The worker opens the real core database with
-`WasmDb.openBrowser(...)`, owns OPFS, and forwards core row/query/write/subscription calls
-over `postMessage`. This worker is an OPFS owner, not a second JavaScript engine or compatibility
-broker.
+With `driver: { type: "persistent" }`, Jazz uses a SharedWorker broker to coordinate tabs for the
+same database namespace. The broker elects one tab as the leader. That tab creates a dedicated
+worker, which opens the core database with `WasmDb.openBrowser(...)`, owns OPFS, and maintains the
+server connection. Follower tabs receive message ports from the broker and route their database
+traffic through the leader. If the leader closes, the broker promotes another tab.
 
-```text
-Main thread Jazz API
-  ↕ postMessage
-Dedicated worker (core OPFS database)
-  ↕ WebSocket byte frames
-Core Jazz server
-```
+The main-thread runtime keeps a non-durable client-side peer so that application writes can be
+applied synchronously while the durable worker processes them in the background.
 
 With `driver: { type: "memory" }`, the worker and OPFS are skipped entirely, and the main-thread
 runtime syncs directly with the server.
@@ -287,9 +284,10 @@ live subscriptions, which is why they participate in durability-tier gating and 
 
 ### Include performance
 
-Each outer row in an `include()` / array subquery gets its own compiled sub-graph. With 1,000 outer
-rows, that is 1,000 sub-graphs. Any change to the inner table re-settles all instances. This is
-correct and simple, but worth remembering when including across very large result sets.
+Initial setup and materialisation still scale with the size of the relation returned by an
+`include()` or array subquery. Once the query is maintained, a child-row change is routed
+incrementally to the affected result. A canonical scale canary checks that the allocation cost of
+one maintained relation change does not grow with the accumulated relation size.
 
 ## Sync protocol
 

@@ -1,7 +1,7 @@
 ---
 title: Local-first auth internals
 description: "How local-first auth derives a stable account from a secret, how the self-signed JWT is structured, and how the server verifies it without an external key store."
-reviewedAt: "c5f0807b6"
+reviewedAt: "b29b48d1a"
 ---
 
 This page explains how [local-first auth](/docs/auth/local-first-auth) works under the hood. You do
@@ -24,7 +24,8 @@ This is why the design doesn't need a server-side user registry: the public key 
 
 The account is built from a single 32-byte secret the client stores locally.
 
-1. The 32-byte **seed** is hashed with SHA-512 to produce an Ed25519 **signing key**.
+1. The 32-byte **seed** is hashed with SHA-512 after the domain separator
+   `jazz-auth-sign-v1`. The first 32 bytes of the digest form the Ed25519 **signing key**.
 2. The corresponding **public key** (32 bytes) is extracted from the signing key.
 3. A deterministic **user ID** is derived from the public key using UUIDv5 with the namespace
    `jazz-auth-key-v1`.

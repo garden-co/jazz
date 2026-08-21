@@ -1,7 +1,7 @@
 ---
 title: Durability Tiers
 description: "API reference for read and write durability tiers: the options that control how far data must propagate before an operation confirms."
-reviewedAt: "f6535a533"
+reviewedAt: "b29b48d1a"
 ---
 
 import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
@@ -12,11 +12,21 @@ For background on how data flows between tiers, see [How Sync Works](/docs/conce
 
 ## Write tiers
 
-`insert`, `update`, and `delete` apply locally with no durability guarantee and return a
-`MutationResult`. Call `wait({ tier: ... })` on that result when you need confirmation that the
-mutation reached a specific durability tier.
+Mutations such as `insert`, `upsert`, `update`, `delete`, and `restore` apply locally with no
+durability guarantee and return a `MutationResult`. Transaction helpers resolve to the same kind of
+result. Call `.wait({ tier: ... })` when you need confirmation that the mutation reached a specific
+durability tier.
 
 See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for detailed guidance on which tier to use and code examples.
+
+### Mutation errors
+
+Jazz throws errors it can detect locally as soon as you call the mutation. The server may reject the
+change later, e.g. if the user does not have permissions. The change can appear locally before that
+rejection arrives. If this happens, `.wait(...)` rejects and Jazz removes the local change.
+
+If you are not waiting with `.wait(...)`, use `db.onMutationError(listener)` to handle a rejection.
+Transactions use `.wait(...)` and report errors in the same way as individual mutations.
 
 ## Read tiers
 

@@ -1,7 +1,7 @@
 ---
 title: Includes & Relations
 description: Resolve references with include(), pick columns with select(), inspect permissions, and run recursive queries.
-reviewedAt: "f6535a533"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -72,11 +72,18 @@ Jazz is distributed and supports offline edits, so a referenced row won't always
 
 When you don't load a reference, the FK column contains its raw value (the UUID string) and the row always appears in results.
 
-When you do load a reference (TypeScript `include`, Rust `join`/`on`), Jazz uses inner-join semantics. If the FK is set but the target row can't be resolved&hairsp;—&hairsp;not yet synced, deleted, or hidden by permissions&hairsp;—&hairsp;**the row is filtered out**. If the FK column is `null` (nullable and unset), the row is still returned with the included field set to `null`.
+When you load a forward reference with TypeScript `include`, the source row still appears if the
+target can't be resolved&hairsp;—&hairsp;for example, because it has not synced yet, was deleted, or is
+hidden by permissions. The included field is `null`. A nullable, unset reference also produces
+`null`.
+
+Rust's `join()` / `on()` API uses an inner join instead, so it filters out source rows without a
+matching target.
 
 ### Requiring includes
 
-To also filter out rows where the FK is `null`, use `.requireIncludes()`. This drops rows where any included forward reference is missing&hairsp;—&hairsp;whether the FK is unset or the target can't be resolved.
+Use `.requireIncludes()` when every included, non-nullable forward reference must resolve. It drops
+a source row if one of those required targets is unavailable.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -91,9 +98,11 @@ To also filter out rows where the FK is `null`, use `.requireIncludes()`. This d
   </Tab>
 </Tabs>
 
-`requireIncludes()` only filters forward references (FK &rarr; row). Reverse relations
-(`todosViaOwner`, etc.) are unaffected. When used inside a nested `include`, it applies at that
-nesting level only.
+`requireIncludes()` only filters non-nullable forward references (FK &rarr; row). Nullable forward
+references and reverse relations (`todosViaOwner`, etc.) are unaffected. When used inside a nested
+`include`, it applies at that nesting level only.
+
+In Rust, call `require_result()` on the corresponding correlated subquery to require a match.
 
 ## Magic columns
 
@@ -115,17 +124,8 @@ query.
 
 Inside the `step` callback, call `hopTo(relation)` to tell Jazz which reference to follow at each level.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-recursive-rust
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
+</include>
 
 This starts from all incomplete todos, then follows each todo's `parentId` &rarr; `parent` relation up to 10 levels deep, returning the full lineage.

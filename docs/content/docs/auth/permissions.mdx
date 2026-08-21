@@ -1,7 +1,7 @@
 ---
 title: Permissions
 description: Jazz's approach to row-level security using relationship-based access controls, and how to build policies of varying complexity.
-reviewedAt: "2e983ef11"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -150,6 +150,20 @@ See [Server Setup](/docs/getting-started/server-setup#backend-context-setup) for
   Once a compiled bundle is loaded, Jazz enforces explicit grants locally too. Sync servers still
   reject violating writes, and server-scoped reads are filtered before data is sent to the client.
 </Callout>
+
+## Check permissions before an action
+
+Use `db.canInsert()`, `db.canRead()`, `db.canUpdate()`, or `db.canDelete()` when your app needs to
+check an action before showing it to the user. Each method returns `"allowed"`, `"denied"`, or
+`"unknown"`.
+
+These results are advice, not permission enforcement. A result can become stale, and `"unknown"`
+means Jazz could not give a definite answer. The authority still makes the final decision when the
+read or write reaches it.
+
+<include cwd lang="ts" meta='title="app.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#dry-run-permissions-ts
+</include>
 
 ## Magic columns
 

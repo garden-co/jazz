@@ -1,7 +1,7 @@
 ---
 title: Client Setup
 description: Set up Jazz in your app — works out of the box with most frameworks, with manual configuration available when needed.
-reviewedAt: "cd2e1bc21"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -211,18 +211,26 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
 
   </Tab>
   <Tab value="Expo">
-    ```js title="metro.config.js"
-    import { getDefaultConfig } from "expo/metro-config";
+    ```js title="metro.config.mjs"
+    import path from "node:path";
+    import { createRequire } from "node:module";
+    import { fileURLToPath } from "node:url";
     import { withJazz } from "jazz-tools/dev/expo";
 
-    const config = getDefaultConfig(__dirname);
+    const require = createRequire(import.meta.url);
+    const { getDefaultConfig } = require("expo/metro-config");
+    const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
-    await withJazz(config, { schemaDir: __dirname });
+    const config = await withJazz(getDefaultConfig(projectRoot), {
+      schemaDir: projectRoot,
+    });
 
     export default config;
     ```
 
-    Injects `EXPO_PUBLIC_JAZZ_APP_ID` and `EXPO_PUBLIC_JAZZ_SERVER_URL` via `expoConfig.extra`. Skipped automatically when `NODE_ENV=production`.
+    Makes `EXPO_PUBLIC_JAZZ_APP_ID` and `EXPO_PUBLIC_JAZZ_SERVER_URL` available for Metro to inline,
+    and returns them as `extra.jazzAppId` and `extra.jazzServerUrl`. Skipped automatically when
+    `NODE_ENV=production`.
 
     Expo and React Native apps still need the runtime polyfills from the quickstart. Import
     `jazz-tools/expo/polyfills` as the first line of your app entry point before any other Jazz
@@ -250,12 +258,12 @@ Jazz Cloud sync URL: `https://v2.sync.jazz.tools/`. For self-hosted deployments,
 
 All plugins accept the same base options:
 
-| Option        | Description                                                                                                                                                                       |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server`      | `true` (default) starts an embedded local server. `false` disables the plugin. A URL string connects to an existing server. An object configures the embedded server (see below). |
-| `schemaDir`   | Directory containing `schema.ts` and `permissions.ts`. Defaults to the project root, or `src/lib/` for SvelteKit.                                                                 |
-| `appId`       | Override the app ID. Defaults to the value in `.env`, otherwise a generated UUID persisted on first run.                                                                          |
-| `adminSecret` | Required when `server` is a URL. For the embedded server, used as its admin secret unless `server.adminSecret` is set; otherwise a random secret is generated.                    |
+| Option        | Description                                                                                                                                                                                   |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server`      | `true` (default) starts an embedded local server. `false` disables managed-server startup. A URL string connects to an existing server. An object configures the embedded server (see below). |
+| `schemaDir`   | Directory containing `schema.ts` and `permissions.ts`. Defaults to the project root, or `src/lib/` for SvelteKit.                                                                             |
+| `appId`       | Override the app ID. Defaults to the value in `.env`, otherwise a generated UUID persisted on first run.                                                                                      |
+| `adminSecret` | Required when `server` is a URL. For the embedded server, used as its admin secret unless `server.adminSecret` is set; otherwise a random secret is generated.                                |
 
 When `server` is an object, the embedded server accepts: `port` (default: random), `appId`, `adminSecret`, `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, and `jwksUrl`. See [Server Setup](/docs/getting-started/server-setup) for the full semantics.
 
@@ -283,19 +291,19 @@ On startup and on every change to `schema.ts` or `permissions.ts`, the plugin pu
 
 Use `runtimeSources` when Jazz can't automatically find its internal assets. This usually only happens with non-standard bundler configurations or on edge runtimes like Cloudflare Workers.
 
-| Field                       | Use it when                                                                 |
-| --------------------------- | --------------------------------------------------------------------------- |
-| `runtimeSources.baseUrl`    | Jazz runtime assets are served from a shared base path like `/assets/jazz/` |
-| `runtimeSources.wasmUrl`    | The Wasm file has an explicit public URL                                    |
-| `runtimeSources.workerUrl`  | The worker script has an explicit public URL                                |
-| `runtimeSources.wasmSource` | Your runtime gives you Wasm bytes directly                                  |
-| `runtimeSources.wasmModule` | Your runtime gives you a precompiled `WebAssembly.Module`                   |
+| Field                            | Use it when                                                                 |
+| -------------------------------- | --------------------------------------------------------------------------- |
+| `runtimeSources.baseUrl`         | Jazz runtime assets are served from a shared base path like `/assets/jazz/` |
+| `runtimeSources.wasmUrl`         | The Wasm file has an explicit public URL                                    |
+| `runtimeSources.brokerWorkerUrl` | The browser broker worker has an explicit public URL                        |
+| `runtimeSources.wasmSource`      | Your runtime gives you Wasm bytes directly                                  |
+| `runtimeSources.wasmModule`      | Your runtime gives you a precompiled `WebAssembly.Module`                   |
 
 Jazz resolves these in this order:
 
 1. `runtimeSources.wasmModule`
 2. `runtimeSources.wasmSource`
-3. `runtimeSources.wasmUrl` / `runtimeSources.workerUrl`
+3. `runtimeSources.wasmUrl` / `runtimeSources.brokerWorkerUrl`
 4. `runtimeSources.baseUrl`
 5. built-in zero-config fallback
 
@@ -336,7 +344,8 @@ The config is the same across frameworks. Plain TypeScript uses `createDb(...)` 
   </Tab>
 </Tabs>
 
-Use `baseUrl` when both assets live together under one public directory. Use explicit `wasmUrl` / `workerUrl` when your app serves them from different places.
+Use `baseUrl` when both assets live together under one public directory. Use explicit `wasmUrl` /
+`brokerWorkerUrl` when your app serves them from different places.
 
 ### Edge-style Wasm setup
 
