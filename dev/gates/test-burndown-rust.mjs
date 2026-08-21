@@ -98,8 +98,8 @@ if (process.argv.includes("--self-test")) {
 }
 const doc = fs.readFileSync("TEST_BURNDOWN.md", "utf8");
 const { active, dormant, documented } = parse(doc);
-if (active.length !== 69 || dormant.length !== 10) fail("expected 69 active + 10 dormant rows");
+if (active.length !== 77 || dormant.length !== 10) fail("expected 77 active + 10 dormant rows");
 const ignored = compiledIgnored();
 if (!same(ignored, documented)) fail("compiled ignored set differs from documented set");
 verifyMarkers(active);
-console.log("Rust burndown: exact 69 active + 10 dormant identity bijection.");
+console.log("Rust burndown: exact 77 active + 10 dormant identity bijection.");
