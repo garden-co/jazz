@@ -563,7 +563,6 @@ async fn read_paths_agree_on_newest_state_after_mixed_generation_writes_impl() {
 /// bob (v2) ──update tags/labels──► server ──► newest state converges
 /// ```
 #[tokio::test]
-#[ignore = "after a runtime-published v1->v2 catalogue bundle the serving edge rejects the current-schema table shape with UnsupportedShapeCapability (gap: Source(SchemaProjection)), so post-migration writes never settle at the edge"]
 async fn migration_published_at_runtime_still_converges_mixed_generation_row() {
     tokio::task::LocalSet::new()
         .run_until(migration_published_at_runtime_still_converges_mixed_generation_row_impl())
