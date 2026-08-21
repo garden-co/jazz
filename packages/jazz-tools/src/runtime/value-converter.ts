@@ -10,6 +10,18 @@ import { toJsonText } from "./json-text.js";
 
 const I64_MIN = -(1n << 63n);
 const I64_MAX = (1n << 63n) - 1n;
+const INTEGER_MIN = -2_147_483_648;
+const INTEGER_MAX = 2_147_483_647;
+
+function toIntegerValue(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric < INTEGER_MIN || numeric > INTEGER_MAX) {
+    throw new Error(
+      `Integer values must be signed 32-bit integers between ${INTEGER_MIN} and ${INTEGER_MAX}; received ${String(value)}`,
+    );
+  }
+  return numeric;
+}
 
 function toBigInt64(value: unknown): bigint {
   const bigintValue =
@@ -68,7 +80,7 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
     case "Boolean":
       return { type: "Boolean", value: Boolean(value) };
     case "Integer":
-      return { type: "Integer", value: Number(value) };
+      return { type: "Integer", value: toIntegerValue(value) };
     case "BigInt":
       return { type: "BigInt", value: toBigInt64(value) };
     case "Double":

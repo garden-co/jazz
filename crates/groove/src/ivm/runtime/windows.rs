@@ -13,9 +13,7 @@ pub(super) struct TopBySortPart {
 
 impl PartialEq for TopBySortPart {
     fn eq(&self, other: &Self) -> bool {
-        self.direction == other.direction
-            && compare_values_sql(&self.key, &other.key, ValueComparison::Exact)
-                == Some(std::cmp::Ordering::Equal)
+        self.direction == other.direction && self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 
@@ -23,15 +21,19 @@ impl Eq for TopBySortPart {}
 
 impl Ord for TopBySortPart {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let ordering = match (is_sql_null_value(&self.key), is_sql_null_value(&other.key)) {
+            // Windows need a total order, unlike SQL predicates where any
+            // comparison involving NULL is unknown. Keep NULL first for the
+            // canonical ascending order, then apply the declared direction.
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => compare_values_sql(&self.key, &other.key, ValueComparison::Exact)
+                .expect("non-null TopBy values must be comparable"),
+        };
         match self.direction {
-            TopByDirection::Asc => {
-                compare_values_sql(&self.key, &other.key, ValueComparison::Exact)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }
-            TopByDirection::Desc => {
-                compare_values_sql(&other.key, &self.key, ValueComparison::Exact)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }
+            TopByDirection::Asc => ordering,
+            TopByDirection::Desc => ordering.reverse(),
         }
     }
 }

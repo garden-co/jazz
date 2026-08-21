@@ -6,7 +6,7 @@ import "./app.css";
 const APP_ID = import.meta.env.VITE_JAZZ_APP_ID as string | undefined;
 const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL as string | undefined;
 
-function baseConfig(): Omit<DbConfig, "jwtToken" | "secret"> {
+function baseConfig(): Omit<DbConfig, "jwtToken" | "secret" | "cookieSession"> {
   if (!APP_ID || !SERVER_URL) {
     const missing = [!APP_ID && "VITE_JAZZ_APP_ID", !SERVER_URL && "VITE_JAZZ_SERVER_URL"]
       .filter((v) => !!v)
@@ -24,7 +24,9 @@ async function buildLocalFirstConfig(): Promise<DbConfig> {
 }
 
 async function buildJwtConfig(): Promise<DbConfig | null> {
-  const { data, error } = await authClient.token();
+  const { data, error } = await authClient.$fetch<{ token: string }>("/token", {
+    method: "GET",
+  });
   if (error || !data?.token) return null;
   return { ...baseConfig(), jwtToken: data.token };
 }
@@ -63,7 +65,7 @@ async function boot() {
   // from BetterAuth and hand it back.
   db.onAuthChanged((state) => {
     if (state.error !== "expired") return;
-    authClient.token().then(({ data, error }) => {
+    authClient.$fetch<{ token: string }>("/token", { method: "GET" }).then(({ data, error }) => {
       if (!error && data?.token) db.updateAuthToken(data.token);
     });
   });

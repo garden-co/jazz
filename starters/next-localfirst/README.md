@@ -100,12 +100,12 @@ anonymous local-first connections will receive auth errors.
 
 ## Known limitations
 
-- **One device per user.** The secret lives in browser storage; clearing
-  site data wipes the identity and the user starts fresh. There is no
-  account portability between devices or browsers.
-- **No account recovery.** If a user loses their device, their data is
-  gone. When those constraints matter, use the `next-hybrid`
-  starter instead.
+- **Recovery is opt-in.** The secret lives in browser storage, so clearing
+  site data loses the identity unless the user first saved the recovery phrase
+  or passkey backup surfaced by this starter.
+- **Passkey portability varies.** A passkey backup may be limited to the
+  browser or platform that syncs it. Pair it with the recovery phrase when
+  users need dependable cross-device recovery.
 
 ## Where to go next
 

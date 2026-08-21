@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 mod common;
 
 use jazz::block_on;
-use jazz::db::{Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, QueryAttachment, ReadOpts,
+    SeededRowIdSource,
+};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -85,7 +88,14 @@ fn row(seed: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
-fn measure_unrelated_coverage_group_refresh(group_count: usize) -> Duration {
+struct CoverageGroupFixture {
+    _client: Db<MemoryStorage>,
+    server: Db<MemoryStorage>,
+    _attachments: Vec<QueryAttachment>,
+    next_row: u64,
+}
+
+fn prepare_coverage_group_fixture(group_count: usize) -> CoverageGroupFixture {
     let schema = schema();
     let server = open_server(schema.clone());
     let client = open_client(0xc1, schema);
@@ -124,38 +134,68 @@ fn measure_unrelated_coverage_group_refresh(group_count: usize) -> Duration {
         "coverage groups did not become covered"
     );
 
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "items",
-            row(1_000_000 + group_count as u64),
-            AuthorId::SYSTEM,
-            BTreeMap::from([
-                ("route".to_owned(), Value::I64(i64::from(u32::MAX))),
-                ("label".to_owned(), Value::String("unrelated".to_owned())),
-            ]),
-        )
-        .expect("write unrelated row");
+    CoverageGroupFixture {
+        _client: client,
+        server,
+        _attachments: attachments,
+        next_row: 1_000_000 + group_count as u64 * 10,
+    }
+}
 
-    let start = Instant::now();
-    server.tick().expect("serve unrelated row change");
-    let elapsed = start.elapsed();
+impl CoverageGroupFixture {
+    fn measure_unrelated_refresh(&mut self) -> Duration {
+        self.server
+            .seed_settled_mergeable_for_bootstrap(
+                "items",
+                row(self.next_row),
+                AuthorId::SYSTEM,
+                BTreeMap::from([
+                    ("route".to_owned(), Value::I64(i64::from(u32::MAX))),
+                    ("label".to_owned(), Value::String("unrelated".to_owned())),
+                ]),
+            )
+            .expect("write unrelated row");
+        self.next_row += 1;
 
-    assert_eq!(attachments.len(), group_count);
-    elapsed
+        let start = Instant::now();
+        self.server.tick().expect("serve unrelated row change");
+        start.elapsed()
+    }
 }
 
 #[test]
 fn unrelated_coverage_group_refresh_is_linear_in_groups_not_flushes() {
-    let small = measure_unrelated_coverage_group_refresh(100);
-    let large = measure_unrelated_coverage_group_refresh(1_000);
-    let group_ratio = large.as_secs_f64() / small.as_secs_f64().max(0.000_001);
+    const PAIRS: usize = 5;
+    let mut small_fixture = prepare_coverage_group_fixture(100);
+    let mut large_fixture = prepare_coverage_group_fixture(1_000);
+
+    // Each pair runs the two already-prepared topologies back-to-back, and we
+    // alternate which topology goes first. This prevents a one-off scheduler
+    // pause or cache effect from making the single 100-group control look
+    // implausibly cheap. The median keeps the original 15x ceiling while
+    // discarding the two noisiest paired observations.
+    let samples: [(Duration, Duration); PAIRS] = std::array::from_fn(|pair| {
+        if pair % 2 == 0 {
+            let small = small_fixture.measure_unrelated_refresh();
+            let large = large_fixture.measure_unrelated_refresh();
+            (small, large)
+        } else {
+            let large = large_fixture.measure_unrelated_refresh();
+            let small = small_fixture.measure_unrelated_refresh();
+            (small, large)
+        }
+    });
+    let mut ratios =
+        samples.map(|(small, large)| large.as_secs_f64() / small.as_secs_f64().max(0.000_001));
+    ratios.sort_by(f64::total_cmp);
+    let group_ratio = ratios[PAIRS / 2];
 
     eprintln!(
-        "coverage-group refresh small={small:?} large={large:?} group_ratio={group_ratio:.2}"
+        "coverage-group refresh pairs={samples:?} sorted_ratios={ratios:?} median_ratio={group_ratio:.2}"
     );
     assert!(
         group_ratio <= 15.0,
         "one-row refresh grew superlinearly with unrelated coverage groups: \
-         small={small:?}, large={large:?}, group_ratio={group_ratio:.2}"
+         pairs={samples:?}, sorted_ratios={ratios:?}, median_ratio={group_ratio:.2}"
     );
 }

@@ -523,6 +523,17 @@ test("CI runs the workflow contract test through its package script", () => {
   assert.match(lint, /run: pnpm test:ci-workflow/);
 });
 
+test("Windows NAPI release builds provision libclang for RocksDB bindgen", () => {
+  const windowsNapiSetup =
+    /name: Install libclang for Windows bindgen[\s\S]*if: matrix\.platform == 'win32-x64-msvc'[\s\S]*choco install llvm --version=21\.1\.8 --yes --no-progress --limit-output[\s\S]*Test-Path \(Join-Path \$libclangPath "libclang\.dll"\)[\s\S]*LIBCLANG_PATH=\$libclangPath[\s\S]*\$env:GITHUB_PATH/;
+  assert.match(packageBuild, windowsNapiSetup);
+  assert.throws(
+    () =>
+      assert.match(packageBuild.replace('"LIBCLANG_PATH=$libclangPath" | ', ""), windowsNapiSetup),
+    /LIBCLANG_PATH/,
+  );
+});
+
 test("TypeScript CI overlaps independent Node and browser suites after one artifact build", () => {
   const typescript = job("test-ts");
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");

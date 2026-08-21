@@ -148,3 +148,7 @@ required-features = ["testing"]
 [[test]]
 name = "authorization_scope_reentry"
 required-features = ["testing"]
+
+[[test]]
+name = "edge_fate_authority"
+required-features = ["runtime"]

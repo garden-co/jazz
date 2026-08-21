@@ -59,7 +59,7 @@ Two processes run in development:
 2. **Vite** on port 5173, proxying `/api/*` to Hono.
 
 `BetterAuthProvider` in `src/main.tsx` watches the Better Auth session. When a
-session exists, it fetches a JWT via `authClient.token()` and passes it to
+session exists, it fetches a JWT via `authClient.$fetch("/token")` and passes it to
 `<JazzProvider>` as `jwtToken`. The Jazz dev server verifies that JWT against
 the JWKS endpoint at `http://localhost:3001/api/auth/jwks`, whose URL is
 declared in `vite.config.ts` so the plugin can wire it up automatically.

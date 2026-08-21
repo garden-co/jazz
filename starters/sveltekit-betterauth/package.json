@@ -12,7 +12,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "better-auth": "^1.5.5",
+    "better-auth": "1.6.24",
     "jazz-tools": "workspace:*",
     "svelte": "^5.0.0"
   },

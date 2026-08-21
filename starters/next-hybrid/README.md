@@ -74,7 +74,7 @@ They carry over automatically. Here is how:
    the same principal that created the anonymous todos.
 
 `components/jazz-provider.tsx` also mounts a `JwtRefresh` component inside
-the provider that re-mints the JWT via `authClient.token()` whenever
+the provider that re-mints the JWT via `authClient.$fetch("/token")` whenever
 `db.onAuthChanged` reports the token as expired, so long-lived sessions
 won't silently drop to unauthenticated.
 
