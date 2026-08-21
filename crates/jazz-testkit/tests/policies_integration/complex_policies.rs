@@ -914,7 +914,6 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed_inner() {
 /// observer ──EdgeServer query────────────────────────────► sees renamed chat, protected fields unchanged
 /// ```
 #[tokio::test]
-#[ignore = "same-table EXISTS WITH CHECK incorrectly accepts a protected is_public field change"]
 async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes() {
     tokio::task::LocalSet::new().run_until(update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes_inner()).await;
 }

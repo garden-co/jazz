@@ -1612,11 +1612,30 @@ fn append_exists_rel_policy_clause(
         ));
     };
 
-    let remaining_filters = lowered
-        .filters
-        .iter()
-        .map(|filter| filter.predicate.clone())
-        .collect::<Vec<_>>();
+    let mut remaining_filters = Vec::new();
+    let mut outer_correlations = Vec::new();
+    for filter in lowered.filters.drain(..) {
+        let Some(LoweredRelValue::OuterRow(source_column)) = filter.value else {
+            remaining_filters.push(filter.predicate);
+            continue;
+        };
+        if filter.scope != correlation.scope {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), path),
+                "core schema ExistsRel does not support outer correlations across multiple relation scopes",
+            ));
+        }
+        let Some(join_column) = filter.column else {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), path),
+                "core schema ExistsRel outer correlation must name a concrete column",
+            ));
+        };
+        outer_correlations.push(JoinCorrelation {
+            join_column,
+            source_column,
+        });
+    }
 
     for reachable in &mut lowered.reachable {
         if reachable.access_row_column == "__pending_outer_row" {
@@ -1647,6 +1666,12 @@ fn append_exists_rel_policy_clause(
         });
     }
     if !lowered.reachable.is_empty() {
+        if !outer_correlations.is_empty() {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), path),
+                "core schema ExistsRel reachability does not support additional outer correlations",
+            ));
+        }
         for reachable in lowered.reachable {
             query.reachable.push(reachable);
         }
@@ -1654,6 +1679,12 @@ fn append_exists_rel_policy_clause(
     }
 
     if !lowered.joins.is_empty() {
+        if !outer_correlations.is_empty() {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), path),
+                "core schema ExistsRel joins do not support additional outer correlations",
+            ));
+        }
         let correlation_scope = correlation.scope.as_deref();
         query.filters = query
             .filters
@@ -1759,15 +1790,28 @@ fn append_exists_rel_policy_clause(
         return Ok(query);
     }
 
-    let filters = lowered
-        .filters
-        .into_iter()
-        .map(|filter| filter.predicate)
-        .collect::<Vec<_>>();
     if correlation_column == "id" {
-        Ok(query.join_via_row_id(lowered.table, source_column, filters))
+        Ok(query.join_via_row_id_with_correlations(
+            lowered.table,
+            source_column,
+            outer_correlations,
+            remaining_filters,
+        ))
+    } else if outer_correlations.is_empty() {
+        Ok(query.join_via_column(
+            lowered.table,
+            correlation_column,
+            source_column,
+            remaining_filters,
+        ))
     } else {
-        Ok(query.join_via_column(lowered.table, correlation_column, source_column, filters))
+        Ok(query.join_via_column_with_correlations(
+            lowered.table,
+            correlation_column,
+            source_column,
+            outer_correlations,
+            remaining_filters,
+        ))
     }
 }
 

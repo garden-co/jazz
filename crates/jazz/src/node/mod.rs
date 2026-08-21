@@ -1091,10 +1091,15 @@ impl CurrentRow {
             .iter()
             .find(|candidate| candidate.name == column)?;
         let user_name = user_column_field(column);
-        let idx = self.record.descriptor().fields().iter().position(|field| {
-            field.name.as_deref() == Some(user_name.as_str())
-                || field.name.as_deref() == Some(column)
-        })?;
+        let fields = self.record.descriptor().fields();
+        let idx = fields
+            .iter()
+            .position(|field| field.name.as_deref() == Some(user_name.as_str()))
+            .or_else(|| {
+                fields
+                    .iter()
+                    .position(|field| field.name.as_deref() == Some(column))
+            })?;
         match self.record.borrowed().get_idx(idx).ok()? {
             Value::Nullable(None) => None,
             Value::Nullable(Some(value)) => Some(*value),
