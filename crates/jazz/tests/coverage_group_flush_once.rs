@@ -89,8 +89,8 @@ fn row(seed: u64) -> RowUuid {
 }
 
 struct CoverageGroupFixture {
-    _client: Db<MemoryStorage>,
-    server: Db<MemoryStorage>,
+    _client: Db<TestStorage>,
+    server: Db<TestStorage>,
     _attachments: Vec<QueryAttachment>,
     next_row: u64,
 }
