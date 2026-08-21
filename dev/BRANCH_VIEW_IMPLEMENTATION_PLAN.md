@@ -470,7 +470,9 @@ Port the current contribution oracles using public branch-dimension schemas:
 
 - Add public schema dimension and table binding builders.
 - Add named branch-dimension values and live/frozen base query options across Rust,
-  TypeScript, WASM, NAPI, React Native, and server/test helpers.
+  TypeScript, WASM, NAPI, and server/test helpers. React Native is explicitly
+  outside this implementation's scope; its legacy runtime surface may be ported
+  independently after the core branch-view contract has settled.
 - Add copy-on-write and contribution-merge helpers; do not add create/discard or
   a mandatory branch table.
 - Port every **port** and **replace** ledger row to active tests.
