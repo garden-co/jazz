@@ -43,7 +43,7 @@ use crate::tx::{
 };
 use base64::Engine;
 use serde::{Deserialize, Deserializer};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::tools::{
@@ -599,6 +599,7 @@ impl ClientDb {
         opts: CoreReadOpts,
         table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
+        cancellation: oneshot::Receiver<()>,
     ) -> Result<()> {
         self.ensure_tick_driver_running()?;
         ClientDbInner::handle_subscribe(
@@ -608,6 +609,7 @@ impl ClientDb {
             opts,
             table,
             tx,
+            cancellation,
         )
         .await
     }
@@ -1199,6 +1201,7 @@ impl ClientDbInner {
         opts: CoreReadOpts,
         table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
+        mut cancellation: oneshot::Receiver<()>,
     ) -> Result<()> {
         let (db, prepared) = {
             let inner = inner.borrow();
@@ -1221,7 +1224,14 @@ impl ClientDbInner {
             // sends a delta-shaped update for a tracked occurrence. That is
             // attach framing, not a replacement snapshot.
             let mut initial_hydration = true;
-            while let Some(event) = stream.next_event().await {
+            loop {
+                let Some(event) = (tokio::select! {
+                    biased;
+                    _ = &mut cancellation => None,
+                    event = stream.next_event() => event,
+                }) else {
+                    break;
+                };
                 match event {
                     CoreSubscriptionEvent::Delta {
                         reset,
@@ -2778,8 +2788,11 @@ impl JazzClient {
     ) -> Result<SubscriptionStream> {
         let table = query.table.clone();
         let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
-        self.db.subscribe(query, opts, table, tx).await?;
-        Ok(SubscriptionStream::new(rx))
+        let (cancellation, cancellation_rx) = oneshot::channel();
+        self.db
+            .subscribe(query, opts, table, tx, cancellation_rx)
+            .await?;
+        Ok(SubscriptionStream::new(rx, cancellation))
     }
 
     /// One-shot query, optionally waiting for a durability tier.

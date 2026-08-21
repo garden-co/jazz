@@ -242,7 +242,6 @@ async fn one_shot_query_is_served_once_without_installing_live_delivery_impl() {
 /// alice ──resubscribe─► server ──► snapshot row1 + row2, then row3 delta
 /// ```
 #[tokio::test]
-#[ignore = "dropping the public SubscriptionStream never tears down the core subscription (the forwarding task ignores send failures and JazzClient::unsubscribe is a no-op), so matching writes keep arriving in the client's local store"]
 async fn dropped_subscription_stops_delivery_and_resubscribes_cleanly() {
     tokio::task::LocalSet::new()
         .run_until(dropped_subscription_stops_delivery_and_resubscribes_cleanly_impl())
