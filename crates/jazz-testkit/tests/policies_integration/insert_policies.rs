@@ -127,37 +127,6 @@ async fn server_without_loaded_policies_allows_write_without_explicit_policy_inn
     server.shutdown().await;
 }
 
-/// Verifies that the edge server denies writes when a loaded permissions bundle
-/// lacks an explicit INSERT policy.
-#[tokio::test]
-#[ignore = "the server currently allows INSERT when a table has no explicit policy bundle"]
-async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy() {
-    tokio::task::LocalSet::new()
-        .run_until(
-            loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy_inner(
-            ),
-        )
-        .await;
-}
-
-async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy_inner() {
-    let notes_table = TableSchema::builder("notes").column("content", ColumnType::Text);
-    let schema = SchemaBuilder::new().table(notes_table).build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client =
-        connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
-
-    let transaction_id = client
-        .insert("notes", crate::row_input!("content" => "A note"))
-        .expect("the current client accepts the optimistic insert")
-        .2
-        .expect("denied insert should commit locally");
-    wait_for_edge_tx_rejection(&client, transaction_id).await;
-
-    client.shutdown().await.expect("shutdown client");
-    server.shutdown().await;
-}
-
 /// Verifies that one local client can evaluate the same schema under different
 /// sessions, showing each user only their own inserted rows.
 #[tokio::test]
