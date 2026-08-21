@@ -432,6 +432,49 @@ impl RowDescriptor {
 
 /// Schema for a single table, including row structure and policies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchDimensionDescriptor {
+    /// Stable UUID identity, independent from the bound application column.
+    pub id: crate::ids::BranchDimensionId,
+    /// Stable schema-wide selector name.
+    pub name: String,
+    /// Logical type shared by every column bound to this dimension.
+    #[serde(rename = "columnType")]
+    pub column_type: ColumnType,
+    /// Immutable value used to normalize history authored before this dimension.
+    #[serde(rename = "migrationDefault")]
+    pub migration_default: Value,
+}
+
+/// Binding from one renameable application column to a stable branch dimension.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BranchDimensionBindingDescriptor {
+    /// Bind a column to the dimension with the same stable name.
+    Column(ColumnName),
+    /// Bind a renameable column to an explicitly named stable dimension.
+    Named {
+        column: ColumnName,
+        dimension: String,
+    },
+}
+
+impl BranchDimensionBindingDescriptor {
+    pub fn column(&self) -> &ColumnName {
+        match self {
+            Self::Column(column) | Self::Named { column, .. } => column,
+        }
+    }
+
+    pub fn dimension(&self) -> &str {
+        match self {
+            Self::Column(column) => column.as_str(),
+            Self::Named { dimension, .. } => dimension,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableSchema {
     /// Row structure definition.
     pub columns: RowDescriptor,
@@ -445,6 +488,16 @@ pub struct TableSchema {
     /// Access control policies.
     #[serde(default, skip_serializing_if = "table_policies_are_default")]
     pub policies: TablePolicies,
+    /// Schema-wide dimension declarations contributed by this schema fragment.
+    #[serde(
+        default,
+        rename = "branchDimensions",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub branch_dimensions: Vec<BranchDimensionDescriptor>,
+    /// Ordinary columns bound to stable branch dimensions.
+    #[serde(default, rename = "branchBy", skip_serializing_if = "Vec::is_empty")]
+    pub branch_by: Vec<BranchDimensionBindingDescriptor>,
 }
 
 fn table_policies_are_default(policies: &TablePolicies) -> bool {
@@ -460,6 +513,8 @@ impl TableSchema {
             columns,
             indexed_columns: None,
             policies: TablePolicies::default(),
+            branch_dimensions: Vec::new(),
+            branch_by: Vec::new(),
         }
     }
 
@@ -469,6 +524,8 @@ impl TableSchema {
             columns,
             indexed_columns: None,
             policies,
+            branch_dimensions: Vec::new(),
+            branch_by: Vec::new(),
         }
     }
 
@@ -513,6 +570,8 @@ pub struct TableSchemaBuilder {
     columns: Vec<ColumnDescriptor>,
     indexed_columns: Option<Vec<ColumnName>>,
     policies: TablePolicies,
+    branch_dimensions: Vec<BranchDimensionDescriptor>,
+    branch_by: Vec<BranchDimensionBindingDescriptor>,
 }
 
 impl TableSchemaBuilder {
@@ -523,6 +582,8 @@ impl TableSchemaBuilder {
             columns: Vec::new(),
             indexed_columns: None,
             policies: TablePolicies::default(),
+            branch_dimensions: Vec::new(),
+            branch_by: Vec::new(),
         }
     }
 
@@ -588,6 +649,26 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Declare a schema-wide branch dimension.
+    pub fn branch_dimension(mut self, dimension: BranchDimensionDescriptor) -> Self {
+        self.branch_dimensions.push(dimension);
+        self
+    }
+
+    /// Bind an ordinary application column to a schema-wide dimension name.
+    pub fn branch_by(
+        mut self,
+        column: impl Into<ColumnName>,
+        dimension: impl Into<String>,
+    ) -> Self {
+        self.branch_by
+            .push(BranchDimensionBindingDescriptor::Named {
+                column: column.into(),
+                dimension: dimension.into(),
+            });
+        self
+    }
+
     /// Index only this explicit user-column subset.
     ///
     /// Internal `_id` and `_id_deleted` indexes are always maintained.
@@ -611,6 +692,8 @@ impl TableSchemaBuilder {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
             policies: self.policies,
+            branch_dimensions: self.branch_dimensions,
+            branch_by: self.branch_by,
         }
     }
 
@@ -621,6 +704,8 @@ impl TableSchemaBuilder {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
             policies: self.policies,
+            branch_dimensions: self.branch_dimensions,
+            branch_by: self.branch_by,
         };
         (name, schema)
     }
@@ -630,8 +715,6 @@ impl TableSchemaBuilder {
 #[derive(Debug, Clone, Default)]
 pub struct SchemaBuilder {
     tables: Vec<TableSchemaBuilder>,
-    branch_read_policy: Option<Box<PolicyExpr>>,
-    branch_write_policy: Option<Box<PolicyExpr>>,
 }
 
 impl SchemaBuilder {
@@ -646,24 +729,10 @@ impl SchemaBuilder {
         self
     }
 
-    /// Set the policy controlling access to branch metadata.
-    pub fn branch_read_policy(mut self, policy: PolicyExpr) -> Self {
-        self.branch_read_policy = Some(Box::new(policy));
-        self
-    }
-
-    /// Set the policy controlling branch creation, updates, discard, and merge.
-    pub fn branch_write_policy(mut self, policy: PolicyExpr) -> Self {
-        self.branch_write_policy = Some(Box::new(policy));
-        self
-    }
-
     /// Build the complete schema.
     pub fn build(self) -> Schema {
         Schema {
             tables: self.tables.into_iter().map(|t| t.build_named()).collect(),
-            branch_read_policy: self.branch_read_policy,
-            branch_write_policy: self.branch_write_policy,
         }
     }
 
@@ -677,47 +746,17 @@ impl SchemaBuilder {
 /// Developer-authored schema persisted in the catalogue.
 ///
 /// Tables are stored in name order so serialization and content hashing are
-/// deterministic. Branch policies are part of the same public schema source;
-/// the compiled runtime representation is derived from this value.
+/// deterministic. The compiled runtime representation is derived from this value.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schema {
     tables: BTreeMap<TableName, TableSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    branch_read_policy: Option<Box<PolicyExpr>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    branch_write_policy: Option<Box<PolicyExpr>>,
 }
 
 impl Schema {
     /// Create an empty schema.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Return the policy controlling access to branch metadata.
-    pub fn branch_read_policy(&self) -> Option<&PolicyExpr> {
-        self.branch_read_policy.as_deref()
-    }
-
-    /// Return the policy controlling branch creation, updates, discard, and merge.
-    pub fn branch_write_policy(&self) -> Option<&PolicyExpr> {
-        self.branch_write_policy.as_deref()
-    }
-
-    /// Attach policies controlling branch metadata reads and branch mutations.
-    ///
-    /// This is primarily useful when rebuilding an admitted public schema from
-    /// durable catalogue data. Table policies are managed by the separate
-    /// permissions catalogue; branch policies remain part of the schema source.
-    pub fn with_branch_policies(
-        mut self,
-        branch_read_policy: Option<PolicyExpr>,
-        branch_write_policy: Option<PolicyExpr>,
-    ) -> Self {
-        self.branch_read_policy = branch_read_policy.map(Box::new);
-        self.branch_write_policy = branch_write_policy.map(Box::new);
-        self
     }
 }
 
@@ -739,7 +778,6 @@ impl FromIterator<(TableName, TableSchema)> for Schema {
     fn from_iter<T: IntoIterator<Item = (TableName, TableSchema)>>(iter: T) -> Self {
         Self {
             tables: iter.into_iter().collect(),
-            ..Self::default()
         }
     }
 }

@@ -3,41 +3,49 @@
 use super::*;
 
 fn branch_dimension_reference_policy_schema() -> JazzSchema {
-    let dimension = crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x74; 16]));
-    let policy = Policy::shape(Query::from("todos").join_via_row_id(
-        "branches",
-        "branch_id",
-        [eq(col("owner"), claim("sub"))],
-    ));
-    JazzSchema::new_with_branch_dimensions(
-        [crate::schema::BranchDimensionSchema::new(
-            dimension,
-            "branch",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        )],
-        [
-            TableSchema::new(
-                "branches",
-                [
-                    ColumnSchema::new("name", ColumnType::String),
-                    ColumnSchema::new("owner", ColumnType::Uuid),
-                ],
+    let policy = PublicPolicyExpr::Exists {
+        table: "branches".to_owned(),
+        condition: Box::new(PublicPolicyExpr::And(vec![
+            public_outer_eq("branch_key", "branch_id"),
+            public_session_eq("owner", &["user_id"]),
+        ])),
+    };
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("branches")
+                    .fk_column("branch_key", "branches")
+                    .column("name", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                            .with_delete(PublicPolicyExpr::True),
+                    ),
             )
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-            TableSchema::new(
-                "todos",
-                [
-                    ColumnSchema::new("branch_id", ColumnType::Uuid),
-                    ColumnSchema::new("title", ColumnType::String),
-                ],
-            )
-            .with_reference("branch_id", "branches")
-            .with_branch_dimension("branch_id", dimension)
-            .with_read_policy(policy.clone())
-            .with_write_policy(policy),
-        ],
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .fk_column("branch_id", "branches")
+                    .column("title", PublicColumnType::Text)
+                    .branch_dimension(PublicBranchDimensionDescriptor {
+                        id: crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x74; 16])),
+                        name: "branch".to_owned(),
+                        column_type: PublicColumnType::Uuid,
+                        migration_default: PublicValue::Uuid(PublicObjectId::from_uuid(
+                            uuid::Uuid::nil(),
+                        )),
+                    })
+                    .branch_by("branch_id", "branch")
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(policy.clone())
+                            .with_insert(policy.clone())
+                            .with_update(Some(policy.clone()), policy.clone())
+                            .with_delete(policy),
+                    ),
+            ),
     )
 }
 
@@ -54,6 +62,7 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
             "branches",
             branch,
             BTreeMap::from([
+                ("branch_key".to_owned(), Value::Uuid(branch.0)),
                 ("name".to_owned(), Value::String("draft".to_owned())),
                 ("owner".to_owned(), Value::Uuid(owner.0)),
             ]),

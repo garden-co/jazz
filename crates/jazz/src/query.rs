@@ -12,9 +12,7 @@ use groove::schema::ColumnType;
 use thiserror::Error;
 
 use crate::ids::SchemaVersionId;
-use crate::schema::{
-    ColumnSchema as JazzColumnSchema, JazzSchema, RuntimeSchema, TableSchema,
-};
+use crate::schema::{ColumnSchema as JazzColumnSchema, JazzSchema, RuntimeSchema, TableSchema};
 
 // Stable public syntax and relation-facade vocabulary.
 include!("query/ast.rs");

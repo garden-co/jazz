@@ -10,8 +10,8 @@ use crate::query::{
     PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
-    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
-    TableSchema as CoreTableSchema, WritePolicies,
+    BranchDimensionBinding, BranchDimensionSchema, ColumnSchema as CoreColumnSchema, JazzSchema,
+    MergeStrategy, RuntimeSchema, TableSchema as CoreTableSchema, WritePolicies,
 };
 
 use crate::tools::public_api::policy::{CmpOp, PolicyValue};
@@ -56,19 +56,84 @@ impl fmt::Display for SchemaConversionError {
 impl std::error::Error for SchemaConversionError {}
 
 pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
+    let (branch_dimensions, branch_dimension_ids) = convert_branch_dimensions(schema)?;
     let mut converted = schema
         .iter()
-        .map(|(name, table)| convert_table(schema, name, table))
+        .map(|(name, table)| convert_table(schema, name, table, &branch_dimension_ids))
         .collect::<Result<Vec<_>, _>>()?;
     coerce_typed_literals(schema, &mut converted);
-    validate_converted_schema(&converted)?;
+    validate_converted_schema(&branch_dimensions, &converted)?;
     Ok(JazzSchema::from_runtime(
         schema.clone(),
         RuntimeSchema {
-            branch_dimensions: Vec::new(),
+            branch_dimensions,
             tables: converted,
         },
     ))
+}
+
+fn convert_branch_dimensions(
+    schema: &Schema,
+) -> Result<
+    (
+        Vec<BranchDimensionSchema>,
+        BTreeMap<String, crate::ids::BranchDimensionId>,
+    ),
+    SchemaConversionError,
+> {
+    let mut declarations = BTreeMap::new();
+    let mut ids = BTreeMap::new();
+    for (table_name, table) in schema.iter() {
+        for dimension in &table.branch_dimensions {
+            let path = format!(
+                "$.{}.branchDimensions.{}",
+                table_name.as_str(),
+                dimension.name
+            );
+            if dimension.name.is_empty() {
+                return Err(err(path, "branch dimension name cannot be empty"));
+            }
+            if let Some(existing) = declarations.get(&dimension.name) {
+                if existing != dimension {
+                    return Err(err(
+                        path,
+                        "conflicting declaration for branch dimension name",
+                    ));
+                }
+                continue;
+            }
+            if let Some(existing_name) = ids.insert(dimension.id, dimension.name.clone()) {
+                if existing_name != dimension.name {
+                    return Err(err(
+                        path,
+                        "branch dimension id is already declared under another name",
+                    ));
+                }
+            }
+            declarations.insert(dimension.name.clone(), dimension.clone());
+        }
+    }
+
+    let mut converted = Vec::with_capacity(declarations.len());
+    let mut ids_by_name = BTreeMap::new();
+    for (name, dimension) in declarations {
+        let synthetic_table = TableName::new("branchDimensions");
+        let column_type = convert_column_type(&synthetic_table, &name, &dimension.column_type)?;
+        let migration_default = convert_default_for_column_type(
+            &synthetic_table,
+            &name,
+            &dimension.column_type,
+            &dimension.migration_default,
+        )?;
+        ids_by_name.insert(name.clone(), dimension.id);
+        converted.push(BranchDimensionSchema::new(
+            dimension.id,
+            name,
+            column_type,
+            migration_default,
+        ));
+    }
+    Ok((converted, ids_by_name))
 }
 
 /// Decode and compile the public JSON schema used by native bindings.
@@ -78,11 +143,69 @@ pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     convert_public_schema(&schema).map_err(|error| format!("compile public schema: {error}"))
 }
 
-fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
+fn validate_converted_schema(
+    branch_dimensions: &[BranchDimensionSchema],
+    tables: &[CoreTableSchema],
+) -> Result<(), SchemaConversionError> {
     let schema = RuntimeSchema {
-        branch_dimensions: Vec::new(),
+        branch_dimensions: branch_dimensions.to_vec(),
         tables: tables.to_vec(),
     };
+    for dimension in branch_dimensions {
+        if !matches!(
+            dimension.column_type,
+            GrooveColumnType::Uuid
+                | GrooveColumnType::U8
+                | GrooveColumnType::U16
+                | GrooveColumnType::U32
+                | GrooveColumnType::U64
+                | GrooveColumnType::I32
+                | GrooveColumnType::I64
+                | GrooveColumnType::EnumTag(_)
+        ) {
+            return Err(err(
+                format!("$.branchDimensions.{}", dimension.name),
+                "branch dimensions require UUID, stable enum, or fixed-width integer values",
+            ));
+        }
+    }
+    for table in tables {
+        let mut bound = std::collections::BTreeSet::new();
+        for binding in &table.branch_by {
+            let dimension = branch_dimensions
+                .iter()
+                .find(|dimension| dimension.id == binding.dimension)
+                .expect("binding ids were resolved from declarations");
+            let column = table
+                .columns
+                .iter()
+                .find(|column| column.name == binding.column)
+                .ok_or_else(|| {
+                    err(
+                        format!("$.{}.branchBy", table.name),
+                        format!("unknown branch column {:?}", binding.column),
+                    )
+                })?;
+            if !bound.insert(binding.dimension) {
+                return Err(err(
+                    format!("$.{}.branchBy", table.name),
+                    format!(
+                        "branch dimension {:?} is bound more than once",
+                        dimension.name
+                    ),
+                ));
+            }
+            if column.column_type != dimension.column_type {
+                return Err(err(
+                    format!("$.{}.branchBy", table.name),
+                    format!(
+                        "column {:?} does not match branch dimension {:?}",
+                        binding.column, dimension.name
+                    ),
+                ));
+            }
+        }
+    }
     for table in tables {
         if let Some(policy) = &table.read_policy {
             policy.validate_runtime(&schema).map_err(|error| {
@@ -440,6 +563,7 @@ fn convert_table(
     schema: &Schema,
     name: &TableName,
     table: &TableSchema,
+    branch_dimension_ids: &BTreeMap<String, crate::ids::BranchDimensionId>,
 ) -> Result<CoreTableSchema, SchemaConversionError> {
     let mut references = BTreeMap::new();
     let mut columns = Vec::with_capacity(table.columns.columns.len());
@@ -472,6 +596,25 @@ fn convert_table(
     }
 
     let mut converted = CoreTableSchema::new(name.as_str(), columns);
+    converted.branch_by = table
+        .branch_by
+        .iter()
+        .map(|binding| {
+            let dimension = branch_dimension_ids
+                .get(binding.dimension())
+                .copied()
+                .ok_or_else(|| {
+                    err(
+                        format!("$.{}.branchBy", name.as_str()),
+                        format!("unknown branch dimension {:?}", binding.dimension()),
+                    )
+                })?;
+            Ok(BranchDimensionBinding {
+                column: binding.column().as_str().to_owned(),
+                dimension,
+            })
+        })
+        .collect::<Result<Vec<_>, SchemaConversionError>>()?;
     converted.references = references;
     converted.indexed_columns = table
         .indexed_columns

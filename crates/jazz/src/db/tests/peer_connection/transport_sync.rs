@@ -3,24 +3,28 @@
 use super::*;
 
 fn branch_sync_schema() -> JazzSchema {
-    let dimension = crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x31; 16]));
-    JazzSchema::new_with_branch_dimensions(
-        [crate::schema::BranchDimensionSchema::new(
-            dimension,
-            "branch",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        )],
-        [TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("branch_id", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-            ],
-        )
-        .with_branch_dimension("branch_id", dimension)
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public())],
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("branch_id", PublicColumnType::Uuid)
+                .column("title", PublicColumnType::Text)
+                .branch_dimension(PublicBranchDimensionDescriptor {
+                    id: crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x31; 16])),
+                    name: "branch".to_owned(),
+                    column_type: PublicColumnType::Uuid,
+                    migration_default: PublicValue::Uuid(PublicObjectId::from_uuid(
+                        uuid::Uuid::nil(),
+                    )),
+                })
+                .branch_by("branch_id", "branch")
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
     )
 }
 

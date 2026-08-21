@@ -4,7 +4,7 @@ import type { WasmSchema } from "../../drivers/types.js";
 import { encodeSchema } from "./schema-codec.js";
 
 describe("branch-aware schema codec", () => {
-  it("matches the Rust postcard layout for dimensions and table bindings", () => {
+  it("preserves dimensions and table bindings in the public schema source", () => {
     const schema: WasmSchema = {
       todos: {
         branchDimensions: [
@@ -23,12 +23,7 @@ describe("branch-aware schema codec", () => {
       },
     };
 
-    expect([...encodeSchema(schema)]).toEqual([
-      1, 16, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 9, 119, 111, 114, 107,
-      115, 112, 97, 99, 101, 10, 8, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 5, 116,
-      111, 100, 111, 115, 1, 12, 119, 111, 114, 107, 115, 112, 97, 99, 101, 95, 105, 100, 10, 0, 1,
-      12, 119, 111, 114, 107, 115, 112, 97, 99, 101, 95, 105, 100, 16, 49, 49, 49, 49, 49, 49, 49,
-      49, 49, 49, 49, 49, 49, 49, 49, 49, 0, 0, 0, 0, 0, 0, 0, 0,
-    ]);
+    const source = JSON.parse(new TextDecoder().decode(encodeSchema(schema)));
+    expect(source).toEqual({ tables: schema });
   });
 });

@@ -7,17 +7,22 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, SeededRowIdSource, SubscriptionEvent,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, BranchDimensionId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::ContributionMergeRow;
 use jazz::protocol::{
     BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
 };
-use jazz::query::{OrderDirection, Query, claim, col, eq, lit};
-use jazz::schema::{BranchDimensionSchema, JazzSchema, Policy, TableSchema};
+use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::schema::JazzSchema;
 use jazz::time::GlobalSeq;
+use jazz::tools::{
+    BranchDimensionDescriptor, CmpOp, ColumnType, ObjectId, PolicyExpr, PolicyValue, SchemaBuilder,
+    TablePolicies, TableSchemaBuilder, Value as PublicValue,
+};
 use jazz_storage_rocksdb::RocksDbStorage;
+
+use common::{allow_all_policies, compile_schema};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -35,24 +40,56 @@ fn selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
+fn branch_dimension(byte: u8, name: &str) -> BranchDimensionDescriptor {
+    BranchDimensionDescriptor {
+        id: jazz::ids::BranchDimensionId(uuid::Uuid::from_bytes([byte; 16])),
+        name: name.to_owned(),
+        column_type: ColumnType::Uuid,
+        migration_default: PublicValue::Uuid(ObjectId::from_uuid(uuid::Uuid::nil())),
+    }
+}
+
+fn branch_owner_policy() -> PolicyExpr {
+    PolicyExpr::Exists {
+        table: "branches".to_owned(),
+        condition: Box::new(PolicyExpr::And(vec![
+            PolicyExpr::Cmp {
+                column: "branch_key".to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec![
+                    "__jazz_outer_row".to_owned(),
+                    "branch_id".to_owned(),
+                ]),
+            },
+            PolicyExpr::Cmp {
+                column: "owner".to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+            },
+        ])),
+    }
+}
+
+fn policy_with_all_writes(read: PolicyExpr) -> TablePolicies {
+    TablePolicies::new()
+        .with_select(read.clone())
+        .with_insert(read.clone())
+        .with_update(Some(read.clone()), read.clone())
+        .with_delete(read)
+}
+
 fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
-    let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x61; 16]));
-    let schema = JazzSchema::new_with_branch_dimensions(
-        [BranchDimensionSchema::new(
-            dimension,
-            "branch",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        )],
-        [TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("branch_id", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-            ],
-        )
-        .with_branch_dimension("branch_id", dimension)
-        .with_indexed_column("title")],
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_dimension(branch_dimension(0x61, "branch"))
+                    .branch_by("branch_id", "branch")
+                    .index_only(["title"]),
+            )
+            .build(),
     );
     let families = schema.column_families();
     let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>());
@@ -72,22 +109,16 @@ fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
 }
 
 fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
-    let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x61; 16]));
-    let schema = JazzSchema::new_with_branch_dimensions(
-        [BranchDimensionSchema::new(
-            dimension,
-            "branch",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        )],
-        [TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("branch_id", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-            ],
-        )
-        .with_branch_dimension("branch_id", dimension)],
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_dimension(branch_dimension(0x61, "branch"))
+                    .branch_by("branch_id", "branch"),
+            )
+            .build(),
     );
     let families = schema.column_families();
     let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>());
@@ -230,52 +261,28 @@ fn branch_view_reduction_precedes_aggregation_and_ordered_windows() {
 
 #[test]
 fn branch_view_join_projects_dimension_subsets_and_shared_tables() {
-    let workspace_dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x81; 16]));
-    let branch_dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x82; 16]));
-    let schema = JazzSchema::new_with_branch_dimensions(
-        [
-            BranchDimensionSchema::new(
-                workspace_dimension,
-                "workspace",
-                ColumnType::Uuid,
-                Value::Uuid(uuid::Uuid::nil()),
-            ),
-            BranchDimensionSchema::new(
-                branch_dimension,
-                "branch",
-                ColumnType::Uuid,
-                Value::Uuid(uuid::Uuid::nil()),
-            ),
-        ],
-        [
-            TableSchema::new(
-                "workspaces",
-                [ColumnSchema::new("name", ColumnType::String)],
-            ),
-            TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
-            TableSchema::new(
-                "memberships",
-                [
-                    ColumnSchema::new("workspace_id", ColumnType::Uuid),
-                    ColumnSchema::new("role", ColumnType::String),
-                ],
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("workspaces").column("name", ColumnType::Text))
+            .table(TableSchemaBuilder::new("users").column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("memberships")
+                    .fk_column("workspace_id", "workspaces")
+                    .column("role", ColumnType::Text)
+                    .branch_dimension(branch_dimension(0x81, "workspace"))
+                    .branch_by("workspace_id", "workspace"),
             )
-            .with_reference("workspace_id", "workspaces")
-            .with_branch_dimension("workspace_id", workspace_dimension),
-            TableSchema::new(
-                "documents",
-                [
-                    ColumnSchema::new("workspace_id", ColumnType::Uuid),
-                    ColumnSchema::new("branch_id", ColumnType::Uuid),
-                    ColumnSchema::new("owner", ColumnType::Uuid),
-                    ColumnSchema::new("title", ColumnType::String),
-                ],
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .fk_column("workspace_id", "workspaces")
+                    .column("branch_id", ColumnType::Uuid)
+                    .fk_column("owner", "users")
+                    .column("title", ColumnType::Text)
+                    .branch_dimension(branch_dimension(0x82, "branch"))
+                    .branch_by("workspace_id", "workspace")
+                    .branch_by("branch_id", "branch"),
             )
-            .with_reference("workspace_id", "workspaces")
-            .with_reference("owner", "users")
-            .with_branch_dimension("workspace_id", workspace_dimension)
-            .with_branch_dimension("branch_id", branch_dimension),
-        ],
+            .build(),
     );
     let families = schema.column_families();
     let db = block_on(Db::open(
@@ -358,47 +365,31 @@ fn branch_view_join_projects_dimension_subsets_and_shared_tables() {
 
 #[test]
 fn branch_view_reachability_consumes_effective_sources() {
-    let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x9c; 16]));
-    let branched = |name, columns: Vec<ColumnSchema>| {
-        TableSchema::new(name, columns).with_branch_dimension("branch_id", dimension)
-    };
-    let schema = JazzSchema::new_with_branch_dimensions(
-        [BranchDimensionSchema::new(
-            dimension,
-            "branch",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        )],
-        [
-            TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-            branched(
-                "documents",
-                vec![
-                    ColumnSchema::new("branch_id", ColumnType::Uuid),
-                    ColumnSchema::new("title", ColumnType::String),
-                ],
-            ),
-            branched(
-                "access",
-                vec![
-                    ColumnSchema::new("branch_id", ColumnType::Uuid),
-                    ColumnSchema::new("document", ColumnType::Uuid),
-                    ColumnSchema::new("team", ColumnType::Uuid),
-                ],
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("teams").column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_dimension(branch_dimension(0x9c, "branch"))
+                    .branch_by("branch_id", "branch"),
             )
-            .with_reference("document", "documents")
-            .with_reference("team", "teams"),
-            branched(
-                "team_edges",
-                vec![
-                    ColumnSchema::new("branch_id", ColumnType::Uuid),
-                    ColumnSchema::new("member", ColumnType::Uuid),
-                    ColumnSchema::new("parent", ColumnType::Uuid),
-                ],
+            .table(
+                TableSchemaBuilder::new("access")
+                    .column("branch_id", ColumnType::Uuid)
+                    .fk_column("document", "documents")
+                    .fk_column("team", "teams")
+                    .branch_by("branch_id", "branch"),
             )
-            .with_reference("member", "teams")
-            .with_reference("parent", "teams"),
-        ],
+            .table(
+                TableSchemaBuilder::new("team_edges")
+                    .column("branch_id", ColumnType::Uuid)
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .branch_by("branch_id", "branch"),
+            )
+            .build(),
     );
     let families = schema.column_families();
     let db = block_on(Db::open(DbConfig::new(
@@ -480,41 +471,24 @@ fn branch_view_reachability_consumes_effective_sources() {
 }
 
 fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
-    let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x74; 16]));
-    let branch_policy = Policy::shape(Query::from("todos").join_via_row_id(
-        "branches",
-        "branch_id",
-        [eq(col("owner"), claim("sub"))],
-    ));
-    let schema = JazzSchema::new_with_branch_dimensions(
-        [BranchDimensionSchema::new(
-            dimension,
-            "branch",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        )],
-        [
-            TableSchema::new(
-                "branches",
-                [
-                    ColumnSchema::new("name", ColumnType::String),
-                    ColumnSchema::new("owner", ColumnType::Uuid),
-                ],
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("branches")
+                    .fk_column("branch_key", "branches")
+                    .column("name", ColumnType::Text)
+                    .column("owner", ColumnType::Uuid)
+                    .policies(allow_all_policies()),
             )
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-            TableSchema::new(
-                "todos",
-                [
-                    ColumnSchema::new("branch_id", ColumnType::Uuid),
-                    ColumnSchema::new("title", ColumnType::String),
-                ],
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .fk_column("branch_id", "branches")
+                    .column("title", ColumnType::Text)
+                    .branch_dimension(branch_dimension(0x74, "branch"))
+                    .branch_by("branch_id", "branch")
+                    .policies(policy_with_all_writes(branch_owner_policy())),
             )
-            .with_reference("branch_id", "branches")
-            .with_branch_dimension("branch_id", dimension)
-            .with_read_policy(branch_policy.clone())
-            .with_write_policy(branch_policy),
-        ],
+            .build(),
     );
     let families = schema.column_families();
     let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>());
@@ -544,6 +518,7 @@ fn branch_dimension_reference_policy_controls_effective_reads() {
         "branches",
         branch,
         BTreeMap::from([
+            ("branch_key".to_owned(), Value::Uuid(branch.0)),
             ("name".to_owned(), Value::String("draft".to_owned())),
             ("owner".to_owned(), Value::Uuid(owner.0)),
         ]),
@@ -618,43 +593,26 @@ fn branch_dimension_reference_policy_controls_effective_reads() {
 
 #[test]
 fn frozen_base_applies_one_cut_to_policy_dependencies() {
-    let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0xa8; 16]));
-    let policy = Policy::shape(Query::from("todos").join_via_row_id(
-        "branches",
-        "branch_id",
-        [eq(col("owner"), claim("sub"))],
-    ));
-    let schema = JazzSchema::new_with_branch_dimensions(
-        [BranchDimensionSchema::new(
-            dimension,
-            "branch",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        )],
-        [
-            TableSchema::new(
-                "branches",
-                [
-                    ColumnSchema::new("scope_id", ColumnType::Uuid),
-                    ColumnSchema::new("name", ColumnType::String),
-                    ColumnSchema::new("owner", ColumnType::Uuid),
-                ],
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("branches")
+                    .column("scope_id", ColumnType::Uuid)
+                    .fk_column("branch_key", "branches")
+                    .column("name", ColumnType::Text)
+                    .column("owner", ColumnType::Uuid)
+                    .branch_dimension(branch_dimension(0xa8, "branch"))
+                    .branch_by("scope_id", "branch")
+                    .policies(allow_all_policies()),
             )
-            .with_branch_dimension("scope_id", dimension)
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-            TableSchema::new(
-                "todos",
-                [
-                    ColumnSchema::new("branch_id", ColumnType::Uuid),
-                    ColumnSchema::new("title", ColumnType::String),
-                ],
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .fk_column("branch_id", "branches")
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id", "branch")
+                    .policies(policy_with_all_writes(branch_owner_policy())),
             )
-            .with_reference("branch_id", "branches")
-            .with_branch_dimension("branch_id", dimension)
-            .with_read_policy(policy.clone())
-            .with_write_policy(policy),
-        ],
+            .build(),
     );
     let families = schema.column_families();
     let db = block_on(Db::open(DbConfig::new(
@@ -678,6 +636,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
             base.clone(),
             branch,
             BTreeMap::from([
+                ("branch_key".to_owned(), Value::Uuid(branch.0)),
                 ("name".to_owned(), Value::String("branch".to_owned())),
                 ("owner".to_owned(), Value::Uuid(before.0)),
             ]),
@@ -769,6 +728,7 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
         "branches",
         branch,
         BTreeMap::from([
+            ("branch_key".to_owned(), Value::Uuid(branch.0)),
             ("name".to_owned(), Value::String("draft".to_owned())),
             ("owner".to_owned(), Value::Uuid(owner.0)),
         ]),
@@ -1457,3 +1417,4 @@ fn db_contribution_merge_is_an_ordinary_retry_safe_transaction() {
         Some(Value::String("source".to_owned()))
     );
 }
+mod common;

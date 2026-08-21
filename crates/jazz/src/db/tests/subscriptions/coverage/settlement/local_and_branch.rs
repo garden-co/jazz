@@ -34,15 +34,7 @@ fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
 
 #[test]
 fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())]);
+    let schema = schema();
     let owner = AuthorId::from_bytes([0x32; 16]);
     let db = open_db(0x32, owner, &schema);
     let query = Query::from("todos");

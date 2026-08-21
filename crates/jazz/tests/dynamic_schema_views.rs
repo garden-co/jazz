@@ -81,6 +81,8 @@ fn metadata_schema(
             indexed_columns: indexed_columns
                 .map(|columns| columns.into_iter().map(Into::into).collect()),
             policies: allow_all_policies(),
+            branch_dimensions: Vec::new(),
+            branch_by: Vec::new(),
         },
     )]);
     if include_reference_target {

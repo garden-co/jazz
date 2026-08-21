@@ -116,20 +116,6 @@ fn empty_public_test_schema() -> JazzSchema {
     build_public_test_schema(PublicSchemaBuilder::new())
 }
 
-fn build_public_test_schema_with_branch_policies(
-    mut builder: PublicSchemaBuilder,
-    branch_read_policy: Option<PublicPolicyExpr>,
-    branch_write_policy: Option<PublicPolicyExpr>,
-) -> JazzSchema {
-    if let Some(policy) = branch_read_policy {
-        builder = builder.branch_read_policy(policy);
-    }
-    if let Some(policy) = branch_write_policy {
-        builder = builder.branch_write_policy(policy);
-    }
-    build_public_test_schema(builder)
-}
-
 fn public_all_policies() -> PublicTablePolicies {
     PublicTablePolicies::new()
         .with_select(PublicPolicyExpr::True)

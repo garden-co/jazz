@@ -21,7 +21,9 @@ use groove::storage::StorageLayout;
 
 use crate::ids::{BranchDimensionId, SchemaVersionId};
 use crate::protocol::{BranchDimensionValue, BranchKey, BranchSelector};
-use crate::query::{Query, claim, col, eq};
+use crate::query::Query;
+#[cfg(test)]
+use crate::query::{claim, col, eq};
 use crate::tools::public_schema::Schema as PublicSchema;
 
 pub use crate::tools::public_schema_convert::SchemaConversionError;
@@ -154,6 +156,7 @@ impl RuntimeSchema {
     /// This is the primary constructor for schemas whose tables already bind
     /// branch dimensions: validation observes the complete declaration rather
     /// than an invalid intermediate builder state.
+    #[cfg(test)]
     pub(crate) fn new_with_branch_dimensions(
         branch_dimensions: impl IntoIterator<Item = BranchDimensionSchema>,
         tables: impl IntoIterator<Item = TableSchema>,
@@ -644,7 +647,6 @@ pub enum MergeStrategy {
     GSet,
 }
 
-#[cfg(test)]
 fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
     matches!(
         column_type,
@@ -657,7 +659,6 @@ fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
     )
 }
 
-#[cfg(test)]
 fn is_gset_column_type(column_type: &GrooveColumnType) -> bool {
     matches!(column_type, GrooveColumnType::Array(_))
 }
