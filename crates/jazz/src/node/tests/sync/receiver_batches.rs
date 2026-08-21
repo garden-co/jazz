@@ -856,7 +856,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
-            settled_through: GlobalSeq(1),
+            settled_through: GlobalTime(1),
             reset_result_set: false,
             version_carriers: Vec::new(),
             version_bundles: vec![VersionBundle {
@@ -864,7 +864,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
                 tx: redacted_tx,
                 versions: vec![first.clone()],
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(1)),
+                global_time: Some(GlobalTime(1)),
                 durability: DurabilityTier::Global,
             }],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -883,7 +883,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
-            settled_through: GlobalSeq(1),
+            settled_through: GlobalTime(1),
             reset_result_set: false,
             version_carriers: Vec::new(),
             version_bundles: vec![VersionBundle {
@@ -891,7 +891,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
                 tx,
                 versions: vec![first, second],
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(1)),
+                global_time: Some(GlobalTime(1)),
                 durability: DurabilityTier::Global,
             }],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),

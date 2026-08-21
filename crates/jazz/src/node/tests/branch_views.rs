@@ -409,12 +409,12 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
             updates.as_slice(),
             [SyncMessage::FateUpdate {
                 fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
-                global_seq: None,
+                global_time: None,
                 ..
             }]
         ), "case {case}");
         assert!(receiver.query_table_versions("todos").unwrap().is_empty(), "case {case}");
-        assert_eq!(receiver.applied_global_watermark(), GlobalSeq(0), "case {case}");
+        assert_eq!(receiver.committed_global_time(), GlobalTime(0), "case {case}");
     }
 }
 

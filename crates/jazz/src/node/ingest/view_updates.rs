@@ -590,7 +590,7 @@ where
         Ok(None)
     }
 
-    fn write_merge_heads_for_bulk_content_versions(
+    pub(crate) fn write_merge_heads_for_bulk_content_versions(
         &mut self,
         batch: &mut DatabaseBatch,
         versions: &[VersionRow],
@@ -624,6 +624,35 @@ where
                 for parent in version.parents() {
                     heads.remove(&parent);
                 }
+                let ancestors_of_new = heads
+                    .iter()
+                    .copied()
+                    .map(|head| {
+                        content_version_reaches_tx_in_staged_parents(
+                            new_tx,
+                            head,
+                            &staged_parents,
+                        )
+                        .map_or_else(
+                            || {
+                                self.content_version_reaches_tx(
+                                    table_id,
+                                    &branch_key,
+                                    row_uuid,
+                                    new_tx,
+                                    head,
+                                )
+                            },
+                            Ok,
+                        )
+                        .map(|reaches| (head, reaches))
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                for (head, is_ancestor) in ancestors_of_new {
+                    if is_ancestor {
+                        heads.remove(&head);
+                    }
+                }
                 let dominated_by_existing_head = heads
                     .iter()
                     .copied()
@@ -651,6 +680,27 @@ where
             }
             Self::write_merge_heads(batch, table_id, &branch_key, row_uuid, &heads)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn rebuild_merge_heads_after_history_commit(
+        &mut self,
+        rows: &BTreeSet<(PhysicalTableId, String, BranchKey, RowUuid)>,
+    ) -> Result<(), Error> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut batch = self.database.open_batch();
+        for (table_id, table, branch_key, row_uuid) in rows {
+            let heads = self.recompute_merge_heads_from_persisted_history(
+                *table_id,
+                table,
+                branch_key,
+                *row_uuid,
+            )?;
+            Self::write_merge_heads(&mut batch, *table_id, branch_key, *row_uuid, &heads)?;
+        }
+        self.database.commit_batch(batch)?;
         Ok(())
     }
 

@@ -835,6 +835,7 @@ where
         let mut receiver_batch = self.database.open_batch();
         let mut receiver_batch_tx_ids = BTreeSet::new();
         let mut receiver_batch_global_times = Vec::new();
+        let mut receiver_batch_content_versions = Vec::new();
         let mut receiver_batch_bundle_count = 0u64;
         for bundle in receiver_candidates.values() {
             let staged = self.stage_view_bundle(
@@ -842,11 +843,16 @@ where
                 bundle,
                 &mut receiver_batch_tx_ids,
                 &mut receiver_batch_global_times,
+                &mut receiver_batch_content_versions,
             )?;
             if staged {
                 receiver_batch_bundle_count += 1;
             }
         }
+        self.write_merge_heads_for_bulk_content_versions(
+            &mut receiver_batch,
+            &receiver_batch_content_versions,
+        )?;
         if !receiver_batch.is_empty() {
             self.sync_metrics.receiver_bulk_ingest_commits += 1;
             self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
@@ -1372,6 +1378,7 @@ where
         bundle: &VersionBundle,
         staged_tx_ids: &mut BTreeSet<TxId>,
         staged_global_times: &mut Vec<GlobalTime>,
+        staged_content_versions: &mut Vec<VersionRow>,
     ) -> Result<bool, Error> {
         validate_received_view_bundle_global_time_durability(
             bundle.global_time,
@@ -1407,6 +1414,7 @@ where
             bundle.global_time,
             bundle.durability,
             staged_global_times,
+            staged_content_versions,
         )?;
         Ok(true)
     }

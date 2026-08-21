@@ -64,6 +64,7 @@ where
                 durability,
                 update_current_indexes,
                 view_scoped_cardinality,
+                None,
             )?;
             self.database.commit_batch(batch)?;
             let mut staged_global_times = Vec::new();
@@ -103,6 +104,7 @@ where
         durability: DurabilityTier,
         update_current_indexes: bool,
         view_scoped_cardinality: bool,
+        staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<(), Error> {
         self.merge_tx_time(tx.tx_id.time);
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
@@ -274,8 +276,12 @@ where
             }
         }
         if update_current_indexes && !matches!(fate, Fate::Rejected(_)) {
-            for stored in &content_versions {
-                self.update_merge_heads_for_content_version_in_batch(batch, stored)?;
+            if let Some(staged) = staged_content_versions {
+                staged.extend(content_versions.iter().cloned());
+            } else {
+                for stored in &content_versions {
+                    self.update_merge_heads_for_content_version_in_batch(batch, stored)?;
+                }
             }
         }
         if update_current_indexes && matches!(fate, Fate::Accepted) {

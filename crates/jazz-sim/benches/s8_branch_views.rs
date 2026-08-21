@@ -10,7 +10,7 @@ use jazz::node::ContributionMergeRow;
 use jazz::protocol::{BranchSelector, BranchViewBase, SnapshotRef};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::time::GlobalSeq;
+use jazz::time::GlobalTime;
 use jazz::tools::ObjectId;
 use jazz::tools::public_schema::{
     BranchDimensionDescriptor, ColumnType as PublicColumnType, SchemaBuilder, TableSchema,
@@ -96,7 +96,7 @@ fn run(row_count: usize) {
             branch: base.clone(),
             snapshot: SnapshotRef {
                 owner: seed_tx.node,
-                global_base: GlobalSeq(0),
+                global_base: GlobalTime(0),
                 local_base: seed_tx.time,
                 dots: Vec::new(),
             },

@@ -15,7 +15,7 @@ use jazz::protocol::{
 };
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::time::GlobalSeq;
+use jazz::time::GlobalTime;
 use jazz::tools::{
     BranchDimensionDescriptor, CmpOp, ColumnType, ObjectId, PolicyExpr, PolicyValue, SchemaBuilder,
     TablePolicies, TableSchemaBuilder, Value as PublicValue,
@@ -656,7 +656,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         .mergeable_tx_id();
     let cut = SnapshotRef {
         owner: authored.node,
-        global_base: GlobalSeq(0),
+        global_base: GlobalTime(0),
         local_base: authored.time,
         dots: Vec::new(),
     };
@@ -1308,7 +1308,7 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
         .mergeable_tx_id();
     let frozen = SnapshotRef {
         owner: seeded.node,
-        global_base: GlobalSeq(0),
+        global_base: GlobalTime(0),
         local_base: seeded.time,
         dots: Vec::new(),
     };

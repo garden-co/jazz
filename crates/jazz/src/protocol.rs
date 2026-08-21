@@ -3173,7 +3173,7 @@ mod tests {
                 selector(2),
                 SnapshotRef {
                     owner: NodeUuid::from_bytes([4; 16]),
-                    global_base: GlobalSeq(5),
+                    global_base: GlobalTime(5),
                     local_base: TxTime(6),
                     dots: Vec::new(),
                 },

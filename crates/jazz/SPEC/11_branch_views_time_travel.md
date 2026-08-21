@@ -30,9 +30,9 @@ traverse or validate an application branch graph.
 
 Invariant digest:
 
-- `INV-TIME-1`: A historical read at `GlobalSeq` position MUST consider only globally settled transactions with `global_seq <= position` and MUST choose row/layer winners using the ordinary current-state rules over that subset.
+- `INV-TIME-1`: A historical read at `GlobalTime` position MUST consider only globally settled transactions with `global_time <= position` and MUST choose row/layer winners using the ordinary current-state rules over that subset.
 - `INV-TIME-2`: A historical read MUST evaluate read policy over the historical state at the requested cut, not over current state.
-- `INV-TIME-3`: `at_time(time)` MUST resolve to the latest settled global position whose transaction time is `<= time`, returning `GlobalSeq(0)` when none exists.
+- `INV-TIME-3`: `at_time(time)` MUST resolve to the latest settled global position whose transaction time is `<= time`, returning `GlobalTime(0)` when none exists.
 - `INV-TIME-4`: A local historical read MUST refuse to answer from incomplete local history.
 - `INV-TIME-5`: A history-complete node at a sufficient watermark MUST answer an exact-position historical read locally.
 - `INV-BVIEW-1`: Branch dimensions MUST have schema-lineage-stable identities, names, types, canonical encodings, and deterministic order; tables MAY bind any subset through renameable application columns.
@@ -65,14 +65,14 @@ Invariant digest:
 
 ### 11.1 Historical reads
 
-A historical read exposes globally settled state at a `GlobalSeq` cut. It
-includes only transactions with `global_seq <= position`, chooses independent
+A historical read exposes globally settled state at a `GlobalTime` cut. It
+includes only transactions with `global_time <= position`, chooses independent
 content and deletion winners over that subset, derives visibility, and evaluates
 the complete query and read policy against that historical state
 (`INV-TIME-1`, `INV-TIME-2`).
 
 `at_time(time)` is a convenience that resolves the latest settled position whose
-transaction time is `<= time`, or `GlobalSeq(0)` if no transaction qualifies.
+transaction time is `<= time`, or `GlobalTime(0)` if no transaction qualifies.
 Clock skew means this is a best-effort lookup, not wall-clock truth
 (`INV-TIME-3`).
 

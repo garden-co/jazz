@@ -887,6 +887,7 @@ where
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         staged_global_times: &mut Vec<GlobalTime>,
+        staged_content_versions: &mut Vec<VersionRow>,
     ) -> Result<(), Error> {
         debug_assert!(
             global_time.is_none() || durability == DurabilityTier::Global,
@@ -911,6 +912,7 @@ where
             durability,
             true,
             false,
+            Some(staged_content_versions),
         )?;
         self.finalize_staged_transaction_ingest(
             batch,
@@ -1036,8 +1038,8 @@ where
             (VersionRow, GlobalTime),
         >::new();
         let mut content_versions = Vec::new();
-        #[cfg(test)]
-        let mut content_rows = BTreeSet::<(String, BranchKey, RowUuid)>::new();
+        let mut content_rows =
+            BTreeSet::<(PhysicalTableId, String, BranchKey, RowUuid)>::new();
         let mut applied_global_times = Vec::with_capacity(eligible.len());
 
         for tx_bundles in eligible {
@@ -1097,8 +1099,8 @@ where
                 );
                 if stored.layer() == VersionLayer::Content {
                     content_versions.push(stored.clone());
-                    #[cfg(test)]
                     content_rows.insert((
+                        self.physical_table_id_for_version(&stored)?,
                         stored.table().to_owned(),
                         stored.branch_key().clone(),
                         stored.row_uuid(),
@@ -1136,13 +1138,20 @@ where
             .map(|(stored, global_time)| (stored.clone(), *global_time))
             .collect::<Vec<_>>();
         self.database.commit_batch(batch)?;
+        self.rebuild_merge_heads_after_history_commit(&content_rows)?;
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
             self.persist_storage_consistency_marker_through(tx_time)?;
         }
         #[cfg(test)]
         {
             if std::env::var_os("JAZZ_SKIP_BULK_INGEST_ASSERTS").is_none() {
-                self.assert_merge_head_rows_match_history_for_test(&content_rows)?;
+                for (_, table, branch_key, row_uuid) in &content_rows {
+                    self.assert_merge_heads_match_history_in_branch_for_test(
+                        table,
+                        branch_key,
+                        *row_uuid,
+                    )?;
+                }
                 self.assert_global_current_updates_match_history_for_test(
                     &current_update_versions,
                 )?;

@@ -233,7 +233,7 @@ deletion history: (table, branch key, row, tx)
 content current:  (table, branch key, row)
 deletion current: (table, branch key, row)
 combined current: (table, branch key, row)
-global changes:   (table, branch key, row, layer, global_seq)
+global changes:   (table, branch key, row, layer, global_time)
 ```
 
 The exact Groove lowering may use canonical branch key bytes as one prefix field, but
