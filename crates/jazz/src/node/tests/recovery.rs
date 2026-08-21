@@ -75,7 +75,7 @@ fn contribution_merge_provenance_survives_reopen() {
     .unwrap();
     {
         let mut core = open_node_at(&temp_dir, schema.clone());
-        core.ingest_commit_unit(
+        core.ingest_commit_unit_settled(
             Transaction {
                 tx_id,
                 kind: TxKind::Mergeable,

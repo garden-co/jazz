@@ -13,7 +13,10 @@ export {
   type Row,
   type SubscriptionCallback,
   type WasmModule,
-  type MutationResult,
+  WriteHandle,
+  WriteResult,
+  ExclusiveWriteHandle,
+  ExclusiveWriteResult,
 } from "./client.js";
 export type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 export {

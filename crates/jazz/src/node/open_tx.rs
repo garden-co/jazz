@@ -882,11 +882,14 @@ where
                 PendingCells::Replace(cells) => (cells, None),
                 PendingCells::Patch(patch) => {
                     let mut cells = BTreeMap::new();
-                    if let Some(existing) = self.visible_current_cells_in_branch(
-                        &write.table,
-                        &write.branch,
-                        write.row_uuid,
-                    ).await? {
+                    if let Some(existing) = self
+                        .visible_current_cells_in_branch(
+                            &write.table,
+                            &write.branch,
+                            write.row_uuid,
+                        )
+                        .await?
+                    {
                         cells.extend(existing);
                     }
                     let authored_columns = patch.keys().cloned().collect();

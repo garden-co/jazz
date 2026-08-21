@@ -51,23 +51,16 @@ where
                 .map(PublicationOutcome::settled);
         }
         let clock_before_ingest = self.clock.clone();
-        // One incoming authority unit can durably stage its source before a
-        // derived merge is discovered. Keep their subscription publication
-        // private until the complete authority operation succeeds, so a later
-        // derived failure fail-stops rather than exposing a partial unit.
-        let publication_scope = self.database.begin_durable_publication_scope()?;
         let mut updates = match self
             .ingest_commit_unit_once(tx, versions, now_ms, ingest_context)
             .await
         {
             Ok(updates) => updates,
             Err(error) => {
-                publication_scope.abort(&mut self.database);
                 self.restore_clock_after_failed_authority_ingest(clock_before_ingest);
                 return Err(error);
             }
         };
-        publication_scope.finish(&mut self.database);
         updates.extend(self.drain_parked_commit_units().await?);
         Ok(updates)
     }

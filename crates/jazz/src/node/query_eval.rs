@@ -1571,14 +1571,15 @@ where
                     .get(&tx_id.node)
                     .copied()
                     .ok_or(Error::MissingTransaction(tx_id))?;
-                let shared = self.query_version_by_alias(
-                    &canonical_table,
-                    row_uuid,
-                    VersionLayer::Content,
-                    tx_id.time,
-                    tx_node_alias,
-                )
-                .await?;
+                let shared = self
+                    .query_version_by_alias(
+                        &canonical_table,
+                        row_uuid,
+                        VersionLayer::Content,
+                        tx_id.time,
+                        tx_node_alias,
+                    )
+                    .await?;
                 if let Some(version) = shared {
                     version
                 } else {
@@ -1711,7 +1712,7 @@ where
         Ok(rows)
     }
 
-    async fn query_rows_including_deleted_with_query_engine(
+    pub(super) async fn query_rows_including_deleted_with_query_engine(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1776,29 +1777,35 @@ where
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
         if position.0 == u64::MAX {
-            Ok(self.database.index_scan_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                ],
-            ).await?)
+            Ok(self
+                .database
+                .index_scan_raw(
+                    "jazz_global_changes",
+                    "by_table_global_time",
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                    ],
+                )
+                .await?)
         } else {
-            Ok(self.database.index_scan_range_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::U64(0),
-                ],
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::U64(position.0 + 1),
-                ],
-            ).await?)
+            Ok(self
+                .database
+                .index_scan_range_raw(
+                    "jazz_global_changes",
+                    "by_table_global_time",
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                        Value::U64(0),
+                    ],
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                        Value::U64(position.0 + 1),
+                    ],
+                )
+                .await?)
         }
     }
 
@@ -1880,29 +1887,33 @@ where
         let mut latest_event = None::<(TxTime, NodeAlias, Option<DeletionEvent>)>;
         let table_id = self.physical_table_id_for_schema(read_schema, table)?;
         let raw_records = if position.0 == u64::MAX {
-            self.database.index_scan_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                ],
-            ).await?
+            self.database
+                .index_scan_raw(
+                    "jazz_global_changes",
+                    "by_table_global_time",
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                    ],
+                )
+                .await?
         } else {
-            self.database.index_scan_range_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::U64(0),
-                ],
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::U64(position.0 + 1),
-                ],
-            ).await?
+            self.database
+                .index_scan_range_raw(
+                    "jazz_global_changes",
+                    "by_table_global_time",
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                        Value::U64(0),
+                    ],
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                        Value::U64(position.0 + 1),
+                    ],
+                )
+                .await?
         };
         for raw in raw_records {
             let record = raw.record();
@@ -2322,7 +2333,7 @@ where
     ) -> Result<RelationSnapshot, Error> {
         #[cfg(test)]
         record_subscription_snapshot_for_link_call();
-        if shape.query().array_subqueries.is_empty() {
+        if shape.query().array_subqueries.is_empty() && read_view == &ReadViewSpec::default() {
             let rows = match authorization_mode {
                 QueryAuthorizationMode::ClientLocal => {
                     self.query_rows_for_client(shape, binding, tier, identity)

@@ -281,23 +281,27 @@ where
                 ));
             }
             let snapshot = match authorization_mode {
-                QueryAuthorizationMode::TrustedServing => node
-                    .query_relation_snapshot_for_serving_in_read_view(
+                QueryAuthorizationMode::TrustedServing => {
+                    node.query_relation_snapshot_for_serving_in_read_view(
                         &prepared.shape,
                         &prepared.binding,
                         tier,
                         author,
                         &opts.read_view,
-                    ),
-                QueryAuthorizationMode::ClientLocal => node.query_relation_snapshot_for_client(
-                    &prepared.shape,
-                    &prepared.binding,
-                    tier,
-                    author,
-                    &opts.read_view,
-                ),
-            }
-            .await?;
+                    )
+                    .await
+                }
+                QueryAuthorizationMode::ClientLocal => {
+                    node.query_relation_snapshot_for_client(
+                        &prepared.shape,
+                        &prepared.binding,
+                        tier,
+                        author,
+                        &opts.read_view,
+                    )
+                    .await
+                }
+            }?;
             return Ok(snapshot
                 .rows
                 .into_iter()

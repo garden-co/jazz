@@ -1737,13 +1737,17 @@ impl CoreDb {
         cells: RowCells,
     ) -> Result<WriteHandle<RocksDbStorage>, Error> {
         let node = self.server.node();
-        let tx_id = node.borrow_mut().commit_mergeable(
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(self.author)
-                .branch(branch)
-                .cells(cells),
+        let published = block_on(
+            node.borrow_mut().commit_mergeable(
+                MergeableCommit::new(table, row, self.next_now_ms())
+                    .made_by(self.author)
+                    .branch(branch)
+                    .cells(cells),
+            ),
         )?;
-        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        let tx_id = block_on(node.borrow_mut().persist_and_settle_transaction(published))?;
+        let outcome = block_on(node.borrow_mut().finalize_local_mergeable_commit(tx_id))?;
+        block_on(node.borrow_mut().persist_and_settle_outcome(outcome))?;
         self.server.mark_subscriber_connections_dirty();
         Ok(WriteHandle {
             node: Rc::downgrade(&node),
@@ -1770,8 +1774,10 @@ impl CoreDb {
             })
             .collect();
         let node = self.server.node();
-        let tx_id = node.borrow_mut().commit_mergeable_many(commits)?;
-        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        let published = block_on(node.borrow_mut().commit_mergeable_many(commits))?;
+        let tx_id = block_on(node.borrow_mut().persist_and_settle_transaction(published))?;
+        let outcome = block_on(node.borrow_mut().finalize_local_mergeable_commit(tx_id))?;
+        block_on(node.borrow_mut().persist_and_settle_outcome(outcome))?;
         self.server.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }

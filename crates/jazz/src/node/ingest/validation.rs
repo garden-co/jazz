@@ -60,6 +60,8 @@ where
             None,
             durability,
             true,
+            false,
+            None,
         )
         .await?;
         let persistence = self.database.apply_batch(batch).await?;

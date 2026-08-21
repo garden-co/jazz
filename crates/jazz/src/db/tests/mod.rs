@@ -28,6 +28,9 @@ impl TestRocksOpen for RocksDbStorage {
 
 use super::*;
 use crate::ids::{AuthorId, NodeUuid};
+use crate::legacy_test_future::{
+    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+};
 use crate::protocol::{
     AuthorizationScopePurpose, AuthorizationScopeReceipt, AuthorizationSupportScopeKey,
     BindingViewKey, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp,

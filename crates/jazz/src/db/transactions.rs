@@ -159,8 +159,7 @@ where
                 now_ms,
                 false,
                 branch,
-            )
-            .await?;
+            )?;
         Ok(())
     }
 
@@ -199,7 +198,11 @@ where
             ));
         }
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
-        let head_cells = self.node.node.lock().await
+        let head_cells = self
+            .node
+            .node
+            .lock()
+            .await
             .visible_current_cells_in_branch(table, &head, row)
             .await?;
         if head_cells.is_some() {
@@ -219,7 +222,11 @@ where
                 .await?;
             return Ok(());
         }
-        let Some(mut inherited) = self.node.node.lock().await
+        let Some(mut inherited) = self
+            .node
+            .node
+            .lock()
+            .await
             .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
             .await?
         else {
@@ -299,8 +306,7 @@ where
                 now_ms,
                 true,
                 head,
-            )
-            .await?;
+            )?;
         Ok(())
     }
 
@@ -385,8 +391,7 @@ where
             now_ms,
             true,
             branch.clone(),
-        )
-        .await?;
+        )?;
         node.tx_write_mergeable_in_schema_and_branch(
             tx_id,
             self.schema_version_id,
@@ -398,8 +403,7 @@ where
             now_ms,
             true,
             branch,
-        )
-        .await?;
+        )?;
         Ok(())
     }
 

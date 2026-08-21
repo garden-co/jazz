@@ -490,8 +490,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            target_lineage: BranchLineage::Root,
-            branch_merge: None,
+            contribution_merge: None,
         };
         let unit = self.resident_commit_unit(tx)?;
         Ok((published, unit))
@@ -546,16 +545,7 @@ where
             let Some(message) = work.pop_front() else {
                 break;
             };
-            let mut outcome = self
-                .apply_sync_message_with_ingest_context(
-                    message,
-                    Some(CommitUnitIngestContext {
-                        identity: AuthorId::SYSTEM,
-                        trust: CommitUnitTrust::TrustedBackend,
-                        edge_authority: false,
-                    }),
-                )
-                .await?;
+            let mut outcome = self.apply_sync_message(message).await?;
             // This is internal continuation work, not a reply to a remote
             // sender. Its resident publications and further continuations are
             // lifecycle-significant; its protocol response is not.
@@ -613,7 +603,7 @@ where
     }
 
     /// Read one exact branch-local row for mutation preparation.
-    pub fn visible_current_cells_in_branch(
+    pub async fn visible_current_cells_in_branch(
         &mut self,
         table: &str,
         branch: &BranchSelector,
@@ -635,14 +625,17 @@ where
             &branch_key,
             row_uuid,
             VersionLayer::Deletion,
-        )? {
+        )
+        .await?
+        {
             Some(version) => Some(version),
             None => self.query_global_layer_winner_in_branch(
                 table,
                 &branch_key,
                 row_uuid,
                 VersionLayer::Deletion,
-            )?,
+            )
+            .await?,
         };
         if deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
             return Ok(None);
@@ -652,14 +645,17 @@ where
             &branch_key,
             row_uuid,
             VersionLayer::Content,
-        )? {
+        )
+        .await?
+        {
             Some(version) => Some(version),
             None => self.query_global_layer_winner_in_branch(
                 table,
                 &branch_key,
                 row_uuid,
                 VersionLayer::Content,
-            )?,
+            )
+            .await?,
         };
         let Some(content) = content
         else {
@@ -670,7 +666,7 @@ where
     }
 
     /// Return the exact local content parent for a branch-local row.
-    pub fn local_content_winner_tx_id_in_branch(
+    pub async fn local_content_winner_tx_id_in_branch(
         &mut self,
         table: &str,
         branch: &BranchSelector,
@@ -682,10 +678,11 @@ where
             row_uuid,
             VersionLayer::Content,
         )
+        .await
     }
 
     /// Return the exact local deletion parent for a branch-local row.
-    pub fn local_deletion_winner_tx_id_in_branch(
+    pub async fn local_deletion_winner_tx_id_in_branch(
         &mut self,
         table: &str,
         branch: &BranchSelector,
@@ -697,9 +694,10 @@ where
             row_uuid,
             VersionLayer::Deletion,
         )
+        .await
     }
 
-    fn local_layer_winner_tx_id_in_branch_selector(
+    async fn local_layer_winner_tx_id_in_branch_selector(
         &mut self,
         table: &str,
         branch: &BranchSelector,
@@ -717,7 +715,8 @@ where
         let (branch_key, _) = schema
             .project_branch_selector(&table_schema, branch)
             .map_err(Error::InvalidBranchKey)?;
-        self.query_local_layer_winner_in_branch(table, &branch_key, row_uuid, layer)?
+        self.query_local_layer_winner_in_branch(table, &branch_key, row_uuid, layer)
+            .await?
             .as_ref()
             .map(|version| self.version_tx_id(version))
             .transpose()
@@ -1127,14 +1126,19 @@ where
         schema_version: SchemaVersionId,
     ) -> Result<Option<(DeletionEvent, (TxTime, NodeUuid))>, Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
-        let prefix = vec![groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0))];
+        // Physical current keys lead with the branch key. Prepend the shared
+        // (default) branch exactly as the canonical content-current lookup
+        // does before applying the logical row-UUID point lookup.
+        let point = groove::ivm::StaticScanSpec::Point(vec![
+            groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0)),
+        ]);
         let global = GraphBuilder::table_scan(
             physical_register_global_current_table_name(table_id),
-            groove::ivm::StaticScanSpec::Point(prefix.clone()),
+            shared_branch_scan(Some(point.clone())),
         );
         let ahead = GraphBuilder::table_scan(
             physical_register_ahead_current_table_name(table_id),
-            groove::ivm::StaticScanSpec::Prefix(prefix),
+            shared_branch_scan(Some(point)),
         );
         let result = self
             .database

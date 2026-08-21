@@ -136,7 +136,7 @@ where
     }
 
     /// Resolve one row through a live head-over-base branch view for mutation helpers.
-    pub fn visible_current_cells_in_branch_view(
+    pub async fn visible_current_cells_in_branch_view(
         &mut self,
         table: &str,
         head: &BranchSelector,
@@ -173,7 +173,8 @@ where
                 DurabilityTier::Local,
                 &head,
                 base.as_ref(),
-            )?
+            )
+            .await?
             .into_iter()
             .find(|row| row.row_uuid() == row_uuid)
             .map(|row| {
@@ -188,34 +189,24 @@ where
             }))
     }
 
-    pub(super) fn branch_view_rows_for_schema(
+    async fn branch_winners_for_schema(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
         tier: DurabilityTier,
-        head: &BranchKey,
-        base: Option<&BranchViewSourceBase>,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let read_table = self.table_in_schema(table, read_schema_version)?;
-        let mut winners = |key: &BranchKey,
-                           snapshot: Option<&SnapshotRef>|
-         -> Result<
-            (BTreeMap<RowUuid, VersionRow>, BTreeMap<RowUuid, VersionRow>),
-            Error,
-        > {
-            let mut content = BTreeMap::new();
-            let mut deletions = BTreeMap::new();
-            let stored_keys =
-                self.equivalent_stored_branch_keys(table, read_schema_version, key)?;
-            for version in stored_keys
-                .iter()
-                .map(|stored_key| self.query_table_versions_in_branch(table, stored_key))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
+        key: &BranchKey,
+        snapshot: Option<&SnapshotRef>,
+    ) -> Result<(BTreeMap<RowUuid, VersionRow>, BTreeMap<RowUuid, VersionRow>), Error> {
+        let mut content = BTreeMap::new();
+        let mut deletions = BTreeMap::new();
+        let stored_keys = self.equivalent_stored_branch_keys(table, read_schema_version, key)?;
+        for stored_key in stored_keys {
+            for version in self
+                .query_table_versions_in_branch(table, &stored_key)
+                .await?
             {
                 let tx_id = self.version_tx_id(&version)?;
-                let Some(tx) = self.query_transaction(tx_id)? else {
+                let Some(tx) = self.query_transaction(tx_id).await? else {
                     continue;
                 };
                 let visible = if let Some(snapshot) = snapshot {
@@ -225,7 +216,7 @@ where
                         local_base: snapshot.local_base,
                         dots: snapshot.dots.clone(),
                     };
-                    self.snapshot_covers(tx_id, &snapshot)
+                    self.snapshot_covers(tx_id, &snapshot).await
                 } else {
                     match tier {
                         DurabilityTier::Global => {
@@ -261,19 +252,44 @@ where
                     target.insert(version.row_uuid(), version);
                 }
             }
-            Ok((content, deletions))
-        };
-        let (head_content, head_deletions) = winners(head, None)?;
+        }
+        Ok((content, deletions))
+    }
+
+    pub(super) async fn branch_view_rows_for_schema(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        tier: DurabilityTier,
+        head: &BranchKey,
+        base: Option<&BranchViewSourceBase>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let read_table = self.table_in_schema(table, read_schema_version)?;
+        let (head_content, head_deletions) = self
+            .branch_winners_for_schema(table, read_schema_version, tier, head, None)
+            .await?;
         let (base_content, base_deletions) = match base {
             None => (BTreeMap::new(), BTreeMap::new()),
             Some(BranchViewSourceBase::Current(key)) if key == head => {
                 (BTreeMap::new(), BTreeMap::new())
             }
-            Some(BranchViewSourceBase::Current(key)) => winners(key, None)?,
+            Some(BranchViewSourceBase::Current(key)) => {
+                self.branch_winners_for_schema(table, read_schema_version, tier, key, None)
+                    .await?
+            }
             Some(BranchViewSourceBase::Snapshot(key, _)) if key == head => {
                 (BTreeMap::new(), BTreeMap::new())
             }
-            Some(BranchViewSourceBase::Snapshot(key, snapshot)) => winners(key, Some(snapshot))?,
+            Some(BranchViewSourceBase::Snapshot(key, snapshot)) => {
+                self.branch_winners_for_schema(
+                    table,
+                    read_schema_version,
+                    tier,
+                    key,
+                    Some(snapshot),
+                )
+                .await?
+            }
         };
         let row_ids = head_content
             .keys()

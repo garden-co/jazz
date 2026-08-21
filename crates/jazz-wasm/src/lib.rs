@@ -563,9 +563,10 @@ impl WasmDbInner {
         cells: RowCells,
         branch: BranchSelector,
     ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| db
-            .mergeable_tx_ref(tx_id)
-            .insert_with_id_in_branch(table, branch, row_id, cells))
+        with_wasm_db!(self, |db| block_on(
+            db.mergeable_tx_ref(tx_id)
+                .insert_with_id_in_branch(table, branch, row_id, cells)
+        ))
     }
 
     fn mergeable_update(
@@ -594,9 +595,10 @@ impl WasmDbInner {
         head: BranchSelector,
         base: Option<BranchViewBase>,
     ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| db
-            .mergeable_tx_ref(tx_id)
-            .update_in_branch_view(table, head, base, row_id, patch))
+        with_wasm_db!(self, |db| block_on(
+            db.mergeable_tx_ref(tx_id)
+                .update_in_branch_view(table, head, base, row_id, patch)
+        ))
     }
 
     fn mergeable_delete(
@@ -623,9 +625,10 @@ impl WasmDbInner {
         head: BranchSelector,
         base: Option<BranchViewBase>,
     ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| db
-            .mergeable_tx_ref(tx_id)
-            .delete_in_branch_view(table, head, base, row_id))
+        with_wasm_db!(self, |db| block_on(
+            db.mergeable_tx_ref(tx_id)
+                .delete_in_branch_view(table, head, base, row_id)
+        ))
     }
 
     fn mergeable_restore(
@@ -653,9 +656,10 @@ impl WasmDbInner {
         cells: RowCells,
         branch: BranchSelector,
     ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| db
-            .mergeable_tx_ref(tx_id)
-            .restore_in_branch(table, branch, row_id, cells))
+        with_wasm_db!(self, |db| block_on(
+            db.mergeable_tx_ref(tx_id)
+                .restore_in_branch(table, branch, row_id, cells)
+        ))
     }
 
     fn exclusive_write(
@@ -892,13 +896,13 @@ impl WasmDbInner {
         match self {
             Self::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                db.insert_with_id_in_branch(table, branch, row_id, cells)
+                block_on(db.insert_with_id_in_branch(table, branch, row_id, cells))
                     .map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.insert_with_id_in_branch(table, branch, row_id, cells)
+                block_on(db.insert_with_id_in_branch(table, branch, row_id, cells))
                     .map_err(to_js_error)?,
             ),
             Self::Closed => panic!("WasmDb is closed"),
@@ -918,9 +922,9 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
                     Rc::clone(db),
-                    db.insert_with_id_in_branch_for_identity(
+                    block_on(db.insert_with_id_in_branch_for_identity(
                         identity, table, branch, row_id, cells,
-                    )
+                    ))
                     .map_err(to_js_error)?,
                 )
             }
@@ -929,9 +933,9 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
                     Rc::clone(db),
-                    db.insert_with_id_in_branch_for_identity(
+                    block_on(db.insert_with_id_in_branch_for_identity(
                         identity, table, branch, row_id, cells,
-                    )
+                    ))
                     .map_err(to_js_error)?,
                 )
             }
@@ -1024,8 +1028,10 @@ impl WasmDbInner {
             Self::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
                 match base {
-                    Some(base) => db.update_in_branch_view(table, head, Some(base), row_id, patch),
-                    None => db.update_in_branch(table, head, row_id, patch),
+                    Some(base) => {
+                        block_on(db.update_in_branch_view(table, head, Some(base), row_id, patch))
+                    }
+                    None => block_on(db.update_in_branch(table, head, row_id, patch)),
                 }
                 .map_err(to_js_error)?,
             ),
@@ -1033,8 +1039,10 @@ impl WasmDbInner {
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
                 match base {
-                    Some(base) => db.update_in_branch_view(table, head, Some(base), row_id, patch),
-                    None => db.update_in_branch(table, head, row_id, patch),
+                    Some(base) => {
+                        block_on(db.update_in_branch_view(table, head, Some(base), row_id, patch))
+                    }
+                    None => block_on(db.update_in_branch(table, head, row_id, patch)),
                 }
                 .map_err(to_js_error)?,
             ),
@@ -1056,9 +1064,9 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
                     Rc::clone(db),
-                    db.update_in_branch_view_for_identity(
+                    block_on(db.update_in_branch_view_for_identity(
                         identity, table, head, base, row_id, patch,
-                    )
+                    ))
                     .map_err(to_js_error)?,
                 )
             }
@@ -1067,9 +1075,9 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
                     Rc::clone(db),
-                    db.update_in_branch_view_for_identity(
+                    block_on(db.update_in_branch_view_for_identity(
                         identity, table, head, base, row_id, patch,
-                    )
+                    ))
                     .map_err(to_js_error)?,
                 )
             }
@@ -1225,8 +1233,10 @@ impl WasmDbInner {
             Self::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
                 match base {
-                    Some(base) => db.delete_in_branch_view(table, head, Some(base), row_id),
-                    None => db.delete_in_branch(table, head, row_id),
+                    Some(base) => {
+                        block_on(db.delete_in_branch_view(table, head, Some(base), row_id))
+                    }
+                    None => block_on(db.delete_in_branch(table, head, row_id)),
                 }
                 .map_err(to_js_error)?,
             ),
@@ -1234,8 +1244,10 @@ impl WasmDbInner {
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
                 match base {
-                    Some(base) => db.delete_in_branch_view(table, head, Some(base), row_id),
-                    None => db.delete_in_branch(table, head, row_id),
+                    Some(base) => {
+                        block_on(db.delete_in_branch_view(table, head, Some(base), row_id))
+                    }
+                    None => block_on(db.delete_in_branch(table, head, row_id)),
                 }
                 .map_err(to_js_error)?,
             ),
@@ -1256,8 +1268,10 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
                     Rc::clone(db),
-                    db.delete_in_branch_view_for_identity(identity, table, head, base, row_id)
-                        .map_err(to_js_error)?,
+                    block_on(
+                        db.delete_in_branch_view_for_identity(identity, table, head, base, row_id),
+                    )
+                    .map_err(to_js_error)?,
                 )
             }
             #[cfg(target_arch = "wasm32")]
@@ -1265,8 +1279,10 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
                     Rc::clone(db),
-                    db.delete_in_branch_view_for_identity(identity, table, head, base, row_id)
-                        .map_err(to_js_error)?,
+                    block_on(
+                        db.delete_in_branch_view_for_identity(identity, table, head, base, row_id),
+                    )
+                    .map_err(to_js_error)?,
                 )
             }
             Self::Closed => panic!("WasmDb is closed"),
@@ -1350,14 +1366,12 @@ impl WasmDbInner {
         match self {
             Self::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                db.restore_in_branch(table, branch, row_id)
-                    .map_err(to_js_error)?,
+                block_on(db.restore_in_branch(table, branch, row_id)).map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.restore_in_branch(table, branch, row_id)
-                    .map_err(to_js_error)?,
+                block_on(db.restore_in_branch(table, branch, row_id)).map_err(to_js_error)?,
             ),
             Self::Closed => panic!("WasmDb is closed"),
         }
@@ -1379,10 +1393,12 @@ impl WasmDbInner {
                 wasm_write_memory(
                     Rc::clone(db),
                     match identity {
-                        Some(identity) => db.restore_with_cells_in_branch_as_identity(
+                        Some(identity) => block_on(db.restore_with_cells_in_branch_as_identity(
                             identity, table, branch, row_id, cells,
-                        ),
-                        None => db.restore_with_cells_in_branch(table, branch, row_id, cells),
+                        )),
+                        None => {
+                            block_on(db.restore_with_cells_in_branch(table, branch, row_id, cells))
+                        }
                     }
                     .map_err(to_js_error)?,
                 )
@@ -1395,10 +1411,12 @@ impl WasmDbInner {
                 wasm_write_browser(
                     Rc::clone(db),
                     match identity {
-                        Some(identity) => db.restore_with_cells_in_branch_as_identity(
+                        Some(identity) => block_on(db.restore_with_cells_in_branch_as_identity(
                             identity, table, branch, row_id, cells,
-                        ),
-                        None => db.restore_with_cells_in_branch(table, branch, row_id, cells),
+                        )),
+                        None => {
+                            block_on(db.restore_with_cells_in_branch(table, branch, row_id, cells))
+                        }
                     }
                     .map_err(to_js_error)?,
                 )

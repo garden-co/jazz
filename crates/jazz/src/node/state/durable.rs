@@ -849,6 +849,7 @@ self.database.finish_persistence(persisted)?;
                     version.branch_key(),
                     row_uuid,
                     version.layer(),
+                )
                 .await?
                 .as_ref()
                 .map(|winner| {
@@ -862,6 +863,7 @@ self.database.finish_persistence(persisted)?;
                     version.branch_key(),
                     row_uuid,
                     version.layer(),
+                )
                 .await?
                 .as_ref()
                 .map(|winner| {

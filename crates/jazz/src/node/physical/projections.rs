@@ -1380,7 +1380,9 @@ where
     }
 }
 
-fn shared_branch_scan(scan: Option<groove::ivm::StaticScanSpec>) -> groove::ivm::StaticScanSpec {
+pub(super) fn shared_branch_scan(
+    scan: Option<groove::ivm::StaticScanSpec>,
+) -> groove::ivm::StaticScanSpec {
     branch_scan(&BranchKey::default(), scan)
 }
 

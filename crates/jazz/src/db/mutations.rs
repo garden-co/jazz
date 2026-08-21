@@ -12,29 +12,38 @@ where
     /// another. This requires a history-complete database and emits an ordinary
     /// mergeable transaction when the target does not already represent every
     /// selected contribution.
-    pub fn merge_branch_contributions(
+    pub async fn merge_branch_contributions(
         &self,
         source: BranchSelector,
         target: BranchSelector,
         rows: impl IntoIterator<Item = ContributionMergeRow>,
     ) -> Result<Option<TxId>, Error> {
-        let tx_id =
-            self.node
-                .node
-                .borrow_mut()
-                .merge_branch_contributions(ContributionMergeRequest {
-                    source,
-                    target,
-                    rows: rows.into_iter().collect(),
-                    made_by: self.identity.author,
-                    permission_subject: Some(self.identity.author),
-                    now_ms: self.next_now_ms(),
-                })?;
-        if let Some(tx_id) = tx_id {
-            self.finalize_local_commit(tx_id)?;
-            self.refresh_subscriptions()?;
-        }
-        Ok(tx_id)
+        let rows = rows.into_iter().collect::<Vec<_>>();
+        let representative_row = rows.first().map(|row| row.row_uuid);
+        let tx_id = self
+            .node
+            .node
+            .lock()
+            .await
+            .merge_branch_contributions(ContributionMergeRequest {
+                source,
+                target,
+                rows,
+                made_by: self.identity.author,
+                permission_subject: Some(self.identity.author),
+                now_ms: self.next_now_ms(),
+            })
+            .await?;
+        let Some(published) = tx_id else {
+            return Ok(None);
+        };
+        let tx_id = published.tx_id;
+        self.finish_published_write(
+            representative_row.expect("a published contribution merge has at least one row"),
+            published,
+        )
+        .await?;
+        Ok(Some(tx_id))
     }
 
     /// Insert a row locally, generating a uuidv7-shaped row id.
@@ -130,6 +139,7 @@ where
             self.next_now_ms(),
             branch,
         )
+        .await
     }
 
     /// Insert one exact branch-local row while evaluating policy as `identity`.
@@ -155,6 +165,7 @@ where
             self.next_now_ms(),
             branch,
         )
+        .await
     }
 
     /// Insert a caller-id row while attributing provenance to `made_by`.
@@ -349,7 +360,7 @@ where
     }
 
     /// Patch one exact branch-local row.
-    pub fn update_in_branch(
+    pub async fn update_in_branch(
         &self,
         table: &str,
         branch: BranchSelector,
@@ -362,14 +373,19 @@ where
                 "exact branch update requires at least one authored column",
             ));
         }
-        let mut node = self.node.node.borrow_mut();
-        let Some(mut cells) = node.visible_current_cells_in_branch(table, &branch, row)? else {
+        let mut node = self.node.node.lock().await;
+        let Some(mut cells) = node
+            .visible_current_cells_in_branch(table, &branch, row)
+            .await?
+        else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("branch-local row not observed: {}", row.0),
             ));
         };
-        let parent = node.local_content_winner_tx_id_in_branch(table, &branch, row)?;
+        let parent = node
+            .local_content_winner_tx_id_in_branch(table, &branch, row)
+            .await?;
         drop(node);
         let authored_columns = patch.keys().cloned().collect();
         cells.extend(patch);
@@ -385,10 +401,11 @@ where
             self.next_now_ms(),
             branch,
         )
+        .await
     }
 
     /// Patch one exact branch-local row while evaluating policy as `identity`.
-    pub fn update_in_branch_for_identity(
+    pub async fn update_in_branch_for_identity(
         &self,
         identity: AuthorId,
         table: &str,
@@ -402,14 +419,19 @@ where
                 "exact branch update requires at least one authored column",
             ));
         }
-        let mut node = self.node.node.borrow_mut();
-        let Some(mut cells) = node.visible_current_cells_in_branch(table, &branch, row)? else {
+        let mut node = self.node.node.lock().await;
+        let Some(mut cells) = node
+            .visible_current_cells_in_branch(table, &branch, row)
+            .await?
+        else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("branch-local row not observed: {}", row.0),
             ));
         };
-        let parent = node.local_content_winner_tx_id_in_branch(table, &branch, row)?;
+        let parent = node
+            .local_content_winner_tx_id_in_branch(table, &branch, row)
+            .await?;
         drop(node);
         let authored_columns = patch.keys().cloned().collect();
         cells.extend(patch);
@@ -425,11 +447,12 @@ where
             self.next_now_ms(),
             branch,
         )
+        .await
     }
 
     /// Patch a row through a head-over-base view, copying inherited content
     /// into the head branch-local row without a cross-branch causal parent.
-    pub fn update_in_branch_view(
+    pub async fn update_in_branch_view(
         &self,
         table: &str,
         head: BranchSelector,
@@ -440,17 +463,21 @@ where
         if self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch(table, &head, row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch(table, &head, row)
+            .await?
             .is_some()
         {
-            return self.update_in_branch(table, head, row, patch);
+            return self.update_in_branch(table, head, row, patch).await;
         }
         let Some(mut inherited) = self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+            .await?
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
@@ -459,10 +486,11 @@ where
         };
         inherited.extend(patch);
         self.insert_with_id_in_branch(table, head, row, inherited)
+            .await
     }
 
     /// Patch through a branch view while evaluating policy as `identity`.
-    pub fn update_in_branch_view_for_identity(
+    pub async fn update_in_branch_view_for_identity(
         &self,
         identity: AuthorId,
         table: &str,
@@ -474,17 +502,23 @@ where
         if self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch(table, &head, row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch(table, &head, row)
+            .await?
             .is_some()
         {
-            return self.update_in_branch_for_identity(identity, table, head, row, patch);
+            return self
+                .update_in_branch_for_identity(identity, table, head, row, patch)
+                .await;
         }
         let Some(mut inherited) = self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+            .await?
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
@@ -493,10 +527,11 @@ where
         };
         inherited.extend(patch);
         self.insert_with_id_in_branch_for_identity(identity, table, head, row, inherited)
+            .await
     }
 
     /// Insert or patch one exact branch-local row.
-    pub fn upsert_in_branch(
+    pub async fn upsert_in_branch(
         &self,
         table: &str,
         branch: BranchSelector,
@@ -506,13 +541,16 @@ where
         let exists = self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch(table, &branch, row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch(table, &branch, row)
+            .await?
             .is_some();
         if exists {
-            self.update_in_branch(table, branch, row, cells)
+            self.update_in_branch(table, branch, row, cells).await
         } else {
             self.insert_with_id_in_branch(table, branch, row, cells)
+                .await
         }
     }
 
@@ -817,15 +855,16 @@ where
     }
 
     /// Soft-delete one exact branch-local row.
-    pub fn delete_in_branch(
+    pub async fn delete_in_branch(
         &self,
         table: &str,
         branch: BranchSelector,
         row: RowUuid,
     ) -> Result<WriteHandle<S>, Error> {
-        let mut node = self.node.node.borrow_mut();
+        let mut node = self.node.node.lock().await;
         if node
-            .visible_current_cells_in_branch(table, &branch, row)?
+            .visible_current_cells_in_branch(table, &branch, row)
+            .await?
             .is_none()
         {
             return Err(Error::new(
@@ -833,11 +872,13 @@ where
                 format!("branch-local row not observed: {}", row.0),
             ));
         }
-        let parents = node
-            .local_deletion_winner_tx_id_in_branch(table, &branch, row)?
-            .or(node.local_content_winner_tx_id_in_branch(table, &branch, row)?)
-            .into_iter()
-            .collect();
+        let deletion_parent = node
+            .local_deletion_winner_tx_id_in_branch(table, &branch, row)
+            .await?;
+        let content_parent = node
+            .local_content_winner_tx_id_in_branch(table, &branch, row)
+            .await?;
+        let parents = deletion_parent.or(content_parent).into_iter().collect();
         drop(node);
         self.write_mergeable_at_ms_with_authorship_in_branch(
             self.identity.author,
@@ -851,19 +892,21 @@ where
             self.next_now_ms(),
             branch,
         )
+        .await
     }
 
     /// Delete one exact branch-local row while evaluating policy as `identity`.
-    pub fn delete_in_branch_for_identity(
+    pub async fn delete_in_branch_for_identity(
         &self,
         identity: AuthorId,
         table: &str,
         branch: BranchSelector,
         row: RowUuid,
     ) -> Result<WriteHandle<S>, Error> {
-        let mut node = self.node.node.borrow_mut();
+        let mut node = self.node.node.lock().await;
         if node
-            .visible_current_cells_in_branch(table, &branch, row)?
+            .visible_current_cells_in_branch(table, &branch, row)
+            .await?
             .is_none()
         {
             return Err(Error::new(
@@ -871,11 +914,13 @@ where
                 format!("branch-local row not observed: {}", row.0),
             ));
         }
-        let parents = node
-            .local_deletion_winner_tx_id_in_branch(table, &branch, row)?
-            .or(node.local_content_winner_tx_id_in_branch(table, &branch, row)?)
-            .into_iter()
-            .collect();
+        let deletion_parent = node
+            .local_deletion_winner_tx_id_in_branch(table, &branch, row)
+            .await?;
+        let content_parent = node
+            .local_content_winner_tx_id_in_branch(table, &branch, row)
+            .await?;
+        let parents = deletion_parent.or(content_parent).into_iter().collect();
         drop(node);
         self.write_mergeable_at_ms_with_authorship_in_branch(
             identity,
@@ -889,11 +934,12 @@ where
             self.next_now_ms(),
             branch,
         )
+        .await
     }
 
     /// Delete a row through a head-over-base view. An inherited base row is
     /// masked by a deletion register in the head branch-local row.
-    pub fn delete_in_branch_view(
+    pub async fn delete_in_branch_view(
         &self,
         table: &str,
         head: BranchSelector,
@@ -903,17 +949,21 @@ where
         if self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch(table, &head, row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch(table, &head, row)
+            .await?
             .is_some()
         {
-            return self.delete_in_branch(table, head, row);
+            return self.delete_in_branch(table, head, row).await;
         }
         if self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+            .await?
             .is_none()
         {
             return Err(Error::new(
@@ -924,8 +974,10 @@ where
         let parent = self
             .node
             .node
-            .borrow_mut()
-            .local_deletion_winner_tx_id_in_branch(table, &head, row)?;
+            .lock()
+            .await
+            .local_deletion_winner_tx_id_in_branch(table, &head, row)
+            .await?;
         self.write_mergeable_at_ms_with_authorship_in_branch(
             self.identity.author,
             None,
@@ -938,10 +990,11 @@ where
             self.next_now_ms(),
             head,
         )
+        .await
     }
 
     /// Delete through a branch view while evaluating policy as `identity`.
-    pub fn delete_in_branch_view_for_identity(
+    pub async fn delete_in_branch_view_for_identity(
         &self,
         identity: AuthorId,
         table: &str,
@@ -952,17 +1005,23 @@ where
         if self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch(table, &head, row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch(table, &head, row)
+            .await?
             .is_some()
         {
-            return self.delete_in_branch_for_identity(identity, table, head, row);
+            return self
+                .delete_in_branch_for_identity(identity, table, head, row)
+                .await;
         }
         if self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+            .await?
             .is_none()
         {
             return Err(Error::new(
@@ -973,8 +1032,10 @@ where
         let parent = self
             .node
             .node
-            .borrow_mut()
-            .local_deletion_winner_tx_id_in_branch(table, &head, row)?;
+            .lock()
+            .await
+            .local_deletion_winner_tx_id_in_branch(table, &head, row)
+            .await?;
         self.write_mergeable_at_ms_with_authorship_in_branch(
             identity,
             Some(identity),
@@ -987,10 +1048,11 @@ where
             self.next_now_ms(),
             head,
         )
+        .await
     }
 
     /// Restore the deletion register of one exact branch-local row.
-    pub fn restore_in_branch(
+    pub async fn restore_in_branch(
         &self,
         table: &str,
         branch: BranchSelector,
@@ -999,8 +1061,10 @@ where
         let parent = self
             .node
             .node
-            .borrow_mut()
-            .local_deletion_winner_tx_id_in_branch(table, &branch, row)?
+            .lock()
+            .await
+            .local_deletion_winner_tx_id_in_branch(table, &branch, row)
+            .await?
             .ok_or_else(|| {
                 Error::new(
                     ErrorCode::NotObserved,
@@ -1019,10 +1083,11 @@ where
             self.next_now_ms(),
             branch,
         )
+        .await
     }
 
     /// Restore an exact branch-local row and replace its content atomically.
-    pub fn restore_with_cells_in_branch(
+    pub async fn restore_with_cells_in_branch(
         &self,
         table: &str,
         branch: BranchSelector,
@@ -1037,10 +1102,11 @@ where
             row,
             cells,
         )
+        .await
     }
 
     /// Restore an exact branch-local row while evaluating policy as `identity`.
-    pub fn restore_with_cells_in_branch_as_identity(
+    pub async fn restore_with_cells_in_branch_as_identity(
         &self,
         identity: AuthorId,
         table: &str,
@@ -1056,10 +1122,11 @@ where
             row,
             cells,
         )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn restore_with_cells_in_branch_for_identity(
+    async fn restore_with_cells_in_branch_for_identity(
         &self,
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
@@ -1070,9 +1137,10 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
         let (content_parents, deletion_parents) = {
-            let mut node = self.node.node.borrow_mut();
+            let mut node = self.node.node.lock().await;
             let deletion_parent = node
-                .local_deletion_winner_tx_id_in_branch(table, &branch, row)?
+                .local_deletion_winner_tx_id_in_branch(table, &branch, row)
+                .await?
                 .ok_or_else(|| {
                     Error::new(
                         ErrorCode::NotObserved,
@@ -1080,7 +1148,8 @@ where
                     )
                 })?;
             (
-                node.local_content_winner_tx_id_in_branch(table, &branch, row)?
+                node.local_content_winner_tx_id_in_branch(table, &branch, row)
+                    .await?
                     .into_iter()
                     .collect::<Vec<_>>(),
                 vec![deletion_parent],
@@ -1104,19 +1173,14 @@ where
             ),
             None => (content, deletion),
         };
-        let tx_id = self
+        let published = self
             .node
             .node
-            .borrow_mut()
-            .commit_mergeable_many_in_schema(self.schema_version_id, vec![content, deletion])?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
+            .lock()
+            .await
+            .commit_mergeable_many_in_schema(self.schema_version_id, vec![content, deletion])
+            .await?;
+        self.finish_published_write(row, published).await
     }
 
     /// Soft-delete a row with explicit millisecond provenance time.
@@ -1653,10 +1717,11 @@ where
             now_ms,
             BranchSelector::default(),
         )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn write_mergeable_at_ms_with_authorship_in_branch(
+    async fn write_mergeable_at_ms_with_authorship_in_branch(
         &self,
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,

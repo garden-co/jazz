@@ -467,7 +467,6 @@ where
             let mut preparer = JazzSourceGraphPreparer {
                 node: self,
                 read_view: &read_view,
-                prepare_branch_subscription_sources: false,
                 inline_sources: BTreeMap::new(),
                 access_paths: BTreeMap::new(),
                 current_projection_targets: BTreeMap::new(),

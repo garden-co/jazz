@@ -18,14 +18,17 @@ where
     ) -> Result<bool, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
-        let Some(raw) = self.database.index_last_raw(
-            "jazz_global_changes",
-            "by_table_global_time",
-            &[
-                Value::U64(table_id.0),
-                Value::Bytes(BranchKey::default().canonical_bytes()),
-            ],
-        ).await?
+        let Some(raw) = self
+            .database
+            .index_last_raw(
+                "jazz_global_changes",
+                "by_table_global_time",
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                ],
+            )
+            .await?
         else {
             return Ok(false);
         };
@@ -100,6 +103,7 @@ where
                     Value::Bytes(BranchKey::default().canonical_bytes()),
                     Value::Uuid(row_uuid.0),
                 ],
+            )
             .await
             .ok()?
         {
@@ -131,6 +135,7 @@ where
                     Value::Bytes(BranchKey::default().canonical_bytes()),
                     Value::Uuid(row_uuid.0),
                 ],
+            )
             .await
             .ok()??;
         let record = raw.record();
@@ -166,11 +171,11 @@ where
                 ))?;
             let previous_current = self
                 .query_global_layer_winner_in_schema_and_branch(
-                authored_schema,
-                &version.table,
-                version.branch_key(),
-                version.row_uuid(),
-                version.layer(),
+                    authored_schema,
+                    &version.table,
+                    version.branch_key(),
+                    version.row_uuid(),
+                    version.layer(),
                 )
                 .await?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {

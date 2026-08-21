@@ -14,7 +14,7 @@ import type {
   BatchId,
   InsertResult,
   MutationErrorEvent,
-  MutationReceipt,
+  MutationResult,
   OpenBatchId,
   PermissionAdvice,
   Runtime,
@@ -789,7 +789,7 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId: string,
     values: Record<string, Value>,
     writeContext?: string | null,
-  ): MutationReceipt {
+  ): MutationResult {
     const rowId = parseUuid(objectId);
     const patch = encodeCellsForPatch(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -854,7 +854,7 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId: string,
     values: InsertValues,
     writeContext?: string | null,
-  ): MutationReceipt {
+  ): MutationResult {
     const rowId = parseUuid(objectId);
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -892,7 +892,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishMutation(write);
   }
 
-  delete(table: string, objectId: string, writeContext?: string | null): MutationReceipt {
+  delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -1434,7 +1434,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return { id: row.id, values: row.values, kind: "committed", batchId };
   }
 
-  private finishMutation(write: Write): MutationReceipt {
+  private finishMutation(write: Write): MutationResult {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.scheduleServerPump();

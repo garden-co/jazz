@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { Db, type DbConfig, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import {
-  MutationResult,
+  WriteHandle,
+  WriteResult,
   type JazzClient,
   type BatchId,
   type LocalTransactionRecord,
@@ -88,35 +89,25 @@ function makeHandleClient(localTransactionRecord: LocalTransactionRecord) {
   };
 }
 
-function makeValueMutationResult(
+function makeValueWriteResult(
   value: Row,
   transactionId: string,
   localTransactionRecord = makeLocalTransactionRecord(transactionId),
 ) {
   const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new MutationResult(
-      value,
-      transactionId as BatchId,
-      client as unknown as JazzClient,
-      "mergeable",
-    ),
+    handle: new WriteResult(value, transactionId as BatchId, client as unknown as JazzClient),
     client,
   };
 }
 
-function makeVoidMutationResult(
+function makeVoidWriteHandle(
   transactionId: string,
   localTransactionRecord = makeLocalTransactionRecord(transactionId),
 ) {
   const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new MutationResult(
-      undefined,
-      transactionId as BatchId,
-      client as unknown as JazzClient,
-      "mergeable",
-    ),
+    handle: new WriteHandle(transactionId as BatchId, client as unknown as JazzClient),
     client,
   };
 }
@@ -131,7 +122,7 @@ describe("Db write handles", () => {
         { type: "Boolean", value: false },
       ],
     };
-    const { handle: writeResult, client: handleClient } = makeValueMutationResult(
+    const { handle: writeResult, client: handleClient } = makeValueWriteResult(
       runtimeRow,
       "transaction-insert",
     );
@@ -154,7 +145,7 @@ describe("Db write handles", () => {
       undefined,
       undefined,
     );
-    await expect(pending.transactionId).resolves.toBe("transaction-insert");
+    await expect(pending.batchId).resolves.toBe("transaction-insert");
     expect(pending.value).toEqual({
       id: "todo-1",
       title: "Buy milk",
@@ -174,9 +165,9 @@ describe("Db write handles", () => {
   it("keeps update and delete handles waitable by durability tier", async () => {
     const table = todoTable();
     const { handle: updateHandle, client: updateClient } =
-      makeVoidMutationResult("transaction-update");
+      makeVoidWriteHandle("transaction-update");
     const { handle: deleteHandle, client: deleteClient } =
-      makeVoidMutationResult("transaction-delete");
+      makeVoidWriteHandle("transaction-delete");
     const update = vi.fn(() => updateHandle);
     const remove = vi.fn(() => deleteHandle);
     const client = {
@@ -219,7 +210,7 @@ describe("Db write handles", () => {
       claims: { role: "writer" },
       authMode: "external",
     };
-    const { handle: insertHandle, client: insertClient } = makeValueMutationResult(
+    const { handle: insertHandle, client: insertClient } = makeValueWriteResult(
       {
         id: "todo-2",
         values: [
@@ -229,10 +220,10 @@ describe("Db write handles", () => {
       },
       "transaction-session-insert",
     );
-    const { handle: updateHandle, client: updateClient } = makeVoidMutationResult(
+    const { handle: updateHandle, client: updateClient } = makeVoidWriteHandle(
       "transaction-session-update",
     );
-    const { handle: deleteHandle, client: deleteClient } = makeVoidMutationResult(
+    const { handle: deleteHandle, client: deleteClient } = makeVoidWriteHandle(
       "transaction-session-delete",
     );
     const insert = vi.fn(() => insertHandle);
@@ -331,7 +322,7 @@ describe("Db mutation error handling", () => {
       }),
       insert: vi.fn(
         () =>
-          new MutationResult(
+          new WriteResult(
             {
               id: "todo-1",
               values: [
@@ -341,7 +332,6 @@ describe("Db mutation error handling", () => {
             },
             batchId,
             client,
-            "mergeable",
           ),
       ),
       waitForTransaction: vi.fn(async () => undefined),

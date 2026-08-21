@@ -44,9 +44,9 @@ fn run(row_count: usize) {
     let head = selector(0x02);
 
     let seed_started = Instant::now();
-    let seed = db.mergeable_tx().unwrap();
+    let seed = block_on(db.mergeable_tx()).unwrap();
     for index in 0..row_count {
-        seed.insert_with_id_in_branch(
+        block_on(seed.insert_with_id_in_branch(
             "items",
             base.clone(),
             row(index),
@@ -57,30 +57,29 @@ fn run(row_count: usize) {
                 ),
                 ("rank".to_owned(), Value::I64(index as i64)),
             ]),
-        )
+        ))
         .unwrap();
     }
-    let seed_tx = seed.commit().unwrap();
+    let seed_tx = block_on(seed.commit()).unwrap();
     let seed_us = seed_started.elapsed().as_micros() as u64;
 
     let overlay_started = Instant::now();
-    let overlay = db.mergeable_tx().unwrap();
+    let overlay = block_on(db.mergeable_tx()).unwrap();
     let overlaid = (row_count / 4).max(1);
     for index in 0..overlaid {
-        overlay
-            .update_in_branch_view(
-                "items",
-                head.clone(),
-                Some(BranchViewBase::Current(base.clone())),
-                row(index),
-                BTreeMap::from([(
-                    "title".to_owned(),
-                    Value::String(format!("draft-{index:08}")),
-                )]),
-            )
-            .unwrap();
+        block_on(overlay.update_in_branch_view(
+            "items",
+            head.clone(),
+            Some(BranchViewBase::Current(base.clone())),
+            row(index),
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String(format!("draft-{index:08}")),
+            )]),
+        ))
+        .unwrap();
     }
-    overlay.commit().unwrap();
+    block_on(overlay.commit()).unwrap();
     let overlay_us = overlay_started.elapsed().as_micros() as u64;
 
     let all = db.prepare_query(&Query::from("items")).unwrap();
@@ -124,22 +123,21 @@ fn run(row_count: usize) {
     assert_eq!(indexed_rows.len(), usize::from(needle >= overlaid));
 
     let cross_started = Instant::now();
-    let cross = db.mergeable_tx().unwrap();
+    let cross = block_on(db.mergeable_tx()).unwrap();
     let cross_row = row(row_count + 1);
     for (branch, title) in [(base.clone(), "base"), (head.clone(), "head")] {
-        cross
-            .insert_with_id_in_branch(
-                "items",
-                branch,
-                cross_row,
-                BTreeMap::from([
-                    ("title".to_owned(), Value::String(title.to_owned())),
-                    ("rank".to_owned(), Value::I64(row_count as i64 + 1)),
-                ]),
-            )
-            .unwrap();
+        block_on(cross.insert_with_id_in_branch(
+            "items",
+            branch,
+            cross_row,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("rank".to_owned(), Value::I64(row_count as i64 + 1)),
+            ]),
+        ))
+        .unwrap();
     }
-    cross.commit().unwrap();
+    block_on(cross.commit()).unwrap();
     let cross_branch_tx_us = cross_started.elapsed().as_micros() as u64;
 
     let merge_rows = (0..overlaid.min(16)).map(|index| ContributionMergeRow {
@@ -147,9 +145,7 @@ fn run(row_count: usize) {
         row_uuid: row(index),
     });
     let merge_started = Instant::now();
-    let merge_tx = db
-        .merge_branch_contributions(base, head, merge_rows)
-        .unwrap();
+    let merge_tx = block_on(db.merge_branch_contributions(base, head, merge_rows)).unwrap();
     let contribution_merge_us = merge_started.elapsed().as_micros() as u64;
     assert!(merge_tx.is_some() || overlaid == 0);
 

@@ -857,7 +857,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     let mut redacted_tx = tx.clone();
     redacted_tx.n_total_writes = 1;
     reader
-        .apply_sync_message(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate {
             subscription,
             settled_through: GlobalTime(1),
             reset_result_set: false,
@@ -884,7 +884,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     let mut reader = reopen_node_at(&reader_dir, node(3), schema());
     assert!(reader.query_transaction(tx_id).unwrap().unwrap().view_scoped_cardinality);
     reader
-        .apply_sync_message(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate {
             subscription,
             settled_through: GlobalTime(1),
             reset_result_set: false,

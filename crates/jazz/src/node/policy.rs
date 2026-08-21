@@ -122,16 +122,17 @@ where
                         .map(|value| (column.name.clone(), value))
                 })
                 .collect();
-            return self.write_policy_query_allows_candidate_for_schema(
-                policy_schema_version,
-                &table,
-                &policy,
-                current.row_uuid(),
-                &current_cells,
-                author,
-                false,
-            )
-            .await;
+            return self
+                .write_policy_query_allows_candidate_for_schema(
+                    policy_schema_version,
+                    &table,
+                    &policy,
+                    current.row_uuid(),
+                    &current_cells,
+                    author,
+                    false,
+                )
+                .await;
         }
         let is_update = self
             .policy_previous_content_subject_row(policy_schema_version, &table, version)
@@ -154,16 +155,17 @@ where
                 })
                 .collect::<BTreeMap<_, _>>();
             if let Some(policy) = table.write_policies.update_using.clone() {
-                if !self.write_policy_query_allows_candidate_for_schema(
-                    policy_schema_version,
-                    &table,
-                    &policy,
-                    previous.row_uuid(),
-                    &previous_cells,
-                    author,
-                    false,
-                )
-                .await?
+                if !self
+                    .write_policy_query_allows_candidate_for_schema(
+                        policy_schema_version,
+                        &table,
+                        &policy,
+                        previous.row_uuid(),
+                        &previous_cells,
+                        author,
+                        false,
+                    )
+                    .await?
                 {
                     return Ok(false);
                 }
@@ -173,16 +175,17 @@ where
             };
             let mut effective_cells = previous_cells;
             effective_cells.extend(cells.clone());
-            return self.write_policy_query_allows_candidate_for_schema(
-                policy_schema_version,
-                &table,
-                &policy,
-                version.row_uuid(),
-                &effective_cells,
-                author,
-                false,
-            )
-            .await;
+            return self
+                .write_policy_query_allows_candidate_for_schema(
+                    policy_schema_version,
+                    &table,
+                    &policy,
+                    version.row_uuid(),
+                    &effective_cells,
+                    author,
+                    false,
+                )
+                .await;
         }
         let Some(policy) = table.write_policies.insert_check.clone() else {
             return Ok(true);
@@ -627,13 +630,14 @@ where
             }
         }
 
-        if let Some(current_version) = self.query_local_layer_winner_in_branch(
-            subject_table,
-            version.branch_key(),
-            version.row_uuid(),
-            VersionLayer::Content,
-        )
-        .await?
+        if let Some(current_version) = self
+            .query_local_layer_winner_in_branch(
+                subject_table,
+                version.branch_key(),
+                version.row_uuid(),
+                VersionLayer::Content,
+            )
+            .await?
         {
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
@@ -642,13 +646,14 @@ where
             }
         }
 
-        if let Some(current_version) = self.query_global_layer_winner_in_branch(
-            subject_table,
-            version.branch_key(),
-            version.row_uuid(),
-            VersionLayer::Content,
-        )
-        .await?
+        if let Some(current_version) = self
+            .query_global_layer_winner_in_branch(
+                subject_table,
+                version.branch_key(),
+                version.row_uuid(),
+                VersionLayer::Content,
+            )
+            .await?
         {
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;

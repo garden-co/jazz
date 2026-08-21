@@ -3,5 +3,8 @@
 //! modules, and independent expected semantics live in [`crate::oracle`].
 
 use super::*;
+use crate::legacy_test_future::{
+    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+};
 
 mod harness;

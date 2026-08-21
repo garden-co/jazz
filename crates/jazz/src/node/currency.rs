@@ -37,6 +37,7 @@ where
                         Value::Bytes(branch_key.canonical_bytes()),
                         Value::Uuid(row_uuid.0),
                     ],
+                )
                 .await?
                 .into_iter()
                 .map(|raw| raw.owned_record())
@@ -73,7 +74,7 @@ where
         Ok(versions)
     }
 
-    pub(super) fn query_table_versions_in_branch(
+    pub(super) async fn query_table_versions_in_branch(
         &mut self,
         table: &str,
         branch_key: &BranchKey,
@@ -85,7 +86,8 @@ where
                 .primary_key_scan_raw(
                     &storage_table,
                     &[Value::Bytes(branch_key.canonical_bytes())],
-                )?
+                )
+                .await?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -99,7 +101,8 @@ where
             let prefix = self.deletion_storage_prefix_in_branch(table, branch_key, None)?;
             let raws = self
                 .database
-                .primary_key_scan_raw(&storage_table, &prefix)?
+                .primary_key_scan_raw(&storage_table, &prefix)
+                .await?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -129,7 +132,7 @@ where
             .await
     }
 
-    pub(super) fn query_local_layer_winner_in_branch(
+    pub(super) async fn query_local_layer_winner_in_branch(
         &mut self,
         table: &str,
         branch_key: &BranchKey,
@@ -137,6 +140,7 @@ where
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
         self.query_layer_winner_from_pk_in_branch(table, branch_key, row_uuid, layer)
+            .await
     }
 
     #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
@@ -159,7 +163,7 @@ where
             .await
     }
 
-    pub(super) fn query_global_layer_winner_in_branch(
+    pub(super) async fn query_global_layer_winner_in_branch(
         &mut self,
         table: &str,
         branch_key: &BranchKey,
@@ -173,13 +177,16 @@ where
             layer,
             PhysicalCurrentClass::Global,
         )?;
-        let raw = self.database.primary_key_get_raw(
-            &current_table,
-            &[
-                Value::Bytes(branch_key.canonical_bytes()),
-                Value::Uuid(row_uuid.0),
-            ],
-        )?;
+        let raw = self
+            .database
+            .primary_key_get_raw(
+                &current_table,
+                &[
+                    Value::Bytes(branch_key.canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
+            .await?;
         let Some(raw) = raw else { return Ok(None) };
         let record = raw.record();
         let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
@@ -194,6 +201,24 @@ where
             tx_time,
             tx_node_alias,
         )
+        .await
+    }
+
+    pub(super) async fn query_current_layer_winner_in_branch(
+        &mut self,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<VersionRow>, Error> {
+        if let Some(local) = self
+            .query_local_layer_winner_in_branch(table, branch_key, row_uuid, layer)
+            .await?
+        {
+            return Ok(Some(local));
+        }
+        self.query_global_layer_winner_in_branch(table, branch_key, row_uuid, layer)
+            .await
     }
 
     /// Read the global winner through a specified schema's physical lineage.
@@ -214,6 +239,7 @@ where
             row_uuid,
             layer,
         )
+        .await
     }
 
     pub(super) async fn query_global_layer_winner_in_schema_and_branch(
@@ -230,13 +256,16 @@ where
             layer,
             PhysicalCurrentClass::Global,
         )?;
-        let raw = self.database.primary_key_get_raw(
-            &current_table,
-            &[
-                Value::Bytes(branch_key.canonical_bytes()),
-                Value::Uuid(row_uuid.0),
-            ],
-        ).await?;
+        let raw = self
+            .database
+            .primary_key_get_raw(
+                &current_table,
+                &[
+                    Value::Bytes(branch_key.canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
+            .await?;
         let Some(raw) = raw else {
             return Ok(None);
         };
@@ -263,9 +292,10 @@ where
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
         self.query_layer_winner_from_pk_in_branch(table, &BranchKey::default(), row_uuid, layer)
+            .await
     }
 
-    pub(super) fn query_layer_winner_from_pk_in_branch(
+    pub(super) async fn query_layer_winner_from_pk_in_branch(
         &mut self,
         table: &str,
         branch_key: &BranchKey,

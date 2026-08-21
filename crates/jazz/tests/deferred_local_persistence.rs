@@ -81,6 +81,23 @@ fn deferred_persistence_keeps_resident_write_sync_and_local_durability_pending()
             .is_err(),
         "resident currency checks must reject a duplicate before persistence",
     );
+    block_on(db.delete("todos", write.row_uuid()))
+        .expect("resident row can be deleted before insert persistence");
+    assert!(
+        block_on(db.all(&query, ReadOpts::default()))
+            .expect("read resident deletion")
+            .is_empty(),
+        "the deletion is immediately query-visible",
+    );
+    block_on(db.restore("todos", write.row_uuid(), row! { title: "restored now" }))
+        .expect("restore observes the resident deletion before persistence");
+    assert_eq!(
+        block_on(db.all(&query, ReadOpts::default()))
+            .expect("read resident restoration")
+            .len(),
+        1,
+        "the restoration is immediately query-visible",
+    );
     assert!(
         block_on(write.wait(DurabilityTier::Local)).is_err(),
         "local durability must not be reported before persistence settles"

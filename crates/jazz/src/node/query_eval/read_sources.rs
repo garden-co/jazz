@@ -251,10 +251,12 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let content =
-                    self.projected_branch_content_source_graph(request, &table, tier, &head_keys)?;
-                let deletions =
-                    self.projected_branch_deletion_source_graph(request, tier, &head_keys)?;
+                let content = self
+                    .projected_branch_content_source_graph(request, &table, tier, &head_keys)
+                    .await?;
+                let deletions = self
+                    .projected_branch_deletion_source_graph(request, tier, &head_keys)
+                    .await?;
                 let base = include_deleted_branch_graph(&table, head, content, deletions)
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let graph = match &authorization {
@@ -278,10 +280,17 @@ where
                                 plan.binding_user_params.clone(),
                                 plan.binding_claim_params.clone(),
                             );
+                        let policy_request = policy_request.map(|mut request| {
+                            request.reads.primary = policy_read_view_projected_through(
+                                &request.reads.primary,
+                                self.read_view,
+                            );
+                            request
+                        });
                         let mut output_fields = current_row_fields(&table);
                         output_fields.push("__jazz_deleted".to_owned());
                         self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
+                            .compose_policy_filtered_current_source_graph(
                                 policy_request,
                                 base,
                                 &output_fields,
@@ -321,17 +330,21 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let head_content = self.projected_branch_content_source_graph(
-                    request,
-                    &table,
-                    graph_tier.expect("branch view has a current tier"),
-                    &head_keys,
-                )?;
-                let head_deletions = self.projected_branch_deletion_source_graph(
-                    request,
-                    graph_tier.expect("branch view has a current tier"),
-                    &head_keys,
-                )?;
+                let head_content = self
+                    .projected_branch_content_source_graph(
+                        request,
+                        &table,
+                        graph_tier.expect("branch view has a current tier"),
+                        &head_keys,
+                    )
+                    .await?;
+                let head_deletions = self
+                    .projected_branch_deletion_source_graph(
+                        request,
+                        graph_tier.expect("branch view has a current tier"),
+                        &head_keys,
+                    )
+                    .await?;
                 let (content, deletions) = match base {
                     Some(BranchViewSourceBase::Current(base)) if base != head => {
                         let base_keys = self
@@ -342,17 +355,21 @@ where
                                 base,
                             )
                             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                        let base_content = self.projected_branch_content_source_graph(
-                            request,
-                            &table,
-                            graph_tier.expect("branch view has a current tier"),
-                            &base_keys,
-                        )?;
-                        let base_deletions = self.projected_branch_deletion_source_graph(
-                            request,
-                            graph_tier.expect("branch view has a current tier"),
-                            &base_keys,
-                        )?;
+                        let base_content = self
+                            .projected_branch_content_source_graph(
+                                request,
+                                &table,
+                                graph_tier.expect("branch view has a current tier"),
+                                &base_keys,
+                            )
+                            .await?;
+                        let base_deletions = self
+                            .projected_branch_deletion_source_graph(
+                                request,
+                                graph_tier.expect("branch view has a current tier"),
+                                &base_keys,
+                            )
+                            .await?;
                         (
                             GraphBuilder::union([
                                 head_content.clone(),
@@ -467,10 +484,12 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let head_content =
-                    self.projected_branch_content_source_graph(request, &table, tier, &head_keys)?;
-                let head_deletions =
-                    self.projected_branch_deletion_source_graph(request, tier, &head_keys)?;
+                let head_content = self
+                    .projected_branch_content_source_graph(request, &table, tier, &head_keys)
+                    .await?;
+                let head_deletions = self
+                    .projected_branch_deletion_source_graph(request, tier, &head_keys)
+                    .await?;
                 let head_content_presence = head_content.clone().project(["row_uuid"]);
                 let head_deletion_presence = head_deletions.clone().project(["row_uuid"]);
                 let deleted = head_deletions
@@ -517,10 +536,12 @@ where
                         head,
                         base,
                     )
+                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let schema_version_alias = self
                     .node
                     .ensure_schema_version_alias(self.read_view.read_schema)
+                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let (opening, opening_descriptor, opening_metadata) =
                     inline_current_graph_with_source_metadata_and_branch_witness(
@@ -561,11 +582,16 @@ where
                         permission_subject,
                         plan,
                     } => {
+                        let param_binding_mode = if plan.binding_source_shape.is_some() {
+                            ParamBindingMode::RetainAllParams
+                        } else {
+                            ParamBindingMode::InlineAllReachableSeeds
+                        };
                         let policy_request = self.node.table_read_policy_authorization_request(
                             self.read_view.policy_schema,
                             &table.name,
                             *permission_subject,
-                            ParamBindingMode::InlineAllReachableSeeds,
+                            param_binding_mode,
                             tier,
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
@@ -581,7 +607,7 @@ where
                         let mut output_fields = current_row_fields(&table);
                         output_fields.extend(branch_witness_field.map(str::to_owned));
                         self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
+                            .compose_policy_filtered_current_source_graph(
                                 policy_request,
                                 unfiltered,
                                 &output_fields,
@@ -639,6 +665,7 @@ where
                     head,
                     base,
                 )
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let (base_graph, descriptor, metadata) = if request.requirements.metadata.is_empty() {
                 (
@@ -651,6 +678,7 @@ where
                 let schema_version_alias = self
                     .node
                     .ensure_schema_version_alias(self.read_view.read_schema)
+                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 inline_current_graph_with_source_metadata(
                     &table,
@@ -677,11 +705,16 @@ where
                     {
                         return Err(source_resolution_error(request, SourceGap::Coverage));
                     }
+                    let param_binding_mode = if plan.binding_source_shape.is_some() {
+                        ParamBindingMode::RetainAllParams
+                    } else {
+                        ParamBindingMode::InlineAllReachableSeeds
+                    };
                     let policy_request = self.node.table_read_policy_authorization_request(
                         self.read_view.policy_schema,
                         &table.name,
                         *permission_subject,
-                        ParamBindingMode::InlineAllReachableSeeds,
+                        param_binding_mode,
                         graph_tier.expect("branch view has a current tier"),
                         plan.binding_source_shape.clone(),
                         plan.binding_user_params.clone(),
@@ -695,7 +728,7 @@ where
                         request
                     });
                     self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
+                        .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base_graph,
                             &current_row_fields(&table),
@@ -865,7 +898,7 @@ where
                     &request.requirements,
                     &authorization,
                     self.read_view.policy_schema,
-                    None,
+                    Some(self.read_view),
                     None,
                     Some(source.graph),
                 )
@@ -894,16 +927,28 @@ where
                         {
                             return Err(source_resolution_error(request, SourceGap::Coverage));
                         }
+                        let param_binding_mode = if plan.binding_source_shape.is_some() {
+                            ParamBindingMode::RetainAllParams
+                        } else {
+                            ParamBindingMode::InlineAllReachableSeeds
+                        };
                         let policy_request = self.node.table_read_policy_authorization_request(
                             self.read_view.policy_schema,
                             &table.name,
                             *permission_subject,
-                            ParamBindingMode::InlineAllReachableSeeds,
+                            param_binding_mode,
                             graph_tier.expect("visible current source has a tier"),
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
                         );
+                        let policy_request = policy_request.map(|mut request| {
+                            request.reads.primary = policy_read_view_projected_through(
+                                &request.reads.primary,
+                                self.read_view,
+                            );
+                            request
+                        });
                         self.node
                             .compose_policy_filtered_current_source_graph(
                                 policy_request,
@@ -1036,7 +1081,7 @@ where
                 &request.requirements,
                 &authorization,
                 self.read_view.policy_schema,
-                None,
+                Some(self.read_view),
                 None,
                 selected_base,
             )
@@ -1121,24 +1166,9 @@ where
                 binding_user_params,
                 binding_claim_params,
             ),
-            SourceExpr::VisibleCurrent {
-                data: DataSource::Branch(branch_id),
-                ..
-            } => {
-                let table = self.node.table_in_schema_or_branch_metadata(
-                    &request.source.table,
-                    self.read_view.read_schema,
-                )?;
-                self.node.branch_table_read_policy_authorization_request(
-                    *branch_id,
-                    &table,
-                    *permission_subject,
-                    binding_source_shape,
-                    binding_user_params,
-                    binding_claim_params,
-                )
-            }
-            SourceExpr::VisibleCurrent { .. } | SourceExpr::SettledBindingView { .. } => {
+            SourceExpr::VisibleCurrent { .. }
+            | SourceExpr::BranchView { .. }
+            | SourceExpr::SettledBindingView { .. } => {
                 let tier = source.current_tier().unwrap_or(DurabilityTier::Global);
                 if request.visibility == RowVisibility::IncludeDeleted {
                     self.node
@@ -1152,13 +1182,7 @@ where
                             binding_claim_params,
                         )
                 } else {
-                    let projected_current_without_metadata = request.visibility
-                        == RowVisibility::Visible
-                        && request.requirements.metadata.is_empty()
-                        && self.needs_projected_current_source(&request.source.table);
-                    let param_binding_mode = if projected_current_without_metadata {
-                        ParamBindingMode::InlineAllReachableSeeds
-                    } else if binding_source_shape.is_some() {
+                    let param_binding_mode = if binding_source_shape.is_some() {
                         ParamBindingMode::RetainAllParams
                     } else {
                         ParamBindingMode::InlineAllReachableSeeds
@@ -1181,7 +1205,11 @@ where
             _ => return Ok(None),
         };
         match dependency {
-            Ok(dependency) => Ok(Some(dependency)),
+            Ok(mut dependency) => {
+                dependency.reads.primary =
+                    policy_read_view_projected_through(&dependency.reads.primary, self.read_view);
+                Ok(Some(dependency))
+            }
             Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
                 Err(Error::QueryCapability(error))
             }
@@ -1414,7 +1442,7 @@ where
     /// Build the maintained content-winner relation for one logical branch
     /// key. `stored_keys` includes historical short spellings produced before
     /// monotone branch-column additions; they compete as one branch-local row.
-    pub(crate) fn projected_branch_content_source_graph(
+    pub(crate) async fn projected_branch_content_source_graph(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1428,6 +1456,7 @@ where
                 self.read_view.read_schema,
                 &request.source.table,
             )
+            .await
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let post_winner_fields = self
             .node
@@ -1478,7 +1507,7 @@ where
     /// Build the maintained deletion-register winner relation for one logical
     /// branch key, normalizing historical short key spellings before winner
     /// selection.
-    pub(crate) fn projected_branch_deletion_source_graph(
+    pub(crate) async fn projected_branch_deletion_source_graph(
         &mut self,
         request: &SourceRequest,
         tier: DurabilityTier,
@@ -2159,14 +2188,12 @@ fn policy_read_view_projected_through(
     policy_view: &ReadView<RequestedSourceStage>,
     enclosing_view: &ReadView<RequestedSourceStage>,
 ) -> ReadView<RequestedSourceStage> {
-    let mut projected = enclosing_view.clone();
+    let mut projected = policy_view.clone();
     // The outer normalized query and the independently normalized policy proof
-    // may use different aliases for one logical table. Keep every policy alias,
-    // but give it the enclosing view's exact current/live/frozen source.
-    for policy_source in policy_view.sources.keys() {
-        if projected.sources.contains_key(policy_source) {
-            continue;
-        }
+    // may use different aliases for one logical table. Preserve every policy
+    // source, including policy-only recursive/access tables, while giving each
+    // source that the outer query also reads its exact current/live/frozen view.
+    for (policy_source, projected_source) in &mut projected.sources {
         if let Some(source) = enclosing_view
             .sources
             .iter()
@@ -2174,7 +2201,7 @@ fn policy_read_view_projected_through(
                 (source_id.table == policy_source.table).then(|| source.clone())
             })
         {
-            projected.sources.insert(policy_source.clone(), source);
+            *projected_source = source;
         }
     }
     projected

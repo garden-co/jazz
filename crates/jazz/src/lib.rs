@@ -115,12 +115,12 @@
 pub(crate) mod legacy_test_future {
     use std::future::Future;
 
-    use crate::ids::{AuthorId, BranchId, SchemaVersionId};
-    use crate::node::{Error, MergeableCommit, NodeState};
+    use crate::ids::{AuthorId, SchemaVersionId};
+    use crate::node::{ContributionMergeRequest, Error, MergeableCommit, NodeState};
     use crate::protocol::{CatalogueSnapshot, SyncMessage, VersionRecord};
     use crate::time::{GlobalTime, TxTime};
     use crate::tools::OpenTransactionId;
-    use crate::tx::{BranchLineage, DurabilityTier, Fate, Transaction, TxId};
+    use crate::tx::{DurabilityTier, Fate, Transaction, TxId};
     use groove::storage::{OrderedKvStorage, ReopenableStorage};
 
     pub(crate) trait ResultFutureExt<T, E>: Future<Output = Result<T, E>> {
@@ -235,6 +235,10 @@ pub(crate) mod legacy_test_future {
             &mut self,
             commits: Vec<MergeableCommit>,
         ) -> Result<TxId, Error>;
+        fn merge_branch_contributions_settled(
+            &mut self,
+            request: ContributionMergeRequest,
+        ) -> Result<Option<TxId>, Error>;
         fn commit_mergeable_in_schema_settled(
             &mut self,
             schema: SchemaVersionId,
@@ -244,27 +248,6 @@ pub(crate) mod legacy_test_future {
             &mut self,
             commit: MergeableCommit,
             made_at: TxTime,
-        ) -> Result<TxId, Error>;
-        fn commit_mergeable_on_branch_settled(
-            &mut self,
-            branch: BranchId,
-            commit: MergeableCommit,
-        ) -> Result<TxId, Error>;
-        fn commit_mergeable_many_on_branch_settled(
-            &mut self,
-            branch: BranchId,
-            commits: Vec<MergeableCommit>,
-        ) -> Result<TxId, Error>;
-        fn merge_back_branch_settled(&mut self, branch: BranchId) -> Result<TxId, Error>;
-        fn merge_back_branch_as_settled(
-            &mut self,
-            branch: BranchId,
-            identity: AuthorId,
-        ) -> Result<TxId, Error>;
-        fn merge_lineage_into_settled(
-            &mut self,
-            source: BranchLineage,
-            target: BranchLineage,
         ) -> Result<TxId, Error>;
         fn commit_mergeable_open_settled<F>(
             &mut self,
@@ -341,6 +324,20 @@ pub(crate) mod legacy_test_future {
             })
         }
 
+        fn merge_branch_contributions_settled(
+            &mut self,
+            request: ContributionMergeRequest,
+        ) -> Result<Option<TxId>, Error> {
+            crate::db::block_on(async {
+                let Some(published) = self.merge_branch_contributions(request).await? else {
+                    return Ok(None);
+                };
+                self.persist_and_settle_transaction(published)
+                    .await
+                    .map(Some)
+            })
+        }
+
         fn commit_mergeable_in_schema_settled(
             &mut self,
             schema: SchemaVersionId,
@@ -359,59 +356,6 @@ pub(crate) mod legacy_test_future {
         ) -> Result<TxId, Error> {
             crate::db::block_on(async {
                 let published = self.commit_mergeable_at(commit, made_at).await?;
-                self.persist_and_settle_transaction(published).await
-            })
-        }
-
-        fn commit_mergeable_on_branch_settled(
-            &mut self,
-            branch: BranchId,
-            commit: MergeableCommit,
-        ) -> Result<TxId, Error> {
-            crate::db::block_on(async {
-                let published = self.commit_mergeable_on_branch(branch, commit).await?;
-                self.persist_and_settle_transaction(published).await
-            })
-        }
-
-        fn commit_mergeable_many_on_branch_settled(
-            &mut self,
-            branch: BranchId,
-            commits: Vec<MergeableCommit>,
-        ) -> Result<TxId, Error> {
-            crate::db::block_on(async {
-                let published = self
-                    .commit_mergeable_many_on_branch(branch, commits)
-                    .await?;
-                self.persist_and_settle_transaction(published).await
-            })
-        }
-
-        fn merge_back_branch_settled(&mut self, branch: BranchId) -> Result<TxId, Error> {
-            crate::db::block_on(async {
-                let published = self.merge_back_branch(branch).await?;
-                self.persist_and_settle_transaction(published).await
-            })
-        }
-
-        fn merge_back_branch_as_settled(
-            &mut self,
-            branch: BranchId,
-            identity: AuthorId,
-        ) -> Result<TxId, Error> {
-            crate::db::block_on(async {
-                let published = self.merge_back_branch_as(branch, identity).await?;
-                self.persist_and_settle_transaction(published).await
-            })
-        }
-
-        fn merge_lineage_into_settled(
-            &mut self,
-            source: BranchLineage,
-            target: BranchLineage,
-        ) -> Result<TxId, Error> {
-            crate::db::block_on(async {
-                let published = self.merge_lineage_into(source, target).await?;
                 self.persist_and_settle_transaction(published).await
             })
         }

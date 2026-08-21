@@ -44,7 +44,7 @@ where
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let mut outcome = PublicationOutcome::settled(Vec::new());
         for (table, branch_key, row_uuid) in rows {
-            let mut created = self
+            let created = self
                 .create_merge_version_if_needed_in_branch(&table, &branch_key, row_uuid)
                 .await?;
             outcome.append_outcome(created);
@@ -168,8 +168,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            target_lineage: BranchLineage::Root,
-            branch_merge: None,
+            contribution_merge: None,
         })?;
         Ok(PublicationOutcome::published_then(
             Vec::new(),
@@ -732,7 +731,9 @@ where
             .await?;
             Self::write_merge_heads(&mut batch, *table_id, branch_key, *row_uuid, &heads)?;
         }
-        self.database.commit_batch(batch).await?;
+        let applied = self.database.apply_batch(batch).await?;
+        let persisted = applied.persist().await;
+        self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
@@ -1149,7 +1150,8 @@ where
                     Value::Bytes(version.branch_key().canonical_bytes()),
                     Value::Uuid(version.row_uuid().0),
                 ],
-            )?;
+            )
+            .await?;
         let actual = rows.first().map(|row| row.record().raw().to_vec());
         let expected = owned_record_from_storage_values(current_schema, expected_values)?
             .raw()

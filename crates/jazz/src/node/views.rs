@@ -631,7 +631,7 @@ where
                     && stored_tx.tx.kind == TxKind::Exclusive
                     && usize::try_from(stored_tx.tx.n_total_writes).ok() != Some(tx_versions.len())
                 {
-                    *tx_versions = self.query_versions_for_tx(*tx_id)?;
+                    *tx_versions = self.query_versions_for_tx(*tx_id).await?;
                 }
                 let filtered_tx_versions = tx_versions
                     .iter()
@@ -1301,7 +1301,18 @@ where
         }
         if bundle.tx.kind != TxKind::Exclusive {
             if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
-                return self.ingest_view_scoped_transaction_with_current_indexes(
+                return self
+                    .ingest_view_scoped_transaction_with_current_indexes(
+                        bundle.tx,
+                        bundle.versions,
+                        bundle.fate,
+                        bundle.global_time,
+                        bundle.durability,
+                    )
+                    .await;
+            }
+            return self
+                .ingest_known_transaction(
                     bundle.tx,
                     bundle.versions,
                     bundle.fate,
@@ -1309,20 +1320,12 @@ where
                     bundle.durability,
                 )
                 .await;
-            }
-            return self.ingest_known_transaction(
-                bundle.tx,
-                bundle.versions,
-                bundle.fate,
-                bundle.global_time,
-                bundle.durability,
-            )
-            .await;
         }
         if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
             let tx_id = bundle.tx.tx_id;
             let mut known_keys = if self.query_transaction(tx_id).await?.is_some() {
-                self.query_versions_for_tx(tx_id).await?
+                self.query_versions_for_tx(tx_id)
+                    .await?
                     .iter()
                     .map(|stored| Ok(view_version_key(&self.version_record_from_row(stored)?)))
                     .collect::<Result<BTreeSet<_>, Error>>()?
@@ -1335,14 +1338,15 @@ where
                 .len()
                 .try_into()
                 .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
-            return self.ingest_transaction_fragment_without_current_indexes(
-                redacted_tx,
-                bundle.versions,
-                bundle.fate,
-                bundle.global_time,
-                bundle.durability,
-            )
-            .await;
+            return self
+                .ingest_transaction_fragment_without_current_indexes(
+                    redacted_tx,
+                    bundle.versions,
+                    bundle.fate,
+                    bundle.global_time,
+                    bundle.durability,
+                )
+                .await;
         }
         let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
             Error::InvalidStoredValue("exclusive transaction write count does not fit usize")

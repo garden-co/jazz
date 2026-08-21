@@ -1505,16 +1505,17 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<(), Error> {
-        self.db().stage_mergeable_update_in_branch_view(
-            self.tx_id(),
-            table,
-            head,
-            base,
-            row,
-            patch,
-            None,
-        )
-        .await
+        self.db()
+            .stage_mergeable_update_in_branch_view(
+                self.tx_id(),
+                table,
+                head,
+                base,
+                row,
+                patch,
+                None,
+            )
+            .await
     }
 
     /// Stage an update with an explicit millisecond provenance time.

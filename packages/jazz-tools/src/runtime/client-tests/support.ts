@@ -2,7 +2,7 @@ import {
   JazzClient,
   type BatchId,
   type InsertResult,
-  type MutationReceipt,
+  type MutationResult,
   type OpenBatchId,
   type Runtime,
 } from "../client.js";
@@ -40,7 +40,7 @@ export async function flushMicrotasks(): Promise<void> {
 export const testBatchId = (value: string): BatchId => value as BatchId;
 export const testOpenBatchId = (value: string): OpenBatchId => value as OpenBatchId;
 
-const committed = (value: string): MutationReceipt => ({
+const committed = (value: string): MutationResult => ({
   kind: "committed",
   batchId: testBatchId(value),
 });
@@ -49,14 +49,14 @@ export function mockRow(id = "todo-1"): InsertResult {
   return { id, values: [], ...committed(`transaction-${id}`) };
 }
 
-export function mockMutation(batchId = "00000000000070008000000000000001"): MutationReceipt {
+export function mockMutation(batchId = "00000000000070008000000000000001"): MutationResult {
   return committed(batchId);
 }
 
 export const runtimeTransactionRecordStubs = {
   beginTransaction: (_kind: "mergeable" | "exclusive", id: OpenBatchId) => id,
   upsert: () => mockMutation("upsert-transaction-id"),
-  commitTransaction: async () => testBatchId("committed-batch"),
+  commitTransaction: () => testBatchId("committed-batch"),
   waitForTransaction: async () => {},
   rollbackTransaction: async () => false,
   connect: () => {},
