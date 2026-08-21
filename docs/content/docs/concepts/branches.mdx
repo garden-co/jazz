@@ -35,7 +35,7 @@ const schema = {
       branch: s.string(),
       title: s.string(),
     })
-    .branchBy(["branch"]),
+    .branchBy("branch"),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -45,32 +45,17 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 `branch` is still an ordinary application column. `branchBy` additionally tells Jazz to keep each
 value's row history separate and to use it when composing branch views.
 
-Create selectors by supplying typed values for the named branch columns:
-
-```ts
-const main = {
-  values: { branch: { type: "String", value: "main" } },
-} as const;
-
-const draft = {
-  values: { branch: { type: "String", value: "draft" } },
-} as const;
-
-const draftOverMain = {
-  head: draft,
-  base: { kind: "current", branch: main },
-} as const;
-```
-
-Pass that view alongside the normal query options:
+For a table with one branch column, pass that column's ordinary value directly:
 
 ```ts
 const documents = await db.all(app.documents.orderBy("title", "asc"), {
-  branch: draftOverMain,
+  branch: "draft",
+  base: "main",
 });
 
 const unsubscribe = db.subscribeAll(app.documents, ({ all }) => renderDocuments(all), {
-  branch: draftOverMain,
+  branch: "draft",
+  base: "main",
 });
 ```
 
@@ -79,7 +64,8 @@ main. Draft deletions hide inherited rows. Filters, joins, includes, permissions
 consume that effective view; fallback is not a late union of two query result sets.
 
 The same row UUID identifies the application object across branches. Its content may differ in each
-branch-local row.
+branch-local row. Results expose the selected head coordinate, including for content inherited from
+the base, so application code sees one consistent effective branch.
 
 ## Model richer branches with references
 
@@ -100,33 +86,21 @@ const schema = {
       branch_id: s.ref("branches"),
       title: s.string(),
     })
-    .branchBy(["branch_id"]),
+    .branchBy("branch_id"),
 };
 ```
 
 Jazz does not assign meaning to the branch row's `base_branch_id`, `base_snapshot_ref`, or `status`.
-The app reads the row, resolves its base, and supplies concrete selectors to the same read-side API:
+The app reads the row, resolves its base, and supplies the reference IDs to the same read-side API:
 
 ```ts
-const uuid = (value: string) => ({ type: "Uuid", value }) as const;
-const selectBranch = (branchId: string) => ({
-  values: { branch_id: uuid(branchId) },
-});
-
 const branchRow = await db.one(app.branches.where({ id: draftBranchId }));
 if (!branchRow?.base_branch_id) throw new Error("Branch has no base");
 
-const head = selectBranch(branchRow.id);
-const base = selectBranch(branchRow.base_branch_id);
-
-const view = {
-  head,
-  base: branchRow.base_snapshot_ref
-    ? { kind: "snapshot", branch: base, snapshot: branchRow.base_snapshot_ref }
-    : { kind: "current", branch: base },
-} as const;
-
-const documents = await db.all(app.documents, { branch: view });
+const documents = await db.all(app.documents, {
+  branch: branchRow.id,
+  base: branchRow.base_branch_id,
+});
 ```
 
 This keeps review, archival, nested drafts, environment promotion, and base selection in userland.
@@ -149,6 +123,47 @@ parent semantics.
 Transactions may contain writes to several branch coordinates and shared tables. They retain one
 atomic fate: if one write is invalid or unauthorized, the whole transaction is rejected.
 
+## Use compound branch coordinates
+
+Most apps need only one branch column. When a branch is qualified by multiple dimensions, declare
+them with the array form:
+
+```ts
+const schema = {
+  documents: s
+    .table({
+      workspace_id: s.ref("workspaces"),
+      branch_id: s.ref("branches"),
+      title: s.string(),
+    })
+    .branchBy(["workspace_id", "branch_id"]),
+};
+```
+
+Compound selectors name every dimension explicitly:
+
+```ts
+const documents = await db.all(app.documents, {
+  branch: {
+    workspace_id: workspaceId,
+    branch_id: draftBranchId,
+  },
+  base: {
+    workspace_id: workspaceId,
+    branch_id: mainBranchId,
+  },
+});
+```
+
+The qualified form also works for generic code targeting a single-column table:
+
+```ts
+await db.all(app.documents, {
+  branch: { branch_id: draftBranchId },
+  base: { branch_id: mainBranchId },
+});
+```
+
 ## Write to the branch
 
 An insert targets one exact branch selector and includes the matching ordinary column value:
@@ -157,7 +172,7 @@ An insert targets one exact branch selector and includes the matching ordinary c
 const { value: document } = db.insert(
   app.documents,
   { branch: "draft", title: "Draft title" },
-  { branch: draft },
+  { branch: "draft" },
 );
 ```
 
@@ -169,11 +184,12 @@ db.update(
   app.documents,
   existingDocumentId,
   { title: "Reworked in the draft" },
-  { branch: draftOverMain },
+  { branch: "draft", base: "main" },
 );
 
 db.delete(app.documents, inheritedDocumentId, {
-  branch: draftOverMain,
+  branch: "draft",
+  base: "main",
 });
 ```
 
@@ -205,14 +221,16 @@ If a draft should keep seeing main exactly as it was at a particular point, pass
 reference with the resolved base:
 
 ```ts
+if (!branchRow.base_branch_id || !branchRow.base_snapshot_ref) {
+  throw new Error("Branch has no frozen base");
+}
+
 const frozenDraft = {
-  head: draft,
-  base: {
-    kind: "snapshot",
-    branch: main,
-    snapshot: branchRow.base_snapshot_ref,
-  },
+  branch: branchRow.id,
+  base: [branchRow.base_branch_id, branchRow.base_snapshot_ref],
 } as const;
+
+const documents = await db.all(app.documents, frozenDraft);
 ```
 
 Jazz applies that cut consistently to base rows and to base data reached through joins and

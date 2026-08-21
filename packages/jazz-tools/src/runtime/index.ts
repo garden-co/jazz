@@ -1,5 +1,4 @@
 export {
-  type InsertOptions,
   type AuthConfig,
   type LocalTransactionRecord,
   type MutationErrorEvent,
@@ -9,16 +8,10 @@ export {
   PersistedWriteRejectedError,
   loadWasmModule,
   type DurabilityTier,
-  type QueryExecutionOptions,
-  type BranchSelector,
-  type BranchView,
-  type BranchViewBase,
   type QueryPropagation,
   type QueryVisibility,
   type Row,
-  type RestoreOptions,
   type SubscriptionCallback,
-  type UpdateOptions,
   type WasmModule,
   type MutationResult,
 } from "./client.js";
@@ -34,6 +27,15 @@ export {
   type TransactionScope,
   type QueryBuilder,
   type QueryOptions,
+  type QueryOptions as QueryExecutionOptions,
+  type Branch,
+  type BranchBase,
+  type BranchValue,
+  type QualifiedBranch,
+  type InsertOptions,
+  type RestoreOptions,
+  type UpdateOptions,
+  type DeleteOptions,
   type TableProxy,
 } from "./db.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";

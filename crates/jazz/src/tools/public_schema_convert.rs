@@ -107,7 +107,8 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             }
             if !matches!(
                 column.column_type,
-                GrooveColumnType::Uuid
+                GrooveColumnType::String
+                    | GrooveColumnType::Uuid
                     | GrooveColumnType::U8
                     | GrooveColumnType::U16
                     | GrooveColumnType::U32
@@ -118,7 +119,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             ) {
                 return Err(err(
                     format!("$.{}.branchBy", table.name),
-                    "branch columns require UUID, stable enum, or fixed-width integer values",
+                    "branch columns require string, UUID, stable enum, or fixed-width integer values",
                 ));
             }
             if let Some(existing) =
@@ -2555,19 +2556,32 @@ mod tests {
                 .contains("unknown branch column")
         );
 
-        let text_column = SchemaBuilder::new()
+        let boolean_column = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("todos")
-                    .column("workspace_id", ColumnType::Text)
+                    .column("workspace_id", ColumnType::Boolean)
                     .branch_by("workspace_id"),
             )
             .build();
         assert!(
-            convert_public_schema(&text_column)
-                .expect_err("text branch column must fail")
+            convert_public_schema(&boolean_column)
+                .expect_err("boolean branch column must fail")
                 .to_string()
                 .contains("fixed-width integer values")
         );
+    }
+
+    #[test]
+    fn accepts_string_branch_columns() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch", ColumnType::Text)
+                    .branch_by("branch"),
+            )
+            .build();
+
+        convert_public_schema(&schema).expect("string branch column must compile");
     }
 
     fn policy_graph_perf_fixture_dir() -> PathBuf {

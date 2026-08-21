@@ -394,7 +394,8 @@ impl RuntimeSchema {
                 assert!(
                     matches!(
                         column.column_type,
-                        GrooveColumnType::Uuid
+                        GrooveColumnType::String
+                            | GrooveColumnType::Uuid
                             | GrooveColumnType::U8
                             | GrooveColumnType::U16
                             | GrooveColumnType::U32
@@ -403,7 +404,7 @@ impl RuntimeSchema {
                             | GrooveColumnType::I64
                             | GrooveColumnType::EnumTag(_)
                     ),
-                    "branch columns require UUID, stable enum, or fixed-width integer values"
+                    "branch columns require string, UUID, stable enum, or fixed-width integer values"
                 );
                 if let Some(existing) =
                     branch_column_types.insert(column_name.clone(), column.column_type.clone())
@@ -1553,8 +1554,7 @@ mod tests {
     use groove::schema::ColumnType;
 
     #[test]
-    #[should_panic(expected = "branch columns require UUID")]
-    fn variable_width_branch_columns_are_rejected() {
+    fn string_branch_columns_are_accepted() {
         let _ = JazzSchema::new_with_branch_columns([TableSchema::new(
             "todos",
             [ColumnSchema::new("branch", ColumnType::String)],

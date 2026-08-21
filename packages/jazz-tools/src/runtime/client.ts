@@ -52,13 +52,16 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
         Uint8Array.from({ length: 16 }, (_, index) =>
           Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16),
         ),
-        false,
       );
       break;
     }
+    case "Text":
+      writer.enumUnit(6); // groove::Value::String
+      writer.string(value.value);
+      break;
     default:
       throw new Error(
-        `branch columns currently require Integer, BigInt, or Uuid values; got ${value.type}`,
+        `branch columns currently require Integer, BigInt, Text, or Uuid values; got ${value.type}`,
       );
   }
   return writer.finish();

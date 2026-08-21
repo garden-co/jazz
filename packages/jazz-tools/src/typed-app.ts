@@ -46,13 +46,24 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
     return new DefinedTable(this.columns, normalizedColumns, this.branchColumns);
   }
 
+  branchBy<const TBranchColumn extends Extract<keyof TColumns, string>>(
+    column: TBranchColumn,
+  ): DefinedTable<TColumns>;
   branchBy<
     const TBranchColumns extends readonly [
       Extract<keyof TColumns, string>,
       ...Extract<keyof TColumns, string>[],
     ],
-  >(columns: TBranchColumns): DefinedTable<TColumns> {
-    const normalizedColumns = [...columns] as Extract<keyof TColumns, string>[];
+  >(columns: TBranchColumns): DefinedTable<TColumns>;
+  branchBy(
+    columns:
+      | Extract<keyof TColumns, string>
+      | readonly [Extract<keyof TColumns, string>, ...Extract<keyof TColumns, string>[]],
+  ): DefinedTable<TColumns> {
+    const normalizedColumns = (Array.isArray(columns) ? [...columns] : [columns]) as Extract<
+      keyof TColumns,
+      string
+    >[];
     for (const column of normalizedColumns) {
       if (!(column in this.columns)) {
         throw new Error(`table.branchBy(...) references unknown column "${column}".`);

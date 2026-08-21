@@ -9,6 +9,8 @@ import type { QueryExecutionOptions } from "./runtime/index.js";
 
 const canonicalQueryExecutionOptions: QueryExecutionOptions = {
   propagation: "local-only",
+  branch: "draft",
+  base: "main",
 };
 const removedQueryExecutionOptions: QueryExecutionOptions = {
   // @ts-expect-error propagate was removed; use propagation instead.

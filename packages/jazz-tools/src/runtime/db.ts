@@ -23,15 +23,16 @@ import {
   MutationResult,
   type MutationErrorEvent,
   type TransactionKind,
-  type InsertOptions,
-  type RestoreOptions,
-  type UpdateOptions,
+  type InsertOptions as InternalInsertOptions,
+  type RestoreOptions as InternalRestoreOptions,
+  type UpdateOptions as InternalUpdateOptions,
   type DurabilityTier,
-  type QueryExecutionOptions,
+  type QueryExecutionOptions as InternalQueryExecutionOptions,
   type QueryPropagation,
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
-  type DeleteOptions,
+  type BranchSelector,
+  type BranchView,
   type OpenBatchId,
   type BatchId,
   type PermissionAdvice,
@@ -41,7 +42,7 @@ import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
-import { toWriteRecord } from "./value-converter.js";
+import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
@@ -171,7 +172,40 @@ export interface QueryBuilder<T> {
   readonly _rowType: T;
 }
 
-export type QueryOptions = QueryExecutionOptions;
+export type BranchValue = string | number | bigint;
+export type QualifiedBranch = Record<string, BranchValue>;
+export type Branch = BranchValue | QualifiedBranch;
+export type BranchBase = Branch | readonly [branch: Branch, snapshot: unknown];
+
+export type QueryOptions = Omit<InternalQueryExecutionOptions, "branch"> & {
+  /** Current branch coordinate. A scalar selects a table with one `branchBy` column. */
+  branch?: Branch;
+  /** Optional live base, or `[base, snapshotRef]` for a frozen base. */
+  base?: BranchBase;
+};
+
+interface TimestampOverrideOptions {
+  updatedAt?: number;
+}
+
+export interface InsertOptions extends TimestampOverrideOptions {
+  id?: string;
+  branch?: Branch;
+}
+
+export interface RestoreOptions extends TimestampOverrideOptions {
+  branch?: Branch;
+}
+
+export interface UpdateOptions extends TimestampOverrideOptions {
+  branch?: Branch;
+  base?: BranchBase;
+}
+
+export interface DeleteOptions extends TimestampOverrideOptions {
+  branch?: Branch;
+  base?: BranchBase;
+}
 
 type DbRuntimeOperationContext = {
   session?: Session;
@@ -179,8 +213,131 @@ type DbRuntimeOperationContext = {
   readSession?: Session;
 };
 
-function nativeDbQueryOptions(options?: QueryOptions): QueryOptions {
-  return options ?? {};
+function branchColumn(schema: WasmSchema, name: string): ColumnDescriptor {
+  const matches = Object.values(schema)
+    .flatMap((table) => table.columns)
+    .filter((column) => column.name === name);
+  const column = matches[0];
+  if (!column) throw new Error(`Unknown branch column "${name}".`);
+  return column;
+}
+
+function normalizeBranchSelector(
+  schema: WasmSchema,
+  tableName: string,
+  input: Branch,
+  scope: "table" | "schema",
+): BranchSelector {
+  const table = schema[tableName];
+  if (!table) throw new Error(`Unknown table "${tableName}".`);
+  const tableColumns = table.branchBy ?? [];
+  const expected =
+    scope === "table"
+      ? new Set(tableColumns)
+      : new Set(Object.values(schema).flatMap((candidate) => candidate.branchBy ?? []));
+  const qualified: QualifiedBranch =
+    typeof input === "object" && input !== null && !Array.isArray(input)
+      ? (input as QualifiedBranch)
+      : expected.size === 1
+        ? { [[...expected][0]!]: input as BranchValue }
+        : (() => {
+            throw new Error(
+              `A scalar branch selector requires exactly one ${scope === "table" ? "table" : "schema"} branch column.`,
+            );
+          })();
+  const actual = Object.keys(qualified);
+  if (actual.length !== expected.size || actual.some((name) => !expected.has(name))) {
+    throw new Error(
+      `Branch selector must provide exactly: ${[...expected].sort().join(", ") || "no columns"}.`,
+    );
+  }
+  return {
+    values: Object.fromEntries(
+      actual.map((name) => [
+        name,
+        toValue(qualified[name], branchColumn(schema, name).column_type),
+      ]),
+    ),
+  };
+}
+
+function normalizeBranchView(
+  schema: WasmSchema,
+  tableName: string,
+  branch: Branch,
+  base?: BranchBase,
+): BranchView {
+  const head = normalizeBranchSelector(schema, tableName, branch, "schema");
+  if (base === undefined) return { head };
+  if (Array.isArray(base)) {
+    return {
+      head,
+      base: {
+        kind: "snapshot",
+        branch: normalizeBranchSelector(schema, tableName, base[0], "schema"),
+        snapshot: base[1],
+      },
+    };
+  }
+  return {
+    head,
+    base: {
+      kind: "current",
+      branch: normalizeBranchSelector(schema, tableName, base as Branch, "schema"),
+    },
+  };
+}
+
+function nativeDbQueryOptions(
+  schema: WasmSchema,
+  tableName: string,
+  options?: QueryOptions,
+): InternalQueryExecutionOptions {
+  if (!options) return {};
+  const { branch, base, ...rest } = options;
+  if (branch === undefined) {
+    if (base !== undefined) throw new Error("A branch base requires a branch head.");
+    return rest;
+  }
+  return { ...rest, branch: normalizeBranchView(schema, tableName, branch, base) };
+}
+
+function normalizeInsertOptions(
+  schema: WasmSchema,
+  tableName: string,
+  options?: InsertOptions,
+): InternalInsertOptions | undefined {
+  if (!options) return undefined;
+  const { branch, ...rest } = options;
+  return branch === undefined
+    ? rest
+    : { ...rest, branch: normalizeBranchSelector(schema, tableName, branch, "table") };
+}
+
+function normalizeRestoreOptions(
+  schema: WasmSchema,
+  tableName: string,
+  options?: RestoreOptions,
+): InternalRestoreOptions | undefined {
+  if (!options) return undefined;
+  const { branch, ...rest } = options;
+  return branch === undefined
+    ? rest
+    : { ...rest, branch: normalizeBranchSelector(schema, tableName, branch, "table") };
+}
+
+function normalizeUpdateOptions(
+  schema: WasmSchema,
+  tableName: string,
+  options?: UpdateOptions,
+): InternalUpdateOptions | undefined {
+  if (!options) return undefined;
+  const { branch, base, ...rest } = options;
+  if (branch === undefined) {
+    if (base !== undefined) throw new Error("A branch base requires a branch head.");
+    return rest;
+  }
+  return { ...rest, branch: normalizeBranchView(schema, tableName, branch, base) };
 }
 
 export function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
@@ -697,7 +854,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const row = client.insertInternal(
       table._table,
       values,
-      options,
+      normalizeInsertOptions(table._schema, table._table, options),
       session,
       attribution,
       openBatchId,
@@ -731,7 +888,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       table._table,
       id,
       values,
-      options,
+      normalizeRestoreOptions(table._schema, table._table, options),
       session,
       attribution,
       openBatchId,
@@ -761,7 +918,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     );
     const client = this.resolveClient(table._schema);
     const { openBatchId, session, attribution } = this.requireBinding("upsert");
-    client.upsertInternal(table._table, id, values, options, session, attribution, openBatchId);
+    client.upsertInternal(
+      table._table,
+      id,
+      values,
+      normalizeUpdateOptions(table._schema, table._table, options),
+      session,
+      attribution,
+      openBatchId,
+    );
   }
 
   /**
@@ -770,7 +935,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * The update is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): void {
     this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecordForOperation(
@@ -781,7 +951,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     );
     const client = this.resolveClient(table._schema);
     const { openBatchId, session, attribution } = this.requireBinding("update");
-    client.updateInternal(table._table, id, updates, undefined, session, attribution, openBatchId);
+    const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
+    client.updateInternal(
+      table._table,
+      id,
+      updates,
+      normalizedOptions?.updatedAt,
+      session,
+      attribution,
+      openBatchId,
+      normalizedOptions?.branch,
+    );
   }
 
   /**
@@ -790,11 +970,20 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * The delete is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): void {
     this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openBatchId, session, attribution } = this.requireBinding("delete");
-    client.deleteInternal(table._table, id, undefined, session, attribution, openBatchId);
+    const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
+    client.deleteInternal(
+      table._table,
+      id,
+      normalizedOptions?.updatedAt,
+      session,
+      attribution,
+      openBatchId,
+      normalizedOptions?.branch,
+    );
   }
 
   /**
@@ -811,10 +1000,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
+    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const rows = await client.query(
       translateQuery(builderJson, planningSchema),
       {
-        ...options,
+        ...queryOptions,
         localUpdates: "deferred",
         openBatchId,
       },
@@ -1237,7 +1427,7 @@ export class Db {
     const inserted = client.insert(
       table._table,
       values,
-      options,
+      normalizeInsertOptions(table._schema, table._table, options),
       context?.session,
       context?.attribution,
     );
@@ -1274,7 +1464,7 @@ export class Db {
       table._table,
       id,
       values,
-      options,
+      normalizeRestoreOptions(table._schema, table._table, options),
       context?.session,
       context?.attribution,
     );
@@ -1308,7 +1498,14 @@ export class Db {
     );
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
-      client.upsert(table._table, id, values, options, context?.session, context?.attribution),
+      client.upsert(
+        table._table,
+        id,
+        values,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        context?.session,
+        context?.attribution,
+      ),
     );
   }
 
@@ -1333,7 +1530,14 @@ export class Db {
     );
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
-      client.update(table._table, id, updates, options, context?.session, context?.attribution),
+      client.update(
+        table._table,
+        id,
+        updates,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        context?.session,
+        context?.attribution,
+      ),
     );
   }
 
@@ -1350,7 +1554,13 @@ export class Db {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
-      client.delete(table._table, id, options, context?.session, context?.attribution),
+      client.delete(
+        table._table,
+        id,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        context?.session,
+        context?.attribution,
+      ),
     );
   }
 
@@ -1510,7 +1720,7 @@ export class Db {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
-    const queryOptions = nativeDbQueryOptions(options);
+    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getRuntimeOperationContext();
@@ -1609,7 +1819,7 @@ export class Db {
       callback(typedDelta);
     };
 
-    const queryOptions = nativeDbQueryOptions(options);
+    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const context = this.getRuntimeOperationContext();
     let subId: number | null = null;
     let unsubscribed = false;
@@ -1663,7 +1873,7 @@ export class Db {
       !queryUsesRelationTraversal(builtQuery)
     ) {
       const seedQuery = () =>
-        this.all(query, { ...queryOptions, tier: "local", propagation: "local-only" });
+        this.all(query, { ...options, tier: "local", propagation: "local-only" });
       const seedRows =
         session == null
           ? seedQuery()
@@ -1730,7 +1940,7 @@ export class Db {
   private registerActiveQuerySubscriptionTrace(
     queryJson: string,
     _queryTable: string,
-    options?: QueryOptions,
+    options?: InternalQueryExecutionOptions,
   ): string | null {
     if (!this.config.devMode) {
       return null;

@@ -1,5 +1,5 @@
-import { BrowserAuthSecretStore, createDb, type BranchSelector, type BranchView } from "jazz-tools";
-import { app, type Task } from "../schema.js";
+import { BrowserAuthSecretStore, createDb } from "jazz-tools";
+import { app, type Scenario, type Task } from "../schema.js";
 
 const appId = "branching-project-planner-example";
 const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId });
@@ -19,31 +19,30 @@ const draftScenario = db.insert(app.scenarios, {
   status: "open",
 }).value;
 
-const selector = (scenarioId: string): BranchSelector => ({
-  values: { scenario_id: { type: "Uuid", value: scenarioId } },
-});
-const main = selector(mainScenario.id);
-const draft = selector(draftScenario.id);
-const draftOverMain: BranchView = {
-  head: draft,
-  base: { kind: "current", branch: main },
-};
+function readScenario(scenario: Scenario) {
+  return scenario.base_scenario_id
+    ? ({ branch: scenario.id, base: scenario.base_scenario_id } as const)
+    : ({ branch: scenario.id } as const);
+}
+
+const mainView = readScenario(mainScenario);
+const draftView = readScenario(draftScenario);
 
 const inherited = db.insert(
   app.tasks,
   { scenario_id: mainScenario.id, title: "Ship documentation", estimate: 5 },
-  { branch: main },
+  { branch: mainScenario.id },
 ).value;
 db.insert(
   app.tasks,
   { scenario_id: mainScenario.id, title: "Run migration rehearsal", estimate: 8 },
-  { branch: main },
+  { branch: mainScenario.id },
 );
 db.update(app.scenarios, mainScenario.id, { status: "approved" });
 db.insert(
   app.tasks,
   { scenario_id: draftScenario.id, title: "Book launch livestream", estimate: 3 },
-  { branch: draft },
+  { branch: draftScenario.id },
 );
 
 function render(target: string, tasks: Task[], editable: boolean) {
@@ -57,7 +56,7 @@ function render(target: string, tasks: Task[], editable: boolean) {
         const button = document.createElement("button");
         button.textContent = "Fast-track in draft";
         button.onclick = () => {
-          db.update(app.tasks, task.id, { estimate: 2 }, { branch: draftOverMain });
+          db.update(app.tasks, task.id, { estimate: 2 }, draftView);
           button.disabled = true;
         };
         item.append(button);
@@ -67,9 +66,13 @@ function render(target: string, tasks: Task[], editable: boolean) {
   );
 }
 
-db.subscribeAll(app.tasks.orderBy("title"), ({ all }) => render("#main-tasks", all, false), {
-  branch: { head: main },
-});
-db.subscribeAll(app.tasks.orderBy("title"), ({ all }) => render("#draft-tasks", all, true), {
-  branch: draftOverMain,
-});
+db.subscribeAll(
+  app.tasks.orderBy("title"),
+  ({ all }) => render("#main-tasks", all, false),
+  mainView,
+);
+db.subscribeAll(
+  app.tasks.orderBy("title"),
+  ({ all }) => render("#draft-tasks", all, true),
+  draftView,
+);

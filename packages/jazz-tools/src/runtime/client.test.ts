@@ -348,10 +348,33 @@ describe("JazzClient transaction query plumbing", () => {
               Current: {
                 values: {
                   workspace: [14, 2],
-                  tenant: [8, ...Array(16).fill(0x42)],
+                  tenant: [8, 16, ...Array(16).fill(0x42)],
                 },
               },
             },
+          },
+        },
+      },
+    });
+  });
+
+  it("canonically encodes string branch values", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    await client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+      branch: {
+        head: { values: { branch: { type: "Text", value: "draft" } } },
+      },
+    });
+
+    const optionsJson = runtime.query.mock.calls[0][3];
+    expect(JSON.parse(optionsJson as string)).toMatchObject({
+      read_view: {
+        source: {
+          BranchView: {
+            head: { values: { branch: [6, 5, 100, 114, 97, 102, 116] } },
           },
         },
       },

@@ -15,9 +15,10 @@ const schema = {
       title: s.string(),
       estimate: s.int(),
     })
-    .branchBy(["scenario_id"]),
+    .branchBy("scenario_id"),
 };
 
 type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
+export type Scenario = s.RowOf<typeof app.scenarios>;
 export type Task = s.RowOf<typeof app.tasks>;
