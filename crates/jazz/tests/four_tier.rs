@@ -264,7 +264,7 @@ fn apply_message(node: &mut NodeState<RocksDbStorage>, message: SyncMessage) -> 
 fn transaction_state(
     node: &mut NodeState<RocksDbStorage>,
     tx_id: TxId,
-) -> (Fate, Option<jazz::time::GlobalSeq>, DurabilityTier) {
+) -> (Fate, Option<jazz::time::GlobalTime>, DurabilityTier) {
     block_on(node.transaction_state(tx_id)).unwrap()
 }
 

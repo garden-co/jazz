@@ -89,12 +89,16 @@ where
                             SourceGap::SchemaProjection,
                         ));
                     }
-                    match self.node.settled_binding_view_source_rows(
-                        &request.source.table,
-                        self.read_view.read_schema,
-                        *binding_view,
-                        *rows,
-                    ) {
+                    match self
+                        .node
+                        .settled_binding_view_source_rows(
+                            &request.source.table,
+                            self.read_view.read_schema,
+                            *binding_view,
+                            *rows,
+                        )
+                        .await
+                    {
                         Ok(rows) => {
                             let table = self
                                 .node

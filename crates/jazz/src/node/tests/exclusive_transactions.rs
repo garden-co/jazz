@@ -416,11 +416,11 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
 fn core_snapshot_uses_atomically_committed_global_time() {
     let (_temp_dir, mut core) = open_node_with_uuid(node(9));
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(1), 25).cells(title_cells("settled")),
         )
         .unwrap();
-    core.finalize_local_mergeable_commit(tx_id).unwrap();
+    core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
 
     let open_id = OpenTransactionId::new();
     core.open_exclusive(open_id).unwrap();
@@ -449,7 +449,7 @@ fn partial_snapshot_whole_table_validation_accepts_its_sparse_global_dots() {
         .commit_exclusive(open_id, AuthorId::SYSTEM, 11)
         .unwrap();
 
-    let updates = core.apply_sync_message(unit).unwrap();
+    let updates = core.apply_sync_message_settled(unit).unwrap();
     let [SyncMessage::FateUpdate { fate, .. }] = updates.as_slice()
     else {
         panic!("expected fate update");
@@ -482,7 +482,7 @@ fn partial_snapshot_filtered_validation_accepts_its_sparse_global_dots() {
         .commit_exclusive(open_id, AuthorId::SYSTEM, 11)
         .unwrap();
 
-    let updates = core.apply_sync_message(unit).unwrap();
+    let updates = core.apply_sync_message_settled(unit).unwrap();
     let [SyncMessage::FateUpdate { fate, .. }] = updates.as_slice() else {
         panic!("expected fate update");
     };

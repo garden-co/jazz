@@ -789,10 +789,7 @@ where
     }
 
     /// Apply a downstream current-row view update.
-    pub(super) async fn apply_view_update(
-        &mut self,
-        update: ViewUpdateParts,
-    ) -> Result<(), Error> {
+    pub(super) async fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
         self.validate_received_view_update_global_time_durability(&update)?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))?;
         self.apply_view_update_inner(update, None).await

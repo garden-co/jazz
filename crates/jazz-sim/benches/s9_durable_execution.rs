@@ -630,57 +630,6 @@ fn append_step_and_event(
             step_row(transition.instance, transition.to_step),
             now_ms,
         )
-/* Superseded synchronous scenario setup retained only while replaying the refactor.
-        .unwrap();
-    accept_global(core, step_tx, global_time);
-    let event_tx = core
-        .commit_mergeable(
-            MergeableCommit::new(
-                EVENTS,
-                event_row(transition.instance, transition.to_step),
-                now_ms,
-            )
-            .cells(cells_map([
-                ("instance", Value::Uuid(instance.0)),
-                ("seq", Value::U64(transition.to_step)),
-                (
-                    "payload",
-                    Value::Bytes(
-                        format!("{}:{}", transition.instance, transition.to_step).into_bytes(),
-                    ),
-                ),
-            ])),
-        )
-        .unwrap();
-    accept_global(core, event_tx, global_time);
-}
-
-fn seed_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>, global_time: &mut u64) {
-    let tx = core
-        .commit_mergeable(
-            MergeableCommit::new(WORKFLOWS, workflow_row(), 1).cells(cells_map([
-                ("name", Value::String("workflow-main".to_owned())),
-                (
-                    "definition",
-                    Value::String(format!("{{\"steps\":{}}}", config.steps_per_instance)),
-                ),
-            ])),
-        )
-        .unwrap();
-    accept_global(core, tx, global_time);
-    for instance in 0..config.instances {
-        let tx = core
-            .commit_mergeable(
-                MergeableCommit::new(INSTANCES, instance_row(instance), 2).cells(cells_map([
-                    ("workflow", Value::Uuid(workflow_row().0)),
-                    ("state", Value::String("running".to_owned())),
-                    ("currentStep", Value::U64(0)),
-                    ("wakeAt", Value::U64(0)),
-                ])),
-            )
-            .unwrap();
-        accept_global(core, tx, global_time);
-*/
         .cells(cells_map([
             ("instance", Value::Uuid(instance.0)),
             ("seq", Value::U64(transition.to_step)),

@@ -71,7 +71,7 @@ where
                 TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?),
                 node,
             );
-            if !self.snapshot_covers(tx_id, snapshot) {
+            if !self.snapshot_covers(tx_id, snapshot).await {
                 return Ok(true);
             }
         }

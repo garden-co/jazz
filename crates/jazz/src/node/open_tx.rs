@@ -1130,14 +1130,15 @@ where
             .map(|idx| versions[idx].clone())
     }
 
-    pub(super) fn snapshot_content_witness(
+    pub(super) async fn snapshot_content_witness(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
         snapshot: &Snapshot,
     ) -> Option<TxId> {
-        let version =
-            self.snapshot_layer_winner(table, row_uuid, VersionLayer::Content, snapshot)?;
+        let version = self
+            .snapshot_layer_winner(table, row_uuid, VersionLayer::Content, snapshot)
+            .await?;
         self.version_tx_id(&version).ok()
     }
 

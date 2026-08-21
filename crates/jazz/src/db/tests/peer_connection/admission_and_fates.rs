@@ -17,7 +17,7 @@ fn authenticated_client_upload_uses_authority_clock_for_forward_skew() {
     let (tx_id, unit) = client
         .node()
         .borrow_mut()
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", RowUuid::from_bytes([0xf1; 16]), future_ms)
                 .made_by(identity)
                 .cells(cells("future", false, identity)),

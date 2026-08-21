@@ -61,7 +61,7 @@ fn trusted_snapshot_carries_policy_source_and_edge_recompiles_it_after_reopen() 
     let storage = RocksDbStorage::open(edge_dir.path(), &refs).expect("open edge store");
     let mut edge = NodeState::new_catalogue_uninitialized(node(0x34), storage)
         .expect("open uninitialized edge");
-    edge.apply_trusted_catalogue_snapshot(snapshot)
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot)
         .expect("install source snapshot");
     assert!(
         edge.try_current_schema()

@@ -680,12 +680,12 @@ where
 
     fn accept_global_for_test(&mut self, tx_id: TxId) -> Result<(), Error> {
         let global_time = self.allocate_global_time_for_test();
-        self.apply_fate_update(
+        crate::db::block_on(self.apply_fate_update(
             tx_id,
             Fate::Accepted,
             Some(global_time),
             Some(DurabilityTier::Global),
-        )
+        ))
     }
 }
 

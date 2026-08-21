@@ -118,7 +118,7 @@ pub(crate) mod legacy_test_future {
     use crate::ids::{AuthorId, BranchId, SchemaVersionId};
     use crate::node::{Error, MergeableCommit, NodeState};
     use crate::protocol::{CatalogueSnapshot, SyncMessage, VersionRecord};
-    use crate::time::{GlobalSeq, TxTime};
+    use crate::time::{GlobalTime, TxTime};
     use crate::tools::OpenTransactionId;
     use crate::tx::{BranchLineage, DurabilityTier, Fate, Transaction, TxId};
     use groove::storage::{OrderedKvStorage, ReopenableStorage};
@@ -306,7 +306,7 @@ pub(crate) mod legacy_test_future {
         fn transaction_state_settled(
             &mut self,
             tx_id: TxId,
-        ) -> Option<(Fate, Option<GlobalSeq>, DurabilityTier)>;
+        ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)>;
     }
 
     impl<S> SettledNodeTestExt for NodeState<S>
@@ -506,7 +506,7 @@ pub(crate) mod legacy_test_future {
         fn transaction_state_settled(
             &mut self,
             tx_id: TxId,
-        ) -> Option<(Fate, Option<GlobalSeq>, DurabilityTier)> {
+        ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)> {
             crate::db::block_on(self.transaction_state(tx_id))
         }
     }

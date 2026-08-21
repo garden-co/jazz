@@ -713,33 +713,6 @@ fn drain_db_route(
     }
 }
 
-/* Superseded synchronous stream fixture retained only while replaying the refactor.
-fn seed_stream(core: &mut NodeState<RocksDbStorage>, stream: usize, global_time: &mut u64) {
-    let tx = core
-        .commit_mergeable(
-            MergeableCommit::new(STREAMS, stream_row(stream), 1)
-                .cells(cells([("name", Value::String(format!("stream-{stream}")))])),
-        )
-        .unwrap();
-    core.apply_fate_update(
-        tx,
-        Fate::Accepted,
-        Some(GlobalTime(*global_time)),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
-    *global_time += 1;
-    let tx = core
-        .commit_mergeable(
-            MergeableCommit::new(STREAM_DOCS, stream_doc_row(stream), 2).cells(cells([
-                ("stream", Value::Uuid(stream_row(stream).0)),
-                ("content", Value::Bytes(Vec::new())),
-            ])),
-        )
-        .unwrap();
-    core.apply_fate_update(
-        tx,
-*/
 fn seed_stream(core: &mut NodeState<RocksDbStorage>, stream: usize, global_time: &mut u64) {
     let tx = commit_mergeable_unit_settled(
         core,

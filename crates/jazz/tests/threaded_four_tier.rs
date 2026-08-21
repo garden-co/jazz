@@ -78,7 +78,7 @@ struct ThreadResult {
     global_rows: BTreeMap<RowUuid, BTreeMap<String, Value>>,
     local_rows: BTreeMap<RowUuid, BTreeMap<String, Value>>,
     subscription_rows: BTreeMap<RowUuid, BTreeMap<String, Value>>,
-    transaction_states: BTreeMap<TxId, (Fate, Option<jazz::time::GlobalSeq>, DurabilityTier)>,
+    transaction_states: BTreeMap<TxId, (Fate, Option<jazz::time::GlobalTime>, DurabilityTier)>,
     sync_metrics: jazz::node::SyncMetrics,
     downstream_peer: Option<LinkSummary>,
 }
