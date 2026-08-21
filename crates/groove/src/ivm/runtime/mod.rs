@@ -22,15 +22,15 @@ use std::sync::{
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::ivm::{
-    AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, BindingSourceOp,
-    CollectByBuilder, CollectByField, CollectByMode, CollectByOp, CollectByProjection,
-    CollectBySlot, CollectBySlotBuilder, DurableStorage, FieldRef, FilterOp, FrontierName,
-    FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp,
-    JoinOpKind, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor,
-    NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
-    ProjectionExpr, RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp,
-    TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
-    ValueComparison, VariantProjectOp, VariantProjectionTarget,
+    AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, ArrangeOp,
+    ArrangementDescriptor, BindingSourceOp, CollectByBuilder, CollectByField, CollectByMode,
+    CollectByOp, CollectByProjection, CollectBySlot, CollectBySlotBuilder, DurableStorage,
+    FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp,
+    InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH,
+    MapProjectOp, NodeDescriptor, NodeDurability, NodeId, NodeOutput, OpType, PersistOp, PlanExpr,
+    PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr, RecursiveEnumRemaps, RecursiveOp,
+    Retainer, StaticScanSpec, TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField,
+    UnnestOp, UnwrapNullableOp, ValueComparison, VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, RawProjectionField,

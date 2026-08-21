@@ -711,7 +711,6 @@ impl IvmRuntime {
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
-        self.prune_unreferenced_arrangements();
         let records = records?;
         if !records.descriptor.registry_compatible_with(&output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);
@@ -758,7 +757,6 @@ impl IvmRuntime {
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
-        self.prune_unreferenced_arrangements();
         snapshots
     }
 }
