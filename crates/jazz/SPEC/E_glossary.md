@@ -20,8 +20,8 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 
 ### Identity (ch. 2)
 
-- **`NodeUuid` / `RowUuid` / `AuthorId` / `SchemaVersionId` / `MigrationLensId` /
-  `BranchDimensionId`** — wire-stable UUID identities.
+- **`NodeUuid` / `RowUuid` / `AuthorId` / `SchemaVersionId` /
+  `MigrationLensId`** — wire-stable UUID identities.
 - **`NodeAlias` / `SchemaVersionAlias`** — node-local `u64` interned identities;
   never on the wire (ch. 14).
 - **`AuthorId::SYSTEM`** — the internal author that bypasses all policy (ch. 7).
@@ -120,7 +120,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   `Propagation`** · **`WriteHandle` / Rust `WatchHandle` / binding
   subscription stream** · **`RowIdSource`**
   (`Production` / `Seeded`).
-- **branch dimension** · **branch key** · **branch-local row** ·
+- **branch column** · **branch key** · **branch-local row** ·
   **branch view** · **live base** · **frozen base** ·
   **supplying branch-key provenance**.
 

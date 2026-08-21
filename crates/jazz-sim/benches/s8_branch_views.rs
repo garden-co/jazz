@@ -5,17 +5,13 @@ use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, BranchDimensionId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::ContributionMergeRow;
 use jazz::protocol::{BranchSelector, BranchViewBase, SnapshotRef};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::time::GlobalTime;
-use jazz::tools::ObjectId;
-use jazz::tools::public_schema::{
-    BranchDimensionDescriptor, ColumnType as PublicColumnType, SchemaBuilder, TableSchema,
-    Value as PublicValue,
-};
+use jazz::tools::public_schema::{ColumnType as PublicColumnType, SchemaBuilder, TableSchema};
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
@@ -189,20 +185,13 @@ fn run(row_count: usize) {
 }
 
 fn schema() -> JazzSchema {
-    let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x57; 16]));
     let public_schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("items")
                 .column("branch_id", PublicColumnType::Uuid)
                 .column("title", PublicColumnType::Text)
                 .column("rank", PublicColumnType::BigInt)
-                .branch_dimension(BranchDimensionDescriptor {
-                    id: dimension,
-                    name: "branch".to_owned(),
-                    column_type: PublicColumnType::Uuid,
-                    migration_default: PublicValue::Uuid(ObjectId::from_uuid(uuid::Uuid::nil())),
-                })
-                .branch_by("branch_id", "branch")
+                .branch_by("branch_id")
                 .index_only(["title"]),
         )
         .build();
@@ -210,7 +199,7 @@ fn schema() -> JazzSchema {
 }
 
 fn selector(byte: u8) -> BranchSelector {
-    BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
 fn row(index: usize) -> RowUuid {

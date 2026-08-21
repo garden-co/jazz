@@ -6,8 +6,6 @@ export type {
   ColumnType,
   ColumnDescriptor,
   TableSchema,
-  BranchDimensionDescriptor,
-  BranchDimensionBindingDescriptor,
   WasmSchema,
   WasmRow,
   RowDelta as WireRowDelta,

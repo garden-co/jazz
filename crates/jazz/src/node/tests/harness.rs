@@ -16,10 +16,10 @@ use crate::query::{
     RelationQuery, ShapeId, ValidatedQuery, claim, col, contains, eq, gt, lit, ne, not, param,
 };
 use crate::tools::public_schema::{
-    BranchDimensionDescriptor as PublicBranchDimensionDescriptor, CmpOp as PublicCmpOp,
-    ColumnDescriptor as PublicColumnDescriptor, ColumnMergeStrategy as PublicColumnMergeStrategy,
-    ColumnType as PublicColumnType, EnumCaseDescriptor as PublicEnumCaseDescriptor,
-    Operation as PublicOperation, PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue,
+    CmpOp as PublicCmpOp, ColumnDescriptor as PublicColumnDescriptor,
+    ColumnMergeStrategy as PublicColumnMergeStrategy, ColumnType as PublicColumnType,
+    EnumCaseDescriptor as PublicEnumCaseDescriptor, Operation as PublicOperation,
+    PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue,
     RowDescriptor as PublicRowDescriptor, Schema as PublicSchema,
     SchemaBuilder as PublicSchemaBuilder, TableName as PublicTableName,
     TablePolicies as PublicTablePolicies, TableSchema as PublicTableSchema,

@@ -430,50 +430,6 @@ impl RowDescriptor {
     }
 }
 
-/// Schema for a single table, including row structure and policies.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BranchDimensionDescriptor {
-    /// Stable UUID identity, independent from the bound application column.
-    pub id: crate::ids::BranchDimensionId,
-    /// Stable schema-wide selector name.
-    pub name: String,
-    /// Logical type shared by every column bound to this dimension.
-    #[serde(rename = "columnType")]
-    pub column_type: ColumnType,
-    /// Immutable value used to normalize history authored before this dimension.
-    #[serde(rename = "migrationDefault")]
-    pub migration_default: Value,
-}
-
-/// Binding from one renameable application column to a stable branch dimension.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum BranchDimensionBindingDescriptor {
-    /// Bind a column to the dimension with the same stable name.
-    Column(ColumnName),
-    /// Bind a renameable column to an explicitly named stable dimension.
-    Named {
-        column: ColumnName,
-        dimension: String,
-    },
-}
-
-impl BranchDimensionBindingDescriptor {
-    pub fn column(&self) -> &ColumnName {
-        match self {
-            Self::Column(column) | Self::Named { column, .. } => column,
-        }
-    }
-
-    pub fn dimension(&self) -> &str {
-        match self {
-            Self::Column(column) => column.as_str(),
-            Self::Named { dimension, .. } => dimension,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableSchema {
     /// Row structure definition.
@@ -488,16 +444,9 @@ pub struct TableSchema {
     /// Access control policies.
     #[serde(default, skip_serializing_if = "table_policies_are_default")]
     pub policies: TablePolicies,
-    /// Schema-wide dimension declarations contributed by this schema fragment.
-    #[serde(
-        default,
-        rename = "branchDimensions",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub branch_dimensions: Vec<BranchDimensionDescriptor>,
-    /// Ordinary columns bound to stable branch dimensions.
+    /// Ordinary immutable columns that form this table's branch key.
     #[serde(default, rename = "branchBy", skip_serializing_if = "Vec::is_empty")]
-    pub branch_by: Vec<BranchDimensionBindingDescriptor>,
+    pub branch_by: Vec<ColumnName>,
 }
 
 fn table_policies_are_default(policies: &TablePolicies) -> bool {
@@ -513,7 +462,6 @@ impl TableSchema {
             columns,
             indexed_columns: None,
             policies: TablePolicies::default(),
-            branch_dimensions: Vec::new(),
             branch_by: Vec::new(),
         }
     }
@@ -524,7 +472,6 @@ impl TableSchema {
             columns,
             indexed_columns: None,
             policies,
-            branch_dimensions: Vec::new(),
             branch_by: Vec::new(),
         }
     }
@@ -570,8 +517,7 @@ pub struct TableSchemaBuilder {
     columns: Vec<ColumnDescriptor>,
     indexed_columns: Option<Vec<ColumnName>>,
     policies: TablePolicies,
-    branch_dimensions: Vec<BranchDimensionDescriptor>,
-    branch_by: Vec<BranchDimensionBindingDescriptor>,
+    branch_by: Vec<ColumnName>,
 }
 
 impl TableSchemaBuilder {
@@ -582,7 +528,6 @@ impl TableSchemaBuilder {
             columns: Vec::new(),
             indexed_columns: None,
             policies: TablePolicies::default(),
-            branch_dimensions: Vec::new(),
             branch_by: Vec::new(),
         }
     }
@@ -649,23 +594,9 @@ impl TableSchemaBuilder {
         self
     }
 
-    /// Declare a schema-wide branch dimension.
-    pub fn branch_dimension(mut self, dimension: BranchDimensionDescriptor) -> Self {
-        self.branch_dimensions.push(dimension);
-        self
-    }
-
-    /// Bind an ordinary application column to a schema-wide dimension name.
-    pub fn branch_by(
-        mut self,
-        column: impl Into<ColumnName>,
-        dimension: impl Into<String>,
-    ) -> Self {
-        self.branch_by
-            .push(BranchDimensionBindingDescriptor::Named {
-                column: column.into(),
-                dimension: dimension.into(),
-            });
+    /// Add an ordinary application column to this table's branch key.
+    pub fn branch_by(mut self, column: impl Into<ColumnName>) -> Self {
+        self.branch_by.push(column.into());
         self
     }
 
@@ -692,7 +623,6 @@ impl TableSchemaBuilder {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
             policies: self.policies,
-            branch_dimensions: self.branch_dimensions,
             branch_by: self.branch_by,
         }
     }
@@ -704,7 +634,6 @@ impl TableSchemaBuilder {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
             policies: self.policies,
-            branch_dimensions: self.branch_dimensions,
             branch_by: self.branch_by,
         };
         (name, schema)

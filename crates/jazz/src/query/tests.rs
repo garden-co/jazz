@@ -909,7 +909,7 @@ mod tests {
         // when it selects the shared/default incarnation.
         assert_eq!(
             validated.shape_id().0.to_string(),
-            "237b7022-8003-5b09-8099-7d48dea62e41"
+            "b0dc6f46-cbc2-5003-928c-f607d7943c77"
         );
     }
 }

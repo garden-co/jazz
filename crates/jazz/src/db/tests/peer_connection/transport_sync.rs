@@ -8,15 +8,7 @@ fn branch_sync_schema() -> JazzSchema {
             PublicTableSchemaBuilder::new("todos")
                 .column("branch_id", PublicColumnType::Uuid)
                 .column("title", PublicColumnType::Text)
-                .branch_dimension(PublicBranchDimensionDescriptor {
-                    id: crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x31; 16])),
-                    name: "branch".to_owned(),
-                    column_type: PublicColumnType::Uuid,
-                    migration_default: PublicValue::Uuid(PublicObjectId::from_uuid(
-                        uuid::Uuid::nil(),
-                    )),
-                })
-                .branch_by("branch_id", "branch")
+                .branch_by("branch_id")
                 .policies(
                     PublicTablePolicies::new()
                         .with_select(PublicPolicyExpr::True)
@@ -29,7 +21,7 @@ fn branch_sync_schema() -> JazzSchema {
 }
 
 fn branch_sync_selector(byte: u8) -> BranchSelector {
-    BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
 #[test]
@@ -171,7 +163,7 @@ fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() 
     assert_eq!(row_ids(&snapshot.rows), vec![selected_row]);
     assert_eq!(
         snapshot.rows[0].cell(&schema.tables[0], "branch_id"),
-        Some(head.dimensions["branch"].decode().unwrap()),
+        Some(head.dimensions["branch_id"].decode().unwrap()),
         "an inherited base row must project the requested head coordinate"
     );
 
@@ -352,10 +344,10 @@ fn branch_view_subscriptions_disambiguate_same_row_and_tx_by_branch() {
     );
     assert_eq!(
         left_snapshot.rows[0].cell(table, "branch_id"),
-        Some(left.dimensions["branch"].decode().unwrap())
+        Some(left.dimensions["branch_id"].decode().unwrap())
     );
     assert_eq!(
         right_snapshot.rows[0].cell(table, "branch_id"),
-        Some(right.dimensions["branch"].decode().unwrap())
+        Some(right.dimensions["branch_id"].decode().unwrap())
     );
 }

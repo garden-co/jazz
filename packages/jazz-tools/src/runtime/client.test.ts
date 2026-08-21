@@ -365,7 +365,7 @@ describe("JazzClient transaction query plumbing", () => {
     { type: "Integer", value: 1.5 },
     { type: "BigInt", value: Number.MAX_SAFE_INTEGER + 1 },
     { type: "BigInt", value: 1n << 63n },
-  ] as const)("rejects invalid branch dimension value $type:$value", async (value) => {
+  ] as const)("rejects invalid branch column value $type:$value", async (value) => {
     const runtime = makeFakeRuntime();
     runtime.query.mockResolvedValue([]);
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());

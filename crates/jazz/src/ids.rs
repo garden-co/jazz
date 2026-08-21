@@ -75,12 +75,6 @@ pub struct PhysicalTableId(pub u64);
 )]
 pub struct PhysicalColumnId(pub u64);
 
-/// Schema-lineage-stable identity of one globally named branch dimension.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct BranchDimensionId(pub uuid::Uuid);
-
 /// Content-addressed migration-lens identity.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,

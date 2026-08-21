@@ -1288,7 +1288,7 @@ where
 
     /// Build the maintained content-winner relation for one logical branch
     /// key. `stored_keys` includes historical short spellings produced before
-    /// monotone dimension additions; they compete as one logical incarnation.
+    /// monotone branch-column additions; they compete as one branch-local row.
     pub(crate) fn projected_branch_content_source_graph(
         &mut self,
         request: &SourceRequest,
@@ -2371,15 +2371,11 @@ fn branch_view_storage_source_fields(
         ProjectField::named("authored_columns"),
     ];
     for column in &table.columns {
-        if let Some(binding) = table
-            .branch_by
-            .iter()
-            .find(|binding| binding.column == column.name)
-        {
+        if table.branch_by.contains(&column.name) {
             let value = head_values
-                .get(&binding.dimension)
+                .get(&column.name)
                 .ok_or(Error::InvalidBranchKey(
-                    "head branch key missing projected table dimension".to_owned(),
+                    "head branch key missing projected table column".to_owned(),
                 ))?
                 .decode()
                 .map_err(|_| {
@@ -2415,15 +2411,11 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
 fn current_row_descriptor_with_hidden_source_fields_for_branch(
     table: &TableSchema,
     metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
-    branch_dimensions_nonnullable: bool,
+    branch_columns_nonnullable: bool,
 ) -> RecordDescriptor {
     let mut fields = std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
         .chain(table.columns.iter().map(|column| {
-            let value_type = if branch_dimensions_nonnullable
-                && table
-                    .branch_by
-                    .iter()
-                    .any(|binding| binding.column == column.name)
+            let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
             {
                 column.column_type.clone()
             } else {
@@ -2469,7 +2461,7 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch(
             fields.push((field.clone(), ValueType::Bytes));
         }
     }
-    if branch_dimensions_nonnullable
+    if branch_columns_nonnullable
         && !metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses)
     {
         fields.push(("supplying_branch_key".to_owned(), ValueType::Bytes));
@@ -2908,14 +2900,9 @@ fn inline_current_record_with_source_metadata(
     values.push(Value::Uuid(row.row_uuid().0));
     for column in &table.columns {
         let value = row.cell(table, &column.name);
-        if branch_witness.is_some()
-            && table
-                .branch_by
-                .iter()
-                .any(|binding| binding.column == column.name)
-        {
+        if branch_witness.is_some() && table.branch_by.contains(&column.name) {
             values.push(value.ok_or(Error::InvalidStoredValue(
-                "frozen branch row is missing a branch dimension value",
+                "frozen branch row is missing a branch column value",
             ))?);
         } else {
             values.push(Value::Nullable(value.map(Box::new)));

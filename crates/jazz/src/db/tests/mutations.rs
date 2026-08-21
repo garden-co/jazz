@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn branch_dimension_reference_policy_schema() -> JazzSchema {
+fn branch_column_reference_policy_schema() -> JazzSchema {
     let policy = PublicPolicyExpr::Exists {
         table: "branches".to_owned(),
         condition: Box::new(PublicPolicyExpr::And(vec![
@@ -29,15 +29,7 @@ fn branch_dimension_reference_policy_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("todos")
                     .fk_column("branch_id", "branches")
                     .column("title", PublicColumnType::Text)
-                    .branch_dimension(PublicBranchDimensionDescriptor {
-                        id: crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x74; 16])),
-                        name: "branch".to_owned(),
-                        column_type: PublicColumnType::Uuid,
-                        migration_default: PublicValue::Uuid(PublicObjectId::from_uuid(
-                            uuid::Uuid::nil(),
-                        )),
-                    })
-                    .branch_by("branch_id", "branch")
+                    .branch_by("branch_id")
                     .policies(
                         PublicTablePolicies::new()
                             .with_select(policy.clone())
@@ -51,11 +43,11 @@ fn branch_dimension_reference_policy_schema() -> JazzSchema {
 
 #[test]
 fn admitted_server_authorizes_branch_write_through_referenced_application_row() {
-    let schema = branch_dimension_reference_policy_schema();
+    let schema = branch_column_reference_policy_schema();
     let owner = AuthorId::from_bytes([0x76; 16]);
     let outsider = AuthorId::from_bytes([0x77; 16]);
     let branch = row(0x78);
-    let selector = BranchSelector::new([("branch", Value::Uuid(branch.0))]);
+    let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
     let server = open_core(0x75, AuthorId::SYSTEM, &schema);
     server
         .insert_with_id(

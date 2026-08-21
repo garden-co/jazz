@@ -18,7 +18,7 @@ import {
 import { httpUrlToWs } from "./url.js";
 import { PostcardWriter } from "./native-runtime/native-codec.js";
 
-function encodeBranchDimensionValue(value: Value): Uint8Array {
+function encodeBranchColumnValue(value: Value): Uint8Array {
   const writer = new PostcardWriter();
   switch (value.type) {
     case "Integer":
@@ -58,7 +58,7 @@ function encodeBranchDimensionValue(value: Value): Uint8Array {
     }
     default:
       throw new Error(
-        `branch dimensions currently require Integer, BigInt, or Uuid values; got ${value.type}`,
+        `branch columns currently require Integer, BigInt, or Uuid values; got ${value.type}`,
       );
   }
   return writer.finish();
@@ -74,7 +74,7 @@ function encodeBranchSelector(value: BranchSelector): WireBranchSelector {
     dimensions: Object.fromEntries(
       Object.entries(value.dimensions).map(([name, dimension]) => [
         name,
-        Array.from(encodeBranchDimensionValue(dimension)),
+        Array.from(encodeBranchColumnValue(dimension)),
       ]),
     ),
   };

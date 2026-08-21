@@ -13,7 +13,7 @@ names defined here, but their behavior is specified in those chapters.
 Invariant digest:
 
 - `INV-CLASS-1`: Column-class shipping principle: upstream-decided mutable state and node-local derived state MUST NOT be shipped as replicated row payload.
-- `INV-DATA-1`: Stable wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`, `BranchDimensionId`, `AuthorId`) in wire byte order; node-local alias types MUST NOT be part of wire identity.
+- `INV-DATA-1`: Stable wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`, `AuthorId`) in wire byte order; node-local alias types MUST NOT be part of wire identity.
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
 - `INV-DATA-3`: `AuthorId::SYSTEM` MUST equal the UUIDv5 derivation `Uuid::new_v5(&Uuid::NAMESPACE_OID, b"jazz:system-author")`.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 48 bits and a logical counter in the low 16 bits; construction MUST reject values outside those packed ranges.
@@ -59,7 +59,7 @@ node-local derived state is never shipped.
 
 Cross-node identity is stable because every durable name is a wire-stable UUID
 newtype (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
-`MigrationLensId`, `BranchDimensionId`, `AuthorId`, and
+`MigrationLensId`, `AuthorId`, and
 `TxId { time: TxTime, node: NodeUuid }`. Global settlement ordering uses the
 distinct packed HLC newtype `GlobalTime` (ch. 3–4). A transaction id combines a
 packed hybrid logical clock (`TxTime`,

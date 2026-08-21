@@ -5,21 +5,21 @@
 Jazz does not own a branch object, branch lifecycle, branch identifier, or
 branch-routing protocol. Applications model drafts, branches, environments,
 scenarios, and similar concepts as ordinary rows. The core owns only the
-relational mechanism those products need: schema-declared **branch
-dimensions**, branch-key-qualified history and winner selection, and a read view
+relational mechanism those products need: schema-declared **branch columns**,
+branch-key-qualified history and winner selection, and a read view
 that overlays one current branch key over an optional live or frozen base.
 
-A table binds zero or more ordinary application columns to globally named
-branch dimensions. The columns remain visible to queries, references, and
-policies, while their encoded values also form an immutable storage coordinate.
+A table names zero or more ordinary application columns in `branchBy`. The
+columns remain visible to queries, references, and policies, while their encoded
+values also form an immutable storage coordinate. There is no stored dimension
+identity, binding, declaration, or branch object.
 Global object identity remains `RowUuid`; one object may have a distinct
 branch-local row in every branch key.
 
 User-facing prose calls that coordinate-specific object a **branch-local row**.
-The implementation may still use “incarnation” where it must distinguish the
-storage identity, but “branch version” is intentionally avoided: throughout
-Jazz, a row version is one immutable history entry, and one branch-local row
-can have many such versions.
+“Branch version” is intentionally avoided: throughout Jazz, a row version is
+one immutable history entry, and one branch-local row can have many such
+versions.
 
 For each row and independent content/deletion layer, a branch-view read chooses the
 head-key winner when one exists and otherwise chooses the base-key
@@ -35,29 +35,29 @@ Invariant digest:
 - `INV-TIME-3`: `at_time(time)` MUST resolve to the latest settled global position whose transaction time is `<= time`, returning `GlobalTime(0)` when none exists.
 - `INV-TIME-4`: A local historical read MUST refuse to answer from incomplete local history.
 - `INV-TIME-5`: A history-complete node at a sufficient watermark MUST answer an exact-position historical read locally.
-- `INV-BVIEW-1`: Branch dimensions MUST have schema-lineage-stable identities, names, types, canonical encodings, and deterministic order; tables MAY bind any subset through renameable application columns.
-- `INV-BVIEW-2`: The logical incarnation key MUST be `(PhysicalTableId, BranchKey, RowUuid)` while application object identity remains `RowUuid`.
+- `INV-BVIEW-1`: Every `branchBy` entry MUST name a non-null, key-encodable ordinary column; same-named branch columns across tables MUST have the same type and canonical encoding.
+- `INV-BVIEW-2`: The logical branch-local row key MUST be `(PhysicalTableId, BranchKey, RowUuid)` while application object identity remains `RowUuid`.
 - `INV-BVIEW-3`: Every content or deletion version on a branch-keyed table MUST carry a complete canonical branch key; its version parents MUST have the same branch key.
-- `INV-BVIEW-4`: Branch bindings MUST be non-null and immutable for one incarnation. Moving an object between branch keys requires explicit writes to both incarnations, which MAY share one atomic transaction.
+- `INV-BVIEW-4`: Branch columns MUST be immutable after insertion. Moving an object between branch keys requires explicit writes to both branch-local rows, which MAY share one atomic transaction.
 - `INV-BVIEW-5`: Content and deletion histories and current winners MUST be selected independently per `(PhysicalTableId, BranchKey, RowUuid, Layer)`.
 - `INV-BVIEW-6`: Secondary indices MUST be physically prefixed by the exact branch key; a composed branch view MUST apply head/base masking before consulting or publishing index results.
-- `INV-BVIEW-7`: A table with no bound dimensions MUST behave as shared data in every branch view.
-- `INV-BVIEW-8`: A read selector MUST use globally named dimension values and each table MUST project that selector onto its declared subset; equal projected head/base branch keys collapse to one source.
+- `INV-BVIEW-7`: A table with no branch columns MUST behave as shared data in every branch view.
+- `INV-BVIEW-8`: A read selector MUST use branch-column names and each table MUST project that selector onto its declared subset; equal projected head/base branch keys collapse to one source.
 - `INV-BVIEW-9`: An overlay MUST select head winners before base winners independently for content and deletion layers, and MUST perform that masking before predicates or relational operators.
 - `INV-BVIEW-10`: A content write MUST NOT imply restoration; an inherited or head-key `Deleted` winner remains effective until an explicit `Restored` winner supersedes it.
 - `INV-BVIEW-11`: A base source MUST be either live current state or the exact state of the selected branch key at a supplied `SnapshotRef`; the cut applies consistently to every table and policy dependency in the read.
 - `INV-BVIEW-12`: The canonical read/subscription identity MUST include normalized head and base branch sources, including any snapshot cut.
-- `INV-BVIEW-13`: Normal references MUST resolve a `RowUuid` through the current effective branch view; exact-incarnation references are a separate, unsupported capability.
-- `INV-BVIEW-14`: A view-relative mutation of an inherited row MUST copy-on-write into the head branch key. Exact-incarnation mutation MUST name its branch key explicitly.
-- `INV-BVIEW-15`: Effective rows MUST distinguish the requested head branch key from the physical branch key that supplied each selected layer; ordinary branch-dimension columns project to the head values while hidden provenance retains supplying branch keys.
+- `INV-BVIEW-13`: Normal references MUST resolve a `RowUuid` through the current effective branch view; branch-qualified row references are a separate, unsupported capability.
+- `INV-BVIEW-14`: A view-relative mutation of an inherited row MUST copy-on-write into the head branch key. An exact mutation MUST name its branch key explicitly.
+- `INV-BVIEW-15`: Effective rows MUST distinguish the requested head branch key from the physical branch key that supplied each selected layer; ordinary branch columns project to the head values while hidden provenance retains supplying branch keys.
 - `INV-BVIEW-16`: Transactions MAY atomically contain versions in multiple branch keys, but admission, fate, persistence, and rejection remain all-or-nothing.
 - `INV-BVIEW-17`: Trusted replication MAY carry complete cross-branch-key commit units; untrusted selected delivery MUST NOT reveal unauthorized sibling versions, tables, branch keys, payloads, or counts merely because they share a transaction.
-- `INV-BVIEW-18`: Read and write policy MUST use ordinary branch-dimension columns and the same effective view as the operation; missing reference/policy evidence fails closed, and Jazz MUST NOT impose a built-in branch-row existence or lifecycle gate.
-- `INV-BVIEW-19`: Schema evolution MAY only add a branch dimension with an immutable typed migration default. Historical versions and old-schema selectors MUST normalize to that default; removal, identity rename, type/encoding/default change, and branch key collapse are forbidden.
+- `INV-BVIEW-18`: Read and write policy MUST use ordinary branch columns and the same effective view as the operation; missing reference/policy evidence fails closed, and Jazz MUST NOT impose a built-in branch-row existence or lifecycle gate.
+- `INV-BVIEW-19`: Schema evolution MAY only add a `branchBy` column with an immutable typed default. Historical versions and old-schema selectors MUST normalize to that default; removal and type/encoding/default change are forbidden. Ordinary schema lineage may rename the column while preserving its physical column identity.
 - `INV-MERGE-1`: Cross-branch-key merge calculation MUST remain a local, authorized helper that emits one ordinary atomic mergeable transaction; receivers MUST NOT require source history to admit its result.
 - `INV-MERGE-2`: Merge provenance MUST identify source and target contributions by stable branch coordinates and exact field-grained contribution dots.
 - `INV-MERGE-3`: A merge calculator MUST recursively subtract source contributions already represented in the target and MUST NOT echo target-originated effects back to their origin.
-- `INV-MERGE-4`: Emitted version parents MUST be only the target incarnation's observed row/layer heads; source-key versions are never causal parents.
+- `INV-MERGE-4`: Emitted version parents MUST be only the target branch-local row's observed row/layer heads; source-key versions are never causal parents.
 - `INV-MERGE-5`: Merge calculation MUST fail atomically when exact contribution history, strategy capabilities, current-schema projection, source-read authority, or target-write authority is unavailable.
 - `INV-MERGE-6`: Prior provenance visible in the target prevents observed duplicate transfer, but Jazz MUST NOT claim globally coordinated exactly-once behavior for concurrent offline calculations.
 
@@ -82,72 +82,49 @@ error or routes to a history-complete authority; it never fabricates a partial
 answer (`INV-TIME-4`). Historical reads are immutable one-shots rather than live
 subscriptions.
 
-### 11.2 Branch dimensions
+### 11.2 Branch columns
 
-A schema lineage declares globally named branch dimensions. Each dimension
-has a stable internal `BranchDimensionId`, a stable semantic name, one
-non-null key-encodable type, one canonical wire/storage encoding, and a stable
-identity across schema lineage. A table binds an application column to any
-subset of those dimensions:
+Each table names a subset of its ordinary columns in `branchBy`:
 
 ```text
-dimensions:
-  workspace: Uuid
-  branch: Uuid
-
 todos:
-  workspace_id: Uuid  -> dimension workspace
-  draft_id: Uuid      -> dimension branch
-  branchBy: [workspace_id, draft_id]
+  workspace_id: Uuid
+  branch_id: Uuid
+  branchBy: [workspace_id, branch_id]
 
 memberships:
-  workspace_id: Uuid  -> dimension workspace
+  workspace_id: Uuid
   branchBy: [workspace_id]
 
 users:
   branchBy: []
 ```
 
-At the durable public-schema boundary, a table fragment may contribute the
-global declarations it uses and binds its ordinary columns by stable dimension
-name. Identical declarations contributed by multiple fragments are deduplicated;
-conflicting names or ids are rejected. The explicit object form preserves the
-association across an application-column rename:
+The durable public schema stores only the ordinary column definitions and their
+names in `branchBy`:
 
 ```json
 {
   "tables": {
     "todos": {
       "columns": [{ "name": "workspace_id", "column_type": { "type": "Uuid" }, "nullable": false }],
-      "branchDimensions": [
-        {
-          "id": "31313131-3131-3131-3131-313131313131",
-          "name": "workspace",
-          "columnType": { "type": "Uuid" },
-          "migrationDefault": {
-            "type": "Uuid",
-            "value": "00000000-0000-0000-0000-000000000000"
-          }
-        }
-      ],
-      "branchBy": [{ "column": "workspace_id", "dimension": "workspace" }]
+      "branchBy": ["workspace_id"]
     }
   }
 }
 ```
 
-`branchBy: ["workspace"]` is shorthand for binding a column and dimension
-that have the same name. It is convenient for initial schemas but the explicit
-form is required when the application column has a different or later-renamed
-name. Declarations and bindings are retained in the persisted source schema and
-compiled by Rust; bindings to missing columns or dimensions, duplicate table
-dimensions, type mismatches, nullable values, and non-key-encodable types fail
-schema admission.
+Entries naming missing, nullable, duplicate, or non-key-encodable columns fail
+schema admission. A branch column is immutable after insertion. Across all
+tables in a schema, branch columns with the same name must have the same type
+and canonical encoding (`INV-BVIEW-1`, `INV-BVIEW-4`). Tables may use different
+subsets; a table with no `branchBy` columns is shared.
 
-Application columns may later be renamed while retaining the same dimension
-binding. Canonical branch-key identity uses stable dimension ids and typed bytes,
-never current column names or declaration order (`INV-BVIEW-1`). Two tables that
-bind the same named dimension must use the same type and encoding.
+Column names provide the uniform selector vocabulary, not durable identities.
+Ordinary schema lineage may rename a branch column because the migration lens
+retains the column's existing physical identity. Historical keys authored with
+the old name are projected through that lineage. Jazz stores no separate
+dimension declaration or binding abstraction.
 
 The empty branch key denotes shared data. It is not a privileged root branch key and
 has no lifecycle semantics (`INV-BVIEW-7`).
@@ -166,12 +143,12 @@ and each layer winner is keyed by that branch-local row plus `Content` or `Delet
 (`INV-BVIEW-2`, `INV-BVIEW-5`). A raw fetch of a branch-keyed object therefore
 requires a read view or an exact branch key.
 
-Bound branch-dimension columns are ordinary values for query projection, reference traversal,
+Branch columns are ordinary values for query projection, reference traversal,
 and policy, but key-like coordinates for mutation. Every version must carry the
 complete canonical branch key. A patch cannot omit, inherit ambiguously, or change
 that coordinate, and a version parent must belong to the same branch key
 (`INV-BVIEW-3`, `INV-BVIEW-4`). An application move is an explicit atomic write to
-the source and destination incarnations, not a cross-branch-key parent edge.
+the source and destination branch-local rows, not a cross-branch-key parent edge.
 
 #### Storage and indices
 
@@ -202,7 +179,7 @@ replicated conflict-resolution protocol.
 
 Current branch-view sources do not scan every branch and discard non-matching
 rows. They open one physical prefix range for each exact stored spelling of the
-selected key (normally one; more only after monotone dimension additions), for
+selected key (normally one; more only after monotone branch-column additions), for
 both content and deletion winners. A head-over-base view therefore reads at
 most the head and base key ranges before masking. Secondary-index probes use
 the same branch-key prefix.
@@ -362,7 +339,7 @@ without source history.
 A contribution dot is field-grained and branch-key-qualified:
 
 ```text
-BranchCoordinate = sorted [(BranchDimensionId, EncodedValue)]
+BranchCoordinate = sorted [(BranchColumnName, EncodedValue)]
 
 ContributionDot = {
   branch_key,
@@ -383,7 +360,7 @@ source dot already represented by the target. This prevents root-originated
 counter deltas or scalar writes from echoing home through chains such as
 `A -> B -> C -> A` (`INV-MERGE-3`).
 
-The output version names only the target incarnation's current row/layer heads
+The output version names only the target branch-local row's current row/layer heads
 as causal parents. Source versions and frozen-base versions are never target
 parents (`INV-MERGE-4`). Each merge strategy must expose exact native
 contribution extraction and target-relative encoding. Authored presence,
@@ -402,10 +379,10 @@ duplicates; Jazz provides no global merge cursor or exactly-once import claim
 
 ### 11.7 Schema evolution
 
-Branch-key evolution is monotone. A schema may add a globally named dimension and
-bind it to tables only when the publication supplies one immutable, typed,
-deterministic migration default. Old history and selectors authored under an
-older schema normalize the missing dimension to that default (`INV-BVIEW-19`).
+Branch-key evolution is monotone. A schema may add an ordinary column to
+`branchBy` only when that column has an immutable, typed, deterministic default.
+Old history and selectors authored under an older schema normalize the missing
+column to that default (`INV-BVIEW-19`).
 
 For example:
 
@@ -414,21 +391,22 @@ v1 branch key: (branch=A)
 v2 branch key: (workspace=DEFAULT, branch=A)
 ```
 
-All old incarnations enter the reserved default bucket. New-schema writes must
-explicitly provide the new dimension. Only old-schema queries receive automatic
+All old branch-local rows enter the reserved default bucket. New-schema writes
+must explicitly provide the new column. Only old-schema queries receive automatic
 default completion; omission in a new-schema query is an error. A cross-schema
 version parent is valid only when both effective normalized branch keys are equal.
 
-The migration default is schema-lineage metadata, not an ordinary insert
-default. It must never change. Adding a dimension rekeys/rebuilds current and
+The ordinary column default is also the migration default and must never change
+after the column joins `branchBy`. Adding a branch column rekeys/rebuilds current and
 secondary-index state and normalizes deletion history and contribution
 coordinates consistently. Prefer reserved schema-minted UUIDs or stable enum
 identities over user-reachable sentinel values.
 
-The initial contract forbids removing a dimension, renaming its stable semantic
-identity, changing its type or encoding, changing its default, splitting or
-collapsing dimensions, and nullable branch bindings. Application columns may
-be renamed because their binding retains the stable dimension id.
+The initial contract forbids removing a branch column from `branchBy`, changing
+its type or encoding, changing its default, splitting or collapsing branch
+columns, and nullable branch columns. An ordinary column rename is allowed
+because schema lineage retains its physical column identity; no branch-specific
+identity is stored.
 
 ## Open Questions
 

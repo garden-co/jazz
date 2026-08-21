@@ -955,24 +955,13 @@ mod tests {
     async fn dynamic_builder_starts_core_server_shell_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("dynamic-server-shell-rehydrate");
-        let branch_dimension = jazz::tools::public_schema::BranchDimensionDescriptor {
-            id: jazz::ids::BranchDimensionId(uuid::Uuid::from_u128(
-                0x31313131313131313131313131313131,
-            )),
-            name: "workspace".to_owned(),
-            column_type: jazz::tools::public_schema::ColumnType::Uuid,
-            migration_default: jazz::tools::public_schema::Value::Uuid(
-                jazz::tools::ObjectId::from_uuid(uuid::Uuid::nil()),
-            ),
-        };
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
                 jazz::tools::public_schema::TableSchema::builder("todos")
                     .column("id", jazz::tools::public_schema::ColumnType::Uuid)
                     .column("title", jazz::tools::public_schema::ColumnType::Text)
                     .column("workspace_id", jazz::tools::public_schema::ColumnType::Uuid)
-                    .branch_dimension(branch_dimension.clone())
-                    .branch_by("workspace_id", "workspace"),
+                    .branch_by("workspace_id"),
             )
             .build();
         let schema_hash = jazz::tools::public_schema::SchemaHash::compute(&schema);
@@ -1019,8 +1008,10 @@ mod tests {
         let restored_todos = restored
             .get(&jazz::tools::public_schema::TableName::new("todos"))
             .expect("restored todos table");
-        assert_eq!(restored_todos.branch_dimensions, vec![branch_dimension]);
-        assert_eq!(restored_todos.branch_by.len(), 1);
+        assert_eq!(
+            restored_todos.branch_by,
+            vec![jazz::tools::public_schema::ColumnName::new("workspace_id")]
+        );
     }
 
     #[tokio::test]

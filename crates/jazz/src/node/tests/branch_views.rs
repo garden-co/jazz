@@ -6,15 +6,7 @@ fn branch_view_schema() -> JazzSchema {
                     .column("branch_id", PublicColumnType::Uuid)
                     .column("title", PublicColumnType::Text)
                     .column("owner", PublicColumnType::Uuid)
-                    .branch_dimension(PublicBranchDimensionDescriptor {
-                        id: crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x41; 16])),
-                        name: "branch".to_owned(),
-                        column_type: PublicColumnType::Uuid,
-                        migration_default: PublicValue::Uuid(crate::tools::ObjectId::from_uuid(
-                            uuid::Uuid::nil(),
-                        )),
-                    })
-                    .branch_by("branch_id", "branch")
+                    .branch_by("branch_id")
                     .policies(public_owner_policies("owner")),
             )
             .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
@@ -29,31 +21,15 @@ fn two_dimension_branch_view_schema() -> JazzSchema {
                 .column("branch_id", PublicColumnType::Uuid)
                 .column("title", PublicColumnType::Text)
                 .column("owner", PublicColumnType::Uuid)
-                .branch_dimension(PublicBranchDimensionDescriptor {
-                    id: crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x41; 16])),
-                    name: "workspace".to_owned(),
-                    column_type: PublicColumnType::Uuid,
-                    migration_default: PublicValue::Uuid(crate::tools::ObjectId::from_uuid(
-                        uuid::Uuid::nil(),
-                    )),
-                })
-                .branch_dimension(PublicBranchDimensionDescriptor {
-                    id: crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x42; 16])),
-                    name: "branch".to_owned(),
-                    column_type: PublicColumnType::Uuid,
-                    migration_default: PublicValue::Uuid(crate::tools::ObjectId::from_uuid(
-                        uuid::Uuid::nil(),
-                    )),
-                })
-                .branch_by("workspace_id", "workspace")
-                .branch_by("branch_id", "branch")
+                .branch_by("workspace_id")
+                .branch_by("branch_id")
                 .policies(public_owner_policies("owner")),
         ),
     )
 }
 
 fn branch_selector(byte: u8) -> BranchSelector {
-    BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
 #[test]
@@ -272,8 +248,8 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
     let schema = two_dimension_branch_view_schema();
     let table = &schema.tables[0];
     let selector = BranchSelector::new([
-        ("workspace", Value::Uuid(uuid::Uuid::from_bytes([0x61; 16]))),
-        ("branch", Value::Uuid(uuid::Uuid::from_bytes([0x62; 16]))),
+        ("workspace_id", Value::Uuid(uuid::Uuid::from_bytes([0x61; 16]))),
+        ("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0x62; 16]))),
     ]);
     let (valid_key, branch_cells) = schema.project_branch_selector(table, &selector).unwrap();
     let mut content_cells = branch_cells;
@@ -314,8 +290,8 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
         dimensions: vec![
             first.clone(),
             (
-                second.0,
-                crate::protocol::BranchDimensionValue::from(Value::Uuid(
+                second.0.clone(),
+                crate::protocol::BranchColumnValue::from(Value::Uuid(
                     uuid::Uuid::from_bytes([0x65; 16]),
                 )),
             ),
@@ -340,7 +316,7 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
                     first.clone(),
                     second.clone(),
                     (
-                        crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x43; 16])),
+                        "unknown".to_owned(),
                         second.1.clone(),
                     ),
                 ],
@@ -360,8 +336,8 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
                 dimensions: vec![
                     first.clone(),
                     (
-                        second.0,
-                        crate::protocol::BranchDimensionValue::from(Value::String(
+                        second.0.clone(),
+                        crate::protocol::BranchColumnValue::from(Value::String(
                             "not-a-uuid".to_owned(),
                         )),
                     ),
@@ -372,7 +348,7 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
             "noncanonical-encoding",
             0,
             BranchKey {
-                dimensions: vec![first.clone(), (second.0, noncanonical)],
+                dimensions: vec![first.clone(), (second.0.clone(), noncanonical)],
             },
         ),
         ("content-disagrees", 0, wrong_value_key),
@@ -710,22 +686,14 @@ fn contribution_merge_denies_unreadable_source_before_minting() {
 
 #[test]
 fn counter_contribution_merge_imports_only_novel_native_deltas() {
-    let dimension = crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x7d; 16]));
-    let schema = JazzSchema::new_with_branch_dimensions(
-        [crate::schema::BranchDimensionSchema::new(
-            dimension,
-            "branch",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        )],
-        [TableSchema::new(
+    let schema = JazzSchema::new_with_branch_columns([TableSchema::new(
             "counts",
             [
                 ColumnSchema::new("branch_id", ColumnType::Uuid),
                 ColumnSchema::new("count", ColumnType::U64),
             ],
         )
-        .with_branch_dimension("branch_id", dimension)
+        .with_branch_column("branch_id")
         .with_column_merge_strategy("count", MergeStrategy::Counter)],
     );
     let (_dir, mut node) =
@@ -782,22 +750,14 @@ fn counter_contribution_merge_imports_only_novel_native_deltas() {
 
 #[test]
 fn gset_contribution_merge_tracks_elements_as_native_operations() {
-    let dimension = crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x83; 16]));
-    let schema = JazzSchema::new_with_branch_dimensions(
-        [crate::schema::BranchDimensionSchema::new(
-            dimension,
-            "branch",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        )],
-        [TableSchema::new(
+    let schema = JazzSchema::new_with_branch_columns([TableSchema::new(
             "sets",
             [
                 ColumnSchema::new("branch_id", ColumnType::Uuid),
                 ColumnSchema::new("members", ColumnType::Array(Box::new(ColumnType::String))),
             ],
         )
-        .with_branch_dimension("branch_id", dimension)
+        .with_branch_column("branch_id")
         .with_column_merge_strategy("members", MergeStrategy::GSet)],
     );
     let (_dir, mut node) =
@@ -915,7 +875,7 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
 }
 
 #[test]
-fn added_branch_dimension_defaults_old_history_and_survives_column_rename() {
+fn added_branch_column_defaults_old_history_and_survives_column_rename() {
     // Schema-lineage physical identities are not exposed by the public facade,
     // so this internal test exercises publication, normalization, and reopen as
     // one mechanism boundary.
@@ -930,23 +890,18 @@ fn added_branch_dimension_defaults_old_history_and_survives_column_rename() {
     )
     .unwrap();
 
-    let dimension = crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x93; 16]));
     let default_workspace = uuid::Uuid::from_bytes([0x94; 16]);
     let other_workspace = uuid::Uuid::from_bytes([0x95; 16]);
     let evolved = build_public_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
                 .column("title", PublicColumnType::Text)
-                .column("workspace_id", PublicColumnType::Uuid)
-                .branch_dimension(PublicBranchDimensionDescriptor {
-                    id: dimension,
-                    name: "workspace".to_owned(),
-                    column_type: PublicColumnType::Uuid,
-                    migration_default: PublicValue::Uuid(crate::tools::ObjectId::from_uuid(
-                        default_workspace,
-                    )),
-                })
-                .branch_by("workspace_id", "workspace"),
+                .column_with_default(
+                    "workspace_id",
+                    PublicColumnType::Uuid,
+                    PublicValue::Uuid(crate::tools::ObjectId::from_uuid(default_workspace)),
+                )
+                .branch_by("workspace_id"),
         ),
     );
     let evolved_version = SchemaVersion::new(evolved.clone());
@@ -982,7 +937,7 @@ fn added_branch_dimension_defaults_old_history_and_survives_column_rename() {
     core.commit_mergeable(
         MergeableCommit::new("todos", other, 20)
             .branch(BranchSelector::new([(
-                "workspace",
+                "workspace_id",
                 Value::Uuid(other_workspace),
             )]))
             .cells(BTreeMap::from([
@@ -995,9 +950,10 @@ fn added_branch_dimension_defaults_old_history_and_survives_column_rename() {
     let rows_for = |node: &mut NodeState<_>, schema: &JazzSchema, workspace| {
         let shape = Query::from("todos").validate(schema).unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
+        let branch_column = schema.tables[0].branch_by[0].clone();
         let view = crate::protocol::ReadViewSpec {
             source: crate::protocol::ReadViewSourceSpec::BranchView {
-                head: BranchSelector::new([("workspace", Value::Uuid(workspace))]),
+                head: BranchSelector::new([(branch_column, Value::Uuid(workspace))]),
                 base: None,
             },
             ..Default::default()
@@ -1028,16 +984,12 @@ fn added_branch_dimension_defaults_old_history_and_survives_column_rename() {
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
                 .column("title", PublicColumnType::Text)
-                .column("space_id", PublicColumnType::Uuid)
-                .branch_dimension(PublicBranchDimensionDescriptor {
-                    id: dimension,
-                    name: "workspace".to_owned(),
-                    column_type: PublicColumnType::Uuid,
-                    migration_default: PublicValue::Uuid(crate::tools::ObjectId::from_uuid(
-                        default_workspace,
-                    )),
-                })
-                .branch_by("space_id", "workspace"),
+                .column_with_default(
+                    "space_id",
+                    PublicColumnType::Uuid,
+                    PublicValue::Uuid(crate::tools::ObjectId::from_uuid(default_workspace)),
+                )
+                .branch_by("space_id"),
         ),
     );
     let renamed_version = SchemaVersion::new(renamed.clone());
@@ -1094,42 +1046,35 @@ fn branched_table_writes_require_an_explicit_exact_selector() {
     assert!(matches!(
         error,
         crate::node::Error::InvalidBranchKey(message)
-            if message == "branch selector for todos must provide exactly 1 dimensions"
+            if message == "branch selector for todos must provide exactly 1 values"
     ));
 }
 
 #[test]
-fn branch_dimension_evolution_rejects_non_monotone_changes() {
+fn branch_column_evolution_rejects_non_monotone_changes() {
     // These catalogue identities are deliberately exercised below the facade:
     // publication must reject invalid lineage before it becomes writable.
     let source = branch_view_schema();
-    let mut renamed_dimension = source.clone();
-    renamed_dimension.runtime_mut_for_testing().branch_dimensions[0].name = "renamed".to_owned();
     let mut changed_default = source.clone();
-    changed_default.runtime_mut_for_testing().branch_dimensions[0].migration_default =
-        Value::Uuid(uuid::Uuid::from_bytes([0x99; 16]));
+    changed_default.runtime_mut_for_testing().tables[0].columns[0].default =
+        Some(Value::Uuid(uuid::Uuid::from_bytes([0x99; 16])));
     let mut changed_type = source.clone();
-    changed_type.runtime_mut_for_testing().branch_dimensions[0].column_type = ColumnType::String;
-    changed_type.runtime_mut_for_testing().branch_dimensions[0].migration_default = v("default");
+    changed_type.runtime_mut_for_testing().tables[0].columns[0].column_type = ColumnType::String;
     let mut removed_from_table = source.clone();
     removed_from_table.runtime_mut_for_testing().tables[0].branch_by.clear();
 
     for (target, expected) in [
         (
-            renamed_dimension,
-            "branch dimensions may only be appended with immutable identity, type, and default",
-        ),
-        (
             changed_default,
-            "branch dimensions may only be appended with immutable identity, type, and default",
+            "branch column type and migration default are immutable",
         ),
         (
             changed_type,
-            "branch dimensions may only be appended with immutable identity, type, and default",
+            "branch column type and migration default are immutable",
         ),
         (
             removed_from_table,
-            "table branch dimensions cannot be removed",
+            "table branch columns cannot be removed",
         ),
     ] {
         let (_dir, mut core) =
@@ -1159,26 +1104,29 @@ fn branch_dimension_evolution_rejects_non_monotone_changes() {
 }
 
 #[test]
-fn branch_dimension_evolution_accepts_addition_without_prefix_order_dependence() {
+fn branch_column_evolution_accepts_monotone_addition_with_default() {
     let source = branch_view_schema();
     let mut target = source.clone();
-    target.runtime_mut_for_testing().branch_dimensions.insert(
-        0,
-        crate::schema::BranchDimensionSchema::new(
-            crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x9a; 16])),
-            "alpha",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        ),
+    target.runtime_mut_for_testing().tables[0].columns.push(
+        crate::schema::ColumnSchema::new("alpha", ColumnType::Uuid)
+            .with_default(Value::Uuid(uuid::Uuid::nil())),
     );
+    target.runtime_mut_for_testing().tables[0].branch_by.insert(0, "alpha".to_owned());
     let source = SchemaVersion::new(source);
     let target = SchemaVersion::new(target);
     let lens = MigrationLens::new(
         source.id,
         target.id,
-        Vec::<TableLens>::new(),
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "alpha".to_owned(),
+                default: Value::Uuid(uuid::Uuid::nil()),
+            }],
+        }],
     );
 
     NodeState::<RocksDbStorage>::validate_migration_lens_between(&lens, &source, &target)
-        .expect("a monotone addition remains valid regardless of canonical declaration order");
+        .expect("a branch column can be added monotonically with an immutable default");
 }

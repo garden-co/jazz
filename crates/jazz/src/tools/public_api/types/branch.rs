@@ -103,14 +103,6 @@ impl SchemaHash {
                 }
             }
 
-            if !table_schema.branch_dimensions.is_empty() {
-                hasher.update(b"branch_dimensions\0");
-                hasher.update(
-                    &serde_json::to_vec(&table_schema.branch_dimensions)
-                        .expect("branch dimensions always serialize"),
-                );
-                hasher.update(&[0]);
-            }
             if !table_schema.branch_by.is_empty() {
                 hasher.update(b"branch_by\0");
                 hasher.update(

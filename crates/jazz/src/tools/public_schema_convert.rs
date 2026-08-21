@@ -10,8 +10,8 @@ use crate::query::{
     PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
-    BranchDimensionBinding, BranchDimensionSchema, ColumnSchema as CoreColumnSchema, JazzSchema,
-    MergeStrategy, RuntimeSchema, TableSchema as CoreTableSchema, WritePolicies,
+    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
+    TableSchema as CoreTableSchema, WritePolicies,
 };
 
 use crate::tools::public_api::policy::{CmpOp, PolicyValue};
@@ -56,88 +56,16 @@ impl fmt::Display for SchemaConversionError {
 impl std::error::Error for SchemaConversionError {}
 
 pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
-    let (branch_dimensions, branch_dimension_ids) = convert_branch_dimensions(schema)?;
     let mut converted = schema
         .iter()
-        .map(|(name, table)| convert_table(schema, name, table, &branch_dimension_ids))
+        .map(|(name, table)| convert_table(schema, name, table))
         .collect::<Result<Vec<_>, _>>()?;
     coerce_typed_literals(schema, &mut converted);
-    validate_converted_schema(&branch_dimensions, &converted)?;
+    validate_converted_schema(&converted)?;
     Ok(JazzSchema::from_runtime(
         schema.clone(),
-        RuntimeSchema {
-            branch_dimensions,
-            tables: converted,
-        },
+        RuntimeSchema { tables: converted },
     ))
-}
-
-fn convert_branch_dimensions(
-    schema: &Schema,
-) -> Result<
-    (
-        Vec<BranchDimensionSchema>,
-        BTreeMap<String, crate::ids::BranchDimensionId>,
-    ),
-    SchemaConversionError,
-> {
-    let mut declarations = Vec::new();
-    let mut declaration_indexes = BTreeMap::new();
-    let mut ids = BTreeMap::new();
-    for (table_name, table) in schema.iter() {
-        for dimension in &table.branch_dimensions {
-            let path = format!(
-                "$.{}.branchDimensions.{}",
-                table_name.as_str(),
-                dimension.name
-            );
-            if dimension.name.is_empty() {
-                return Err(err(path, "branch dimension name cannot be empty"));
-            }
-            if let Some(index) = declaration_indexes.get(&dimension.name) {
-                let existing = &declarations[*index];
-                if existing != dimension {
-                    return Err(err(
-                        path,
-                        "conflicting declaration for branch dimension name",
-                    ));
-                }
-                continue;
-            }
-            if let Some(existing_name) = ids.insert(dimension.id, dimension.name.clone()) {
-                if existing_name != dimension.name {
-                    return Err(err(
-                        path,
-                        "branch dimension id is already declared under another name",
-                    ));
-                }
-            }
-            declaration_indexes.insert(dimension.name.clone(), declarations.len());
-            declarations.push(dimension.clone());
-        }
-    }
-
-    let mut converted = Vec::with_capacity(declarations.len());
-    let mut ids_by_name = BTreeMap::new();
-    for dimension in declarations {
-        let name = dimension.name.clone();
-        let synthetic_table = TableName::new("branchDimensions");
-        let column_type = convert_column_type(&synthetic_table, &name, &dimension.column_type)?;
-        let migration_default = convert_default_for_column_type(
-            &synthetic_table,
-            &name,
-            &dimension.column_type,
-            &dimension.migration_default,
-        )?;
-        ids_by_name.insert(name.clone(), dimension.id);
-        converted.push(BranchDimensionSchema::new(
-            dimension.id,
-            name,
-            column_type,
-            migration_default,
-        ));
-    }
-    Ok((converted, ids_by_name))
 }
 
 /// Decode and compile the public JSON schema used by native bindings.
@@ -147,64 +75,60 @@ pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     convert_public_schema(&schema).map_err(|error| format!("compile public schema: {error}"))
 }
 
-fn validate_converted_schema(
-    branch_dimensions: &[BranchDimensionSchema],
-    tables: &[CoreTableSchema],
-) -> Result<(), SchemaConversionError> {
+fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
     let schema = RuntimeSchema {
-        branch_dimensions: branch_dimensions.to_vec(),
         tables: tables.to_vec(),
     };
-    for dimension in branch_dimensions {
-        if !matches!(
-            dimension.column_type,
-            GrooveColumnType::Uuid
-                | GrooveColumnType::U8
-                | GrooveColumnType::U16
-                | GrooveColumnType::U32
-                | GrooveColumnType::U64
-                | GrooveColumnType::I32
-                | GrooveColumnType::I64
-                | GrooveColumnType::EnumTag(_)
-        ) {
-            return Err(err(
-                format!("$.branchDimensions.{}", dimension.name),
-                "branch dimensions require UUID, stable enum, or fixed-width integer values",
-            ));
-        }
-    }
+    let mut branch_column_types = BTreeMap::<String, GrooveColumnType>::new();
     for table in tables {
         let mut bound = std::collections::BTreeSet::new();
-        for binding in &table.branch_by {
-            let dimension = branch_dimensions
-                .iter()
-                .find(|dimension| dimension.id == binding.dimension)
-                .expect("binding ids were resolved from declarations");
+        for branch_column in &table.branch_by {
             let column = table
                 .columns
                 .iter()
-                .find(|column| column.name == binding.column)
+                .find(|column| column.name == *branch_column)
                 .ok_or_else(|| {
                     err(
                         format!("$.{}.branchBy", table.name),
-                        format!("unknown branch column {:?}", binding.column),
+                        format!("unknown branch column {branch_column:?}"),
                     )
                 })?;
-            if !bound.insert(binding.dimension) {
+            if !bound.insert(branch_column) {
                 return Err(err(
                     format!("$.{}.branchBy", table.name),
-                    format!(
-                        "branch dimension {:?} is bound more than once",
-                        dimension.name
-                    ),
+                    format!("branch column {branch_column:?} is listed more than once"),
                 ));
             }
-            if column.column_type != dimension.column_type {
+            if matches!(column.column_type, GrooveColumnType::Nullable(_)) {
+                return Err(err(
+                    format!("$.{}.branchBy", table.name),
+                    format!("branch column {branch_column:?} must be non-null"),
+                ));
+            }
+            if !matches!(
+                column.column_type,
+                GrooveColumnType::Uuid
+                    | GrooveColumnType::U8
+                    | GrooveColumnType::U16
+                    | GrooveColumnType::U32
+                    | GrooveColumnType::U64
+                    | GrooveColumnType::I32
+                    | GrooveColumnType::I64
+                    | GrooveColumnType::EnumTag(_)
+            ) {
+                return Err(err(
+                    format!("$.{}.branchBy", table.name),
+                    "branch columns require UUID, stable enum, or fixed-width integer values",
+                ));
+            }
+            if let Some(existing) =
+                branch_column_types.insert(branch_column.clone(), column.column_type.clone())
+                && existing != column.column_type
+            {
                 return Err(err(
                     format!("$.{}.branchBy", table.name),
                     format!(
-                        "column {:?} does not match branch dimension {:?}",
-                        binding.column, dimension.name
+                        "branch column {branch_column:?} must have the same type in every table"
                     ),
                 ));
             }
@@ -567,7 +491,6 @@ fn convert_table(
     schema: &Schema,
     name: &TableName,
     table: &TableSchema,
-    branch_dimension_ids: &BTreeMap<String, crate::ids::BranchDimensionId>,
 ) -> Result<CoreTableSchema, SchemaConversionError> {
     let mut references = BTreeMap::new();
     let mut columns = Vec::with_capacity(table.columns.columns.len());
@@ -603,22 +526,8 @@ fn convert_table(
     converted.branch_by = table
         .branch_by
         .iter()
-        .map(|binding| {
-            let dimension = branch_dimension_ids
-                .get(binding.dimension())
-                .copied()
-                .ok_or_else(|| {
-                    err(
-                        format!("$.{}.branchBy", name.as_str()),
-                        format!("unknown branch dimension {:?}", binding.dimension()),
-                    )
-                })?;
-            Ok(BranchDimensionBinding {
-                column: binding.column().as_str().to_owned(),
-                dimension,
-            })
-        })
-        .collect::<Result<Vec<_>, SchemaConversionError>>()?;
+        .map(|column| column.as_str().to_owned())
+        .collect();
     converted.references = references;
     converted.indexed_columns = table
         .indexed_columns
@@ -2581,9 +2490,7 @@ mod tests {
     }
 
     use crate::tools::public_api::types::EnumCaseDescriptor;
-    use crate::tools::public_api::types::{
-        BranchDimensionBindingDescriptor, BranchDimensionDescriptor, TableSchemaBuilder,
-    };
+    use crate::tools::public_api::types::TableSchemaBuilder;
     use crate::tools::public_schema::{
         ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, SchemaBuilder,
         TablePolicies, TableSchema,
@@ -2591,40 +2498,22 @@ mod tests {
     use std::path::PathBuf;
     use uuid::Uuid;
 
-    fn branch_dimension(
-        id_byte: u8,
-        name: &str,
-        column_type: ColumnType,
-    ) -> BranchDimensionDescriptor {
-        BranchDimensionDescriptor {
-            id: crate::ids::BranchDimensionId(Uuid::from_bytes([id_byte; 16])),
-            name: name.to_owned(),
-            column_type,
-            migration_default: Value::Uuid(ObjectId::from_uuid(Uuid::nil())),
-        }
-    }
-
     #[test]
-    fn compiles_named_and_shorthand_branch_dimension_bindings() {
-        let dimension = branch_dimension(0x41, "workspace", ColumnType::Uuid);
+    fn compiles_branch_columns_with_the_same_name_and_type_across_tables() {
         let todos = TableSchemaBuilder::new("todos")
             .column("workspace_id", ColumnType::Uuid)
-            .branch_dimension(dimension.clone())
-            .branch_by("workspace_id", "workspace")
+            .branch_by("workspace_id")
             .build();
-        let mut notes = TableSchemaBuilder::new("notes")
-            .column("workspace", ColumnType::Uuid)
+        let notes = TableSchemaBuilder::new("notes")
+            .column("workspace_id", ColumnType::Uuid)
+            .branch_by("workspace_id")
             .build();
-        notes
-            .branch_by
-            .push(BranchDimensionBindingDescriptor::Column("workspace".into()));
         let schema = Schema::from([
             (TableName::new("todos"), todos),
             (TableName::new("notes"), notes),
         ]);
 
-        let converted = convert_public_schema(&schema).expect("branch dimensions compile");
-        assert_eq!(converted.branch_dimensions.len(), 1);
+        let converted = convert_public_schema(&schema).expect("branch columns compile");
         assert_eq!(
             converted
                 .tables
@@ -2633,86 +2522,31 @@ mod tests {
                 .sum::<usize>(),
             2
         );
-        assert!(
-            converted
-                .tables
-                .iter()
-                .flat_map(|table| &table.branch_by)
-                .all(|binding| binding.dimension == dimension.id)
-        );
     }
 
     #[test]
-    fn preserves_branch_dimension_declaration_order_for_monotone_evolution() {
-        let zeta = branch_dimension(0x47, "zeta", ColumnType::Uuid);
-        let alpha = branch_dimension(0x48, "alpha", ColumnType::Uuid);
-        let schema = SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("todos")
-                    .column("zeta_id", ColumnType::Uuid)
-                    .column("alpha_id", ColumnType::Uuid)
-                    .branch_dimension(zeta.clone())
-                    .branch_dimension(alpha.clone())
-                    .branch_by("zeta_id", "zeta")
-                    .branch_by("alpha_id", "alpha"),
-            )
-            .build();
-
-        let converted = convert_public_schema(&schema).expect("ordered dimensions compile");
-        assert_eq!(
-            converted
-                .branch_dimensions
-                .iter()
-                .map(|dimension| dimension.id)
-                .collect::<Vec<_>>(),
-            vec![zeta.id, alpha.id],
-            "a later lexicographically earlier name must not reorder the lineage prefix"
-        );
-    }
-
-    #[test]
-    fn rejects_conflicting_global_branch_dimension_declarations() {
+    fn rejects_same_named_branch_columns_with_different_types() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("workspace_id", ColumnType::Uuid)
-                    .branch_dimension(branch_dimension(0x42, "workspace", ColumnType::Uuid))
-                    .branch_by("workspace_id", "workspace"),
+                    .branch_by("workspace_id"),
             )
             .table(
                 TableSchemaBuilder::new("notes")
-                    .column("space_id", ColumnType::Uuid)
-                    .branch_dimension(branch_dimension(0x43, "workspace", ColumnType::Uuid))
-                    .branch_by("space_id", "workspace"),
+                    .column("workspace_id", ColumnType::Integer)
+                    .branch_by("workspace_id"),
             )
             .build();
 
-        let error = convert_public_schema(&schema).expect_err("conflicting names must fail");
-        assert!(error.to_string().contains("conflicting declaration"));
+        let error = convert_public_schema(&schema).expect_err("conflicting types must fail");
+        assert!(error.to_string().contains("same type in every table"));
     }
 
     #[test]
-    fn rejects_unknown_missing_and_mistyped_branch_bindings() {
-        let unknown_dimension = SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("todos")
-                    .column("workspace_id", ColumnType::Uuid)
-                    .branch_by("workspace_id", "workspace"),
-            )
-            .build();
-        assert!(
-            convert_public_schema(&unknown_dimension)
-                .expect_err("unknown dimension must fail")
-                .to_string()
-                .contains("unknown branch dimension")
-        );
-
+    fn rejects_missing_and_non_key_encodable_branch_columns() {
         let missing_column = SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("todos")
-                    .branch_dimension(branch_dimension(0x44, "workspace", ColumnType::Uuid))
-                    .branch_by("workspace_id", "workspace"),
-            )
+            .table(TableSchemaBuilder::new("todos").branch_by("workspace_id"))
             .build();
         assert!(
             convert_public_schema(&missing_column)
@@ -2721,37 +2555,19 @@ mod tests {
                 .contains("unknown branch column")
         );
 
-        let mistyped_column = SchemaBuilder::new()
+        let text_column = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("todos")
-                    .column("workspace_id", ColumnType::Integer)
-                    .branch_dimension(branch_dimension(0x45, "workspace", ColumnType::Uuid))
-                    .branch_by("workspace_id", "workspace"),
+                    .column("workspace_id", ColumnType::Text)
+                    .branch_by("workspace_id"),
             )
             .build();
         assert!(
-            convert_public_schema(&mistyped_column)
-                .expect_err("type mismatch must fail")
+            convert_public_schema(&text_column)
+                .expect_err("text branch column must fail")
                 .to_string()
-                .contains("does not match branch dimension")
+                .contains("fixed-width integer values")
         );
-    }
-
-    #[test]
-    fn rejects_non_key_encodable_branch_dimension_types() {
-        let mut dimension = branch_dimension(0x46, "workspace", ColumnType::Text);
-        dimension.migration_default = Value::Text(String::new());
-        let schema = SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("todos")
-                    .column("workspace", ColumnType::Text)
-                    .branch_dimension(dimension)
-                    .branch_by("workspace", "workspace"),
-            )
-            .build();
-
-        let error = convert_public_schema(&schema).expect_err("text dimensions must fail");
-        assert!(error.to_string().contains("fixed-width integer values"));
     }
 
     fn policy_graph_perf_fixture_dir() -> PathBuf {

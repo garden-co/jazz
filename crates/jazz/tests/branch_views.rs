@@ -17,8 +17,7 @@ use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::time::GlobalTime;
 use jazz::tools::{
-    BranchDimensionDescriptor, CmpOp, ColumnType, ObjectId, PolicyExpr, PolicyValue, SchemaBuilder,
-    TablePolicies, TableSchemaBuilder, Value as PublicValue,
+    CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies, TableSchemaBuilder,
 };
 use jazz_storage_rocksdb::RocksDbStorage;
 
@@ -37,16 +36,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 fn selector(byte: u8) -> BranchSelector {
-    BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
-}
-
-fn branch_dimension(byte: u8, name: &str) -> BranchDimensionDescriptor {
-    BranchDimensionDescriptor {
-        id: jazz::ids::BranchDimensionId(uuid::Uuid::from_bytes([byte; 16])),
-        name: name.to_owned(),
-        column_type: ColumnType::Uuid,
-        migration_default: PublicValue::Uuid(ObjectId::from_uuid(uuid::Uuid::nil())),
-    }
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
 fn branch_owner_policy() -> PolicyExpr {
@@ -85,8 +75,7 @@ fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
                 TableSchemaBuilder::new("todos")
                     .column("branch_id", ColumnType::Uuid)
                     .column("title", ColumnType::Text)
-                    .branch_dimension(branch_dimension(0x61, "branch"))
-                    .branch_by("branch_id", "branch")
+                    .branch_by("branch_id")
                     .index_only(["title"]),
             )
             .build(),
@@ -115,8 +104,7 @@ fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
                 TableSchemaBuilder::new("todos")
                     .column("branch_id", ColumnType::Uuid)
                     .column("title", ColumnType::Text)
-                    .branch_dimension(branch_dimension(0x61, "branch"))
-                    .branch_by("branch_id", "branch"),
+                    .branch_by("branch_id"),
             )
             .build(),
     );
@@ -269,8 +257,7 @@ fn branch_view_join_projects_dimension_subsets_and_shared_tables() {
                 TableSchemaBuilder::new("memberships")
                     .fk_column("workspace_id", "workspaces")
                     .column("role", ColumnType::Text)
-                    .branch_dimension(branch_dimension(0x81, "workspace"))
-                    .branch_by("workspace_id", "workspace"),
+                    .branch_by("workspace_id"),
             )
             .table(
                 TableSchemaBuilder::new("documents")
@@ -278,9 +265,8 @@ fn branch_view_join_projects_dimension_subsets_and_shared_tables() {
                     .column("branch_id", ColumnType::Uuid)
                     .fk_column("owner", "users")
                     .column("title", ColumnType::Text)
-                    .branch_dimension(branch_dimension(0x82, "branch"))
-                    .branch_by("workspace_id", "workspace")
-                    .branch_by("branch_id", "branch"),
+                    .branch_by("workspace_id")
+                    .branch_by("branch_id"),
             )
             .build(),
     );
@@ -314,7 +300,7 @@ fn branch_view_join_projects_dimension_subsets_and_shared_tables() {
     .unwrap();
     db.insert_with_id_in_branch(
         "memberships",
-        BranchSelector::new([("workspace", Value::Uuid(workspace))]),
+        BranchSelector::new([("workspace_id", Value::Uuid(workspace))]),
         RowUuid::from_bytes([0x87; 16]),
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     )
@@ -323,8 +309,8 @@ fn branch_view_join_projects_dimension_subsets_and_shared_tables() {
     db.insert_with_id_in_branch(
         "documents",
         BranchSelector::new([
-            ("workspace", Value::Uuid(workspace)),
-            ("branch", Value::Uuid(branch)),
+            ("workspace_id", Value::Uuid(workspace)),
+            ("branch_id", Value::Uuid(branch)),
         ]),
         document,
         BTreeMap::from([
@@ -350,8 +336,8 @@ fn branch_view_join_projects_dimension_subsets_and_shared_tables() {
         &query,
         ReadOpts::default().branch_view(
             BranchSelector::new([
-                ("workspace", Value::Uuid(workspace)),
-                ("branch", Value::Uuid(branch)),
+                ("workspace_id", Value::Uuid(workspace)),
+                ("branch_id", Value::Uuid(branch)),
             ]),
             None,
         ),
@@ -372,22 +358,21 @@ fn branch_view_reachability_consumes_effective_sources() {
                 TableSchemaBuilder::new("documents")
                     .column("branch_id", ColumnType::Uuid)
                     .column("title", ColumnType::Text)
-                    .branch_dimension(branch_dimension(0x9c, "branch"))
-                    .branch_by("branch_id", "branch"),
+                    .branch_by("branch_id"),
             )
             .table(
                 TableSchemaBuilder::new("access")
                     .column("branch_id", ColumnType::Uuid)
                     .fk_column("document", "documents")
                     .fk_column("team", "teams")
-                    .branch_by("branch_id", "branch"),
+                    .branch_by("branch_id"),
             )
             .table(
                 TableSchemaBuilder::new("team_edges")
                     .column("branch_id", ColumnType::Uuid)
                     .fk_column("member", "teams")
                     .fk_column("parent", "teams")
-                    .branch_by("branch_id", "branch"),
+                    .branch_by("branch_id"),
             )
             .build(),
     );
@@ -484,8 +469,7 @@ fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
                 TableSchemaBuilder::new("todos")
                     .fk_column("branch_id", "branches")
                     .column("title", ColumnType::Text)
-                    .branch_dimension(branch_dimension(0x74, "branch"))
-                    .branch_by("branch_id", "branch")
+                    .branch_by("branch_id")
                     .policies(policy_with_all_writes(branch_owner_policy())),
             )
             .build(),
@@ -508,12 +492,12 @@ fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
 }
 
 #[test]
-fn branch_dimension_reference_policy_controls_effective_reads() {
+fn branch_column_reference_policy_controls_effective_reads() {
     let (db, _schema) = open_policy_db();
     let owner = AuthorId::from_bytes([0x76; 16]);
     let outsider = AuthorId::from_bytes([0x77; 16]);
     let branch = RowUuid::from_bytes([0x78; 16]);
-    let selector = BranchSelector::new([("branch", Value::Uuid(branch.0))]);
+    let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
     db.insert_with_id(
         "branches",
         branch,
@@ -578,7 +562,8 @@ fn branch_dimension_reference_policy_controls_effective_reads() {
             .is_empty()
     );
 
-    let missing = BranchSelector::new([("branch", Value::Uuid(RowUuid::from_bytes([0x7b; 16]).0))]);
+    let missing =
+        BranchSelector::new([("branch_id", Value::Uuid(RowUuid::from_bytes([0x7b; 16]).0))]);
     assert!(
         block_on(db.all_for_identity(
             &prepared,
@@ -597,19 +582,18 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         &SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("branches")
-                    .column("scope_id", ColumnType::Uuid)
+                    .column("branch_id", ColumnType::Uuid)
                     .fk_column("branch_key", "branches")
                     .column("name", ColumnType::Text)
                     .column("owner", ColumnType::Uuid)
-                    .branch_dimension(branch_dimension(0xa8, "branch"))
-                    .branch_by("scope_id", "branch")
+                    .branch_by("branch_id")
                     .policies(allow_all_policies()),
             )
             .table(
                 TableSchemaBuilder::new("todos")
                     .fk_column("branch_id", "branches")
                     .column("title", ColumnType::Text)
-                    .branch_by("branch_id", "branch")
+                    .branch_by("branch_id")
                     .policies(policy_with_all_writes(branch_owner_policy())),
             )
             .build(),
@@ -628,8 +612,8 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
     let after = AuthorId::from_bytes([0xae; 16]);
     let base_branch = RowUuid::from_bytes([0xaa; 16]);
     let head_branch = RowUuid::from_bytes([0xab; 16]);
-    let base = BranchSelector::new([("branch", Value::Uuid(base_branch.0))]);
-    let head = BranchSelector::new([("branch", Value::Uuid(head_branch.0))]);
+    let base = BranchSelector::new([("branch_id", Value::Uuid(base_branch.0))]);
+    let head = BranchSelector::new([("branch_id", Value::Uuid(head_branch.0))]);
     for branch in [base_branch, head_branch] {
         db.insert_with_id_in_branch(
             "branches",
@@ -686,14 +670,14 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         .unwrap();
     assert!(branch_rows.iter().all(|row| {
         row.cell(branch_table, "owner") == Some(Value::Uuid(before.0))
-            && row.cell(branch_table, "scope_id") == Some(Value::Uuid(head_branch.0))
+            && row.cell(branch_table, "branch_id") == Some(Value::Uuid(head_branch.0))
     }));
     let system_rows = block_on(db.all(&query, opts.clone())).unwrap();
     assert_eq!(system_rows.len(), 1);
     let live_opts = ReadOpts::default().branch_view(
-        BranchSelector::new([("branch", Value::Uuid(head_branch.0))]),
+        BranchSelector::new([("branch_id", Value::Uuid(head_branch.0))]),
         Some(BranchViewBase::Current(BranchSelector::new([(
-            "branch",
+            "branch_id",
             Value::Uuid(base_branch.0),
         )]))),
     );
@@ -723,7 +707,7 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     let owner = AuthorId::from_bytes([0xb5; 16]);
     let outsider = AuthorId::from_bytes([0xb6; 16]);
     let branch = RowUuid::from_bytes([0xb7; 16]);
-    let selector = BranchSelector::new([("branch", Value::Uuid(branch.0))]);
+    let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
     db.insert_with_id(
         "branches",
         branch,

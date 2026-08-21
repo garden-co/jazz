@@ -29,12 +29,12 @@ use crate::schema::WritePolicies;
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::ObjectId as PublicObjectId;
 use crate::tools::public_schema::{
-    BranchDimensionDescriptor as PublicBranchDimensionDescriptor, CmpOp as PublicCmpOp,
-    ColumnDescriptor as PublicColumnDescriptor, ColumnType as PublicColumnType,
-    EnumCaseDescriptor as PublicEnumCaseDescriptor, Operation as PublicOperation,
-    PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue, Schema as PublicSchema,
-    SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
-    TableSchemaBuilder as PublicTableSchemaBuilder, Value as PublicValue,
+    CmpOp as PublicCmpOp, ColumnDescriptor as PublicColumnDescriptor,
+    ColumnType as PublicColumnType, EnumCaseDescriptor as PublicEnumCaseDescriptor,
+    Operation as PublicOperation, PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue,
+    Schema as PublicSchema, SchemaBuilder as PublicSchemaBuilder,
+    TablePolicies as PublicTablePolicies, TableSchemaBuilder as PublicTableSchemaBuilder,
+    Value as PublicValue,
 };
 use crate::tools::public_schema::{
     RelColumnRef as PublicRelColumnRef, RelExpr as PublicRelExpr,

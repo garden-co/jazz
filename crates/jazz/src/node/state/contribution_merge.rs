@@ -28,29 +28,13 @@ where
             .schema
             .clone();
         let full_key = |selector: &BranchSelector| -> Result<BranchKey, Error> {
-            if selector.dimensions.len() != schema.branch_dimensions.len() {
+            let branch_columns = schema.tables.iter().flat_map(|table| table.branch_by.iter().cloned()).collect::<BTreeSet<_>>();
+            if selector.dimensions.keys().cloned().collect::<BTreeSet<_>>() != branch_columns {
                 return Err(Error::InvalidBranchKey(
-                    "contribution selector must bind every schema dimension".to_owned(),
+                    "contribution selector must bind every schema branch column".to_owned(),
                 ));
             }
-            let mut dimensions = schema
-                .branch_dimensions
-                .iter()
-                .map(|dimension| {
-                    selector
-                        .dimensions
-                        .get(&dimension.name)
-                        .cloned()
-                        .map(|value| (dimension.id, value))
-                        .ok_or_else(|| {
-                            Error::InvalidBranchKey(format!(
-                                "missing branch dimension {}",
-                                dimension.name
-                            ))
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            dimensions.sort_by_key(|(dimension, _)| *dimension);
+            let dimensions = selector.dimensions.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
             Ok(BranchKey { dimensions })
         };
         let source_full = full_key(&request.source)?;
@@ -231,10 +215,7 @@ where
             let mut cells = BTreeMap::new();
             let mut authored = BTreeSet::new();
             for column in table.columns.iter().filter(|column| {
-                !table
-                    .branch_by
-                    .iter()
-                    .any(|binding| binding.column == column.name)
+                !table.branch_by.contains(&column.name)
             }) {
                 let strategy = table.merge_strategy(&column.name);
                 let component = match strategy {

@@ -286,7 +286,7 @@ where
                 .get(&write_schema_version)
                 .ok_or(Error::InvalidStoredValue("commit schema missing"))?
                 .schema;
-            let (branch_key, dimension_cells) = schema
+            let (branch_key, branch_cells) = schema
                 .project_branch_selector(&table_schema, &commit.branch)
                 .map_err(Error::InvalidBranchKey)?;
             let table_id = self.physical_table_id_for_schema(
@@ -354,12 +354,12 @@ where
                 commit.parents
             };
             let mut cells = commit.cells;
-            for (column, value) in dimension_cells {
+            for (column, value) in branch_cells {
                 if let Some(authored) = cells.get(&column)
                     && authored != &value
                 {
                     return Err(Error::InvalidMergeableCommit(
-                        "branch dimension column does not match exact branch key",
+                        "branch column does not match exact branch key",
                     ));
                 }
                 cells.insert(column, value);

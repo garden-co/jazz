@@ -14,8 +14,8 @@ where
 {
     /// Return every persisted spelling of a logical branch key that can occur
     /// across the table's monotone schema history. Older spellings omit later
-    /// dimensions and are equivalent only when the selector supplies those
-    /// dimensions' immutable migration defaults.
+    /// branch columns and are equivalent only when the selector supplies those
+    /// columns' immutable defaults.
     pub(super) fn equivalent_stored_branch_keys(
         &self,
         table: &str,
@@ -34,17 +34,41 @@ where
             .iter()
             .find(|candidate| candidate.name == table)
             .ok_or(Error::TableNotFound(table.to_owned()))?;
-        let selected = selected
+        let read_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&read_schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "read schema physical mapping is missing",
+            ))?;
+        let read_table_mapping = read_mapping
+            .tables
+            .get(table)
+            .ok_or(Error::TableNotFound(table.to_owned()))?;
+        let selected_by_name = selected
             .dimensions
             .iter()
             .cloned()
             .collect::<BTreeMap<_, _>>();
+        let selected_by_physical = read_table
+            .branch_by
+            .iter()
+            .map(|column_name| {
+                let physical = read_table_mapping.columns.get(column_name).ok_or(
+                    Error::InvalidStoredValue("branch column physical mapping is missing"),
+                )?;
+                let value = selected_by_name.get(column_name).cloned().ok_or_else(|| {
+                    Error::InvalidBranchKey(format!("selected branch key missing {column_name}"))
+                })?;
+                Ok((*physical, value))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()?;
         let mut keys = BTreeSet::new();
         for (schema_version, catalogue_schema) in &self.catalogue.catalogue_schemas {
             let Some(mapping) = self.catalogue.physical_mappings.get(schema_version) else {
                 continue;
             };
-            let Some((logical_table, _)) = mapping
+            let Some((logical_table, table_mapping)) = mapping
                 .tables
                 .iter()
                 .find(|(_, mapping)| mapping.table_id == table_id)
@@ -59,50 +83,55 @@ where
             else {
                 continue;
             };
-            let historical_dimensions = table
+            let historical_physical_columns = table
                 .branch_by
                 .iter()
-                .map(|binding| binding.dimension)
+                .filter_map(|name| table_mapping.columns.get(name))
+                .copied()
                 .collect::<BTreeSet<_>>();
-            let missing_dimension_is_non_default = read_table.branch_by.iter().any(|binding| {
-                if historical_dimensions.contains(&binding.dimension) {
-                    return false;
-                }
-                let Some(dimension) = read_schema
-                    .schema
-                    .branch_dimensions
-                    .iter()
-                    .find(|dimension| dimension.id == binding.dimension)
-                else {
+            let missing_dimension_is_non_default = read_table.branch_by.iter().any(|column_name| {
+                let Some(physical) = read_table_mapping.columns.get(column_name) else {
                     return true;
                 };
-                selected.get(&binding.dimension)
-                    != Some(&crate::protocol::BranchDimensionValue::from(
-                        dimension.migration_default.clone(),
-                    ))
+                if historical_physical_columns.contains(physical) {
+                    return false;
+                }
+                let default = read_table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == *column_name)
+                    .and_then(|column| column.default.clone())
+                    .map(crate::protocol::BranchColumnValue::from);
+                selected_by_physical.get(physical) != default.as_ref()
             });
             if missing_dimension_is_non_default {
                 continue;
             }
-            let mut dimensions = table
-                .branch_by
-                .iter()
-                .map(|binding| {
-                    selected
-                        .get(&binding.dimension)
-                        .cloned()
-                        .map(|value| (binding.dimension, value))
-                        .ok_or(Error::InvalidStoredValue(
-                            "selected branch key missing historical table dimension",
-                        ))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            dimensions.sort_by_key(|(dimension, _)| *dimension);
+            let mut dimensions =
+                table
+                    .branch_by
+                    .iter()
+                    .map(|column_name| {
+                        let physical = table_mapping.columns.get(column_name).ok_or(
+                            Error::InvalidStoredValue(
+                                "historical branch column physical mapping is missing",
+                            ),
+                        )?;
+                        selected_by_physical
+                            .get(physical)
+                            .cloned()
+                            .map(|value| (column_name.clone(), value))
+                            .ok_or(Error::InvalidStoredValue(
+                                "selected branch key missing historical table branch column",
+                            ))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+            dimensions.sort_by(|left, right| left.0.cmp(&right.0));
             keys.insert(BranchKey { dimensions });
         }
         if keys.is_empty() {
             keys.insert(BranchKey {
-                dimensions: selected.into_iter().collect(),
+                dimensions: selected_by_name.into_iter().collect(),
             });
         }
         Ok(keys)
@@ -286,18 +315,16 @@ where
             if projected_table != table {
                 continue;
             }
-            for binding in &read_table.branch_by {
+            for column_name in &read_table.branch_by {
                 let (_, encoded) = head
                     .dimensions
                     .iter()
-                    .find(|(dimension, _)| *dimension == binding.dimension)
+                    .find(|(name, _)| name == column_name)
                     .ok_or_else(|| {
-                        Error::InvalidBranchKey(
-                            "head branch key missing table dimension".to_owned(),
-                        )
+                        Error::InvalidBranchKey("head branch key missing table column".to_owned())
                     })?;
                 cells.insert(
-                    binding.column.clone(),
+                    column_name.clone(),
                     encoded.decode().map_err(|_| {
                         Error::InvalidBranchKey("invalid head branch value".to_owned())
                     })?,

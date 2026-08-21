@@ -708,19 +708,6 @@ where
         source: &SchemaVersion,
         target: &SchemaVersion,
     ) -> Result<(), Error> {
-        if target.schema.branch_dimensions.len() < source.schema.branch_dimensions.len()
-            || !source.schema.branch_dimensions.iter().all(|source_dimension| {
-                target
-                    .schema
-                    .branch_dimensions
-                    .iter()
-                    .any(|target_dimension| target_dimension == source_dimension)
-            })
-        {
-            return Err(Error::InvalidCatalogueUpdate(
-                "branch dimensions may only be appended with immutable identity, type, and default",
-            ));
-        }
         for table_lens in &lens.table_lenses {
             let source_table = source
                 .schema
@@ -734,20 +721,8 @@ where
                 .iter()
                 .find(|table| table.name == table_lens.target_table)
                 .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
-            let target_bindings = target_table
-                .branch_by
-                .iter()
-                .map(|binding| binding.dimension)
-                .collect::<BTreeSet<_>>();
-            if source_table
-                .branch_by
-                .iter()
-                .any(|binding| !target_bindings.contains(&binding.dimension))
-            {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "table branch dimensions cannot be removed",
-                ));
-            }
+            let target_bindings = target_table.branch_by.iter().cloned().collect::<BTreeSet<_>>();
+            let mut branch_columns = source_table.branch_by.iter().cloned().collect::<BTreeSet<_>>();
             let mut columns = source_table
                 .columns
                 .iter()
@@ -779,6 +754,9 @@ where
                         )?;
                         column.name = to.clone();
                         columns.insert(to.clone(), column);
+                        if branch_columns.remove(from) {
+                            branch_columns.insert(to.clone());
+                        }
                     }
                     LensOp::CopyColumn { from, to } => {
                         if columns.contains_key(to) {
@@ -811,8 +789,20 @@ where
                                 "added column is absent from target",
                             ))?;
                         columns.insert(column.clone(), target_column);
+                        if target_bindings.contains(column)
+                            && columns[column].default.is_none()
+                        {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "added branch column requires a migration default",
+                            ));
+                        }
                     }
                     LensOp::DropColumn { column, .. } => {
+                        if branch_columns.contains(column) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "table branch columns cannot be removed",
+                            ));
+                        }
                         if columns.remove(column).is_none() {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "dropped column is absent from source",
@@ -820,6 +810,11 @@ where
                         }
                     }
                     LensOp::TransformColumn { column, transform } => {
+                        if branch_columns.contains(column) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "branch column type and migration default are immutable",
+                            ));
+                        }
                         validate_transform_column(columns.get(column), transform)?;
                         let source_column =
                             columns.get(column).ok_or(Error::InvalidCatalogueUpdate(
@@ -850,12 +845,28 @@ where
                     "renamed table requires an explicit RenameTable operation",
                 ));
             }
+            if !branch_columns.is_subset(&target_bindings) {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "table branch columns cannot be removed",
+                ));
+            }
             let target_columns = target_table
                 .columns
                 .iter()
                 .cloned()
                 .map(|column| (column.name.clone(), column))
                 .collect::<BTreeMap<_, _>>();
+            for branch_column in &branch_columns {
+                let Some(source_column) = columns.get(branch_column) else { continue; };
+                let Some(target_column) = target_columns.get(branch_column) else { continue; };
+                if source_column.column_type != target_column.column_type
+                    || source_column.default != target_column.default
+                {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "branch column type and migration default are immutable",
+                    ));
+                }
+            }
             if columns != target_columns {
                 return Err(Error::InvalidCatalogueUpdate(
                     "lens operations do not reproduce target columns",

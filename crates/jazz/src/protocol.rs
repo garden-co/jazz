@@ -1589,17 +1589,17 @@ impl ReadViewSourceSpec {
     serde::Serialize,
 )]
 pub struct BranchSelector {
-    /// Canonically encoded typed values keyed by stable branch-dimension name.
-    pub dimensions: BTreeMap<String, BranchDimensionValue>,
+    /// Canonically encoded typed values keyed by branch-column name.
+    pub dimensions: BTreeMap<String, BranchColumnValue>,
 }
 
 impl BranchSelector {
-    /// Construct a selector from named dimension values.
+    /// Construct a selector from named branch-column values.
     pub fn new(dimensions: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Self {
         Self {
             dimensions: dimensions
                 .into_iter()
-                .map(|(name, value)| (name.into(), BranchDimensionValue::from(value)))
+                .map(|(name, value)| (name.into(), BranchColumnValue::from(value)))
                 .collect(),
         }
     }
@@ -1617,19 +1617,19 @@ impl BranchViewBase {
     }
 }
 
-/// Canonical wire/storage encoding of one branch-dimension value.
+/// Canonical wire/storage encoding of one branch-column value.
 #[derive(
     Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
-pub struct BranchDimensionValue(pub Vec<u8>);
+pub struct BranchColumnValue(pub Vec<u8>);
 
-impl From<Value> for BranchDimensionValue {
+impl From<Value> for BranchColumnValue {
     fn from(value: Value) -> Self {
-        Self(postcard::to_allocvec(&value).expect("branch dimension values are encodable"))
+        Self(postcard::to_allocvec(&value).expect("branch column values are encodable"))
     }
 }
 
-impl BranchDimensionValue {
+impl BranchColumnValue {
     /// Decode the value for validation and ordinary column projection.
     pub fn decode(&self) -> Result<Value, postcard::Error> {
         postcard::from_bytes(&self.0)
@@ -1650,8 +1650,8 @@ impl BranchDimensionValue {
     serde::Serialize,
 )]
 pub struct BranchKey {
-    /// Values ordered by stable dimension identity, never application column name.
-    pub dimensions: Vec<(crate::ids::BranchDimensionId, BranchDimensionValue)>,
+    /// Values ordered by branch-column name.
+    pub dimensions: Vec<(String, BranchColumnValue)>,
 }
 
 impl BranchKey {
@@ -1956,7 +1956,7 @@ pub enum ResultMemberEntry {
 }
 
 /// Real table row membership, including both the ordinary current-content
-/// compatibility identity and the extra dimensions needed by historic,
+/// compatibility identity and the extra branch columns needed by historic,
 /// branch/prefix, include-deleted, and schema-projected reads.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct RealRowMemberEntry {

@@ -7,19 +7,17 @@
 
 use std::collections::HashMap;
 
-use jazz::ids::BranchDimensionId;
 use jazz::tools::ObjectId;
-use jazz::tools::public_schema::{
-    BranchDimensionBindingDescriptor, BranchDimensionDescriptor, ColumnDescriptor,
-    ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor, RowDescriptor, Schema,
-    SchemaHash, TableName, TablePolicies, TableSchema, Value,
-};
 use jazz::tools::public_schema::{CmpOp, Operation, PolicyExpr, PolicyValue};
+use jazz::tools::public_schema::{
+    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
+    RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
+};
 
 use jazz::tools::schema_lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 10;
+const SCHEMA_VERSION: u8 = 11;
 const LENS_VERSION: u8 = 4;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
@@ -117,7 +115,6 @@ fn encode_table_entry(buf: &mut Vec<u8>, name: &TableName, schema: &TableSchema)
     write_string(buf, name.as_str());
     encode_row_descriptor(buf, &schema.columns);
     encode_indexed_columns(buf, schema.indexed_columns.as_deref());
-    encode_branch_dimensions(buf, &schema.branch_dimensions);
     encode_branch_bindings(buf, &schema.branch_by);
 }
 
@@ -129,7 +126,6 @@ fn decode_table_entry(
     let name = read_string(data, offset, "table_name")?;
     let descriptor = decode_row_descriptor(data, offset, schema_version)?;
     let indexed_columns = decode_indexed_columns(data, offset)?;
-    let branch_dimensions = decode_branch_dimensions(data, offset)?;
     let branch_by = decode_branch_bindings(data, offset)?;
 
     Ok((
@@ -138,62 +134,26 @@ fn decode_table_entry(
             columns: descriptor,
             indexed_columns,
             policies: TablePolicies::default(),
-            branch_dimensions,
             branch_by,
         },
     ))
 }
 
-fn encode_branch_dimensions(buf: &mut Vec<u8>, dimensions: &[BranchDimensionDescriptor]) {
-    write_u32(buf, dimensions.len() as u32);
-    for dimension in dimensions {
-        buf.extend_from_slice(dimension.id.0.as_bytes());
-        write_string(buf, &dimension.name);
-        encode_column_type(buf, &dimension.column_type);
-        encode_value(buf, &dimension.migration_default);
-    }
-}
-
-fn decode_branch_dimensions(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<Vec<BranchDimensionDescriptor>, CatalogueEncodingError> {
-    let count = read_u32(data, offset)?;
-    let mut dimensions = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let id = read_bytes(data, offset, 16)?;
-        let id = BranchDimensionId(uuid::Uuid::from_bytes(
-            id.try_into().expect("16-byte dimension id"),
-        ));
-        dimensions.push(BranchDimensionDescriptor {
-            id,
-            name: read_string(data, offset, "branch_dimension_name")?,
-            column_type: decode_column_type(data, offset, SCHEMA_VERSION)?,
-            migration_default: decode_value(data, offset)?,
-        });
-    }
-    Ok(dimensions)
-}
-
-fn encode_branch_bindings(buf: &mut Vec<u8>, bindings: &[BranchDimensionBindingDescriptor]) {
+fn encode_branch_bindings(buf: &mut Vec<u8>, bindings: &[ColumnName]) {
     write_u32(buf, bindings.len() as u32);
     for binding in bindings {
-        write_string(buf, binding.column().as_str());
-        write_string(buf, binding.dimension());
+        write_string(buf, binding.as_str());
     }
 }
 
 fn decode_branch_bindings(
     data: &[u8],
     offset: &mut usize,
-) -> Result<Vec<BranchDimensionBindingDescriptor>, CatalogueEncodingError> {
+) -> Result<Vec<ColumnName>, CatalogueEncodingError> {
     let count = read_u32(data, offset)?;
     let mut bindings = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        bindings.push(BranchDimensionBindingDescriptor::Named {
-            column: ColumnName::new(read_string(data, offset, "branch_binding_column")?),
-            dimension: read_string(data, offset, "branch_binding_dimension")?,
-        });
+        bindings.push(ColumnName::new(read_string(data, offset, "branch_column")?));
     }
     Ok(bindings)
 }
@@ -723,7 +683,6 @@ fn decode_current_lens_transform(
 
 fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema) {
     encode_row_descriptor(buf, &schema.columns);
-    encode_branch_dimensions(buf, &schema.branch_dimensions);
     encode_branch_bindings(buf, &schema.branch_by);
 }
 
@@ -734,13 +693,11 @@ fn decode_table_schema(
 ) -> Result<TableSchema, CatalogueEncodingError> {
     let schema_version = schema_version_for_lens_payload(lens_version);
     let descriptor = decode_row_descriptor(data, offset, schema_version)?;
-    let branch_dimensions = decode_branch_dimensions(data, offset)?;
     let branch_by = decode_branch_bindings(data, offset)?;
     Ok(TableSchema {
         columns: descriptor,
         indexed_columns: None,
         policies: TablePolicies::default(),
-        branch_dimensions,
         branch_by,
     })
 }
@@ -2066,34 +2023,20 @@ mod tests {
     }
 
     #[test]
-    fn schema_roundtrip_preserves_branch_dimensions_bindings_and_hash() {
-        let dimension = BranchDimensionDescriptor {
-            id: BranchDimensionId(uuid::Uuid::from_u128(0x31313131313131313131313131313131)),
-            name: "workspace".to_owned(),
-            column_type: ColumnType::Uuid,
-            migration_default: Value::Uuid(ObjectId::from_uuid(uuid::Uuid::nil())),
-        };
+    fn schema_roundtrip_preserves_branch_columns_and_hash() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("todos")
                     .column("id", ColumnType::Uuid)
                     .column("workspace_id", ColumnType::Uuid)
-                    .branch_dimension(dimension.clone())
-                    .branch_by("workspace_id", "workspace"),
+                    .branch_by("workspace_id"),
             )
             .build();
 
         let decoded = decode_schema(&encode_schema(&schema)).expect("schema decodes");
         let todos = decoded.get(&TableName::new("todos")).expect("todos table");
 
-        assert_eq!(todos.branch_dimensions, vec![dimension]);
-        assert_eq!(
-            todos.branch_by,
-            vec![BranchDimensionBindingDescriptor::Named {
-                column: ColumnName::new("workspace_id"),
-                dimension: "workspace".to_owned(),
-            }]
-        );
+        assert_eq!(todos.branch_by, vec![ColumnName::new("workspace_id")]);
         assert_eq!(SchemaHash::compute(&decoded), SchemaHash::compute(&schema));
     }
 

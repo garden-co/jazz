@@ -928,7 +928,7 @@ The native single-version run is the floor; the naive alternative
 
 ### 8. Branch views `[needs: scenario harness]`
 
-_Motivation: schema-declared branch dimensions and overlay reads provide
+_Motivation: schema-declared branch columns and overlay reads provide
 isolated parallel lines of work over shared live or frozen bases without a
 core-owned branch object._
 

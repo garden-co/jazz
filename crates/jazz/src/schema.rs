@@ -19,8 +19,8 @@ use groove::schema::{
 };
 use groove::storage::StorageLayout;
 
-use crate::ids::{BranchDimensionId, SchemaVersionId};
-use crate::protocol::{BranchDimensionValue, BranchKey, BranchSelector};
+use crate::ids::SchemaVersionId;
+use crate::protocol::{BranchColumnValue, BranchKey, BranchSelector};
 use crate::query::Query;
 #[cfg(test)]
 use crate::query::{claim, col, eq};
@@ -107,16 +107,10 @@ impl JazzSchema {
     }
 
     /// Construct a compiled schema for internal engine tests whose tables
-    /// already carry branch-dimension bindings.
+    /// already declare their branch columns.
     #[cfg(test)]
-    pub(crate) fn new_with_branch_dimensions(
-        branch_dimensions: impl IntoIterator<Item = BranchDimensionSchema>,
-        tables: impl IntoIterator<Item = TableSchema>,
-    ) -> Self {
-        Self::from_runtime(
-            PublicSchema::new(),
-            RuntimeSchema::new_with_branch_dimensions(branch_dimensions, tables),
-        )
+    pub(crate) fn new_with_branch_columns(tables: impl IntoIterator<Item = TableSchema>) -> Self {
+        Self::from_runtime(PublicSchema::new(), RuntimeSchema::new(tables))
     }
 }
 
@@ -132,15 +126,13 @@ impl Deref for JazzSchema {
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema {
-    /// Globally named, lineage-stable branch dimensions in canonical order.
-    pub branch_dimensions: Vec<BranchDimensionSchema>,
     /// Application tables in the schema.
     pub tables: Vec<TableSchema>,
 }
 
 impl PartialEq for RuntimeSchema {
     fn eq(&self, other: &Self) -> bool {
-        self.branch_dimensions == other.branch_dimensions && self.tables == other.tables
+        self.tables == other.tables
     }
 }
 
@@ -148,30 +140,10 @@ impl RuntimeSchema {
     /// Construct a compiled schema from already-lowered application tables.
     #[cfg(test)]
     pub(crate) fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
-        Self::new_with_branch_dimensions([], tables)
-    }
-
-    /// Construct a schema with its globally named dimensions and tables atomically.
-    ///
-    /// This is the primary constructor for schemas whose tables already bind
-    /// branch dimensions: validation observes the complete declaration rather
-    /// than an invalid intermediate builder state.
-    #[cfg(test)]
-    pub(crate) fn new_with_branch_dimensions(
-        branch_dimensions: impl IntoIterator<Item = BranchDimensionSchema>,
-        tables: impl IntoIterator<Item = TableSchema>,
-    ) -> Self {
         Self {
-            branch_dimensions: branch_dimensions.into_iter().collect(),
             tables: tables.into_iter().collect(),
         }
         .validated()
-    }
-
-    /// Declare one globally named branch dimension.
-    pub fn with_branch_dimension(mut self, dimension: BranchDimensionSchema) -> Self {
-        self.branch_dimensions.push(dimension);
-        self.validated()
     }
 
     /// Project a named selector onto one table and validate its exact branch key.
@@ -182,39 +154,40 @@ impl RuntimeSchema {
     ) -> Result<(BranchKey, BTreeMap<String, Value>), String> {
         if selector.dimensions.len() != table.branch_by.len() {
             return Err(format!(
-                "branch selector for {} must provide exactly {} dimensions",
+                "branch selector for {} must provide exactly {} values",
                 table.name,
                 table.branch_by.len()
             ));
         }
         let mut dimensions = Vec::with_capacity(table.branch_by.len());
         let mut cells = BTreeMap::new();
-        for binding in &table.branch_by {
-            let dimension = self
-                .branch_dimensions
+        for column_name in &table.branch_by {
+            let column = table
+                .columns
                 .iter()
-                .find(|candidate| candidate.id == binding.dimension)
-                .ok_or_else(|| format!("unknown branch dimension on {}", table.name))?;
+                .find(|column| &column.name == column_name)
+                .ok_or_else(|| {
+                    format!("unknown branch column {column_name:?} on {}", table.name)
+                })?;
             let encoded = selector
                 .dimensions
-                .get(&dimension.name)
-                .ok_or_else(|| format!("missing branch dimension {}", dimension.name))?;
+                .get(column_name)
+                .ok_or_else(|| format!("missing branch column {column_name}"))?;
             let value = encoded
                 .decode()
-                .map_err(|_| format!("invalid branch dimension {} encoding", dimension.name))?;
-            if BranchDimensionValue::from(value.clone()) != *encoded {
+                .map_err(|_| format!("invalid branch column {column_name} encoding"))?;
+            if BranchColumnValue::from(value.clone()) != *encoded {
                 return Err(format!(
-                    "non-canonical branch dimension {} encoding",
-                    dimension.name
+                    "non-canonical branch column {column_name} encoding"
                 ));
             }
-            RecordDescriptor::new([("value", dimension.column_type.clone())])
+            RecordDescriptor::new([("value", column.column_type.clone())])
                 .create(std::slice::from_ref(&value))
-                .map_err(|_| format!("invalid branch dimension {} value", dimension.name))?;
-            dimensions.push((dimension.id, encoded.clone()));
-            cells.insert(binding.column.clone(), value);
+                .map_err(|_| format!("invalid branch column {column_name} value"))?;
+            dimensions.push((column_name.clone(), encoded.clone()));
+            cells.insert(column_name.clone(), value);
         }
-        dimensions.sort_by_key(|(id, _)| *id);
+        dimensions.sort_by(|left, right| left.0.cmp(&right.0));
         Ok((BranchKey { dimensions }, cells))
     }
 
@@ -224,110 +197,101 @@ impl RuntimeSchema {
         table: &TableSchema,
         selector: &BranchSelector,
     ) -> Result<(BranchKey, BTreeMap<String, Value>), String> {
-        if selector.dimensions.len() != self.branch_dimensions.len()
-            || self
-                .branch_dimensions
-                .iter()
-                .any(|dimension| !selector.dimensions.contains_key(&dimension.name))
-        {
+        let schema_branch_columns = self
+            .tables
+            .iter()
+            .flat_map(|table| table.branch_by.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if selector.dimensions.keys().cloned().collect::<BTreeSet<_>>() != schema_branch_columns {
             return Err(
-                "branch view selector must provide every schema dimension exactly once".to_owned(),
+                "branch view selector must provide every schema branch column exactly once"
+                    .to_owned(),
             );
         }
         let projected = BranchSelector {
             dimensions: table
                 .branch_by
                 .iter()
-                .map(|binding| {
-                    let dimension = self
-                        .branch_dimensions
-                        .iter()
-                        .find(|dimension| dimension.id == binding.dimension)
-                        .expect("validated table binding");
-                    (
-                        dimension.name.clone(),
-                        selector.dimensions[&dimension.name].clone(),
-                    )
-                })
+                .map(|column| (column.clone(), selector.dimensions[column].clone()))
                 .collect(),
         };
         self.project_branch_selector(table, &projected)
     }
 
     /// Compare a stored key with a selector in this schema, interpreting
-    /// dimensions absent from older monotone schemas at their migration defaults.
+    /// branch columns absent from older monotone schemas at their defaults.
     pub(crate) fn branch_key_matches(
         &self,
         table: &TableSchema,
         stored: &BranchKey,
         selected: &BranchKey,
     ) -> bool {
-        table.branch_by.iter().all(|binding| {
-            let dimension = self
-                .branch_dimensions
+        table.branch_by.iter().all(|column_name| {
+            let column = table
+                .columns
                 .iter()
-                .find(|dimension| dimension.id == binding.dimension)
-                .expect("validated branch dimension binding");
+                .find(|column| column.name == *column_name)
+                .expect("validated branch column");
             let selected = selected
                 .dimensions
                 .iter()
-                .find(|(id, _)| *id == binding.dimension)
+                .find(|(name, _)| name == column_name)
                 .map(|(_, value)| value);
             let stored = stored
                 .dimensions
                 .iter()
-                .find(|(id, _)| *id == binding.dimension)
+                .find(|(name, _)| name == column_name)
                 .map(|(_, value)| value)
                 .cloned()
-                .unwrap_or_else(|| BranchDimensionValue::from(dimension.migration_default.clone()));
-            selected == Some(&stored)
-        }) && stored.dimensions.iter().all(|(id, _)| {
-            table
-                .branch_by
-                .iter()
-                .any(|binding| binding.dimension == *id)
-        })
+                .or_else(|| column.default.clone().map(BranchColumnValue::from));
+            selected == stored.as_ref()
+        }) && stored
+            .dimensions
+            .iter()
+            .all(|(name, _)| table.branch_by.contains(name))
     }
 
     /// Expand an older table-local key with immutable defaults from the
-    /// current monotone dimension declaration.
+    /// current monotone branch-column declaration.
     pub(crate) fn normalize_branch_key(
         &self,
         table: &TableSchema,
         stored: &BranchKey,
     ) -> Result<BranchKey, String> {
-        if stored.dimensions.iter().any(|(id, _)| {
-            !table
-                .branch_by
-                .iter()
-                .any(|binding| binding.dimension == *id)
-        }) {
+        if stored
+            .dimensions
+            .iter()
+            .any(|(name, _)| !table.branch_by.contains(name))
+        {
             return Err(format!(
-                "stored branch key has an unknown dimension on {}",
+                "stored branch key has an unknown column on {}",
                 table.name
             ));
         }
         let mut dimensions = table
             .branch_by
             .iter()
-            .map(|binding| {
-                let dimension = self
-                    .branch_dimensions
+            .map(|column_name| {
+                let column = table
+                    .columns
                     .iter()
-                    .find(|dimension| dimension.id == binding.dimension)
-                    .ok_or_else(|| format!("unknown branch dimension on {}", table.name))?;
+                    .find(|column| column.name == *column_name)
+                    .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
                 let value = stored
                     .dimensions
                     .iter()
-                    .find(|(id, _)| *id == binding.dimension)
+                    .find(|(name, _)| name == column_name)
                     .map(|(_, value)| value.clone())
-                    .unwrap_or_else(|| {
-                        BranchDimensionValue::from(dimension.migration_default.clone())
-                    });
-                Ok((binding.dimension, value))
+                    .or_else(|| column.default.clone().map(BranchColumnValue::from))
+                    .ok_or_else(|| {
+                        format!(
+                            "older branch key is missing {column_name} without a migration default"
+                        )
+                    })?;
+                Ok((column_name.clone(), value))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        dimensions.sort_by_key(|(dimension, _)| *dimension);
+        dimensions.sort_by(|left, right| left.0.cmp(&right.0));
         Ok(BranchKey { dimensions })
     }
 
@@ -341,41 +305,40 @@ impl RuntimeSchema {
         key: &BranchKey,
     ) -> Result<BTreeMap<String, Value>, String> {
         let mut bindings = table.branch_by.iter().collect::<Vec<_>>();
-        bindings.sort_by_key(|binding| binding.dimension);
+        bindings.sort();
         if key.dimensions.len() != bindings.len() {
             return Err(format!(
-                "branch key for {} must contain exactly {} dimensions",
+                "branch key for {} must contain exactly {} values",
                 table.name,
                 bindings.len()
             ));
         }
 
         let mut cells = BTreeMap::new();
-        for (binding, (actual_id, encoded)) in bindings.into_iter().zip(&key.dimensions) {
-            if *actual_id != binding.dimension {
+        for (column_name, (actual_name, encoded)) in bindings.into_iter().zip(&key.dimensions) {
+            if actual_name != column_name {
                 return Err(format!(
-                    "branch key for {} is not in canonical dimension order",
+                    "branch key for {} is not in canonical column order",
                     table.name
                 ));
             }
-            let dimension = self
-                .branch_dimensions
+            let column = table
+                .columns
                 .iter()
-                .find(|dimension| dimension.id == binding.dimension)
-                .ok_or_else(|| format!("unknown branch dimension on {}", table.name))?;
+                .find(|column| column.name == *column_name)
+                .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
             let value = encoded
                 .decode()
-                .map_err(|_| format!("invalid branch dimension {} encoding", dimension.name))?;
-            if BranchDimensionValue::from(value.clone()) != *encoded {
+                .map_err(|_| format!("invalid branch column {column_name} encoding"))?;
+            if BranchColumnValue::from(value.clone()) != *encoded {
                 return Err(format!(
-                    "non-canonical branch dimension {} encoding",
-                    dimension.name
+                    "non-canonical branch column {column_name} encoding"
                 ));
             }
-            RecordDescriptor::new([("value", dimension.column_type.clone())])
+            RecordDescriptor::new([("value", column.column_type.clone())])
                 .create(std::slice::from_ref(&value))
-                .map_err(|_| format!("invalid branch dimension {} value", dimension.name))?;
-            cells.insert(binding.column.clone(), value);
+                .map_err(|_| format!("invalid branch column {column_name} value"))?;
+            cells.insert(column_name.clone(), value);
         }
         Ok(cells)
     }
@@ -387,83 +350,69 @@ impl RuntimeSchema {
         key: &BranchKey,
     ) -> Result<BranchSelector, String> {
         let mut dimensions = BTreeMap::new();
-        for binding in &table.branch_by {
-            let dimension = self
-                .branch_dimensions
+        for column_name in &table.branch_by {
+            let column = table
+                .columns
                 .iter()
-                .find(|dimension| dimension.id == binding.dimension)
-                .ok_or_else(|| format!("unknown branch dimension on {}", table.name))?;
+                .find(|column| column.name == *column_name)
+                .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
             let value = key
                 .dimensions
                 .iter()
-                .find(|(id, _)| *id == binding.dimension)
+                .find(|(name, _)| name == column_name)
                 .map(|(_, value)| value.clone())
-                .unwrap_or_else(|| BranchDimensionValue::from(dimension.migration_default.clone()));
-            dimensions.insert(dimension.name.clone(), value);
+                .or_else(|| column.default.clone().map(BranchColumnValue::from))
+                .ok_or_else(|| {
+                    format!("branch key is missing {column_name} without a migration default")
+                })?;
+            dimensions.insert(column_name.clone(), value);
         }
         Ok(BranchSelector { dimensions })
     }
 
+    #[cfg(test)]
     fn validated(self) -> Self {
-        let mut dimension_ids = BTreeSet::new();
-        let mut dimension_names = BTreeSet::new();
-        for dimension in &self.branch_dimensions {
-            assert!(
-                dimension_ids.insert(dimension.id),
-                "duplicate branch dimension id"
-            );
-            assert!(
-                dimension_names.insert(dimension.name.clone()),
-                "duplicate branch dimension name"
-            );
-            assert!(
-                !matches!(dimension.column_type, GrooveColumnType::Nullable(_)),
-                "branch dimensions must be non-nullable"
-            );
-            assert!(
-                matches!(
-                    dimension.column_type,
-                    GrooveColumnType::Uuid
-                        | GrooveColumnType::U8
-                        | GrooveColumnType::U16
-                        | GrooveColumnType::U32
-                        | GrooveColumnType::U64
-                        | GrooveColumnType::I32
-                        | GrooveColumnType::I64
-                        | GrooveColumnType::EnumTag(_)
-                ),
-                "branch dimensions require UUID, stable enum, or fixed-width integer values"
-            );
-            assert!(
-                RecordDescriptor::new([("value", dimension.column_type.clone())])
-                    .create(std::slice::from_ref(&dimension.migration_default))
-                    .is_ok(),
-                "branch dimension migration default must match its declared type"
-            );
-        }
+        let mut branch_column_types = BTreeMap::new();
         for table in &self.tables {
-            let mut bound_dimensions = BTreeSet::new();
-            for binding in &table.branch_by {
-                let dimension = self
-                    .branch_dimensions
-                    .iter()
-                    .find(|dimension| dimension.id == binding.dimension)
-                    .unwrap_or_else(|| panic!("unknown branch dimension on {}", table.name));
+            let mut bound_columns = BTreeSet::new();
+            for column_name in &table.branch_by {
                 let column = table
                     .columns
                     .iter()
-                    .find(|column| column.name == binding.column)
+                    .find(|column| column.name == *column_name)
                     .unwrap_or_else(|| {
-                        panic!("unknown branch column {}.{}", table.name, binding.column)
+                        panic!("unknown branch column {}.{column_name}", table.name)
                     });
                 assert!(
-                    bound_dimensions.insert(binding.dimension),
-                    "duplicate table branch dimension"
+                    bound_columns.insert(column_name),
+                    "duplicate table branch column"
                 );
-                assert_eq!(
-                    column.column_type, dimension.column_type,
-                    "branch dimension column type mismatch"
+                assert!(
+                    !matches!(column.column_type, GrooveColumnType::Nullable(_)),
+                    "branch columns must be non-nullable"
                 );
+                assert!(
+                    matches!(
+                        column.column_type,
+                        GrooveColumnType::Uuid
+                            | GrooveColumnType::U8
+                            | GrooveColumnType::U16
+                            | GrooveColumnType::U32
+                            | GrooveColumnType::U64
+                            | GrooveColumnType::I32
+                            | GrooveColumnType::I64
+                            | GrooveColumnType::EnumTag(_)
+                    ),
+                    "branch columns require UUID, stable enum, or fixed-width integer values"
+                );
+                if let Some(existing) =
+                    branch_column_types.insert(column_name.clone(), column.column_type.clone())
+                {
+                    assert_eq!(
+                        existing, column.column_type,
+                        "same-named branch columns must have the same type"
+                    );
+                }
             }
             for (column_name, strategy) in &table.merge_strategies {
                 let column = table
@@ -641,45 +590,6 @@ impl RuntimeSchema {
     }
 }
 
-/// One globally named branch coordinate whose identity survives column renames.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct BranchDimensionSchema {
-    /// Stable semantic identity.
-    pub id: BranchDimensionId,
-    /// Stable selector name used by branch views.
-    pub name: String,
-    /// Non-null, canonically key-encodable value type.
-    pub column_type: GrooveColumnType,
-    /// Immutable default used when this dimension is added monotonically.
-    pub migration_default: Value,
-}
-
-impl BranchDimensionSchema {
-    /// Construct a branch dimension declaration.
-    pub fn new(
-        id: BranchDimensionId,
-        name: impl Into<String>,
-        column_type: GrooveColumnType,
-        migration_default: Value,
-    ) -> Self {
-        Self {
-            id,
-            name: name.into(),
-            column_type,
-            migration_default,
-        }
-    }
-}
-
-/// Binding from an ordinary application column to a stable branch dimension.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct BranchDimensionBinding {
-    /// Application column, freely renameable through schema lineage.
-    pub column: String,
-    /// Stable dimension identity.
-    pub dimension: BranchDimensionId,
-}
-
 /// Per-column strategy used when upstream nodes merge concurrent content heads.
 ///
 /// Counter deltas are represented on the wire as an absolute user cell plus the
@@ -696,6 +606,7 @@ pub enum MergeStrategy {
     GSet,
 }
 
+#[cfg(test)]
 fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
     matches!(
         column_type,
@@ -708,6 +619,7 @@ fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
     )
 }
 
+#[cfg(test)]
 fn is_gset_column_type(column_type: &GrooveColumnType) -> bool {
     matches!(column_type, GrooveColumnType::Array(_))
 }
@@ -831,7 +743,7 @@ pub struct TableSchema {
     pub columns: Vec<ColumnSchema>,
     /// Ordinary columns that form this table's exact branch key.
     #[serde(default)]
-    pub branch_by: Vec<BranchDimensionBinding>,
+    pub branch_by: Vec<String>,
     /// Jazz-level reference metadata by source column name.
     pub references: BTreeMap<String, String>,
     /// Read policy used when serving views.
@@ -865,16 +777,9 @@ impl TableSchema {
         }
     }
 
-    /// Bind an ordinary application column to a stable branch dimension.
-    pub fn with_branch_dimension(
-        mut self,
-        column: impl Into<String>,
-        dimension: BranchDimensionId,
-    ) -> Self {
-        self.branch_by.push(BranchDimensionBinding {
-            column: column.into(),
-            dimension,
-        });
+    /// Add an ordinary application column to this table's branch key.
+    pub fn with_branch_column(mut self, column: impl Into<String>) -> Self {
+        self.branch_by.push(column.into());
         self
     }
 
@@ -1502,17 +1407,7 @@ fn transactions_table() -> GrooveTableSchema {
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_str(&mut bytes, "jazz-schema-v1-branch-views");
-    put_u64(&mut bytes, schema.branch_dimensions.len() as u64);
-    for dimension in &schema.branch_dimensions {
-        bytes.extend_from_slice(dimension.id.0.as_bytes());
-        put_str(&mut bytes, &dimension.name);
-        put_column_type(&mut bytes, &dimension.column_type);
-        let default = postcard::to_allocvec(&dimension.migration_default)
-            .expect("branch dimension defaults are encodable");
-        put_u64(&mut bytes, default.len() as u64);
-        bytes.extend(default);
-    }
+    put_str(&mut bytes, "jazz-schema-v2-branch-columns");
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     put_u64(&mut bytes, tables.len() as u64);
@@ -1530,11 +1425,10 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
             put_str(&mut bytes, target);
         }
         let mut branch_by = table.branch_by.iter().collect::<Vec<_>>();
-        branch_by.sort_by_key(|binding| binding.dimension);
+        branch_by.sort();
         put_u64(&mut bytes, branch_by.len() as u64);
-        for binding in branch_by {
-            bytes.extend_from_slice(binding.dimension.0.as_bytes());
-            put_str(&mut bytes, &binding.column);
+        for column in branch_by {
+            put_str(&mut bytes, column);
         }
     }
     bytes
@@ -1659,44 +1553,28 @@ mod tests {
     use groove::schema::ColumnType;
 
     #[test]
-    #[should_panic(expected = "branch dimensions require UUID")]
-    fn variable_width_branch_dimensions_are_rejected() {
-        let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x30; 16]));
-        let _ = JazzSchema::new_with_branch_dimensions(
-            [BranchDimensionSchema::new(
-                dimension,
-                "branch",
-                ColumnType::String,
-                Value::String("main".to_owned()),
-            )],
-            [
-                TableSchema::new("todos", [ColumnSchema::new("branch", ColumnType::String)])
-                    .with_branch_dimension("branch", dimension),
-            ],
-        );
+    #[should_panic(expected = "branch columns require UUID")]
+    fn variable_width_branch_columns_are_rejected() {
+        let _ = JazzSchema::new_with_branch_columns([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("branch", ColumnType::String)],
+        )
+        .with_branch_column("branch")]);
     }
 
     #[test]
-    fn added_branch_dimension_reads_older_keys_at_its_default() {
-        let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x31; 16]));
-        let schema = JazzSchema::new_with_branch_dimensions(
-            [BranchDimensionSchema::new(
-                dimension,
-                "workspace",
-                ColumnType::Uuid,
-                Value::Uuid(uuid::Uuid::nil()),
-            )],
-            [TableSchema::new(
-                "todos",
-                [ColumnSchema::new("workspace_id", ColumnType::Uuid)],
-            )
-            .with_branch_dimension("workspace_id", dimension)],
-        );
+    fn added_branch_column_reads_older_keys_at_its_default() {
+        let schema = JazzSchema::new_with_branch_columns([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("workspace_id", ColumnType::Uuid)
+                .with_default(Value::Uuid(uuid::Uuid::nil()))],
+        )
+        .with_branch_column("workspace_id")]);
         let table = &schema.tables[0];
         let default = schema
             .project_branch_selector(
                 table,
-                &BranchSelector::new([("workspace", Value::Uuid(uuid::Uuid::nil()))]),
+                &BranchSelector::new([("workspace_id", Value::Uuid(uuid::Uuid::nil()))]),
             )
             .unwrap()
             .0;
@@ -1704,7 +1582,7 @@ mod tests {
             .project_branch_selector(
                 table,
                 &BranchSelector::new([(
-                    "workspace",
+                    "workspace_id",
                     Value::Uuid(uuid::Uuid::from_bytes([0x32; 16])),
                 )]),
             )
