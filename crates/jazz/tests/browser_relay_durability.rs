@@ -2,37 +2,41 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+mod common;
+
 use jazz::db::{Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEvent, block_on};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
 
+use common::compile_schema;
+
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+            .build(),
+    )
 }
 
 fn included_relation_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("profiles", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "messages",
-            [
-                ColumnSchema::new("author", ColumnType::Uuid),
-                ColumnSchema::new("body", ColumnType::String),
-                ColumnSchema::new("created", ColumnType::U64),
-            ],
-        )
-        .with_reference("author", "profiles"),
-    ])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("profiles").column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("author", "profiles")
+                    .column("body", ColumnType::Text)
+                    .column("created", ColumnType::Timestamp),
+            )
+            .build(),
+    )
 }
 
 fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemoryStorage> {

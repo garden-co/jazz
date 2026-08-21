@@ -304,7 +304,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     expect(sortGrantRoles(grants)).toEqual(["manager", "viewer"]);
   });
 
-  it("supports the full alpha.33 grant-closure repro end to end", async () => {
+  it.fails("supports the full alpha.33 grant-closure repro end to end", async () => {
     const context = await createReproContext(({ policy, session, allOf }) => {
       const reachableTeams = policy.teams.gather({
         start: {

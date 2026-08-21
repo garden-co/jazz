@@ -210,6 +210,11 @@ mod tests {
     }
 
     async fn publish_schema_for_test(app: &axum::Router, schema: Schema) {
+        let schema_json = serde_json::to_value(&schema).expect("schema request json");
+        assert!(
+            schema_json.get("tables").is_some(),
+            "admin schema requests retain the public Schema envelope"
+        );
         let response = app
             .clone()
             .oneshot(
@@ -219,7 +224,7 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
-                        serde_json::json!({ "schema": schema }).to_string(),
+                        serde_json::json!({ "schema": schema_json }).to_string(),
                     ))
                     .unwrap(),
             )
@@ -566,8 +571,10 @@ mod tests {
             .await
             .expect("schema body");
         let schema_json: Value = serde_json::from_slice(&schema_body).expect("schema json");
-        let expected_schema_json = serde_json::to_value(schema).expect("expected schema json");
+        let expected_schema_json = serde_json::to_value(&schema).expect("expected schema json");
         assert_eq!(schema_json["schema"], expected_schema_json);
+        assert!(schema_json["schema"].get("tables").is_some());
+        assert!(schema_json["schema"].get("users").is_none());
         assert!(schema_json.get("publishedAt").is_some());
 
         let bad_hash_response = app
@@ -581,6 +588,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad_hash_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn publish_schema_rejects_obsolete_bare_table_map() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+        let legacy_tables = schema
+            .iter()
+            .map(|(name, table)| (*name, table.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let app = make_test_router(make_state_with_schema(schema).await);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/admin/schemas"))
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "schema": legacy_tables }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("publish obsolete schema shape");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -1381,9 +1417,8 @@ mod tests {
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
         publish_schema_for_test(&app, v2).await;
-        let runtime_v1 = jazz::tools::public_schema_convert::convert_public_schema(&v1)
-            .expect("convert source schema");
-        let runtime_v2 = jazz::tools::public_schema_convert::convert_public_schema(
+        let runtime_v1 = jazz::schema::JazzSchema::new(&v1).expect("convert source schema");
+        let runtime_v2 = jazz::schema::JazzSchema::new(
             &state
                 .catalogue
                 .known_schema(&state.catalogue_store, &v2_hash)
@@ -1632,9 +1667,8 @@ mod tests {
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
         publish_schema_for_test(&app, v2).await;
-        let runtime_v1 = jazz::tools::public_schema_convert::convert_public_schema(&v1)
-            .expect("convert source schema");
-        let runtime_v2 = jazz::tools::public_schema_convert::convert_public_schema(
+        let runtime_v1 = jazz::schema::JazzSchema::new(&v1).expect("convert source schema");
+        let runtime_v2 = jazz::schema::JazzSchema::new(
             &state
                 .catalogue
                 .known_schema(&state.catalogue_store, &v2_hash)

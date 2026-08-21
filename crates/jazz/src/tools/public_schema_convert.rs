@@ -10,8 +10,8 @@ use crate::query::{
     PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
-    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, TableSchema as CoreTableSchema,
-    WritePolicies,
+    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
+    TableSchema as CoreTableSchema, WritePolicies,
 };
 
 use crate::tools::public_api::policy::{CmpOp, PolicyValue};
@@ -27,10 +27,12 @@ use crate::tools::public_schema::{
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
 const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
+const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
+const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[doc(hidden)]
+/// Error produced while compiling a developer-authored schema for the runtime.
 pub struct SchemaConversionError {
     path: String,
     message: String,
@@ -53,32 +55,67 @@ impl fmt::Display for SchemaConversionError {
 
 impl std::error::Error for SchemaConversionError {}
 
-#[doc(hidden)]
-pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
-    let mut tables = schema.iter().collect::<Vec<_>>();
-    tables.sort_by_key(|(name, _)| name.as_str());
-    let mut converted = tables
-        .into_iter()
+pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
+    let mut converted = schema
+        .iter()
         .map(|(name, table)| convert_table(schema, name, table))
         .collect::<Result<Vec<_>, _>>()?;
     coerce_typed_literals(schema, &mut converted);
     validate_converted_schema(&converted)?;
-    Ok(JazzSchema {
-        tables: converted,
-        branch_read_policy: None,
-        branch_write_policy: None,
-    })
+    let branch_read_policy =
+        convert_optional_branch_policy(schema, "branch_read_policy", schema.branch_read_policy())?;
+    let branch_write_policy = convert_optional_branch_policy(
+        schema,
+        "branch_write_policy",
+        schema.branch_write_policy(),
+    )?;
+    Ok(JazzSchema::from_runtime(
+        schema.clone(),
+        RuntimeSchema {
+            tables: converted,
+            branch_read_policy,
+            branch_write_policy,
+        },
+    ))
+}
+
+/// Decode and compile the public JSON schema used by native bindings.
+pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
+    let schema: Schema =
+        serde_json::from_slice(bytes).map_err(|error| format!("decode public schema: {error}"))?;
+    convert_public_schema(&schema).map_err(|error| format!("compile public schema: {error}"))
+}
+
+fn convert_optional_branch_policy(
+    schema: &Schema,
+    path: &str,
+    expr: Option<&PolicyExpr>,
+) -> Result<Option<Query>, SchemaConversionError> {
+    let Some(expr) = expr else {
+        return Ok(None);
+    };
+    let branch_name = TableName::from("jazz_branches");
+    let branch_schema = TableSchema::builder("jazz_branches")
+        .column("branch_id", ColumnType::Uuid)
+        .column("created_by", ColumnType::Uuid)
+        .nullable_column("parent", ColumnType::Uuid)
+        .nullable_column("base_global", ColumnType::Timestamp)
+        .column("state", ColumnType::Text)
+        .build();
+    let mut schema = schema.clone();
+    schema.insert(branch_name, branch_schema.clone());
+    convert_policy(&schema, &branch_schema, &branch_name, path, expr).map(Some)
 }
 
 fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
-    let schema = JazzSchema {
+    let schema = RuntimeSchema {
         tables: tables.to_vec(),
         branch_read_policy: None,
         branch_write_policy: None,
     };
     for table in tables {
         if let Some(policy) = &table.read_policy {
-            policy.validate(&schema).map_err(|error| {
+            policy.validate_runtime(&schema).map_err(|error| {
                 err(
                     format!("$.{}.policies.select.using", table.name),
                     format!("converted read policy is invalid: {error:?}"),
@@ -86,7 +123,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             })?;
         }
         for (label, policy) in table.write_policies.iter() {
-            policy.validate(&schema).map_err(|error| {
+            policy.validate_runtime(&schema).map_err(|error| {
                 err(
                     format!("$.{}.policies.{label}", table.name),
                     format!("converted write policy is invalid: {error:?}"),
@@ -577,7 +614,10 @@ fn convert_default_for_column_type(
             ColumnType::Text | ColumnType::Json { .. } | ColumnType::Enum { .. },
             Value::Text(value),
         ) => Ok(GrooveValue::String(value.clone())),
-        (ColumnType::EnumPayload { cases }, Value::Enum { case, values }) => {
+        (
+            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
+            Value::Enum { case, values },
+        ) => {
             let (case_index, entry) = cases
                 .iter()
                 .enumerate()
@@ -681,7 +721,17 @@ fn convert_column_type(
         ColumnType::Uuid => Ok(GrooveColumnType::Uuid),
         ColumnType::Bytea => Ok(GrooveColumnType::Bytes),
         ColumnType::Enum { .. } => Ok(GrooveColumnType::String),
-        ColumnType::EnumPayload { cases } => {
+        ColumnType::ScalarEnum { name, variants } => {
+            groove::records::ScalarEnumSchema::new(name.clone(), variants.iter().cloned())
+                .map(GrooveColumnType::EnumTag)
+                .map_err(|error| {
+                    err(
+                        format!("$.{}.{}", table.as_str(), column),
+                        error.to_string(),
+                    )
+                })
+        }
+        ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
             let mut converted_cases = Vec::with_capacity(cases.len());
             for case in cases {
                 if case.name.is_empty() {
@@ -705,7 +755,11 @@ fn convert_column_type(
                     RecordDescriptor::new(fields),
                 ));
             }
-            EnumSchema::new(format!("{}_{}", table.as_str(), column), converted_cases)
+            let enum_name = match column_type {
+                ColumnType::CatalogueEnumPayload { name, .. } => name.clone(),
+                _ => format!("{}_{}", table.as_str(), column),
+            };
+            EnumSchema::new(enum_name, converted_cases)
                 .map(|schema| GrooveColumnType::Enum(Box::new(schema)))
                 .map_err(|error| {
                     err(
@@ -1267,7 +1321,7 @@ enum LoweredRelValue {
 #[derive(Clone)]
 struct PendingReachable {
     from: Operand,
-    seed: crate::query::ReachableSeed,
+    seed: Option<crate::query::ReachableSeed>,
     edge_table: String,
     edge_member_column: String,
     edge_parent_column: String,
@@ -1343,7 +1397,7 @@ fn append_exists_rel_policy_clause(
             edge_parent_column: pending.edge_parent_column,
             edge_filters: pending.edge_filters,
             bound: crate::query::RecursionBound::MaxDepth(pending.max_depth),
-            seed: Some(pending.seed),
+            seed: pending.seed,
         });
     }
     if !lowered.reachable.is_empty() {
@@ -1451,7 +1505,7 @@ fn lower_exists_rel(
                     edge_parent_column: pending.edge_parent_column,
                     edge_filters: pending.edge_filters,
                     bound: crate::query::RecursionBound::MaxDepth(pending.max_depth),
-                    seed: Some(pending.seed),
+                    seed: pending.seed,
                 };
                 reachable
                     .access_filters
@@ -1509,6 +1563,15 @@ fn lower_gather_rel(
     let (from, seed) = lower_gather_seed(table, path, seed)?;
     let (edge_table, output_table, edge_member_column, edge_parent_column, edge_filters) =
         lower_gather_step(table, path, step)?;
+    let seed = if seed.table == output_table
+        && seed.user_column.as_deref() == Some("id")
+        && seed.team_column == "id"
+        && seed.filters.is_empty()
+    {
+        None
+    } else {
+        Some(seed)
+    };
     let max_depth = match bound {
         RelRecursionBound::MaxDepth(depth) if *depth > 0 => *depth,
         RelRecursionBound::MaxDepth(_) => {
@@ -2233,6 +2296,17 @@ fn convert_policy_predicate(
         )?))),
         PolicyExpr::Cmp { column, op, value } => {
             let left = Operand::Column(column.clone());
+            if matches!(value, PolicyValue::Literal(Value::Null)) {
+                // Match `session_where`: equality against the public NULL
+                // literal is the ergonomic spelling of a null test.
+                match op {
+                    CmpOp::Eq => return Ok(Predicate::IsNull(left)),
+                    CmpOp::Ne => {
+                        return Ok(Predicate::Not(Box::new(Predicate::IsNull(left))));
+                    }
+                    CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {}
+                }
+            }
             let right = convert_policy_operand(table, path, value)?;
             Ok(match op {
                 CmpOp::Eq => Predicate::Eq(left, right),
@@ -2330,13 +2404,18 @@ fn convert_session_path_operand(
     {
         return Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()));
     }
+    if path_segments.len() == 1
+        && PUBLIC_AUTH_MODE_SESSION_PATHS.contains(&path_segments[0].as_str())
+    {
+        return Ok(Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()));
+    }
     if path_segments.len() == 2 && path_segments[0] == "claims" {
         return Ok(Operand::Claim(path_segments[1].clone()));
     }
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
         format!(
-            "core schema policies only support session.user_id and session.claims.* references, got session.{}",
+            "core schema policies only support session.user_id, session.authMode, and session.claims.* references, got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -2369,7 +2448,6 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionE
 mod tests {
     use super::*;
     use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
-    use crate::schema::JazzSchema;
     use crate::tools::object::ObjectId;
     use crate::tools::public_api::policy::{CmpOp, PolicyValue};
     use crate::tools::public_api::relation_ir::{
@@ -2415,37 +2493,44 @@ mod tests {
                 .expect("read policy graph perf fixture source");
         let source: serde_json::Value =
             serde_json::from_str(&source).expect("parse policy graph perf fixture source");
-        serde_json::from_value(source["mergedSchema"].clone())
-            .expect("decode policy graph perf public schema fixture")
-    }
-
-    fn policy_graph_perf_fixture_native_schema() -> JazzSchema {
-        let bytes = std::fs::read(policy_graph_perf_fixture_dir().join("schema.native.bin"))
-            .expect("read policy graph perf native schema fixture");
-        postcard::from_bytes(&bytes).expect("decode policy graph perf native schema fixture")
+        let tables: BTreeMap<TableName, TableSchema> =
+            serde_json::from_value(source["mergedSchema"].clone())
+                .expect("decode policy graph perf public schema fixture");
+        tables.into_iter().collect()
     }
 
     #[test]
-    fn converts_policy_graph_perf_public_schema_to_native_fixture_byte_stably() {
-        let converted = convert_public_schema(&policy_graph_perf_fixture_schema())
-            .expect("convert policy graph schema");
-        let expected = policy_graph_perf_fixture_native_schema();
+    fn converts_policy_graph_perf_source_deterministically() {
+        let source = policy_graph_perf_fixture_schema();
+        let converted = convert_public_schema(&source).expect("convert policy graph schema");
+        let recompiled = convert_public_schema(converted.public_schema())
+            .expect("retained public schema recompiles");
 
-        for (index, (left, right)) in converted
-            .tables
-            .iter()
-            .zip(expected.tables.iter())
-            .enumerate()
-        {
-            assert_eq!(left, right, "first table mismatch at index {index}");
-        }
-        assert_eq!(converted.tables.len(), expected.tables.len());
+        assert_eq!(converted, recompiled);
+        assert_eq!(converted.version_id(), recompiled.version_id());
+        assert_eq!(&source, converted.public_schema());
+    }
+
+    #[test]
+    fn compiles_branch_policy_source() {
+        let source = SchemaBuilder::new()
+            .branch_read_policy(PolicyExpr::Cmp {
+                column: "created_by".to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+            })
+            .build();
+
+        let compiled = convert_public_schema(&source).expect("compile branch policy source");
         assert_eq!(
-            converted.version_id(),
-            expected.version_id(),
-            "server public-schema conversion must publish the same schema version that TS/NAPI clients use"
+            compiled
+                .branch_read_policy
+                .as_ref()
+                .expect("branch policy is installed")
+                .table,
+            "jazz_branches"
         );
-        assert_eq!(converted, expected);
+        assert_eq!(compiled.public_schema(), &source);
     }
 
     #[test]
@@ -2493,6 +2578,7 @@ mod tests {
             .build();
         let integer_table = convert_public_schema(&integer_schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "todos")
@@ -2517,6 +2603,7 @@ mod tests {
             .build();
         let integer_array_table = convert_public_schema(&integer_array_schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "todos")
@@ -2548,6 +2635,7 @@ mod tests {
             .build();
         let numeric_default_table = convert_public_schema(&numeric_default_schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "numeric_defaults")
@@ -2583,6 +2671,7 @@ mod tests {
         .collect();
         let default_table = convert_public_schema(&default_schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "todos")
@@ -2635,6 +2724,7 @@ mod tests {
             .build();
         let table = convert_public_schema(&schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "events")
@@ -2792,6 +2882,7 @@ mod tests {
             .build();
         let table = convert_public_schema(&schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "metrics")
@@ -2877,6 +2968,7 @@ mod tests {
 
         let table = convert_public_schema(&schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "events")
@@ -2910,6 +3002,7 @@ mod tests {
 
         let table = convert_public_schema(&schema)
             .unwrap()
+            .into_runtime()
             .tables
             .into_iter()
             .find(|table| table.name == "todos")
@@ -3034,6 +3127,36 @@ mod tests {
             vec![Predicate::Eq(
                 Operand::Column("token_id".to_owned()),
                 Operand::Literal(GrooveValue::Uuid(Uuid::nil())),
+            )]
+        );
+    }
+
+    #[test]
+    fn converts_auth_mode_session_comparison_to_reserved_claim() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .column("body", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::SessionCmp {
+                        path: vec!["authMode".to_owned()],
+                        op: CmpOp::Eq,
+                        value: Value::Text("external".to_owned()),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).expect("authMode policy should convert");
+        let messages = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "messages")
+            .unwrap();
+
+        assert_eq!(
+            messages.read_policy.as_ref().unwrap().filters,
+            vec![Predicate::Eq(
+                Operand::Claim("authMode".to_owned()),
+                Operand::Literal(GrooveValue::String("external".to_owned())),
             )]
         );
     }

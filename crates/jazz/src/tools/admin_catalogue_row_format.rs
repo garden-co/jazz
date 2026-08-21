@@ -24,8 +24,8 @@ pub enum EncodingError {
     /// Value type doesn't match column type.
     TypeMismatch {
         column: String,
-        expected: ColumnType,
-        actual: Option<ColumnType>,
+        expected: Box<ColumnType>,
+        actual: Option<Box<ColumnType>>,
     },
     /// Null value for non-nullable column.
     NullNotAllowed { column: String },
@@ -220,8 +220,8 @@ fn encode_row_with_layout(
         if !val.is_null() && !value_matches_column_type(val, &col.column_type) {
             return Err(EncodingError::TypeMismatch {
                 column: col.name.to_string(),
-                expected: col.column_type.clone(),
-                actual: val.column_type(),
+                expected: Box::new(col.column_type.clone()),
+                actual: val.column_type().map(Box::new),
             });
         }
 
@@ -314,7 +314,8 @@ fn estimated_array_len(elements: &[Value], column_type: &ColumnType) -> usize {
         .map(|element| match (element, element_type) {
             (Value::Text(value), ColumnType::Text)
             | (Value::Text(value), ColumnType::Json { .. })
-            | (Value::Text(value), ColumnType::Enum { .. }) => value.len(),
+            | (Value::Text(value), ColumnType::Enum { .. })
+            | (Value::Text(value), ColumnType::ScalarEnum { .. }) => value.len(),
             (Value::Bytea(bytes), ColumnType::Bytea) => bytes.len(),
             (Value::Array(_), ColumnType::Array { .. }) => {
                 let nested_col = ColumnDescriptor::new("", column_type.clone());
@@ -348,26 +349,28 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
         ColumnType::Text => matches!(value, Value::Text(_)),
         ColumnType::Bytea => matches!(value, Value::Bytea(_)),
         ColumnType::Json { schema: _ } => matches!(value, Value::Text(_)),
-        ColumnType::Enum { variants } => match value {
+        ColumnType::Enum { variants } | ColumnType::ScalarEnum { variants, .. } => match value {
             Value::Text(s) => variants.contains(s),
             _ => false,
         },
-        ColumnType::EnumPayload { cases } => match value {
-            Value::Enum { case, values } => cases
-                .iter()
-                .find(|entry| entry.name == *case)
-                .is_some_and(|entry| {
-                    values.len() == entry.fields.len()
-                        && values.iter().zip(&entry.fields).all(|(value, field)| {
-                            if value.is_null() {
-                                field.nullable
-                            } else {
-                                value_matches_column_type(value, &field.column_type)
-                            }
-                        })
-                }),
-            _ => false,
-        },
+        ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
+            match value {
+                Value::Enum { case, values } => cases
+                    .iter()
+                    .find(|entry| entry.name == *case)
+                    .is_some_and(|entry| {
+                        values.len() == entry.fields.len()
+                            && values.iter().zip(&entry.fields).all(|(value, field)| {
+                                if value.is_null() {
+                                    field.nullable
+                                } else {
+                                    value_matches_column_type(value, &field.column_type)
+                                }
+                            })
+                    }),
+                _ => false,
+            }
+        }
         ColumnType::Array {
             element: element_type,
         } => match value {
@@ -450,10 +453,10 @@ fn encode_enum_variant_index(variants: &[String], value: &str) -> Result<u8, Enc
         .and_then(|index| u8::try_from(index).ok())
         .ok_or_else(|| EncodingError::TypeMismatch {
             column: "enum".to_string(),
-            expected: ColumnType::Enum {
+            expected: Box::new(ColumnType::Enum {
                 variants: variants.to_vec(),
-            },
-            actual: Some(ColumnType::Text),
+            }),
+            actual: Some(Box::new(ColumnType::Text)),
         })
 }
 
@@ -543,8 +546,10 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
             }
         }
         Value::Enum { case, values } => {
-            let ColumnType::EnumPayload { cases } = &col.column_type else {
-                unreachable!("Enum value does not match column type")
+            let cases = match &col.column_type {
+                ColumnType::EnumPayload { cases }
+                | ColumnType::CatalogueEnumPayload { cases, .. } => cases,
+                _ => unreachable!("Enum value does not match column type"),
             };
             let descriptor = cases
                 .iter()
@@ -713,8 +718,11 @@ cfg_decode! {
             }
             ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
             ColumnType::Text | ColumnType::Json { schema: _ } => decode_text_value(data, None),
-        ColumnType::Enum { variants } => decode_enum_value(data, variants),
-            ColumnType::EnumPayload { cases } => {
+            ColumnType::Enum { variants } | ColumnType::ScalarEnum { variants, .. } => {
+                decode_enum_value(data, variants)
+            }
+            ColumnType::EnumPayload { cases }
+            | ColumnType::CatalogueEnumPayload { cases, .. } => {
                 if data.len() < 4 { return Err(EncodingError::MalformedData { message: "enum payload case length missing".to_string() }); }
                 let len = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
                 if data.len() < 4 + len { return Err(EncodingError::MalformedData { message: "enum payload case truncated".to_string() }); }
@@ -980,7 +988,10 @@ pub fn encode_value_with_type(value: &Value, col_type: &ColumnType) -> Vec<u8> {
         (Value::Text(raw), ColumnType::Uuid) => Uuid::parse_str(raw)
             .map(|uuid| ObjectId::from_uuid(uuid).uuid().as_bytes().to_vec())
             .unwrap_or_else(|_| INVALID_UUID_TEXT_SENTINEL.to_vec()),
-        (Value::Text(raw), ColumnType::Enum { variants }) if col_type.fixed_size().is_some() => {
+        (
+            Value::Text(raw),
+            ColumnType::Enum { variants } | ColumnType::ScalarEnum { variants, .. },
+        ) if col_type.fixed_size().is_some() => {
             vec![encode_enum_variant_index(variants, raw).unwrap_or_else(|_| unreachable!())]
         }
         (Value::Row { id, values }, ColumnType::Row { columns: desc }) => {
@@ -1103,7 +1114,10 @@ fn encode_array_into(buf: &mut Vec<u8>, elements: &[Value], array_type: &ColumnT
 
 fn encode_value_with_type_into(buf: &mut Vec<u8>, value: &Value, col_type: &ColumnType) {
     match (value, col_type) {
-        (Value::Text(raw), ColumnType::Enum { variants }) if col_type.fixed_size().is_some() => {
+        (
+            Value::Text(raw),
+            ColumnType::Enum { variants } | ColumnType::ScalarEnum { variants, .. },
+        ) if col_type.fixed_size().is_some() => {
             buf.push(encode_enum_variant_index(variants, raw).unwrap_or_else(|_| unreachable!()));
         }
         (Value::Integer(n), _) => buf.extend_from_slice(&n.to_le_bytes()),

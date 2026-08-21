@@ -186,10 +186,17 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
 fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     let base = schema();
     let base_version = base.version_id();
-    let renamed_schema = JazzSchema::new([
-        TableSchema::new("tasks", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
-    ]);
+    let renamed_schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("notes")
+                    .column("body", PublicColumnType::Text),
+            ),
+    );
     let renamed = SchemaVersion::new(renamed_schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0x91), base.clone());
     let row_uuid = row(0x92);
@@ -341,8 +348,13 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     // A same-row payload from a different physical table must not satisfy the
     // request, even if it is packaged under the requested transaction.
     let mut cross_physical = version_bundles[0].clone();
+    let notes = renamed_schema
+        .tables
+        .iter()
+        .find(|table| table.name == "notes")
+        .expect("notes table");
     cross_physical.versions = vec![VersionRecord::from_cells(
-        &renamed_schema.tables[1],
+        notes,
         renamed.id,
         row_uuid,
         Vec::new(),
@@ -411,18 +423,23 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
 /// member merely because their table names, row UUIDs, and transactions agree.
 #[test]
 fn inline_known_state_witness_rejects_reused_logical_table_name() {
-    let original = JazzSchema::new([TableSchema::new(
-        "tasks",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]);
-    let without_tasks = JazzSchema::new([TableSchema::new(
-        "notes",
-        [ColumnSchema::new("body", ColumnType::String)],
-    )]);
-    let reintroduced = JazzSchema::new([
-        TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
-        TableSchema::new("tasks", [ColumnSchema::new("name", ColumnType::String)]),
-    ]);
+    let original = renamed_tasks_schema();
+    let without_tasks = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text),
+        ),
+    );
+    let reintroduced = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("notes")
+                    .column("body", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .column("name", PublicColumnType::Text),
+            ),
+    );
     let without_tasks_version = SchemaVersion::new(without_tasks.clone());
     let reintroduced_version = SchemaVersion::new(reintroduced.clone());
     let (_dir, mut receiver) = open_node_with_schema(node(0x96), original.clone());
@@ -535,4 +552,3 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         "an old same-named inline body does not cover the registered shape's reintroduced lineage"
     );
 }
-

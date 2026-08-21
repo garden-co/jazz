@@ -1,8 +1,5 @@
 <script lang="ts">
-	import {
-		createJazzClient,
-		JazzSvelteProvider,
-	} from 'jazz-tools/svelte';
+	import { JazzSvelteProvider } from 'jazz-tools/svelte';
 	import type { DbConfig } from 'jazz-tools';
 	import { generateAuthSecret } from 'jazz-tools';
 	import { Toaster } from 'svelte-sonner';
@@ -50,10 +47,9 @@
 	// #endregion context-setup-svelte
 
 	const config = $derived(defaultConfig(configOverrides));
-	const client = $derived(createJazzClient(config));
 </script>
 
-<JazzSvelteProvider {client}>
+<JazzSvelteProvider {config}>
 	{#snippet children({ db })}
 		<h1>Todos</h1>
 		<TodoList />

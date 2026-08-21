@@ -8,10 +8,7 @@ use std::{
 
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::{
-    ivm::{FrontierName, NodeId, ValueComparison},
-    records::RecordDescriptor,
-};
+use crate::ivm::{FrontierName, NodeId};
 
 use super::{IvmRuntimeError, RecordDeltas, record_deltas_digest};
 
@@ -110,11 +107,9 @@ pub(super) struct ArrangementKey {
     /// Context-independent inputs use the root scope and can be shared across
     /// unrelated subscriptions.
     pub(super) scope: ScopeId,
-    /// The graph fragment whose records are arranged.
+    /// The typed `Arrange` graph node. Its descriptor owns the input, fields,
+    /// record type, and comparison semantics.
     pub(super) input: NodeId,
-    pub(super) fields: Arc<[String]>,
-    pub(super) descriptor: RecordDescriptor,
-    pub(super) comparison: ValueComparison,
 }
 
 /// Database tick plus recursive sub-tick for scoped arrangement freshness.

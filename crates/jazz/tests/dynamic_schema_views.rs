@@ -1,65 +1,130 @@
+mod common;
+
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps, SeededRowIdSource};
 use jazz::groove::records::Value;
-use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, col, eq, gt, lit};
-use jazz::schema::{ColumnSchema, JazzSchema, MergeStrategy, Policy, TableSchema};
-use jazz::tools::OpenTransactionId;
+use jazz::query::{OrderDirection, col, gt, lit};
+use jazz::schema::JazzSchema;
+use jazz::tools::{
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, ObjectId, OpenTransactionId, PolicyExpr,
+    RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema, TableSchemaBuilder,
+    Value as PublicValue,
+};
+
+use common::{allow_all_policies, compile_schema};
 
 fn schema(default: &str) -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "items",
-        [ColumnSchema::new("label", ColumnType::String)
-            .with_default(Value::String(default.to_owned()))],
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column_with_default(
+                        "label",
+                        ColumnType::Text,
+                        PublicValue::Text(default.to_owned()),
+                    )
+                    .policies(allow_all_policies()),
+            )
+            .build(),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
 }
 
 fn schema_with_note(default: &str) -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("label", ColumnType::String)
-                .with_default(Value::String(default.to_owned())),
-            ColumnSchema::new("note", ColumnType::String)
-                .with_default(Value::String(String::new())),
-        ],
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column_with_default(
+                        "label",
+                        ColumnType::Text,
+                        PublicValue::Text(default.to_owned()),
+                    )
+                    .column_with_default("note", ColumnType::Text, PublicValue::Text(String::new()))
+                    .policies(allow_all_policies()),
+            )
+            .build(),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
 }
 
 fn owner_only_schema(default: &str) -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "items",
-        [ColumnSchema::new("label", ColumnType::String)
-            .with_default(Value::String(default.to_owned()))],
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column_with_default(
+                        "label",
+                        ColumnType::Text,
+                        PublicValue::Text(default.to_owned()),
+                    )
+                    .policies(
+                        jazz::tools::TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::False)
+                            .with_update(Some(PolicyExpr::False), PolicyExpr::False)
+                            .with_delete(PolicyExpr::False),
+                    ),
+            )
+            .build(),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::shape(
-        jazz::query::Query::from("items").filter(eq(lit(1_i64), lit(2_i64))),
-    ))])
 }
 
-fn metadata_schema(reference: Option<&str>, counter: bool, indexed: bool) -> JazzSchema {
-    let mut table = TableSchema::new(
-        "items",
-        [ColumnSchema::new("value", ColumnType::I64).with_default(Value::I64(0))],
+fn metadata_schema(
+    column: ColumnDescriptor,
+    indexed_columns: Option<Vec<&str>>,
+    include_reference_target: bool,
+) -> JazzSchema {
+    let mut source = Schema::from([(
+        TableName::new("items"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![column]),
+            indexed_columns: indexed_columns
+                .map(|columns| columns.into_iter().map(Into::into).collect()),
+            policies: allow_all_policies(),
+        },
+    )]);
+    if include_reference_target {
+        source.extend(
+            SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("other"))
+                .build(),
+        );
+    }
+    compile_schema(&source)
+}
+
+fn reference_metadata_schema(reference: bool) -> JazzSchema {
+    let column = ColumnDescriptor::new("value", ColumnType::Uuid)
+        .default(PublicValue::Uuid(ObjectId::from_uuid(uuid::Uuid::nil())));
+    let column = if reference {
+        column.references("other")
+    } else {
+        column
+    };
+    metadata_schema(column, None, true)
+}
+
+fn counter_metadata_schema(counter: bool) -> JazzSchema {
+    let column =
+        ColumnDescriptor::new("value", ColumnType::Integer).default(PublicValue::Integer(0));
+    let column = if counter {
+        column.merge_strategy(ColumnMergeStrategy::Counter)
+    } else {
+        column
+    };
+    metadata_schema(column, None, false)
+}
+
+fn indexed_metadata_schema(indexed: bool) -> JazzSchema {
+    metadata_schema(
+        ColumnDescriptor::new("value", ColumnType::BigInt).default(PublicValue::BigInt(0)),
+        indexed.then_some(vec!["value"]),
+        false,
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public());
-    if let Some(target) = reference {
-        table = table.with_reference("value", target);
-    }
-    if counter {
-        table = table.with_column_merge_strategy("value", MergeStrategy::Counter);
-    }
-    if indexed {
-        table = table.with_indexed_column("value");
-    }
-    JazzSchema::new([table])
+}
+
+fn empty_schema() -> JazzSchema {
+    compile_schema(&SchemaBuilder::new().build())
 }
 
 fn open_owner(schema: JazzSchema) -> Db<MemoryStorage> {
@@ -155,11 +220,19 @@ fn exact_schema_view_policy_cannot_inherit_public_structural_policy() {
 
 #[test]
 fn automatic_schema_view_admission_rejects_non_lens_metadata_changes() {
-    for (label, target) in [
-        ("references", metadata_schema(Some("other"), false, false)),
-        ("merge strategies", metadata_schema(None, true, false)),
+    for (label, base, target) in [
+        (
+            "references",
+            reference_metadata_schema(false),
+            reference_metadata_schema(true),
+        ),
+        (
+            "merge strategies",
+            counter_metadata_schema(false),
+            counter_metadata_schema(true),
+        ),
     ] {
-        let owner = open_owner(metadata_schema(None, false, false));
+        let owner = open_owner(base);
         let error = match owner.register_schema_view(target) {
             Ok(_) => panic!("{label} change unexpectedly auto-admitted"),
             Err(error) => error,
@@ -168,9 +241,9 @@ fn automatic_schema_view_admission_rejects_non_lens_metadata_changes() {
         assert!(error.message.contains("explicit lens"));
     }
 
-    let base = metadata_schema(None, false, false);
+    let base = indexed_metadata_schema(false);
     let owner = open_owner(base.clone());
-    let indexed = metadata_schema(None, false, true);
+    let indexed = indexed_metadata_schema(true);
     assert_eq!(base.version_id(), indexed.version_id());
     let error = match owner.register_schema_view(indexed) {
         Ok(_) => panic!("index change unexpectedly registered without physical admission"),
@@ -183,7 +256,7 @@ fn automatic_schema_view_admission_rejects_non_lens_metadata_changes() {
 /// registering the first typed view must still permit local-first staging.
 #[test]
 fn empty_owner_accepts_first_typed_schema_view() {
-    let owner = open_owner(JazzSchema::new([]));
+    let owner = open_owner(empty_schema());
     let batch = OpenTransactionId::new();
     owner.begin_mergeable(batch).unwrap();
     let view = owner.register_schema_view(schema("first")).unwrap();
@@ -204,7 +277,7 @@ fn empty_owner_accepts_first_typed_schema_view() {
 /// each pending write retains the schema version selected by its view.
 #[test]
 fn one_batch_accepts_writes_from_structurally_distinct_views() {
-    let owner = open_owner(JazzSchema::new([]));
+    let owner = open_owner(empty_schema());
     let batch = OpenTransactionId::new();
     owner.begin_mergeable(batch).unwrap();
     let first = owner.register_schema_view(schema("same")).unwrap();
@@ -233,7 +306,7 @@ fn one_batch_accepts_writes_from_structurally_distinct_views() {
 /// through the attached typed view, not through the owner's genesis schema.
 #[test]
 fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
-    let owner = open_owner(JazzSchema::new([]));
+    let owner = open_owner(empty_schema());
     let view = owner.register_schema_view(schema("initial")).unwrap();
     let row = RowUuid::from_bytes([6; 16]);
 
@@ -284,7 +357,7 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
 /// the direct write commits, while the already-open snapshot remains stable.
 #[test]
 fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
-    let owner = open_owner(JazzSchema::new([]));
+    let owner = open_owner(empty_schema());
     let batch = OpenTransactionId::new();
     owner.begin_exclusive(batch).unwrap();
     let view = owner.register_schema_view(schema("direct")).unwrap();
@@ -307,7 +380,7 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
 /// commit can resolve at Local durability; no remote authority is required.
 #[test]
 fn exclusive_view_commit_rejects_concurrent_local_row_change() {
-    let owner = open_owner(JazzSchema::new([]));
+    let owner = open_owner(empty_schema());
     let view = owner.register_schema_view(schema("base")).unwrap();
     let row = RowUuid::from_bytes([8; 16]);
     view.insert_with_id("items", row, Default::default())

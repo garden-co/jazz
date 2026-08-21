@@ -3,8 +3,7 @@ use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use groove::records::{EnumCase, EnumSchema, EnumValue, RecordDescriptor, ValueType};
-use groove::schema::{ColumnSchema, ColumnType};
+use groove::records::{EnumValue, RecordDescriptor, ValueType};
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use jazz_storage_rocksdb::RocksDbStorage;
 
@@ -22,12 +21,29 @@ use crate::protocol_limits::{
     MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
-    ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate,
-    RelationOrderBy, ShapeId, all_of, any_of, claim, col, contains, eq, gt, in_list, is_null, lit,
-    lte, ne, not, param,
+    ArraySubquery, BindingId, Include, JoinMode, OrderDirection, Predicate, RelationOrderBy,
+    ShapeId, all_of, any_of, claim, col, contains, eq, gt, in_list, is_null, lit, lte, ne, not,
+    param,
 };
-use crate::schema::{Policy, TableSchema, WritePolicies};
+use crate::schema::WritePolicies;
 use crate::time::{GlobalSeq, TxTime};
+use crate::tools::ObjectId as PublicObjectId;
+use crate::tools::public_schema::{
+    CmpOp as PublicCmpOp, ColumnDescriptor as PublicColumnDescriptor,
+    ColumnType as PublicColumnType, EnumCaseDescriptor as PublicEnumCaseDescriptor,
+    Operation as PublicOperation, PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue,
+    Schema as PublicSchema, SchemaBuilder as PublicSchemaBuilder,
+    TablePolicies as PublicTablePolicies, TableSchemaBuilder as PublicTableSchemaBuilder,
+    Value as PublicValue,
+};
+use crate::tools::public_schema::{
+    RelColumnRef as PublicRelColumnRef, RelExpr as PublicRelExpr,
+    RelJoinCondition as PublicRelJoinCondition, RelJoinKind as PublicRelJoinKind,
+    RelKeyRef as PublicRelKeyRef, RelPredicateCmpOp as PublicRelPredicateCmpOp,
+    RelPredicateExpr as PublicRelPredicateExpr, RelProjectColumn as PublicRelProjectColumn,
+    RelProjectExpr as PublicRelProjectExpr, RelRecursionBound as PublicRelRecursionBound,
+    RelValueRef as PublicRelValueRef, RowIdRef as PublicRelRowIdRef,
+};
 use crate::tx::TxId;
 use crate::wire::{
     FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD,

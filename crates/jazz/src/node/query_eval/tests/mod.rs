@@ -27,10 +27,24 @@ use crate::protocol::{
     ShapeAst, Subscribe, SyncMessage, TableLens,
 };
 use crate::query::{
-    Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, PolicyBranch, Query, claim, col,
-    contains, eq, gt, in_list, lit, lte, param, table,
+    Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, Query, claim, col, eq, gt, in_list,
+    lit, lte, param, table,
 };
-use crate::schema::{JazzSchema, Policy, TableSchema};
+use crate::schema::{JazzSchema, TableSchema};
+use crate::tools::public_schema::{
+    CmpOp as PublicCmpOp, PolicyValue as PublicPolicyValue, RelColumnRef as PublicRelColumnRef,
+    RelExpr as PublicRelExpr, RelJoinCondition as PublicRelJoinCondition,
+    RelJoinKind as PublicRelJoinKind, RelKeyRef as PublicRelKeyRef,
+    RelPredicateCmpOp as PublicRelPredicateCmpOp, RelPredicateExpr as PublicRelPredicateExpr,
+    RelProjectColumn as PublicRelProjectColumn, RelProjectExpr as PublicRelProjectExpr,
+    RelRecursionBound as PublicRelRecursionBound, RelValueRef as PublicRelValueRef,
+    RowIdRef as PublicRelRowIdRef,
+};
+use crate::tools::{
+    ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
+    SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
+    TableSchemaBuilder as PublicTableSchemaBuilder,
+};
 
 /// A coalesced authority re-entry for Alice's document must replace only
 /// that exact member; Bob's ordinary content update in the same batch must
@@ -222,50 +236,168 @@ fn lowered_current_app_rows_graph(
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "issues",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("state", ColumnType::String),
-                ColumnSchema::new("assignee", ColumnType::Uuid),
-                ColumnSchema::new("priority", ColumnType::U64),
-            ],
-        )
-        .with_reference("assignee", "users"),
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "issue_members",
-            [
-                ColumnSchema::new("issue", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("issue", "issues")
-        .with_reference("user", "users"),
-    ])
+    public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .fk_column("assignee", "users")
+                    .column("priority", PublicColumnType::Timestamp),
+            )
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("issue_members")
+                    .fk_column("issue", "issues")
+                    .fk_column("user", "users"),
+            ),
+    )
 }
 
 fn signed_metric_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "metrics",
-        [
-            ColumnSchema::new("bucket", ColumnType::String),
-            ColumnSchema::new("score", ColumnType::I64),
-        ],
-    )])
+    public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("metrics")
+                .column("bucket", PublicColumnType::Text)
+                .column("score", PublicColumnType::BigInt),
+        ),
+    )
 }
 
 fn owner_policy_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "issues",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("assignee", ColumnType::Uuid),
-            ColumnSchema::new("requiresAdmin", ColumnType::Bool),
-        ],
+    public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("issues")
+                .column("title", PublicColumnType::Text)
+                .column("assignee", PublicColumnType::Uuid)
+                .column("requiresAdmin", PublicColumnType::Boolean)
+                .policies(
+                    PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                        "assignee",
+                        vec!["claims".to_owned(), "sub".to_owned()],
+                    )),
+                ),
+        ),
     )
-    .with_read_policy(Query::from("issues").filter(eq(col("assignee"), claim("sub"))))])
+}
+
+fn public_query_eval_schema(builder: PublicSchemaBuilder) -> JazzSchema {
+    crate::schema::JazzSchema::new(&builder.build())
+        .expect("query-eval test public schema compiles")
+}
+
+fn public_claim_eq(column: &str, claim: &str) -> PublicPolicyExpr {
+    PublicPolicyExpr::eq_session(column, vec!["claims".to_owned(), claim.to_owned()])
+}
+
+fn public_outer_exists(
+    table: &str,
+    join_column: &str,
+    outer_column: &str,
+    additional_conditions: impl IntoIterator<Item = PublicPolicyExpr>,
+) -> PublicPolicyExpr {
+    let mut conditions = vec![PublicPolicyExpr::Cmp {
+        column: join_column.to_owned(),
+        op: PublicCmpOp::Eq,
+        value: PublicPolicyValue::SessionRef(vec![
+            "__jazz_outer_row".to_owned(),
+            outer_column.to_owned(),
+        ]),
+    }];
+    conditions.extend(additional_conditions);
+    PublicPolicyExpr::Exists {
+        table: table.to_owned(),
+        condition: Box::new(PublicPolicyExpr::And(conditions)),
+    }
+}
+
+fn public_seeded_recursive_access_policy(seed_claim: &str) -> PublicPolicyExpr {
+    let column = |scope: &str, column: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: column.to_owned(),
+    };
+    let eq =
+        |scope: &str, column_name: &str, right: PublicRelValueRef| PublicRelPredicateExpr::Cmp {
+            left: column(scope, column_name),
+            op: PublicRelPredicateCmpOp::Eq,
+            right,
+        };
+    let seed = PublicRelExpr::Project {
+        input: Box::new(PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::TableScan {
+                table: "teamSeeds".into(),
+                alias: Some("seed".to_owned()),
+            }),
+            predicate: eq(
+                "seed",
+                "user",
+                PublicRelValueRef::SessionRef(vec!["claims".to_owned(), seed_claim.to_owned()]),
+            ),
+        }),
+        columns: vec![PublicRelProjectColumn {
+            alias: "id".to_owned(),
+            expr: PublicRelProjectExpr::Column(column("seed", "team")),
+        }],
+    };
+    let step = PublicRelExpr::Project {
+        input: Box::new(PublicRelExpr::Join {
+            left: Box::new(PublicRelExpr::Filter {
+                input: Box::new(PublicRelExpr::TableScan {
+                    table: "teamMemberships".into(),
+                    alias: Some("edge".to_owned()),
+                }),
+                predicate: eq(
+                    "edge",
+                    "member",
+                    PublicRelValueRef::RowId(PublicRelRowIdRef::Frontier),
+                ),
+            }),
+            right: Box::new(PublicRelExpr::TableScan {
+                table: "teams".into(),
+                alias: Some("team".to_owned()),
+            }),
+            on: vec![PublicRelJoinCondition {
+                left: column("edge", "parent"),
+                right: column("team", "id"),
+            }],
+            join_kind: PublicRelJoinKind::Inner,
+        }),
+        columns: vec![PublicRelProjectColumn {
+            alias: "id".to_owned(),
+            expr: PublicRelProjectExpr::Column(column("team", "id")),
+        }],
+    };
+    let reachable = PublicRelExpr::Gather {
+        seed: Box::new(seed),
+        step: Box::new(step),
+        frontier_key: PublicRelKeyRef::RowId(PublicRelRowIdRef::Current),
+        bound: PublicRelRecursionBound::MaxDepth(8),
+        dedupe_key: vec![PublicRelKeyRef::RowId(PublicRelRowIdRef::Current)],
+    };
+    PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(reachable),
+                right: Box::new(PublicRelExpr::TableScan {
+                    table: "resourceAccess".into(),
+                    alias: Some("access".to_owned()),
+                }),
+                on: vec![PublicRelJoinCondition {
+                    left: PublicRelColumnRef {
+                        scope: None,
+                        column: "id".to_owned(),
+                    },
+                    right: column("access", "team"),
+                }],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: eq(
+                "access",
+                "resource",
+                PublicRelValueRef::RowId(PublicRelRowIdRef::Outer),
+            ),
+        },
+    }
 }
 
 fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
@@ -297,18 +429,19 @@ fn evolved_todos_version() -> (
     RowUuid,
     TxId,
 ) {
-    let base = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
-    let evolved_todos = TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
+    let base = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
     );
-    let evolved_payload = SchemaVersion::new(JazzSchema::new([evolved_todos.clone()]));
+    let evolved_schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
+        ),
+    );
+    let evolved_todos = evolved_schema.tables[0].clone();
+    let evolved_payload = SchemaVersion::new(evolved_schema);
     let (dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe1; 16]), base.clone());
     node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
@@ -386,37 +519,29 @@ fn evolved_todos_version() -> (
 /// and reset materialization must honor its branch discriminator, lens the
 /// old `users` table to `people`, and never substitute root history.
 fn recursive_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new("resources", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "teamSeeds",
-            [
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("kind", ColumnType::String),
-            ],
-        )
-        .with_reference("team", "teams"),
-        TableSchema::new(
-            "resourceAccess",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("resource", "resources")
-        .with_reference("team", "teams"),
-        TableSchema::new(
-            "teamTeamMemberships",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("onlyAdmins", ColumnType::Bool),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-    ])
+    public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("resources").column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teamSeeds")
+                    .fk_column("team", "teams")
+                    .column("kind", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resourceAccess")
+                    .fk_column("resource", "resources")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teamTeamMemberships")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .column("onlyAdmins", PublicColumnType::Boolean),
+            ),
+    )
 }
 
 fn open_recursive_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
@@ -424,54 +549,33 @@ fn open_recursive_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
 }
 
 fn missing_session_seed_policy_schema() -> JazzSchema {
-    let mut policy = Query::from("resources").reachable_via(
-        "resourceAccess",
-        "resource",
-        "team",
-        lit("seeded-by-session"),
-        "teamMemberships",
-        "member",
-        "parent",
-        [],
-    );
-    policy.reachable[0].seed = Some(crate::query::ReachableSeed {
-        table: "teamSeeds".to_owned(),
-        user_column: Some("user".to_owned()),
-        user_claim: Some("session_id".to_owned()),
-        team_column: "team".to_owned(),
-        filters: Vec::new(),
-    });
-    JazzSchema::new([
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new("resources", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(policy),
-        TableSchema::new(
-            "teamSeeds",
-            [
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("team", "teams"),
-        TableSchema::new(
-            "resourceAccess",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("resource", "resources")
-        .with_reference("team", "teams"),
-        TableSchema::new(
-            "teamMemberships",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-    ])
+    public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("name", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(public_seeded_recursive_access_policy("session_id")),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teamSeeds")
+                    .fk_column("team", "teams")
+                    .column("user", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resourceAccess")
+                    .fk_column("resource", "resources")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teamMemberships")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams"),
+            ),
+    )
 }
 
 fn row(idx: usize) -> RowUuid {
@@ -704,7 +808,7 @@ fn commit_global_member(
 /// separate discriminator assertion pins the internal relation terminal so
 /// a base root and overlay target cannot silently lose their correlation
 /// witness while still returning an empty array.
-fn recursive_shape(schema: &JazzSchema) -> ValidatedQuery {
+fn recursive_shape(schema: &RuntimeSchema) -> ValidatedQuery {
     Query::from("resources")
         .reachable_via(
             "resourceAccess",
@@ -716,6 +820,6 @@ fn recursive_shape(schema: &JazzSchema) -> ValidatedQuery {
             "parent",
             [eq(col("onlyAdmins"), lit(false))],
         )
-        .validate(schema)
+        .validate_runtime(schema)
         .unwrap()
 }

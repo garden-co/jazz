@@ -360,8 +360,8 @@ describe("History & Conflict Management", () => {
     const aliceConflict = dbAlice.update(todos, id, { title: aliceConflictTitle });
     const bobConflict = dbBob.update(todos, id, { title: bobConflictTitle });
     const [aliceConflictBatchId, bobConflictBatchId] = await Promise.all([
-      aliceConflict.batchId,
-      bobConflict.batchId,
+      aliceConflict.transactionId,
+      bobConflict.transactionId,
     ]);
     expect(aliceConflictBatchId).not.toBe(bobConflictBatchId);
     await Promise.all([aliceConflict.wait({ tier: "edge" }), bobConflict.wait({ tier: "edge" })]);

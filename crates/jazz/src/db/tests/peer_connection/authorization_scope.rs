@@ -2,10 +2,166 @@
 
 use super::*;
 
+fn schema_with_explicit_public_read() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    )
+}
+
+// Wire inspection is required because coverage-group keys and server-stamped
+// authorization generations are intentionally absent from the public API.
+// Final convergence is still asserted through the receiver's public read.
+fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    let stale = row(0x61);
+    server
+        .insert_with_id("todos", stale, cells("live", false, owner))
+        .unwrap();
+
+    let (client_transport, server_transport, client_sent, server_sent) = duplex_with_taps();
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos").filter(eq(col("title"), lit("live")));
+    let prepared = prepared(&client, &query);
+    let _first_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    upstream.borrow_mut().tick().unwrap();
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        vec![stale]
+    );
+
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(BTreeMap::from([(
+            "generation".to_owned(),
+            Value::U64(1),
+        )]));
+    subscriber.borrow_mut().tick().unwrap();
+    upstream.borrow_mut().tick().unwrap();
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(BTreeMap::from([(
+            "generation".to_owned(),
+            Value::U64(2),
+        )]));
+    subscriber.borrow_mut().tick().unwrap();
+
+    server
+        .update(
+            "todos",
+            stale,
+            BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        )
+        .unwrap();
+    let fresh = replacement_row.then(|| {
+        let fresh = row(0x62);
+        server
+            .insert_with_id("todos", fresh, cells("live", false, owner))
+            .unwrap();
+        fresh
+    });
+
+    // Fully drain the canonical maintained view before the duplicate attaches,
+    // but hold its first-usage delivery so the client still advertises stale A.
+    subscriber.borrow_mut().tick().unwrap();
+    let held_first_usage_updates = server_sent.borrow_mut().drain(..).collect::<Vec<_>>();
+
+    let second_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let second_subscription = second_attachment.subscription();
+    client.tick().unwrap();
+    let second_subscribe = client_sent
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            SyncMessage::Subscribe(subscribe) if subscribe.subscription == second_subscription => {
+                Some(subscribe.clone())
+            }
+            _ => None,
+        })
+        .expect("second usage site must send a real Subscribe");
+    let known_authorization_progress = match &second_subscribe.known_state {
+        Some(KnownStateDeclaration::FastWithAuthorizationProgress {
+            authorization_progress,
+            ..
+        }) => *authorization_progress,
+        other => panic!("expected authorization-aware fast cursor, got {other:?}"),
+    };
+    assert_ne!(
+        known_authorization_progress, 2,
+        "the second usage site must exercise a stale authorization cursor"
+    );
+    subscriber.borrow_mut().tick().unwrap();
+    server_sent.borrow_mut().extend(held_first_usage_updates);
+
+    let second_update = server_sent
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            SyncMessage::ViewUpdate { subscription, .. }
+                if *subscription == second_subscription =>
+            {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .expect("duplicate usage site must receive its own ViewUpdate");
+    let SyncMessage::ViewUpdate {
+        reset_result_set,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        ..
+    } = &second_update
+    else {
+        unreachable!();
+    };
+    assert!(*reset_result_set);
+    assert_eq!(peer_payload_inventory.authorization_progress, Some(2));
+    assert_eq!(result_member_adds.len(), usize::from(replacement_row));
+    assert!(result_member_removes.is_empty());
+    if let Some(fresh) = fresh {
+        assert_eq!(result_member_adds[0].as_real_row().unwrap().row_uuid, fresh);
+    }
+
+    upstream.borrow_mut().tick().unwrap();
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        fresh.into_iter().collect::<Vec<_>>(),
+        "authoritative duplicate fanout must replace stale client membership"
+    );
+}
+
+#[test]
+fn delayed_duplicate_usage_resets_stale_authorization_with_empty_canonical_set() {
+    assert_delayed_duplicate_usage_reset(false);
+}
+
+#[test]
+fn delayed_duplicate_usage_resets_stale_authorization_with_replacement_row() {
+    assert_delayed_duplicate_usage_reset(true);
+}
+
 #[test]
 fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
-    let mut schema = schema();
-    schema.tables[0].read_policy = Some(Query::from("todos"));
+    let schema = schema_with_explicit_public_read();
     let identity = AuthorId::from_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let shape = Query::from("todos").validate(&schema).unwrap();
@@ -101,8 +257,7 @@ fn legacy_authorization_scope_subscribe_refreshes_claims() {
 
 #[test]
 fn authorization_scope_rejects_unrelated_caller_intent() {
-    let mut schema = schema();
-    schema.tables[0].read_policy = Some(Query::from("todos"));
+    let schema = schema_with_explicit_public_read();
     let identity = AuthorId::from_bytes([0xc2; 16]);
     let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
     let shape = Query::from("todos").validate(&schema).unwrap();
@@ -147,22 +302,34 @@ fn authorization_scope_rejects_unrelated_caller_intent() {
 
 #[test]
 fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
-    let mut schema = schema();
-    schema.tables[0].write_policies = WritePolicies {
-        update_using: Some(Query::from("support_using")),
-        update_check: Some(Query::from("support_check")),
-        ..WritePolicies::default()
-    };
-    schema.tables.push(TableSchema::new(
-        "support_using",
-        Vec::<ColumnSchema>::new(),
-    ));
-    schema.tables.push(TableSchema::new(
-        "support_check",
-        Vec::<ColumnSchema>::new(),
-    ));
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column("owner", PublicColumnType::Uuid),
+            )
+            .table(PublicTableSchemaBuilder::new("support_using"))
+            .table(PublicTableSchemaBuilder::new("support_check")),
+    );
     let identity = AuthorId::from_bytes([0xc3; 16]);
     let server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    server
+        .node()
+        .borrow_mut()
+        .mutate_current_schema_for_testing(|compiled| {
+            compiled
+                .tables
+                .iter_mut()
+                .find(|table| table.name == "todos")
+                .expect("todos table")
+                .write_policies = WritePolicies {
+                update_using: Some(Query::from("support_using")),
+                update_check: Some(Query::from("support_check")),
+                ..WritePolicies::default()
+            };
+        });
     let action = PermissionAdviceAction::Update {
         table: "todos".to_owned(),
         row: row(1),
@@ -452,8 +619,7 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
 
 #[test]
 fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
-    let mut schema = schema();
-    schema.tables[0].read_policy = Some(Query::from("todos"));
+    let schema = schema_with_explicit_public_read();
     let identity = AuthorId::from_bytes([0xc4; 16]);
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();

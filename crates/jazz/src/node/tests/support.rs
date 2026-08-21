@@ -105,11 +105,99 @@ where
         "global-current tables must equal accepted argmax winners for {table}"
     );
 }
+
+fn compile_public_test_schema(source: &PublicSchema) -> JazzSchema {
+    crate::schema::JazzSchema::new(source)
+        .expect("node-test public schema compiles")
+}
+
+fn build_public_test_schema(builder: PublicSchemaBuilder) -> JazzSchema {
+    compile_public_test_schema(&builder.build())
+}
+
+fn empty_public_test_schema() -> JazzSchema {
+    build_public_test_schema(PublicSchemaBuilder::new())
+}
+
+fn build_public_test_schema_with_branch_policies(
+    mut builder: PublicSchemaBuilder,
+    branch_read_policy: Option<PublicPolicyExpr>,
+    branch_write_policy: Option<PublicPolicyExpr>,
+) -> JazzSchema {
+    if let Some(policy) = branch_read_policy {
+        builder = builder.branch_read_policy(policy);
+    }
+    if let Some(policy) = branch_write_policy {
+        builder = builder.branch_write_policy(policy);
+    }
+    build_public_test_schema(builder)
+}
+
+fn public_all_policies() -> PublicTablePolicies {
+    PublicTablePolicies::new()
+        .with_select(PublicPolicyExpr::True)
+        .with_insert(PublicPolicyExpr::True)
+        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+        .with_delete(PublicPolicyExpr::True)
+}
+
+fn public_write_policies(policy: PublicPolicyExpr) -> PublicTablePolicies {
+    PublicTablePolicies::new()
+        .with_insert(policy.clone())
+        .with_update(Some(policy.clone()), policy.clone())
+        .with_delete(policy)
+}
+
+fn public_outer_exists(
+    table: &str,
+    join_column: &str,
+    outer_column: &str,
+    additional_conditions: impl IntoIterator<Item = PublicPolicyExpr>,
+) -> PublicPolicyExpr {
+    let mut conditions = vec![PublicPolicyExpr::Cmp {
+        column: join_column.to_owned(),
+        op: PublicCmpOp::Eq,
+        value: PublicPolicyValue::SessionRef(vec![
+            "__jazz_outer_row".to_owned(),
+            outer_column.to_owned(),
+        ]),
+    }];
+    conditions.extend(additional_conditions);
+    PublicPolicyExpr::Exists {
+        table: table.to_owned(),
+        condition: Box::new(PublicPolicyExpr::And(conditions)),
+    }
+}
+
+fn public_claim_eq(column: &str, claim: &str) -> PublicPolicyExpr {
+    PublicPolicyExpr::eq_session(
+        column,
+        vec!["claims".to_owned(), claim.to_owned()],
+    )
+}
+
+fn public_literal_eq(column: &str, value: PublicValue) -> PublicPolicyExpr {
+    PublicPolicyExpr::eq_literal(column, value)
+}
+
+fn public_owner_policies(column: &str) -> PublicTablePolicies {
+    let owner = PublicPolicyExpr::eq_session(
+        column,
+        vec!["claims".to_owned(), "sub".to_owned()],
+    );
+    PublicTablePolicies::new()
+        .with_select(owner.clone())
+        .with_insert(owner.clone())
+        .with_update(Some(owner.clone()), owner.clone())
+        .with_delete(owner)
+}
+
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )])
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+        ),
+    )
 }
 fn global_winner_tx<S>(
     node: &mut NodeState<S>,
@@ -146,15 +234,45 @@ where
             .len()
 }
 fn owner_policy_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("owner", PublicColumnType::Uuid)
+            .policies(public_owner_policies("owner")),
+    ))
+}
+
+fn owner_read_schema(table: &str) -> JazzSchema {
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new(table)
+            .column("title", PublicColumnType::Text)
+            .column("owner", PublicColumnType::Uuid)
+            .policies(
+                PublicTablePolicies::new().with_select(public_claim_eq("owner", "sub")),
+            ),
+    ))
+}
+
+fn todos_member_read_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(PublicTablePolicies::new().with_select(public_outer_exists(
+                        "members",
+                        "owner",
+                        "id",
+                        [public_claim_eq("user", "sub")],
+                    ))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("owner", "todos")
+                    .column("user", PublicColumnType::Uuid),
+            ),
     )
-    .with_read_policy(Policy::owner_only("todos", "owner"))
-    .with_write_policy(Policy::owner_only("todos", "owner"))])
 }
 fn user(byte: u8) -> AuthorId {
     AuthorId::from_bytes([byte; 16])
@@ -318,28 +436,26 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
     }
 }
 fn s7_schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
-    let v1 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
-    let v2 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]);
-    let v3 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]);
-    let v4 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("search_name", ColumnType::String),
-        ],
-    )]);
+    let v1 = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+        ),
+    );
+    let v2 = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("body", PublicColumnType::Text),
+    ));
+    let v3 = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos").column("name", PublicColumnType::Text),
+        ),
+    );
+    let v4 = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("name", PublicColumnType::Text)
+            .column("search_name", PublicColumnType::Text),
+    ));
     let lenses = vec![
         MigrationLens::new(
             v1.version_id(),
@@ -387,13 +503,11 @@ fn s7_schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
     ([v1, v2, v3, v4], lenses)
 }
 fn catalogue_evolved_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )])
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("body", PublicColumnType::Text),
+    ))
 }
 
 #[derive(Clone)]
@@ -570,23 +684,94 @@ fn open_history_complete_node_with_schema(
     (temp_dir, node)
 }
 fn two_column_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )])
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("body", PublicColumnType::Text),
+    ))
+}
+
+fn todos_notes_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text),
+            ),
+    )
+}
+
+fn renamed_tasks_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks").column("name", PublicColumnType::Text),
+        ),
+    )
+}
+
+fn evolved_todos_name_body_schema() -> JazzSchema {
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("name", PublicColumnType::Text)
+            .column("body", PublicColumnType::Text),
+    ))
+}
+
+fn catalogue_v3_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .column("archived", PublicColumnType::Boolean),
+        ),
+    )
+}
+
+fn projected_reachable_schema(
+    edge_table: &str,
+    access_table: &str,
+    doc_column: &str,
+    edge_kind_column: &str,
+    access_kind_column: &str,
+) -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column(doc_column, PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new(edge_table)
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .column(edge_kind_column, PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new(access_table)
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams")
+                    .column(access_kind_column, PublicColumnType::Text),
+            ),
+    )
 }
 fn counter_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "counters",
-        [
-            ColumnSchema::new("count", ColumnType::U64),
-            ColumnSchema::new("title", ColumnType::String),
-        ],
-    )
-    .with_column_merge_strategy("count", MergeStrategy::Counter)])
+    let source = [(
+        PublicTableName::new("counters"),
+        PublicTableSchema::new(PublicRowDescriptor::new(vec![
+            PublicColumnDescriptor::new("count", PublicColumnType::Integer)
+                .merge_strategy(PublicColumnMergeStrategy::Counter),
+            PublicColumnDescriptor::new("title", PublicColumnType::Text),
+        ])),
+    )]
+    .into_iter()
+    .collect::<PublicSchema>();
+    compile_public_test_schema(&source)
 }
 fn commit_and_oracle(
     node: &mut NodeState<RocksDbStorage>,

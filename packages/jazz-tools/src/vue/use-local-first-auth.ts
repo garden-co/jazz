@@ -37,20 +37,20 @@ export interface UseLocalFirstAuth {
  * ```vue
  * <script setup lang="ts">
  * import { computed } from 'vue';
- * import { useLocalFirstAuth, createJazzClient, JazzProvider } from 'jazz-tools/vue';
+ * import { useLocalFirstAuth, JazzProvider } from 'jazz-tools/vue';
  * import TodoList from './TodoList.vue';
  *
  * const { secret, isLoading } = useLocalFirstAuth();
  *
- * const client = computed(() =>
+ * const config = computed(() =>
  *   !isLoading.value && secret.value
- *     ? createJazzClient({ appId: '<your-app-id>', secret: secret.value })
+ *     ? { appId: '<your-app-id>', secret: secret.value }
  *     : null,
  * );
  * </script>
  *
  * <template>
- *   <JazzProvider v-if="client" :client="client">
+ *   <JazzProvider v-if="config" :config="config">
  *     <TodoList />
  *   </JazzProvider>
  * </template>

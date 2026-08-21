@@ -85,6 +85,24 @@ describe("jazzPlugin", () => {
     expect(result.optimizeDeps?.exclude).toContain("some-dep");
   });
 
+  it("persists the generated app ID before Vite starts its server", async () => {
+    const schemaDir = await tempRoots.create("jazz-vite-bootstrap-env-test-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const plugin = jazzPlugin({ schemaDir });
+    const config = plugin.config as (
+      config: Record<string, unknown>,
+      env: { command: string; mode: string },
+    ) => unknown;
+
+    await config({ root: schemaDir }, { command: "serve", mode: "development" });
+
+    const envContent = await readFile(join(schemaDir, ".env"), "utf8");
+    expect(envContent).toMatch(
+      /^VITE_JAZZ_APP_ID=[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/m,
+    );
+  });
+
   // Without this alias, a Vite consumer installed via pnpm hits
   // "Failed to resolve import 'jazz-wasm'" at runtime — the bare specifier
   // in jazz-tools' chunk can't be found unless jazz-wasm is hoisted or a

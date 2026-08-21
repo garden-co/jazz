@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
 use jazz::schema::{JazzSchema, TableSchema};
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz_sim::fixture::{
     CellValueGen, CurrentRowsSync, EdgeSet, EntitySet, Fixture, FixtureBuilder, FixtureCommitApply,
@@ -213,23 +213,21 @@ fn topology(profile: PeerProfile) -> Topology {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(USERS, [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            ISSUES,
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("assignee", ColumnType::Uuid),
-            ],
-        ),
-        TableSchema::new(
-            ISSUE_MEMBERS,
-            [
-                ColumnSchema::new("issue", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-            ],
-        ),
-    ])
+    jazz_sim::public_schema_fixture::compile_public_schema(
+        SchemaBuilder::new()
+            .table(TableSchemaBuilder::new(USERS).column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new(ISSUES)
+                    .column("title", ColumnType::Text)
+                    .column("assignee", ColumnType::Uuid),
+            )
+            .table(
+                TableSchemaBuilder::new(ISSUE_MEMBERS)
+                    .column("issue", ColumnType::Uuid)
+                    .column("user", ColumnType::Uuid),
+            )
+            .build(),
+    )
 }
 
 fn assert_counts(

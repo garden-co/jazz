@@ -890,8 +890,8 @@ pub fn validate_jwt_with_static_key_at(
 pub fn resolve_verified_jwt_session(
     verified: VerifiedJwt,
 ) -> Result<Session, UnauthenticatedResponse> {
-    let subject = verified.subject.trim();
-    if subject.is_empty() {
+    let subject = verified.subject;
+    if !jazz::tools::identity::principal_is_nonempty(&subject) {
         return Err(UnauthenticatedResponse::invalid("Invalid JWT subject"));
     }
 
@@ -916,7 +916,7 @@ pub fn resolve_verified_jwt_session(
     };
 
     Ok(Session {
-        user_id: subject.to_string(),
+        user_id: subject,
         claims,
         auth_mode: jazz::tools::AuthMode::External,
     })
@@ -1164,6 +1164,32 @@ mod tests {
         let mut header = Header::new(Algorithm::HS256);
         header.kid = Some(kid.to_string());
         encode(&header, claims, &key).unwrap()
+    }
+
+    #[test]
+    fn external_jwt_subject_rejects_blank_but_preserves_exact_opaque_bytes() {
+        for subject in ["", " \t\n "] {
+            assert!(
+                resolve_verified_jwt_session(VerifiedJwt {
+                    subject: subject.to_owned(),
+                    issuer: None,
+                    claims: serde_json::json!({}),
+                    exp: None,
+                })
+                .is_err()
+            );
+        }
+
+        let subject = " WorkOS_User_01J8Y3K4M5N6P7Q8R9S0T1U2V3 ";
+        let session = resolve_verified_jwt_session(VerifiedJwt {
+            subject: subject.to_owned(),
+            issuer: None,
+            claims: serde_json::json!({}),
+            exp: None,
+        })
+        .unwrap();
+        assert_eq!(session.user_id, subject);
+        assert_eq!(session.claims["subject"], subject);
     }
 
     #[test]

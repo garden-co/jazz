@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
@@ -124,9 +125,9 @@ function normalizeServerOption(
     }, {});
 }
 
-async function readEnvAppId(envPath: string, envKey: string): Promise<string | null> {
+function readEnvAppId(envPath: string, envKey: string): string | null {
   try {
-    const content = await readFile(envPath, "utf8");
+    const content = readFileSync(envPath, "utf8");
     const match = content.match(new RegExp(`^${envKey}=(.+)$`, "m"));
     return match?.[1]?.trim() ?? null;
   } catch {
@@ -134,17 +135,17 @@ async function readEnvAppId(envPath: string, envKey: string): Promise<string | n
   }
 }
 
-async function persistAppIdToEnv(envPath: string, envKey: string, appId: string): Promise<void> {
+function persistAppIdToEnv(envPath: string, envKey: string, appId: string): void {
   let content = "";
   try {
-    content = await readFile(envPath, "utf8");
+    content = readFileSync(envPath, "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
   if (content.includes(`${envKey}=`)) return;
   const line = `${envKey}=${appId}\n`;
-  await mkdir(join(envPath, ".."), { recursive: true });
-  await writeFile(envPath, content ? content + line : line);
+  mkdirSync(join(envPath, ".."), { recursive: true });
+  writeFileSync(envPath, content ? content + line : line);
 }
 
 export interface InitializeOptions extends JazzPluginOptions {
@@ -168,6 +169,26 @@ export class ManagedDevRuntime {
   private cleanupHandler: (() => void) | null = null;
 
   constructor(private envKeys: ManagedRuntimeEnvKeys) {}
+
+  prepareEnv(options: InitializeOptions): string | null {
+    const serverOpt = options.server ?? true;
+    if (serverOpt === false || typeof serverOpt === "string") return null;
+
+    const explicitAdminSecret = options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET ?? null;
+    if (process.env[this.envKeys.serverUrl] && explicitAdminSecret) return null;
+
+    const schemaDir = options.schemaDir ?? process.cwd();
+    const envPath = join(options.envDir ?? schemaDir, ".env");
+    const serverConfig = typeof serverOpt === "object" ? serverOpt : {};
+    const appId =
+      process.env[this.envKeys.appId] ??
+      readEnvAppId(envPath, this.envKeys.appId) ??
+      serverConfig.appId ??
+      options.appId ??
+      randomUUID();
+    persistAppIdToEnv(envPath, this.envKeys.appId, appId);
+    return appId;
+  }
 
   private getManagedRuntimeConfig(options: JazzPluginOptions): ManagedRuntimeConfig {
     return {
@@ -255,6 +276,7 @@ export class ManagedDevRuntime {
       const telemetryCollectorUrl =
         process.env[this.envKeys.telemetryCollectorUrl] ??
         resolveTelemetryCollectorUrl(options.telemetry);
+      const preparedAppId = this.prepareEnv(options);
 
       try {
         if (serverOpt === false) {
@@ -306,10 +328,9 @@ export class ManagedDevRuntime {
             serverConfig.adminSecret ??
             options.adminSecret ??
             `jazz-dev-${randomUUID().slice(0, 8)}`;
-          const envAppId = await readEnvAppId(envPath, this.envKeys.appId);
           appId =
             process.env[this.envKeys.appId] ??
-            envAppId ??
+            preparedAppId ??
             serverConfig.appId ??
             options.appId ??
             randomUUID();
@@ -343,7 +364,7 @@ export class ManagedDevRuntime {
           });
         }
 
-        await persistAppIdToEnv(envPath, this.envKeys.appId, appId);
+        persistAppIdToEnv(envPath, this.envKeys.appId, appId);
         if (telemetryCollectorUrl) {
           console.log(`${LOG_PREFIX} telemetry collector: ${telemetryCollectorUrl}`);
         }

@@ -27,9 +27,8 @@ describe("createDb in-memory driver", () => {
       driver: { type: "memory" },
     });
 
-    // Opening the native client decodes the TypeScript-authored postcard
-    // schema. Retired ColumnSchema option slots must not remain in the encoder:
-    // one extra `None` shifts every following field and fails before this query.
+    // Opening the native client decodes and compiles the TypeScript-authored
+    // source schema before this query can run.
     await expect(db.all(app.notes)).resolves.toEqual([]);
   });
 

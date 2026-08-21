@@ -6,16 +6,19 @@ use crate::ids::{NodeUuid, RowUuid};
 use crate::node::MergeableCommit;
 use crate::protocol::{ProgramFactEntry, RealRowMemberEntry, SyncMessage, VersionRecord};
 use crate::query::{
-    Aggregate, ArraySubquery, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not,
-    param,
+    Aggregate, ArraySubquery, OrderDirection, Query, col, eq, gt, is_null, lit, ne, not, param,
 };
-use crate::schema::{JazzSchema, Policy, TableSchema, WritePolicies};
+use crate::schema::{JazzSchema, TableSchema};
 use crate::time::{GlobalSeq, TxTime};
 use crate::tools::OpenTransactionId;
+use crate::tools::{
+    ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
+    SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
+    TableSchemaBuilder as PublicTableSchemaBuilder,
+};
 use crate::tx::DeletionEvent;
 use crate::tx::{DurabilityTier, Fate, TxKind};
 use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
-use groove::schema::{ColumnSchema, ColumnType};
 use jazz_storage_rocksdb::RocksDbStorage;
 
 fn node(byte: u8) -> NodeUuid {
@@ -271,6 +274,64 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     );
 }
 
+#[test]
+fn duplicate_structured_query_authorization_mismatch_forces_reset() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x92));
+    for (index, title) in ["one", "two"].into_iter().enumerate() {
+        let tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(0x40 + index as u8), 1_000 + index as u64)
+                    .cells(title_cells(title)),
+            )
+            .unwrap();
+        accept_global(&mut core, tx, index as u64 + 1);
+    }
+    let shape = Query::from("todos")
+        .aggregate([Aggregate::count()])
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let canonical = subscription_key(&shape, &binding);
+    let target = SubscriptionKey {
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x47)),
+        ..canonical
+    };
+    let mut peer = PeerState::client_link(AuthorId::from_bytes([0x11; 16]));
+    peer.rehydrate_query_for_subscription_with_opts(
+        &mut core,
+        canonical,
+        &shape,
+        &binding,
+        RegisterShapeOptions::default(),
+    )
+    .unwrap();
+    peer.advance_authorization_progress();
+    peer.declare_known_state(
+        target,
+        Some(KnownStateDeclaration::FastWithAuthorizationProgress {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            position: GlobalSeq(2),
+            authorization_progress: 0,
+        }),
+    );
+
+    let update = peer
+        .rehydrate_query_for_subscription_from_maintained_subscription(
+            &mut core, canonical, target, &shape,
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate {
+        reset_result_set, ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+    assert!(
+        reset_result_set,
+        "structured duplicate usage must not resume across authorization generations"
+    );
+}
+
 fn output_member(root: RowUuid, joined: RowUuid, time: u64) -> ResultMemberEntry {
     RealRowMemberEntry::current_content((
         "todos".to_owned().into(),
@@ -297,7 +358,7 @@ fn incremental_delivery_removes_a_superseded_output_occurrence() {
     let replacement = output_member(root, row(0x32), 11);
 
     assert_eq!(
-        replacement_removals(&indexed_members(&[previous.clone()]), &[replacement]),
+        replacement_removals(&indexed_members(std::slice::from_ref(&previous)), &[replacement]),
         vec![previous],
         "a newer current-row version must replace the version already sent for the same output occurrence"
     );
@@ -347,8 +408,8 @@ fn incremental_delivery_keeps_terminal_children_with_their_root() {
 
     assert!(
         replacement_removals(
-            &indexed_members(&[root_member.clone()]),
-            &[child_member.clone()]
+            &indexed_members(std::slice::from_ref(&root_member)),
+            std::slice::from_ref(&child_member)
         )
         .is_empty()
     );
@@ -402,7 +463,7 @@ fn incremental_delivery_replaces_equal_tx_with_a_new_rendered_revision() {
     .into();
 
     assert_eq!(
-        replacement_removals(&indexed_members(&[previous.clone()]), &[replacement]),
+        replacement_removals(&indexed_members(std::slice::from_ref(&previous)), &[replacement]),
         vec![previous],
     );
 }
@@ -537,29 +598,42 @@ fn priority_cells(title: impl Into<String>, priority: u64) -> BTreeMap<String, V
     ])
 }
 
+fn public_session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {
+    PublicPolicyExpr::eq_session(
+        column,
+        path.iter().map(|segment| (*segment).to_owned()).collect(),
+    )
+}
+
+fn public_exists(table: &str, conditions: Vec<PublicPolicyExpr>) -> PublicPolicyExpr {
+    PublicPolicyExpr::Exists {
+        table: table.to_owned(),
+        condition: Box::new(PublicPolicyExpr::and(conditions)),
+    }
+}
+
 fn access_policy_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "docs",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("project", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::shape(Query::from("docs").join_via(
-            "docAccess",
-            "doc",
-            [eq(col("userID"), claim("sub"))],
-        ))),
-        TableSchema::new(
-            "docAccess",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("userID", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("doc", "docs"),
-    ])
+    let read = public_exists(
+        "docAccess",
+        vec![
+            public_session_eq("doc", &["__jazz_outer_row", "id"]),
+            public_session_eq("userID", &["claims", "sub"]),
+        ],
+    );
+    public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .column("project", PublicColumnType::Uuid)
+                    .policies(PublicTablePolicies::new().with_select(read)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("docAccess")
+                    .fk_column("doc", "docs")
+                    .column("userID", PublicColumnType::Uuid),
+            ),
+    )
 }
 
 fn doc_cells(title: impl Into<String>, project: RowUuid) -> BTreeMap<String, Value> {
@@ -577,94 +651,83 @@ fn access_cells(doc: RowUuid, user: AuthorId) -> BTreeMap<String, Value> {
 }
 
 fn aggregate_access_policy_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "docs",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("score", ColumnType::U64),
-            ],
-        )
-        .with_read_policy(Policy::shape(Query::from("docs").join_via(
-            "docAccess",
-            "doc",
-            [eq(col("userID"), claim("sub"))],
-        ))),
-        TableSchema::new(
-            "docAccess",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("userID", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("doc", "docs"),
-    ])
+    let read = public_exists(
+        "docAccess",
+        vec![
+            public_session_eq("doc", &["__jazz_outer_row", "id"]),
+            public_session_eq("userID", &["claims", "sub"]),
+        ],
+    );
+    public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .column("score", PublicColumnType::Timestamp)
+                    .policies(PublicTablePolicies::new().with_select(read)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("docAccess")
+                    .fk_column("doc", "docs")
+                    .column("userID", PublicColumnType::Uuid),
+            ),
+    )
 }
 
 fn session_claim_read_policy_schema() -> JazzSchema {
-    let policy = Query::from("resources").filter(eq(col("owner"), claim("session_id")));
-    JazzSchema::new([
-        TableSchema::new("resources", [ColumnSchema::new("owner", ColumnType::Uuid)])
-            .with_read_policy(policy.clone())
-            .with_write_policies(WritePolicies {
-                insert_check: Some(policy),
-                ..WritePolicies::default()
-            }),
-    ])
+    let policy = public_session_eq("owner", &["claims", "session_id"]);
+    public_peer_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("resources")
+            .column("owner", PublicColumnType::Uuid)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_select(policy.clone())
+                    .with_insert(policy),
+            ),
+    ))
 }
 
 fn session_seed_write_policy_schema() -> JazzSchema {
-    let mut policy = Query::from("resources").reachable_via(
+    let policy = crate::test_public_schema::seeded_recursive_access_policy(
         "resourceAccess",
         "resource",
         "team",
-        lit("seeded-by-session"),
+        &[],
+        &[],
+        "teams",
         "teamMemberships",
         "member",
         "parent",
-        [],
+        &[],
+        "teamSeeds",
+        "user",
+        &["claims", "session_id"],
+        "team",
     );
-    policy.reachable[0].seed = Some(crate::query::ReachableSeed {
-        table: "teamSeeds".to_owned(),
-        user_column: Some("user".to_owned()),
-        user_claim: Some("session_id".to_owned()),
-        team_column: "team".to_owned(),
-        filters: Vec::new(),
-    });
-    JazzSchema::new([
-        TableSchema::new("resources", [ColumnSchema::new("owner", ColumnType::Uuid)])
-            .with_write_policies(WritePolicies {
-                insert_check: Some(policy),
-                ..WritePolicies::default()
-            }),
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "teamSeeds",
-            [
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("team", "teams"),
-        TableSchema::new(
-            "resourceAccess",
-            [
-                ColumnSchema::new("resource", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("resource", "resources")
-        .with_reference("team", "teams"),
-        TableSchema::new(
-            "teamMemberships",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-    ])
+    public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(PublicTablePolicies::new().with_insert(policy)),
+            )
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("teamSeeds")
+                    .fk_column("team", "teams")
+                    .column("user", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resourceAccess")
+                    .fk_column("resource", "resources")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teamMemberships")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams"),
+            ),
+    )
 }
 
 fn resource_commit_unit(
@@ -791,30 +854,32 @@ fn scored_doc_cells(title: impl Into<String>, score: u64) -> BTreeMap<String, Va
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )])
+    public_peer_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+        ),
+    )
 }
 
 fn nullable_title_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("anchor", ColumnType::String),
-            ColumnSchema::new("maybe_title", ColumnType::String.nullable()),
-        ],
-    )])
+    public_peer_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("anchor", PublicColumnType::Text)
+            .nullable_column("maybe_title", PublicColumnType::Text),
+    ))
 }
 
 fn priority_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("priority", ColumnType::U64),
-        ],
-    )])
+    public_peer_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("priority", PublicColumnType::Timestamp),
+    ))
+}
+
+fn public_peer_schema(builder: PublicSchemaBuilder) -> JazzSchema {
+    crate::schema::JazzSchema::new(&builder.build())
+        .expect("peer-test public schema compiles")
 }
 
 fn open_node_with_schema(
@@ -1218,16 +1283,15 @@ fn maintained_subscription_view_default_rehydrate_installs_subscription() {
 
 #[test]
 fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
-    let schema = JazzSchema::new([
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner_id", ColumnType::Uuid),
-            ],
-        ),
-    ]);
+    let schema = public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("owner_id", PublicColumnType::Uuid),
+            ),
+    );
     let (_dir, mut core) = open_node_with_schema(node(0x93), schema.clone());
     let user = row(0xa1);
     let user_tx = core
@@ -3221,19 +3285,22 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
 
 #[test]
 fn maintained_subscription_view_tags_terminal_columns_by_table() {
-    let schema = JazzSchema::new([
-        TableSchema::new("warehouses", [ColumnSchema::new("ytd", ColumnType::F64)]),
-        TableSchema::new("stock", [ColumnSchema::new("ytd", ColumnType::U64)]),
-        TableSchema::new(
-            "orderLines",
-            [
-                ColumnSchema::new("warehouse", ColumnType::Uuid),
-                ColumnSchema::new("stock", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("warehouse", "warehouses")
-        .with_reference("stock", "stock"),
-    ]);
+    let schema = public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("warehouses")
+                    .column("ytd", PublicColumnType::Double),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("stock")
+                    .column("ytd", PublicColumnType::Timestamp),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("orderLines")
+                    .fk_column("warehouse", "warehouses")
+                    .fk_column("stock", "stock"),
+            ),
+    );
     let (_dir, mut core) = open_node_with_schema(node(0x9a), schema);
     let warehouse = row(0x80);
     let stock = row(0x81);
@@ -4185,11 +4252,14 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
 
 #[test]
 fn incremental_query_result_set_rebuilds_stale_closure_rows() {
-    let schema = JazzSchema::new([
-        TableSchema::new("stock", [ColumnSchema::new("quantity", ColumnType::U64)]),
-        TableSchema::new("orderLines", [ColumnSchema::new("stock", ColumnType::Uuid)])
-            .with_reference("stock", "stock"),
-    ]);
+    let schema = public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("stock")
+                    .column("quantity", PublicColumnType::Timestamp),
+            )
+            .table(PublicTableSchemaBuilder::new("orderLines").fk_column("stock", "stock")),
+    );
     let (_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let stock_row = row(1);
     let first_line_row = row(2);

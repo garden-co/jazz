@@ -290,6 +290,77 @@ fn make_env_filter() -> tracing_subscriber::EnvFilter {
         .add_directive("tower_http=debug".parse().unwrap())
 }
 
+#[cfg(feature = "otel")]
+static OTEL_TRACER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
+    std::sync::OnceLock::new();
+#[cfg(feature = "otel")]
+static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> =
+    std::sync::OnceLock::new();
+#[cfg(feature = "otel")]
+static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
+    std::sync::OnceLock::new();
+
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
+    #[cfg(feature = "otel")]
+    {
+        if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+            let tracer_provider = otel::init_tracer_provider();
+            let otel_trace_layer = otel::layer(&tracer_provider);
+            let _ = OTEL_TRACER_PROVIDER.set(tracer_provider);
+
+            let logger_provider = otel::init_logger_provider();
+            let otel_log_layer = otel::log_bridge::<tracing_subscriber::Registry>(&logger_provider);
+            // Route Rust panics through the OTLP log pipeline (with a flush)
+            // before the process dies; see otel::install_panic_hook.
+            otel::install_panic_hook(logger_provider.clone());
+            let _ = OTEL_LOGGER_PROVIDER.set(logger_provider);
+
+            let meter_provider = otel::init_meter_provider();
+            opentelemetry::global::set_meter_provider(meter_provider.clone());
+            let _ = OTEL_METER_PROVIDER.set(meter_provider);
+
+            tracing_subscriber::registry()
+                .with(make_env_filter())
+                .with(fmt_layer)
+                .with(otel_trace_layer)
+                .with(otel_log_layer)
+                .init();
+            return;
+        }
+    }
+
+    tracing_subscriber::registry()
+        .with(make_env_filter())
+        .with(fmt_layer)
+        .init();
+}
+
+fn shutdown_tracing() {
+    #[cfg(feature = "otel")]
+    {
+        if let Some(provider) = OTEL_TRACER_PROVIDER.get()
+            && let Err(e) = provider.shutdown()
+        {
+            eprintln!("OTel tracer shutdown error: {e}");
+        }
+        if let Some(provider) = OTEL_LOGGER_PROVIDER.get()
+            && let Err(e) = provider.shutdown()
+        {
+            eprintln!("OTel logger shutdown error: {e}");
+        }
+        if let Some(provider) = OTEL_METER_PROVIDER.get()
+            && let Err(e) = provider.shutdown()
+        {
+            eprintln!("OTel meter shutdown error: {e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,76 +598,5 @@ mod tests {
     fn production_requires_explicit_local_first_opt_in() {
         assert!(!resolve_dev_default_flag(NodeEnvMode::Production, false));
         assert!(resolve_dev_default_flag(NodeEnvMode::Production, true));
-    }
-}
-
-#[cfg(feature = "otel")]
-static OTEL_TRACER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
-    std::sync::OnceLock::new();
-#[cfg(feature = "otel")]
-static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> =
-    std::sync::OnceLock::new();
-#[cfg(feature = "otel")]
-static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
-    std::sync::OnceLock::new();
-
-fn init_tracing() {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    let fmt_layer = tracing_subscriber::fmt::layer();
-
-    #[cfg(feature = "otel")]
-    {
-        if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
-            let tracer_provider = otel::init_tracer_provider();
-            let otel_trace_layer = otel::layer(&tracer_provider);
-            let _ = OTEL_TRACER_PROVIDER.set(tracer_provider);
-
-            let logger_provider = otel::init_logger_provider();
-            let otel_log_layer = otel::log_bridge::<tracing_subscriber::Registry>(&logger_provider);
-            // Route Rust panics through the OTLP log pipeline (with a flush)
-            // before the process dies; see otel::install_panic_hook.
-            otel::install_panic_hook(logger_provider.clone());
-            let _ = OTEL_LOGGER_PROVIDER.set(logger_provider);
-
-            let meter_provider = otel::init_meter_provider();
-            opentelemetry::global::set_meter_provider(meter_provider.clone());
-            let _ = OTEL_METER_PROVIDER.set(meter_provider);
-
-            tracing_subscriber::registry()
-                .with(make_env_filter())
-                .with(fmt_layer)
-                .with(otel_trace_layer)
-                .with(otel_log_layer)
-                .init();
-            return;
-        }
-    }
-
-    tracing_subscriber::registry()
-        .with(make_env_filter())
-        .with(fmt_layer)
-        .init();
-}
-
-fn shutdown_tracing() {
-    #[cfg(feature = "otel")]
-    {
-        if let Some(provider) = OTEL_TRACER_PROVIDER.get() {
-            if let Err(e) = provider.shutdown() {
-                eprintln!("OTel tracer shutdown error: {e}");
-            }
-        }
-        if let Some(provider) = OTEL_LOGGER_PROVIDER.get() {
-            if let Err(e) = provider.shutdown() {
-                eprintln!("OTel logger shutdown error: {e}");
-            }
-        }
-        if let Some(provider) = OTEL_METER_PROVIDER.get() {
-            if let Err(e) = provider.shutdown() {
-                eprintln!("OTel meter shutdown error: {e}");
-            }
-        }
     }
 }

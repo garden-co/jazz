@@ -133,7 +133,7 @@ fn canonical_policy_branch_key(branch: &PolicyBranch) -> Vec<u8> {
 
 fn canonical_policy_branch_key_for_schema(
     branch: &PolicyBranch,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
 ) -> Result<Vec<u8>, QueryError> {
     let mut bytes = Vec::new();
     put_len(&mut bytes, branch.filters.len());
@@ -231,7 +231,7 @@ fn canonical_reachable_key(reachable: &ReachableVia) -> Vec<u8> {
 
 fn canonical_reachable_key_for_schema(
     reachable: &ReachableVia,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
 ) -> Result<Vec<u8>, QueryError> {
     let seed_value_type = reachable
         .seed
@@ -486,7 +486,7 @@ fn canonical_operand_key(operand: &Operand) -> Vec<u8> {
 
 fn canonical_query_bytes_for_schema(
     query: &Query,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
 ) -> Result<Vec<u8>, QueryError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"jazz-query-v0");

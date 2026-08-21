@@ -14,7 +14,6 @@ use jazz::db::{
     SubscriptionStream, Transport,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
@@ -22,8 +21,12 @@ use jazz::protocol::SyncMessage;
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::GlobalSeq;
+use jazz::tools::public_schema::{
+    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
+use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, mem, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
@@ -1071,17 +1074,16 @@ fn read_doc(node: &mut NodeState<RocksDbStorage>, stream: usize) -> Vec<u8> {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(STREAMS, [col("name", ColumnType::String)]),
-        TableSchema::new(
-            STREAM_DOCS,
-            [
-                col("stream", ColumnType::Uuid),
-                col("content", ColumnType::Bytes),
-            ],
-        )
-        .with_reference("stream", STREAMS),
-    ])
+    compile_public_schema(
+        SchemaBuilder::new()
+            .table(PublicTableSchema::builder(STREAMS).column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchema::builder(STREAM_DOCS)
+                    .fk_column("stream", STREAMS)
+                    .column("content", PublicColumnType::Bytea),
+            )
+            .build(),
+    )
 }
 
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<RocksDbStorage>) {
@@ -1176,10 +1178,6 @@ fn result_row_count(update: &SyncMessage) -> usize {
 
 fn cells<const N: usize>(items: [(&str, Value); N]) -> BTreeMap<String, Value> {
     items.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
-}
-
-fn col(name: &str, ty: ColumnType) -> ColumnSchema {
-    ColumnSchema::new(name, ty)
 }
 
 fn table_schema<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {

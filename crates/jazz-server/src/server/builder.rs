@@ -326,7 +326,7 @@ impl ServerBuilder {
             return Ok(None);
         };
         let storage_config = storage_config?;
-        let schema = jazz::tools::public_schema_convert::convert_public_schema(&schema)
+        let schema = jazz::schema::JazzSchema::new(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         Ok(Some(
             crate::server::ServerRuntimeHandle::start_with_storage_config(
@@ -774,16 +774,17 @@ mod tests {
             .first()
             .expect("authority has genesis")
             .clone();
-        let evolved = jazz::protocol::SchemaVersion::new(jazz::schema::JazzSchema::new([
-            jazz::schema::TableSchema::new(
-                "notes",
-                [
-                    groove::schema::ColumnSchema::new("id", groove::schema::ColumnType::Uuid),
-                    groove::schema::ColumnSchema::new("body", groove::schema::ColumnType::String),
-                    groove::schema::ColumnSchema::new("extra", groove::schema::ColumnType::String),
-                ],
-            ),
-        ]));
+        let evolved_source = jazz::tools::public_schema::SchemaBuilder::new()
+            .table(
+                jazz::tools::public_schema::TableSchema::builder("notes")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
+                    .column("body", jazz::tools::public_schema::ColumnType::Text)
+                    .column("extra", jazz::tools::public_schema::ColumnType::Text),
+            )
+            .build();
+        let evolved_runtime =
+            jazz::schema::JazzSchema::new(&evolved_source).expect("evolved public schema compiles");
+        let evolved = jazz::protocol::SchemaVersion::new(evolved_runtime);
         let mut evolved_snapshot = snapshot;
         evolved_snapshot.schemas.push(evolved.clone());
         evolved_snapshot.lineages.push((
@@ -954,13 +955,22 @@ mod tests {
     async fn dynamic_builder_starts_core_server_shell_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("dynamic-server-shell-rehydrate");
+        let branch_read_policy = jazz::tools::public_schema::PolicyExpr::eq_session(
+            "owner_id",
+            vec!["user_id".to_owned()],
+        );
+        let branch_write_policy = jazz::tools::public_schema::PolicyExpr::True;
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
                 jazz::tools::public_schema::TableSchema::builder("todos")
                     .column("id", jazz::tools::public_schema::ColumnType::Uuid)
-                    .column("title", jazz::tools::public_schema::ColumnType::Text),
+                    .column("title", jazz::tools::public_schema::ColumnType::Text)
+                    .column("owner_id", jazz::tools::public_schema::ColumnType::Uuid),
             )
+            .branch_read_policy(branch_read_policy.clone())
+            .branch_write_policy(branch_write_policy.clone())
             .build();
+        let schema_hash = jazz::tools::public_schema::SchemaHash::compute(&schema);
 
         {
             let built = ServerBuilder::new(app_id)
@@ -995,6 +1005,14 @@ mod tests {
             .expect("build dynamic server from rehydrated catalogue");
 
         assert!(rebuilt.state.runtime().is_some());
+        let restored = rebuilt
+            .state
+            .catalogue
+            .known_schema(&rebuilt.state.catalogue_store, &schema_hash)
+            .expect("read rehydrated schema")
+            .expect("rehydrated schema is present");
+        assert_eq!(restored.branch_read_policy(), Some(&branch_read_policy));
+        assert_eq!(restored.branch_write_policy(), Some(&branch_write_policy));
     }
 
     #[tokio::test]

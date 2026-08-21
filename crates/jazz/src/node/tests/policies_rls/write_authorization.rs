@@ -1,6 +1,6 @@
 // Write attribution, ownership, joins, rejection, and cleanup.
 
-use crate::query::{Include, JoinMode, OrderDirection, PolicyBranch, Predicate, any_of};
+use crate::query::{Include, JoinMode, OrderDirection};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -235,17 +235,15 @@ fn write_policy_rejection_cleans_up_client() {
 
 #[test]
 fn session_owner_string_uuid_write_policy_accepts_matching_author() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner_id", ColumnType::String),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::shape(
-        Query::from("todos").filter(eq(col("owner_id"), claim("user_id"))),
-    ))]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("owner_id", PublicColumnType::Text)
+            .policies(
+                public_write_policies(public_claim_eq("owner_id", "user_id"))
+                    .with_select(PublicPolicyExpr::True),
+            ),
+    ));
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
@@ -392,25 +390,23 @@ fn owner_only_read_narrows_view_updates_per_peer_identity() {
 
 #[test]
 fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "announcements",
-            [ColumnSchema::new("title", ColumnType::String)],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "messages",
-            [
-                ColumnSchema::new("body", ColumnType::String),
-                ColumnSchema::new("owner_id", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
-        ))
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("announcements")
+                    .column("title", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("messages")
+                    .column("body", PublicColumnType::Text)
+                    .column("owner_id", PublicColumnType::Text)
+                    .policies(
+                        public_all_policies()
+                            .with_select(public_claim_eq("owner_id", "user_id")),
+                    ),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_bob_dir, mut bob_node) = open_node_with_schema(node(4), schema.clone());
     let alice = user(0xa1);
@@ -570,24 +566,27 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let uninvited = user(0xb2);
     let canvas_row = row(8);
     let invite_row = row(9);
-    let canvas_policy = Policy::shape(Query::from("canvases").join_via(
+    let canvas_policy = public_outer_exists(
         "canvasInvites",
         "canvas",
-        [eq(col("userID"), claim("sub"))],
-    ));
-    let schema = JazzSchema::new([
-        TableSchema::new("canvases", [ColumnSchema::new("title", ColumnType::String)])
-            .with_read_policy(canvas_policy.clone())
-            .with_write_policy(canvas_policy),
-        TableSchema::new(
-            "canvasInvites",
-            [
-                ColumnSchema::new("canvas", ColumnType::Uuid),
-                ColumnSchema::new("userID", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("canvas", "canvases"),
-    ]);
+        "id",
+        [public_claim_eq("userID", "sub")],
+    );
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("canvases")
+                    .column("title", PublicColumnType::Text)
+                    .policies(
+                        public_write_policies(canvas_policy.clone()).with_select(canvas_policy),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("canvasInvites")
+                    .fk_column("canvas", "canvases")
+                    .column("userID", PublicColumnType::Uuid),
+            ),
+    );
     let (_uninvited_writer_dir, mut uninvited_writer) =
         open_node_with_schema(node(1), schema.clone());
     let (_invited_writer_dir, mut invited_writer) = open_node_with_schema(node(2), schema.clone());
@@ -673,7 +672,13 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
             .unwrap()
             .into_iter()
             .map(|row| {
-                let table = &invited_reader.catalogue.schema.tables[0];
+                let table = invited_reader
+                    .catalogue
+                    .schema
+                    .tables
+                    .iter()
+                    .find(|table| table.name == "canvases")
+                    .expect("canvases table");
                 (
                     row.row_uuid(),
                     BTreeMap::from([(
@@ -747,33 +752,29 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     let private_canvas = row(9);
     let blocked_canvas = row(11);
     let invite_row = row(10);
-    let policy = Policy::shape(
-        Query::from("canvases")
-            .filter(eq(col("isPublic"), lit(true)))
-            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("canvases").join_via(
-                "canvasInvites",
-                "canvas",
-                [eq(col("userID"), claim("sub"))],
-            ))),
-    );
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "canvases",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("isPublic", ColumnType::Bool),
-            ],
-        )
-        .with_write_policy(policy),
-        TableSchema::new(
+    let policy = PublicPolicyExpr::Or(vec![
+        public_literal_eq("isPublic", PublicValue::Boolean(true)),
+        public_outer_exists(
             "canvasInvites",
-            [
-                ColumnSchema::new("canvas", ColumnType::Uuid),
-                ColumnSchema::new("userID", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("canvas", "canvases"),
+            "canvas",
+            "id",
+            [public_claim_eq("userID", "sub")],
+        ),
     ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("canvases")
+                    .column("title", PublicColumnType::Text)
+                    .column("isPublic", PublicColumnType::Boolean)
+                    .policies(public_write_policies(policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("canvasInvites")
+                    .fk_column("canvas", "canvases")
+                    .column("userID", PublicColumnType::Uuid),
+            ),
+    );
     let (_invited_dir, mut invited_writer) = open_node_with_schema(node(1), schema.clone());
     let (_uninvited_dir, mut uninvited_writer) = open_node_with_schema(node(2), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
@@ -867,36 +868,31 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
     let public_chat = row(0x18);
     let private_chat = row(0x19);
     let membership = row(0x1a);
-    let policy = Policy::shape(
-        Query::from("chats")
-            .filter(eq(col("isPublic"), lit(true)))
-            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").join_via(
-                "chatMembers",
-                "chatId",
-                [eq(col("userId"), claim("user_id"))],
-            ))),
-    );
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("isPublic", ColumnType::Bool),
-                ColumnSchema::new("createdBy", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(policy)
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
+    let policy = PublicPolicyExpr::Or(vec![
+        public_literal_eq("isPublic", PublicValue::Boolean(true)),
+        public_outer_exists(
             "chatMembers",
-            [
-                ColumnSchema::new("chatId", ColumnType::Uuid),
-                ColumnSchema::new("userId", ColumnType::String),
-            ],
-        )
-        .with_reference("chatId", "chats")
-        .with_write_policy(Policy::public()),
+            "chatId",
+            "id",
+            [public_claim_eq("userId", "user_id")],
+        ),
     ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("chats")
+                    .column("title", PublicColumnType::Text)
+                    .column("isPublic", PublicColumnType::Boolean)
+                    .column("createdBy", PublicColumnType::Uuid)
+                    .policies(public_all_policies().with_select(policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("chatMembers")
+                    .fk_column("chatId", "chats")
+                    .column("userId", PublicColumnType::Text)
+                    .policies(public_write_policies(PublicPolicyExpr::True)),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_member_dir, _member_reader) = open_node_with_schema(node(3), schema.clone());
     let (_other_dir, _other_reader) = open_node_with_schema(node(4), schema);
@@ -947,4 +943,3 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
         BTreeSet::from([public_chat])
     );
 }
-

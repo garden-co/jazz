@@ -1,5 +1,41 @@
 // Identity-scoped reads, peer delivery, Edge rehydration, and deletion visibility.
 
+fn private_message_membership_schema() -> JazzSchema {
+    let member_exists = |outer_column: &str| {
+        public_outer_exists(
+            "chatMembers",
+            "chatId",
+            outer_column,
+            [public_claim_eq("userId", "user_id")],
+        )
+    };
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("chatMembers")
+                    .fk_column("chatId", "chats")
+                    .column("userId", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_claim_eq("userId", "user_id"),
+                        member_exists("chatId"),
+                    ]))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("chats")
+                    .column("isPublic", PublicColumnType::Boolean)
+                    .column("createdBy", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("messages")
+                    .fk_column("chatId", "chats")
+                    .column("text", PublicColumnType::Text)
+                    .column("createdAt", PublicColumnType::Timestamp)
+                    .policies(public_all_policies().with_select(member_exists("chatId"))),
+            ),
+    )
+}
+
 #[test]
 fn message_read_policy_allows_public_chat_or_membership_join() {
     let member = user(0xa1);
@@ -9,68 +45,58 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
     let public_message = row(0x28);
     let private_message = row(0x29);
     let membership = row(0x1a);
-    let policy = Policy::shape(
-        Query::from("messages")
-            .join_via_row_id("chats", "chat_id", [eq(col("visibility"), lit("public"))])
-            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_column(
-                "chat_members",
-                "chat_id",
-                "chat_id",
-                [eq(col("user_id"), claim("user_id"))],
-            ))),
-    );
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("visibility", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("chats")
-                .filter(eq(col("visibility"), lit("public")))
-                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").join_via_column(
-                    "chat_members",
-                    "chat_id",
-                    "id",
-                    [eq(col("user_id"), claim("user_id"))],
-                ))),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
+    let member_exists = |outer_column: &str| {
+        public_outer_exists(
             "chat_members",
-            [
-                ColumnSchema::new("chat_id", ColumnType::Uuid),
-                ColumnSchema::new("user_id", ColumnType::String),
-            ],
+            "chat_id",
+            outer_column,
+            [public_claim_eq("user_id", "user_id")],
         )
-        .with_reference("chat_id", "chats")
-        .with_read_policy(Policy::shape(
-            Query::from("chat_members")
-                .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chat_members").filter(eq(col("user_id"), claim("user_id"))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chat_members").join_via_column(
-                    "chat_members",
-                    "chat_id",
-                    "chat_id",
-                    [eq(col("user_id"), claim("user_id"))],
-                ))),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "messages",
-            [
-                ColumnSchema::new("chat_id", ColumnType::Uuid),
-                ColumnSchema::new("text", ColumnType::String),
-            ],
+    };
+    let public_chat_exists = |outer_column: &str| {
+        public_outer_exists(
+            "chats",
+            "id",
+            outer_column,
+            [public_literal_eq(
+                "visibility",
+                PublicValue::Text("public".to_owned()),
+            )],
         )
-        .with_reference("chat_id", "chats")
-        .with_read_policy(policy)
-        .with_write_policy(Policy::public()),
-    ]);
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("chats")
+                    .column("title", PublicColumnType::Text)
+                    .column("visibility", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_literal_eq(
+                            "visibility",
+                            PublicValue::Text("public".to_owned()),
+                        ),
+                        member_exists("id"),
+                    ]))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("chat_members")
+                    .fk_column("chat_id", "chats")
+                    .column("user_id", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_claim_eq("user_id", "user_id"),
+                        member_exists("chat_id"),
+                    ]))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("messages")
+                    .fk_column("chat_id", "chats")
+                    .column("text", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_chat_exists("chat_id"),
+                        member_exists("chat_id"),
+                    ]))),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
     accept_global(
@@ -172,88 +198,60 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
     let bob_message = row(0x29);
     let alice_membership = row(0x1a);
     let bob_membership = row(0x1b);
-    let policy = Policy::shape(
-        Query::from("messages")
-            .filter(Predicate::Any(Vec::new()))
-            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_row_id(
-                "chats",
-                "chatId",
-                [eq(col("isPublic"), lit(true))],
-            )))
-            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_column(
-                "chatMembers",
-                "chatId",
-                "chatId",
-                [eq(col("userId"), claim("user_id"))],
-            ))),
-    );
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("isPublic", ColumnType::Bool),
-                ColumnSchema::new("createdBy", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("chats")
-                .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").filter(eq(col("isPublic"), lit(true))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").join_via_column(
-                    "chatMembers",
-                    "chatId",
-                    "id",
-                    [eq(col("userId"), claim("user_id"))],
-                ))),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
+    let member_exists = |outer_column: &str| {
+        public_outer_exists(
             "chatMembers",
-            [
-                ColumnSchema::new("chatId", ColumnType::Uuid),
-                ColumnSchema::new("userId", ColumnType::String),
-            ],
+            "chatId",
+            outer_column,
+            [public_claim_eq("userId", "user_id")],
         )
-        .with_reference("chatId", "chats")
-        .with_read_policy(Policy::shape(
-            Query::from("chatMembers")
-                .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chatMembers").filter(eq(col("userId"), claim("user_id"))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chatMembers").join_via_column(
-                    "chatMembers",
-                    "chatId",
-                    "chatId",
-                    [eq(col("userId"), claim("user_id"))],
-                ))),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "messages",
-            [
-                ColumnSchema::new("chatId", ColumnType::Uuid),
-                ColumnSchema::new("text", ColumnType::String),
-                ColumnSchema::new("senderId", ColumnType::Uuid),
-                ColumnSchema::new("createdAt", ColumnType::U64),
-            ],
+    };
+    let public_chat_exists = |outer_column: &str| {
+        public_outer_exists(
+            "chats",
+            "id",
+            outer_column,
+            [public_literal_eq("isPublic", PublicValue::Boolean(true))],
         )
-        .with_reference("chatId", "chats")
-        .with_reference("senderId", "profiles")
-        .with_read_policy(policy)
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "profiles",
-            [
-                ColumnSchema::new("userId", ColumnType::String),
-                ColumnSchema::new("name", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ]);
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("chats")
+                    .column("isPublic", PublicColumnType::Boolean)
+                    .column("createdBy", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_literal_eq("isPublic", PublicValue::Boolean(true)),
+                        member_exists("id"),
+                    ]))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("chatMembers")
+                    .fk_column("chatId", "chats")
+                    .column("userId", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_claim_eq("userId", "user_id"),
+                        member_exists("chatId"),
+                    ]))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("messages")
+                    .fk_column("chatId", "chats")
+                    .column("text", PublicColumnType::Text)
+                    .fk_column("senderId", "profiles")
+                    .column("createdAt", PublicColumnType::Timestamp)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_chat_exists("chatId"),
+                        member_exists("chatId"),
+                    ]))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("profiles")
+                    .column("userId", PublicColumnType::Text)
+                    .column("name", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
     accept_global(
@@ -348,55 +346,55 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
     let bob_private_message = row(0x2a);
     let membership = row(0x1a);
     let bob_membership = row(0x1b);
-    let policy = Policy::shape(
-        Query::from("messages")
-            .join_via_row_id("chats", "chat_id", [eq(col("visibility"), lit("public"))])
-            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_column(
-                "chat_members",
-                "chat_id",
-                "chat_id",
-                [eq(col("user_id"), claim("user_id"))],
-            ))),
-    );
-    let schema = JazzSchema::new([
-        TableSchema::new(
+    let member_exists = |outer_column: &str| {
+        public_outer_exists(
             "chat_members",
-            [
-                ColumnSchema::new("chat_id", ColumnType::Uuid),
-                ColumnSchema::new("user_id", ColumnType::String),
-            ],
+            "chat_id",
+            outer_column,
+            [public_claim_eq("user_id", "user_id")],
         )
-        .with_reference("chat_id", "chats")
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
+    };
+    let public_chat_exists = |outer_column: &str| {
+        public_outer_exists(
             "chats",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("visibility", ColumnType::String),
-            ],
+            "id",
+            outer_column,
+            [public_literal_eq(
+                "visibility",
+                PublicValue::Text("public".to_owned()),
+            )],
         )
-        .with_read_policy(Policy::shape(
-            Query::from("chats")
-                .filter(eq(col("visibility"), lit("public")))
-                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").join_via_column(
-                    "chat_members",
-                    "chat_id",
-                    "id",
-                    [eq(col("user_id"), claim("user_id"))],
-                ))),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "messages",
-            [
-                ColumnSchema::new("chat_id", ColumnType::Uuid),
-                ColumnSchema::new("text", ColumnType::String),
-            ],
-        )
-        .with_reference("chat_id", "chats")
-        .with_read_policy(policy)
-        .with_write_policy(Policy::public()),
-    ]);
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("chat_members")
+                    .fk_column("chat_id", "chats")
+                    .column("user_id", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("chats")
+                    .column("title", PublicColumnType::Text)
+                    .column("visibility", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_literal_eq(
+                            "visibility",
+                            PublicValue::Text("public".to_owned()),
+                        ),
+                        member_exists("id"),
+                    ]))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("messages")
+                    .fk_column("chat_id", "chats")
+                    .column("text", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_chat_exists("chat_id"),
+                        member_exists("chat_id"),
+                    ]))),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     for commit in [
         MergeableCommit::new("chats", public_chat, 10).cells(BTreeMap::from([
@@ -525,59 +523,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     let seed_message = row(0x28);
     let alice_membership = row(0x1a);
     let bob_membership = row(0x1b);
-    let policy = Policy::shape(
-        Query::from("messages")
-            .filter(Predicate::Any(Vec::new()))
-            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_column(
-                "chatMembers",
-                "chatId",
-                "chatId",
-                [eq(col("userId"), claim("user_id"))],
-            ))),
-    );
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "chatMembers",
-            [
-                ColumnSchema::new("chatId", ColumnType::Uuid),
-                ColumnSchema::new("userId", ColumnType::String),
-            ],
-        )
-        .with_reference("chatId", "chats")
-        .with_read_policy(Policy::shape(
-            Query::from("chatMembers")
-                .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chatMembers").filter(eq(col("userId"), claim("user_id"))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chatMembers").join_via_column(
-                    "chatMembers",
-                    "chatId",
-                    "chatId",
-                    [eq(col("userId"), claim("user_id"))],
-                ))),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("isPublic", ColumnType::Bool),
-                ColumnSchema::new("createdBy", ColumnType::String),
-            ],
-        )
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "messages",
-            [
-                ColumnSchema::new("chatId", ColumnType::Uuid),
-                ColumnSchema::new("text", ColumnType::String),
-                ColumnSchema::new("createdAt", ColumnType::U64),
-            ],
-        )
-        .with_reference("chatId", "chats")
-        .with_read_policy(policy)
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = private_message_membership_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     for commit in [
         MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
@@ -674,59 +620,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     let bob_message = row(0x29);
     let alice_membership = row(0x1a);
     let bob_membership = row(0x1b);
-    let policy = Policy::shape(
-        Query::from("messages")
-            .filter(Predicate::Any(Vec::new()))
-            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_column(
-                "chatMembers",
-                "chatId",
-                "chatId",
-                [eq(col("userId"), claim("user_id"))],
-            ))),
-    );
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "chatMembers",
-            [
-                ColumnSchema::new("chatId", ColumnType::Uuid),
-                ColumnSchema::new("userId", ColumnType::String),
-            ],
-        )
-        .with_reference("chatId", "chats")
-        .with_read_policy(Policy::shape(
-            Query::from("chatMembers")
-                .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chatMembers").filter(eq(col("userId"), claim("user_id"))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chatMembers").join_via_column(
-                    "chatMembers",
-                    "chatId",
-                    "chatId",
-                    [eq(col("userId"), claim("user_id"))],
-                ))),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("isPublic", ColumnType::Bool),
-                ColumnSchema::new("createdBy", ColumnType::String),
-            ],
-        )
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "messages",
-            [
-                ColumnSchema::new("chatId", ColumnType::Uuid),
-                ColumnSchema::new("text", ColumnType::String),
-                ColumnSchema::new("createdAt", ColumnType::U64),
-            ],
-        )
-        .with_reference("chatId", "chats")
-        .with_read_policy(policy)
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = private_message_membership_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     for commit in [
         MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
@@ -837,19 +731,19 @@ fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
     let bob = user(0xb2);
     let private_chat = row(0x18);
     let public_chat = row(0x19);
-    let schema = JazzSchema::new([TableSchema::new(
-        "chats",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("visibility", ColumnType::String),
-            ColumnSchema::new("owner_id", ColumnType::String),
-        ],
-    )
-    .with_read_policy(Policy::shape(Query::from("chats").filter(any_of([
-        eq(col("visibility"), lit("public")),
-        eq(col("owner_id"), claim("user_id")),
-    ]))))
-    .with_write_policy(Policy::public())]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("chats")
+            .column("title", PublicColumnType::Text)
+            .column("visibility", PublicColumnType::Text)
+            .column("owner_id", PublicColumnType::Text)
+            .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                public_literal_eq(
+                    "visibility",
+                    PublicValue::Text("public".to_owned()),
+                ),
+                public_claim_eq("owner_id", "user_id"),
+            ]))),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     for commit in [
         MergeableCommit::new("chats", private_chat, 10).cells(BTreeMap::from([
@@ -895,32 +789,30 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let canvas_row = row(8);
     let shape_row = row(10);
     let invite_row = row(9);
-    let shape_policy = Policy::shape(Query::from("shapes").join_via_column(
+    let shape_policy = public_outer_exists(
         "canvasInvites",
         "canvas",
         "canvas",
-        [eq(col("userID"), claim("sub"))],
-    ));
-    let schema = JazzSchema::new([
-        TableSchema::new("canvases", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new(
-            "shapes",
-            [
-                ColumnSchema::new("canvas", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-            ],
-        )
-        .with_reference("canvas", "canvases")
-        .with_read_policy(shape_policy),
-        TableSchema::new(
-            "canvasInvites",
-            [
-                ColumnSchema::new("canvas", ColumnType::Uuid),
-                ColumnSchema::new("userID", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("canvas", "canvases"),
-    ]);
+        [public_claim_eq("userID", "sub")],
+    );
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("canvases")
+                    .column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("shapes")
+                    .fk_column("canvas", "canvases")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(shape_policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("canvasInvites")
+                    .fk_column("canvas", "canvases")
+                    .column("userID", PublicColumnType::Uuid),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let shape = Query::from("shapes")
         .validate(&core.catalogue.schema)
@@ -1134,37 +1026,33 @@ fn relay_and_edge_peer_identities_drive_policy_composed_reads() {
 
 #[test]
 fn edge_query_rehydrate_applies_session_user_id_read_policy() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("visibility", ColumnType::String),
-                ColumnSchema::new("owner_id", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("chats")
-                .filter(eq(col("visibility"), lit("public")))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").filter(eq(col("owner_id"), claim("user_id"))),
-                )),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "messages",
-            [
-                ColumnSchema::new("chat_id", ColumnType::Uuid),
-                ColumnSchema::new("body", ColumnType::String),
-                ColumnSchema::new("author_id", ColumnType::String),
-                ColumnSchema::new("owner_id", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
-        ))
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("chats")
+                    .column("title", PublicColumnType::Text)
+                    .column("visibility", PublicColumnType::Text)
+                    .column("owner_id", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_literal_eq(
+                            "visibility",
+                            PublicValue::Text("public".to_owned()),
+                        ),
+                        public_claim_eq("owner_id", "user_id"),
+                    ]))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("messages")
+                    .column("chat_id", PublicColumnType::Uuid)
+                    .column("body", PublicColumnType::Text)
+                    .column("author_id", PublicColumnType::Text)
+                    .column("owner_id", PublicColumnType::Text)
+                    .policies(
+                        public_all_policies()
+                            .with_select(public_claim_eq("owner_id", "user_id")),
+                    ),
+            ),
+    );
     let (_alice_dir, mut alice) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice_id = user(0xa1);
@@ -1277,38 +1165,33 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
 
 #[test]
 fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("visibility", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("chats")
-                .filter(eq(lit(true), lit(false)))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").filter(eq(col("visibility"), lit("public"))),
-                ))
-                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").join_via_column(
-                    "chat_members",
-                    "chat_id",
-                    "id",
-                    [eq(col("user_id"), claim("user_id"))],
-                ))),
-        ))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "chat_members",
-            [
-                ColumnSchema::new("chat_id", ColumnType::Uuid),
-                ColumnSchema::new("user_id", ColumnType::String),
-            ],
-        )
-        .with_reference("chat_id", "chats")
-        .with_write_policy(Policy::public()),
-    ]);
+    let member_exists = public_outer_exists(
+        "chat_members",
+        "chat_id",
+        "id",
+        [public_claim_eq("user_id", "user_id")],
+    );
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("chats")
+                    .column("title", PublicColumnType::Text)
+                    .column("visibility", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_literal_eq(
+                            "visibility",
+                            PublicValue::Text("public".to_owned()),
+                        ),
+                        member_exists,
+                    ]))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("chat_members")
+                    .fk_column("chat_id", "chats")
+                    .column("user_id", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
     let bob = user(0xb2);
@@ -1354,17 +1237,15 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
 /// complete canonical row version. `select` shapes terminal output only.
 #[test]
 fn public_chat_projections_ship_identical_complete_row_versions() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "chats",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("visibility", ColumnType::String),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("chats").filter(eq(col("visibility"), lit("public"))),
-    ))
-    .with_write_policy(Policy::public())]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("chats")
+            .column("title", PublicColumnType::Text)
+            .column("visibility", PublicColumnType::Text)
+            .policies(public_all_policies().with_select(public_literal_eq(
+                "visibility",
+                PublicValue::Text("public".to_owned()),
+            ))),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(0x62), schema.clone());
     let reader = user(0x63);
     let public_chat = row(0x64);
@@ -1445,21 +1326,14 @@ fn public_chat_projections_ship_identical_complete_row_versions() {
 
 #[test]
 fn nullable_join_code_claim_branch_allows_edge_chat_read() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "chats",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("joinCode", ColumnType::String.nullable()),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("chats")
-            .filter(eq(lit(true), lit(false)))
-            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").filter(any_of([
-                eq(col("joinCode"), claim("join_code")),
-            ])))),
-    ))
-    .with_write_policy(Policy::public())]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("chats")
+            .column("title", PublicColumnType::Text)
+            .nullable_column("joinCode", PublicColumnType::Text)
+            .policies(
+                public_all_policies().with_select(public_claim_eq("joinCode", "join_code")),
+            ),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
     let reader = user(0xb2);
@@ -1518,24 +1392,19 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
 
 #[test]
 fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "chats",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("visibility", ColumnType::String),
-                ColumnSchema::new("owner_id", ColumnType::String),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("chats")
-                .filter(eq(col("visibility"), lit("public")))
-                .policy_branch(PolicyBranch::single_alternative_from_query(
-                    Query::from("chats").filter(eq(col("owner_id"), claim("user_id"))),
-                )),
-        ))
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("chats")
+            .column("title", PublicColumnType::Text)
+            .column("visibility", PublicColumnType::Text)
+            .column("owner_id", PublicColumnType::Text)
+            .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                public_literal_eq(
+                    "visibility",
+                    PublicValue::Text("public".to_owned()),
+                ),
+                public_claim_eq("owner_id", "user_id"),
+            ]))),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
     let bob = user(0xb2);
@@ -1588,14 +1457,14 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
 
 #[test]
 fn deletion_read_policy_requires_visible_global_content_winner() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("owner", PublicColumnType::Uuid)
+            .policies(
+                PublicTablePolicies::new().with_select(public_claim_eq("owner", "sub")),
+            ),
+    ));
     let (_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
     let other = user(0xb2);
@@ -1679,4 +1548,3 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
         .all(|row| row.row_uuid() != orphan_row)
     );
 }
-

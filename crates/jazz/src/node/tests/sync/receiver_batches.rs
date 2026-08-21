@@ -326,13 +326,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
 // producer-side whole-row payload rule.
 #[test]
 fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
-    let projection_schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]);
+    let projection_schema = two_column_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), projection_schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(2), projection_schema.clone());
     let (_reader_dir, mut reader) = open_node_with_schema(node(3), projection_schema.clone());
@@ -823,4 +817,3 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         vec![(row(1), title_cells("one")), (row(2), title_cells("two")),]
     );
 }
-

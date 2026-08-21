@@ -110,14 +110,7 @@ fn query_rows_at_lowers_filters_against_historical_current_rows() {
 fn query_rows_at_for_link_evaluates_read_policy_at_historical_cut() {
     let alice = AuthorId::from_bytes([0xa1; 16]);
     let bob = AuthorId::from_bytes([0xb2; 16]);
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let schema = owner_read_schema("todos");
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(2), schema);
     let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();

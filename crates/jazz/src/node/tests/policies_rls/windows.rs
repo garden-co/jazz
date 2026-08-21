@@ -2,14 +2,14 @@
 
 #[test]
 fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_binding() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "documents",
-        [
-            ColumnSchema::new("owner", ColumnType::Uuid),
-            ColumnSchema::new("updated_at", ColumnType::U64),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("documents", "owner"))]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("documents")
+            .column("owner", PublicColumnType::Uuid)
+            .column("updated_at", PublicColumnType::Timestamp)
+            .policies(
+                PublicTablePolicies::new().with_select(public_claim_eq("owner", "sub")),
+            ),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner_a = user(0xa1);
     let owner_b = user(0xb2);
@@ -59,33 +59,29 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
 #[test]
 fn authorization_proofs_are_existential_before_top_by_windows() {
     let reader = user(0xa1);
-    let documents_policy = Query::from("documents")
-        .join_via(
+    let documents_policy = PublicPolicyExpr::Or(vec![
+        public_outer_exists(
             "documentAccess",
             "document",
-            [eq(col("reader"), claim("sub"))],
-        )
-        .policy_branch(PolicyBranch::single_alternative_from_query(
-            Query::from("documents").filter(eq(col("published"), lit(true))),
-        ));
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "documents",
-            [
-                ColumnSchema::new("updated_at", ColumnType::U64),
-                ColumnSchema::new("published", ColumnType::Bool),
-            ],
-        )
-        .with_read_policy(Policy::shape(documents_policy)),
-        TableSchema::new(
-            "documentAccess",
-            [
-                ColumnSchema::new("document", ColumnType::Uuid),
-                ColumnSchema::new("reader", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("document", "documents"),
+            "id",
+            [public_claim_eq("reader", "sub")],
+        ),
+        public_literal_eq("published", PublicValue::Boolean(true)),
     ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("documents")
+                    .column("updated_at", PublicColumnType::Timestamp)
+                    .column("published", PublicColumnType::Boolean)
+                    .policies(PublicTablePolicies::new().with_select(documents_policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("documentAccess")
+                    .fk_column("document", "documents")
+                    .column("reader", PublicColumnType::Uuid),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let mut document_txs = Vec::new();
     let mut grant_txs = Vec::new();

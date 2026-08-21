@@ -2467,13 +2467,62 @@ pub const SCHEMA_LINEAGE_PUBLICATION_NAMESPACE: uuid::Uuid =
 /// Namespace used for semantic read-view UUIDv5 ids.
 pub const READ_VIEW_NAMESPACE: uuid::Uuid = uuid::uuid!("1a87cf70-f8f0-5ae7-a574-1f9b5e4517f1");
 
-/// Published immutable schema-version payload.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+/// Compiled in-memory schema version whose durable/wire form is the public schema.
+#[derive(Clone, Debug, PartialEq)]
 pub struct SchemaVersion {
     /// Content-addressed id, equal to `schema.version_id()`.
     pub id: SchemaVersionId,
-    /// Full schema payload.
+    /// Compiled runtime schema. Serialization emits its retained public schema.
     pub schema: JazzSchema,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SchemaVersionWire {
+    id: SchemaVersionId,
+    /// Canonical public schema and PolicyExpr values encoded as JSON so public
+    /// Value remains portable across both JSON storage and postcard transport
+    /// serializers.
+    public_schema_json: Vec<u8>,
+}
+
+fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(schema.public_schema()).map_err(|error| error.to_string())
+}
+
+fn compile_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
+    crate::tools::public_schema_convert::decode_public_schema_json(bytes)
+}
+
+impl serde::Serialize for SchemaVersion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let public_schema_json =
+            durable_public_schema_json(&self.schema).map_err(serde::ser::Error::custom)?;
+        let wire = SchemaVersionWire {
+            id: self.id,
+            public_schema_json,
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SchemaVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let SchemaVersionWire {
+            id,
+            public_schema_json,
+        } = SchemaVersionWire::deserialize(deserializer)?;
+        let schema =
+            compile_public_schema_json(&public_schema_json).map_err(serde::de::Error::custom)?;
+        // Keep identity validation at catalogue admission/open, where callers
+        // receive the established domain error rather than a codec error.
+        Ok(Self { id, schema })
+    }
 }
 
 /// Atomic catalogue payload that admits one non-genesis schema.
@@ -2542,7 +2591,10 @@ impl SchemaLineagePublication {
 }
 
 impl SchemaVersion {
-    /// Construct a schema-version payload from a schema.
+    /// Construct a schema-version payload from a compiled schema.
+    ///
+    /// Durable or wire serialization requires the schema to retain the public
+    /// source attached by the public-schema compiler.
     pub fn new(schema: JazzSchema) -> Self {
         Self {
             id: schema.version_id(),
@@ -2914,10 +2966,73 @@ pub enum OutboxMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::public_schema::{
+        ColumnType as PublicColumnType, PolicyExpr, SchemaBuilder, TablePolicies,
+        TableSchemaBuilder,
+    };
     use groove::schema::{ColumnSchema, ColumnType};
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn schema_version_persists_policy_source_and_recompiles_on_decode() {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+            )
+            .build();
+        let compiled = crate::schema::JazzSchema::new(&source).expect("source schema compiles");
+        let version = SchemaVersion::new(compiled);
+
+        let stored = serde_json::to_string(&version).expect("source schema serializes");
+        let SchemaVersionWire {
+            public_schema_json, ..
+        } = serde_json::from_str(&stored).expect("decode stored schema envelope");
+        let stored_source_json =
+            String::from_utf8(public_schema_json).expect("public schema JSON is UTF-8");
+        let stored_source: serde_json::Value =
+            serde_json::from_str(&stored_source_json).expect("public schema JSON decodes");
+        assert!(
+            stored_source["tables"].is_object(),
+            "schema-version payloads preserve the public Schema JSON envelope"
+        );
+        assert!(stored_source_json.contains("\"policies\""));
+        assert!(stored_source_json.contains("\"type\":\"True\""));
+        assert!(!stored_source_json.contains("read_policy"));
+        assert!(!stored_source_json.contains("write_policies"));
+
+        let bytes = postcard::to_allocvec(&version).expect("source schema crosses the wire");
+        let decoded: SchemaVersion =
+            postcard::from_bytes(&bytes).expect("source schema recompiles on decode");
+        assert_eq!(decoded, version);
+        assert_eq!(
+            decoded.schema.public_schema(),
+            version.schema.public_schema()
+        );
+    }
+
+    #[test]
+    fn schema_version_serialization_trusts_the_retained_source_without_recompiling() {
+        let source = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .build();
+        let compiled = crate::schema::JazzSchema::new(&source).expect("source schema compiles");
+        let mut version = SchemaVersion::new(compiled);
+
+        // A test-only mutation makes recompilation observably disagree with the
+        // runtime value. Wire serialization must remain a source encoding step;
+        // recompiling here puts schema-size work on every propagated write.
+        version.schema.runtime_mut_for_testing().tables.clear();
+
+        let encoded = postcard::to_allocvec(&version)
+            .expect("serialization trusts the source established at construction");
+        let decoded: SchemaVersion = postcard::from_bytes(&encoded).expect("source recompiles");
+        assert_eq!(decoded.schema.public_schema(), &source);
+        assert_eq!(decoded.schema.tables().len(), 1);
     }
 
     #[test]

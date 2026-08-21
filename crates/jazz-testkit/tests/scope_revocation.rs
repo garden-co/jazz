@@ -1,6 +1,5 @@
 use jazz_testkit as support;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz::row_input;
@@ -19,7 +18,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(45);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(45);
 
 fn owned_docs_schema() -> jazz::tools::Schema {
-    HashMap::from([(
+    jazz::tools::Schema::from([(
         TableName::new("docs"),
         TableSchema::with_policies(
             RowDescriptor::new(vec![
@@ -106,7 +105,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                     .expect("connect bob");
             wait_for_edge_query_ready(&bob, "docs", READY_TIMEOUT).await;
 
-            let (doc_id, _, create_batch) = writer
+            let (doc_id, _, create_tx) = writer
                 .for_session(Session::new(writer_user_id.clone()))
                 .insert(
                     "docs",
@@ -117,10 +116,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                     ),
                 )
                 .expect("trusted writer creates bob-visible doc");
-            writer
-                .wait_for_transaction(create_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
-                .await
-                .expect("create reaches edge");
+            support::wait_for_edge_txs(&writer, &[create_tx.expect("ordinary mutation commits immediately")]).await;
 
             let query = jazz::query::Query::from("docs");
             wait_for_query(
@@ -136,14 +132,11 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             // An UPSERT needs read access to its target row. This writer has
             // that access only through this row's transfer_writer_id, keeping
             // Bob's owner-scoped revocation behavior intact.
-            let revoke_batch = writer
+            let revoke_tx = writer
                 .for_session(Session::new(writer_user_id))
                 .update(doc_id, vec![("owner_id".to_owned(), Value::Uuid(alice_owner_id))])
                 .expect("narrowly authorized writer transfers ownership away from bob");
-            writer
-                .wait_for_transaction(revoke_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
-                .await
-                .expect("ownership transfer reaches edge");
+            support::wait_for_edge_txs(&writer, &[revoke_tx.expect("ordinary mutation commits immediately")]).await;
 
             let edge_rows_after_revoke = wait_for_query(
                 &bob,

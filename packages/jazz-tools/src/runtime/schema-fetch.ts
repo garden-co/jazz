@@ -55,12 +55,12 @@ export async function fetchStoredWasmSchema(
   }
 
   const body = (await response.json()) as {
-    schema: WasmSchema;
+    schema: { tables: WasmSchema };
     publishedAt?: number | null;
   };
 
   return {
-    schema: body.schema,
+    schema: body.schema.tables,
     publishedAt: normalizePublishedAtEpochMilliseconds(body.publishedAt),
   };
 }
@@ -166,7 +166,7 @@ export async function publishStoredSchema(
       "Content-Type": "application/json",
       "X-Jazz-Admin-Secret": options.adminSecret,
     },
-    body: JSON.stringify({ schema: options.schema }),
+    body: JSON.stringify({ schema: { tables: options.schema } }),
   });
 
   if (!response.ok) {

@@ -5,6 +5,7 @@ pub mod fixture;
 pub mod mem;
 pub mod policy_graph_fixture;
 pub mod profiling;
+pub mod public_schema_fixture;
 pub mod view_accounting;
 
 use hdrhistogram::Histogram;
@@ -1048,7 +1049,7 @@ pub fn run_echo_threaded(seed: u64, rounds: u64, profile: PeerProfile) -> RunRep
 }
 
 fn empty_schema() -> JazzSchema {
-    JazzSchema::new([])
+    JazzSchema::empty()
 }
 
 #[derive(Clone, Debug)]

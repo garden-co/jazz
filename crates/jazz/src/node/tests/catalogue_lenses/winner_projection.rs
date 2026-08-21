@@ -2,17 +2,8 @@
 
 #[test]
 fn current_winner_projects_rename_copy_chains_across_durability_tiers() {
-    let base = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
-    let evolved = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]));
+    let base = schema();
+    let evolved = SchemaVersion::new(evolved_todos_name_body_schema());
     let (_dir, mut core) = open_node_with_schema(node(0x5c), base.clone());
     let old_row = row(0x5c);
     accept_global(
@@ -98,30 +89,31 @@ fn current_winner_projects_rename_copy_chains_across_durability_tiers() {
 
 fn assert_current_winner_copied_enum_remap(
     marker: u8,
-    source_type: ColumnType,
-    copied_type: ColumnType,
-    latest_type: ColumnType,
+    source_type: PublicColumnType,
+    copied_type: PublicColumnType,
+    latest_type: PublicColumnType,
     old_value: Value,
     unknown_value: Value,
 ) {
-    let base = JazzSchema::new([TableSchema::new(
-        "items",
-        [ColumnSchema::new("source", source_type)],
-    )]);
-    let copied = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("status", copied_type.clone()),
-            ColumnSchema::new("status_copy", copied_type),
-        ],
-    )]));
-    let latest = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("status", latest_type),
-            ColumnSchema::new("status_copy", copied.schema.tables[0].columns[1].column_type.clone()),
-        ],
-    )]));
+    let base = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items").column("source", source_type),
+        ),
+    );
+    let copied = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("status", copied_type.clone())
+                .column("status_copy", copied_type.clone()),
+        ),
+    ));
+    let latest = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("status", latest_type)
+                .column("status_copy", copied_type),
+        ),
+    ));
     let (_dir, mut core) = open_node_with_schema(node(marker), base.clone());
     let old_row = row(marker);
     accept_global(
@@ -239,13 +231,11 @@ fn assert_current_winner_copied_enum_remap(
 
 #[test]
 fn current_winner_remaps_copied_scalar_enums_and_omits_later_winners() {
-    let base = enum_projection_schema(&["open", "selected"]);
-    let latest = enum_projection_schema(&["open", "selected", "closed"]);
     assert_current_winner_copied_enum_remap(
         0x5e,
-        base.tables[0].columns[1].column_type.clone(),
-        base.tables[0].columns[1].column_type.clone(),
-        latest.tables[0].columns[1].column_type.clone(),
+        public_scalar_enum("status", &["open", "selected"]),
+        public_scalar_enum("status", &["open", "selected"]),
+        public_scalar_enum("status", &["open", "selected", "closed"]),
         Value::EnumTag(1),
         Value::EnumTag(2),
     );
@@ -253,14 +243,12 @@ fn current_winner_remaps_copied_scalar_enums_and_omits_later_winners() {
 
 #[test]
 fn current_winner_remaps_copied_payload_enums_and_omits_later_winners() {
-    let base = payload_enum_projection_schema(&["open"]);
-    let latest = payload_enum_projection_schema(&["open", "closed"]);
     let payload = groove::records::RecordDescriptor::new([("note", ColumnType::String)]);
     assert_current_winner_copied_enum_remap(
         0x61,
-        base.tables[0].columns[1].column_type.clone(),
-        base.tables[0].columns[1].column_type.clone(),
-        latest.tables[0].columns[1].column_type.clone(),
+        public_payload_enum("status", &["open"], "note"),
+        public_payload_enum("status", &["open"], "note"),
+        public_payload_enum("status", &["open", "closed"], "note"),
         Value::Enum(groove::records::EnumValue::create(0, payload.clone(), &[v("open")]).unwrap()),
         Value::Enum(groove::records::EnumValue::create(1, payload, &[v("closed")]).unwrap()),
     );
@@ -268,13 +256,14 @@ fn current_winner_remaps_copied_payload_enums_and_omits_later_winners() {
 
 #[test]
 fn current_winner_remaps_copied_nested_scalar_enums_and_omits_later_winners() {
-    let base = nested_scalar_enum_projection_schema(&["open"]);
-    let latest = nested_scalar_enum_projection_schema(&["open", "closed"]);
+    let scalar_array = |variants: &[&str]| PublicColumnType::Array {
+        element: Box::new(public_scalar_enum("status", variants)),
+    };
     assert_current_winner_copied_enum_remap(
         0x63,
-        base.tables[0].columns[1].column_type.clone(),
-        base.tables[0].columns[1].column_type.clone(),
-        latest.tables[0].columns[1].column_type.clone(),
+        scalar_array(&["open"]),
+        scalar_array(&["open"]),
+        scalar_array(&["open", "closed"]),
         Value::Array(vec![Value::EnumTag(0)]),
         Value::Array(vec![Value::EnumTag(1)]),
     );
@@ -282,14 +271,15 @@ fn current_winner_remaps_copied_nested_scalar_enums_and_omits_later_winners() {
 
 #[test]
 fn current_winner_remaps_copied_nested_payload_enums_and_omits_later_winners() {
-    let base = nested_payload_enum_projection_schema(&["open"]);
-    let latest = nested_payload_enum_projection_schema(&["open", "closed"]);
+    let payload_array = |cases: &[&str]| PublicColumnType::Array {
+        element: Box::new(public_payload_enum("status", cases, "note")),
+    };
     let payload = groove::records::RecordDescriptor::new([("note", ColumnType::String)]);
     assert_current_winner_copied_enum_remap(
         0x65,
-        base.tables[0].columns[1].column_type.clone(),
-        base.tables[0].columns[1].column_type.clone(),
-        latest.tables[0].columns[1].column_type.clone(),
+        payload_array(&["open"]),
+        payload_array(&["open"]),
+        payload_array(&["open", "closed"]),
         Value::Array(vec![Value::Enum(
             groove::records::EnumValue::create(0, payload.clone(), &[v("open")]).unwrap(),
         )]),
@@ -298,4 +288,3 @@ fn current_winner_remaps_copied_nested_payload_enums_and_omits_later_winners() {
         )]),
     );
 }
-

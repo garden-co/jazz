@@ -75,7 +75,7 @@ fn counter_merge_sums_concurrent_deltas_and_keeps_lww_columns() {
         &mut base_writer,
         &mut core,
         MergeableCommit::new("counters", row, 10).cells(BTreeMap::from([
-            ("count".to_owned(), Value::U64(10)),
+            ("count".to_owned(), Value::I32(10)),
             ("title".to_owned(), v("base")),
         ])),
     );
@@ -84,7 +84,7 @@ fn counter_merge_sums_concurrent_deltas_and_keeps_lww_columns() {
             MergeableCommit::new("counters", row, 20)
                 .parents(vec![base])
                 .cells(BTreeMap::from([
-                    ("count".to_owned(), Value::U64(11)),
+                    ("count".to_owned(), Value::I32(11)),
                     ("title".to_owned(), v("left-title")),
                 ])),
         )
@@ -94,7 +94,7 @@ fn counter_merge_sums_concurrent_deltas_and_keeps_lww_columns() {
             MergeableCommit::new("counters", row, 21)
                 .parents(vec![base])
                 .cells(BTreeMap::from([
-                    ("count".to_owned(), Value::U64(12)),
+                    ("count".to_owned(), Value::I32(12)),
                     ("title".to_owned(), v("right-title")),
                 ])),
         )
@@ -115,7 +115,7 @@ fn counter_merge_sums_concurrent_deltas_and_keeps_lww_columns() {
         })
         .expect("core should create a counter merge version");
     let cells = merge.cells(&schema.tables[0]).unwrap();
-    assert_eq!(cells.get("count"), Some(&Value::U64(13)));
+    assert_eq!(cells.get("count"), Some(&Value::I32(13)));
     assert_eq!(cells.get("title"), Some(&v("right-title")));
 
     let current = core
@@ -124,7 +124,7 @@ fn counter_merge_sums_concurrent_deltas_and_keeps_lww_columns() {
         .into_iter()
         .map(current_row_pair)
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(current[&row].get("count"), Some(&Value::U64(13)));
+    assert_eq!(current[&row].get("count"), Some(&Value::I32(13)));
     assert_eq!(current[&row].get("title"), Some(&v("right-title")));
 }
 #[test]
@@ -134,12 +134,12 @@ fn counter_merge_seeded_concurrent_increments_converge_to_exact_sum() {
         let (_base_dir, mut base_writer) = open_node_with_schema(node(1), schema.clone());
         let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
         let row = row(0x20 + seed as u8);
-        let base_value = seed % 7;
+        let base_value = (seed % 7) as i32;
         let base = commit_mergeable_global(
             &mut base_writer,
             &mut core,
             MergeableCommit::new("counters", row, 10).cells(BTreeMap::from([
-                ("count".to_owned(), Value::U64(base_value)),
+                ("count".to_owned(), Value::I32(base_value)),
                 ("title".to_owned(), v("base")),
             ])),
         );
@@ -149,7 +149,7 @@ fn counter_merge_seeded_concurrent_increments_converge_to_exact_sum() {
             .collect::<Vec<_>>();
         let mut messages = Vec::new();
         for (idx, (_, writer)) in writers.iter_mut().enumerate() {
-            let delta = ((seed + idx as u64 * 3) % 5) + 1;
+            let delta = (((seed + idx as u64 * 3) % 5) + 1) as i32;
             expected += delta;
             let (_tx, message) = writer
                 .commit_mergeable_unit(
@@ -157,7 +157,7 @@ fn counter_merge_seeded_concurrent_increments_converge_to_exact_sum() {
                         .parents(vec![base])
                         .cells(BTreeMap::from([(
                             "count".to_owned(),
-                            Value::U64(base_value + delta),
+                            Value::I32(base_value + delta),
                         )])),
                 )
                 .unwrap();
@@ -180,7 +180,7 @@ fn counter_merge_seeded_concurrent_increments_converge_to_exact_sum() {
                 .collect::<BTreeMap<_, _>>();
             assert_eq!(
                 current[&row].get("count"),
-                Some(&Value::U64(expected)),
+                Some(&Value::I32(expected)),
                 "seed {seed}"
             );
             assert_eq!(current[&row].get("title"), Some(&v("base")), "seed {seed}");
@@ -212,7 +212,7 @@ fn counter_merge_of_divergent_merges_sums_raw_frontier_once() {
 
     let merge = merge_with_parent_set(&mut core, row, &[h1, h2, h3]);
     let cells = merge.cells(table).unwrap();
-    assert_eq!(cells.get("count"), Some(&Value::U64(6)));
+    assert_eq!(cells.get("count"), Some(&Value::I32(6)));
     assert_eq!(cells.get("title"), Some(&v("h3")));
 }
 
@@ -343,7 +343,7 @@ fn ingest_counter_version(
     row_uuid: RowUuid,
     tx_id: TxId,
     parents: Vec<TxId>,
-    count: u64,
+    count: i32,
     title: &str,
 ) {
     ingest_direct_version(
@@ -354,7 +354,7 @@ fn ingest_counter_version(
         tx_id,
         parents,
         BTreeMap::from([
-            ("count".to_owned(), Value::U64(count)),
+            ("count".to_owned(), Value::I32(count)),
             ("title".to_owned(), v(title)),
         ]),
     );

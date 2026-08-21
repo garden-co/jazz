@@ -4,6 +4,8 @@ description: Group related reads and writes into one mergeable or exclusive tran
 reviewedAt: "b29b48d1a"
 ---
 
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
 A transaction groups related writes under one commit. Reads made through the transaction can see
 its staged writes, while code outside the transaction cannot see them until it commits.
 

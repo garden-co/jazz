@@ -170,10 +170,9 @@ describe("dev catalogue push behavior", () => {
     expect(result.warnings).toContain(
       'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
     );
-    expect(schemaPublishBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
-      "title",
-      "ownerId",
-    ]);
+    expect(schemaPublishBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual(
+      ["title", "ownerId"],
+    );
     expect(permissionsPublishBody.schemaHash).toBe(SCHEMA_HASH);
     expect(permissionsPublishBody.expectedParentBundleObjectId).toBeNull();
     expect(Object.keys(permissionsPublishBody.permissions)).toContain("todos");
@@ -218,9 +217,12 @@ describe("dev catalogue push behavior", () => {
           return new Response(JSON.stringify({ hashes: [storedHash] }), { status: 200 });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${storedHash}`)) {
-          return new Response(JSON.stringify({ schema: storedSchema, publishedAt: 0 }), {
-            status: 200,
-          });
+          return new Response(
+            JSON.stringify({ schema: { tables: storedSchema }, publishedAt: 0 }),
+            {
+              status: 200,
+            },
+          );
         }
         if (input.includes(`/admin/permissions`) || input.endsWith(`/admin/schemas`)) {
           throw new Error("deploy() should not publish when schema is already stored.");
@@ -296,9 +298,12 @@ describe("dev catalogue push behavior", () => {
           return new Response(JSON.stringify({ hashes: [nextSchemaHash] }), { status: 200 });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
-          return new Response(JSON.stringify({ schema: storedSchema, publishedAt: 0 }), {
-            status: 200,
-          });
+          return new Response(
+            JSON.stringify({ schema: { tables: storedSchema }, publishedAt: 0 }),
+            {
+              status: 200,
+            },
+          );
         }
         if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
           return new Response(JSON.stringify({ head: previousHead }), { status: 200 });
@@ -376,12 +381,12 @@ describe("dev catalogue push behavior", () => {
           return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-          return new Response(JSON.stringify({ schema: fromSchema, publishedAt: 0 }), {
+          return new Response(JSON.stringify({ schema: { tables: fromSchema }, publishedAt: 0 }), {
             status: 200,
           });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
-          return new Response(JSON.stringify({ schema: toSchema, publishedAt: 0 }), {
+          return new Response(JSON.stringify({ schema: { tables: toSchema }, publishedAt: 0 }), {
             status: 200,
           });
         }
@@ -548,7 +553,7 @@ export default s.defineMigration({
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
     });
-    expect(publishBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+    expect(publishBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
       "title",
       "ownerId",
     ]);
@@ -655,7 +660,7 @@ export default s.defineMigration({
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
     });
-    expect(schemaBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+    expect(schemaBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
       "title",
       "ownerId",
     ]);
@@ -742,7 +747,7 @@ export default s.defineMigration({
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
     });
-    expect(schemaBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+    expect(schemaBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
       "title",
       "ownerId",
     ]);

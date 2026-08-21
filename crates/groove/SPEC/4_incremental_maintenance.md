@@ -29,7 +29,7 @@ Invariant digest:
 - `INV-TICK-3`: Commit notifications MUST contain weighted result deltas only; unchanged matching rows and base-table changes outside the query result MUST NOT be reported.
 - `INV-TICK-4`: Same-key operations in one `DatabaseBatch` MUST compute deltas against prior operations in that batch, not only against pre-batch storage, and table deltas MUST be consolidated before ticking.
 - `INV-TICK-5`: `TickEvaluator` MUST NOT reuse node outputs across different scopes, ticks, or recursive sub-ticks; per-tick memoized outputs MUST be cleared after the tick.
-- `INV-TICK-6`: Shared arrangements MUST be keyed by `ArrangementKey { scope, input, fields, descriptor }`, so identical context-independent join inputs share one arrangement across subscriptions.
+- `INV-TICK-6`: An arrangement MUST be a typed, hash-consed graph node whose identity includes its record-producing input, key fields, and comparison semantics. Consumers MUST depend on that node explicitly, so graph reachability governs sharing and lifecycle; runtime state adds evaluation scope to the node identity.
 - `INV-TICK-7`: A root-scope arrangement MUST be stamped with `SubTick { tick: current_tick, sub_tick: 0 }`; only context-dependent arrangements may use the recursive evaluator's nonzero `sub_tick`.
 - `INV-TICK-8`: Arrangement state MUST NOT move backward in logical time; stale reads MUST fail instead of returning data for the wrong `Tick`/`SubTick`.
 - `INV-TICK-9`: In accumulate mode, advancing an arrangement more than once at the same `SubTick` MUST be idempotent so shared state absorbs each tick delta only once.
@@ -137,12 +137,15 @@ equivalence alone does not establish the mechanism law.
 
 ### 4.3 Arrangements: shared, logically-timed state
 
-Arrangements are shared indexes for incrementally maintaining joins and
-anti-joins. Instead of rebuilding an input for each consumer, the runtime keeps a
-single arrangement for each identical, context-independent input and lets all
-subscriptions and operators use that maintained state. The shared state is keyed
-by `ArrangementKey { scope, input, fields, descriptor }` and stored as
-arrangement state (`ArrangementState` in the reference implementation)
+Arrangements are shared indexes for incrementally maintaining joins,
+anti-joins, grouping, and ordering. Each arrangement is a typed, hash-consed
+graph node between its record-producing input and its consumers. Its node
+identity includes the input, key fields, comparison semantics, and record type;
+identical consumers therefore share the same node naturally. Retaining a
+consumer retains its arrangement dependency, while removing the final consumer
+makes the arrangement unreachable without reconstructing ownership by scanning
+operators. Runtime state is keyed by the arrangement node plus evaluation scope
+(`ArrangementKey`/`ArrangementState` in the reference implementation)
 (`INV-TICK-6`).
 
 Because arrangements are shared, they are explicitly governed by logical time.

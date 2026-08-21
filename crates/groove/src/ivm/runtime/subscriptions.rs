@@ -2049,7 +2049,6 @@ impl IvmRuntime {
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
-        self.prune_unreferenced_arrangements();
         Ok(())
     }
 
@@ -2474,7 +2473,6 @@ impl IvmRuntime {
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
-        self.prune_unreferenced_arrangements();
     }
 
     pub(super) fn advance_tick(&mut self) -> u64 {

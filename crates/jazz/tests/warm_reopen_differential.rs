@@ -1,18 +1,22 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+mod common;
+
 use jazz::block_on;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, RemovedRow, SeededRowIdSource,
     SubscriptionEvent,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, RelationEdge, RelationSnapshot};
 use jazz::query::{ArraySubquery, OrderDirection, Query};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::{JazzSchema, TableSchema};
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::RocksDbStorage;
+
+use common::{allow_all_policies, compile_schema};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CanonicalRow {
@@ -55,28 +59,23 @@ fn author() -> AuthorId {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "parents",
-            [
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("rank", ColumnType::U32),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "children",
-            [
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("rank", ColumnType::U32),
-            ],
-        )
-        .with_reference("parent_id", "parents")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("parents")
+                    .column("label", ColumnType::Text)
+                    .column("rank", ColumnType::Integer)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("children")
+                    .fk_column("parent_id", "parents")
+                    .column("label", ColumnType::Text)
+                    .column("rank", ColumnType::Integer)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
 }
 
 fn query() -> Query {
@@ -122,18 +121,18 @@ fn open_db(
     .expect("open db")
 }
 
-fn parent_cells(label: &str, rank: u32) -> BTreeMap<String, Value> {
+fn parent_cells(label: &str, rank: i32) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("label".to_owned(), Value::String(label.to_owned())),
-        ("rank".to_owned(), Value::U32(rank)),
+        ("rank".to_owned(), Value::I32(rank)),
     ])
 }
 
-fn child_cells(parent: RowUuid, label: &str, rank: u32) -> BTreeMap<String, Value> {
+fn child_cells(parent: RowUuid, label: &str, rank: i32) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("parent_id".to_owned(), Value::Uuid(parent.0)),
         ("label".to_owned(), Value::String(label.to_owned())),
-        ("rank".to_owned(), Value::U32(rank)),
+        ("rank".to_owned(), Value::I32(rank)),
     ])
 }
 

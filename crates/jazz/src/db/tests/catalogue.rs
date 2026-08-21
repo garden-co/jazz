@@ -130,20 +130,26 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
 #[test]
 fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     let schema = |statuses: &[&str], with_body: bool| {
-        let mut columns = vec![
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new(
+        let table = PublicTableSchemaBuilder::new("items")
+            .column("title", PublicColumnType::Text)
+            .column(
                 "status",
-                ColumnType::EnumTag(
-                    groove::records::ScalarEnumSchema::new("status", statuses.iter().copied())
-                        .unwrap(),
-                ),
-            ),
-        ];
-        if with_body {
-            columns.push(ColumnSchema::new("body", ColumnType::String));
-        }
-        JazzSchema::new([TableSchema::new("items", columns)])
+                PublicColumnType::EnumPayload {
+                    cases: statuses
+                        .iter()
+                        .map(|status| PublicEnumCaseDescriptor {
+                            name: (*status).to_owned(),
+                            fields: Vec::new(),
+                        })
+                        .collect(),
+                },
+            );
+        let table = if with_body {
+            table.column("body", PublicColumnType::Text)
+        } else {
+            table
+        };
+        build_public_db_test_schema(PublicSchemaBuilder::new().table(table))
     };
     let base = schema(&["open"], false);
     let middle = SchemaVersion::new(schema(&["open", "archived"], false));
@@ -155,7 +161,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
             "items",
             BTreeMap::from([
                 ("title".to_owned(), Value::String("before".to_owned())),
-                ("status".to_owned(), Value::EnumTag(0)),
+                ("status".to_owned(), empty_payload_case(0)),
             ]),
         )
         .unwrap();
@@ -269,7 +275,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
         .commit_mergeable(
             MergeableCommit::new("items", row(0x5c), 10).cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("after".to_owned())),
-                ("status".to_owned(), Value::EnumTag(0)),
+                ("status".to_owned(), empty_payload_case(0)),
                 ("body".to_owned(), Value::String("new body".to_owned())),
             ])),
         )
@@ -289,31 +295,29 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
 fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     let alice = AuthorId::from_bytes([0xa1; 16]);
     let bob = AuthorId::from_bytes([0xb2; 16]);
-    let structural = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-            ColumnSchema::new("editor", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())]);
-    let v2_table = TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-            ColumnSchema::new("editor", ColumnType::Uuid),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )
-    .with_write_policy(Policy::public());
-    let owner_head = JazzSchema::new([v2_table
-        .clone()
-        .with_read_policy(Policy::owner_only("todos", "owner"))]);
-    let editor_head =
-        JazzSchema::new([v2_table.with_read_policy(Policy::owner_only("todos", "editor"))]);
+    let table = |with_body: bool, read_column: Option<&str>| {
+        let table = PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("owner", PublicColumnType::Uuid)
+            .column("editor", PublicColumnType::Uuid);
+        let table = if with_body {
+            table.column("body", PublicColumnType::Text)
+        } else {
+            table
+        };
+        let table = if let Some(column) = read_column {
+            table.policies(
+                PublicTablePolicies::new()
+                    .with_select(public_session_eq(column, &["claims", "sub"])),
+            )
+        } else {
+            table
+        };
+        build_public_db_test_schema(PublicSchemaBuilder::new().table(table))
+    };
+    let structural = table(false, None);
+    let owner_head = table(true, Some("owner"));
+    let editor_head = table(true, Some("editor"));
     let owner_payload = SchemaVersion::new(owner_head.clone());
     assert_eq!(owner_payload.id, editor_head.version_id());
 

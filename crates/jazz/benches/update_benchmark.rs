@@ -10,13 +10,15 @@
 
 use std::collections::BTreeMap;
 
+mod schema_fixture;
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, block_on};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 type CoreDb = Db<MemoryStorage>;
@@ -24,24 +26,20 @@ type CoreDb = Db<MemoryStorage>;
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("folders", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "documents",
-            [
-                ColumnSchema::new("folder", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("content", ColumnType::String),
-                ColumnSchema::new("author", ColumnType::Uuid),
-                ColumnSchema::new("created_at", ColumnType::U64),
-            ],
-        )
-        .with_reference("folder", "folders")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::owner_only("documents", "author")),
-    ])
+    let author = schema_fixture::session_column("author", "sub");
+    schema_fixture::compile(
+        SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("folders").column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .fk_column("folder", "folders")
+                    .column("title", ColumnType::Text)
+                    .column("content", ColumnType::Text)
+                    .column("author", ColumnType::Uuid)
+                    .column("created_at", ColumnType::Timestamp)
+                    .policies(schema_fixture::write_operations(author)),
+            ),
+    )
 }
 
 fn open_core_db(seed: u64) -> CoreDb {

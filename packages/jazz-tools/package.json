@@ -171,6 +171,7 @@
     "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
+    "@vue/server-renderer": "^3.5.22",
     "better-auth": "^1.5.5",
     "fake-indexeddb": "^5.0.2",
     "jsdom": "^26.0.0",

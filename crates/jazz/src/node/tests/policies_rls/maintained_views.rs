@@ -2,14 +2,7 @@
 
 #[test]
 fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let schema = owner_read_schema("todos");
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author_a = user(0xa1);
     let author_b = user(0xb2);
@@ -94,14 +87,7 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
 
 #[test]
 fn maintained_view_query_engine_seed_clean_owner_policy_claim_params_match_one_shot() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let schema = owner_read_schema("todos");
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
     let other = user(0xb2);
@@ -140,14 +126,7 @@ fn maintained_view_query_engine_seed_clean_owner_policy_claim_params_match_one_s
 
 #[test]
 fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let schema = owner_read_schema("todos");
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author_a = user(0xa1);
     let author_b = user(0xb2);
@@ -207,14 +186,7 @@ fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
 
 #[test]
 fn maintained_view_system_identity_bypasses_root_read_policy() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let schema = owner_read_schema("todos");
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author_a = user(0xa1);
     let author_b = user(0xb2);
@@ -255,28 +227,7 @@ fn maintained_view_system_identity_bypasses_root_read_policy() {
 
 #[test]
 fn maintained_view_allows_join_policy_slice() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::shape(Query::from("todos").join_via(
-            "members",
-            "owner",
-            [eq(col("user"), claim("sub"))],
-        ))),
-        TableSchema::new(
-            "members",
-            [
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("owner", "todos"),
-    ]);
+    let schema = todos_member_read_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let shape = Query::from("todos")
         .validate(&core.catalogue.schema)
@@ -288,14 +239,7 @@ fn maintained_view_allows_join_policy_slice() {
 
 #[test]
 fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let schema = owner_read_schema("todos");
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
     let other = user(0xb2);
@@ -353,28 +297,7 @@ fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
 
 #[test]
 fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::shape(Query::from("todos").join_via(
-            "members",
-            "owner",
-            [eq(col("user"), claim("sub"))],
-        ))),
-        TableSchema::new(
-            "members",
-            [
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("owner", "todos"),
-    ]);
+    let schema = todos_member_read_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
     let other = user(0xb2);
@@ -437,26 +360,23 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
 #[test]
 fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas_without_full_recompute()
 {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "sharedTodos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("owner", "members"),
-        TableSchema::new(
-            "members",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("userID", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("members").filter(eq(col("userID"), claim("sub"))),
-        )),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("sharedTodos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("owner", "members"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .column("name", PublicColumnType::Text)
+                    .column("userID", PublicColumnType::Uuid)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(public_claim_eq("userID", "sub")),
+                    ),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let reader = user(0xa1);
     let other = user(0xb2);
@@ -553,32 +473,36 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
     let first_edge = row(0xa1);
     let second_edge = row(0xa2);
     let third_edge = row(0xa3);
-    let container_policy = Policy::shape(Query::from("containers").join_via(
-        "containerAccess",
-        "container",
-        [eq(col("reader"), claim("sub"))],
-    ));
-    let schema = JazzSchema::new([
-        TableSchema::new("containers", [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(container_policy),
-        TableSchema::new(
-            "entries",
-            [
-                ColumnSchema::new("container", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-            ],
-        )
-        .with_reference("container", "containers")
-        .with_read_policy(Policy::shape(Query::from("entries").inherits("container"))),
-        TableSchema::new(
-            "containerAccess",
-            [
-                ColumnSchema::new("container", ColumnType::Uuid),
-                ColumnSchema::new("reader", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("container", "containers"),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("containers")
+                    .column("name", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(public_outer_exists(
+                        "containerAccess",
+                        "container",
+                        "id",
+                        [public_claim_eq("reader", "sub")],
+                    ))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("entries")
+                    .fk_column("container", "containers")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::Inherits {
+                            operation: PublicOperation::Select,
+                            via_column: "container".to_owned(),
+                            max_depth: None,
+                        },
+                    )),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("containerAccess")
+                    .fk_column("container", "containers")
+                    .column("reader", PublicColumnType::Uuid),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
     let _container_tx = accept_global(
@@ -794,17 +718,18 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
 fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
     // The maintained subscription view footprint is table-aware and now ships
     // reference-closure rows from the fast path.
-    let ref_schema = JazzSchema::new([
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("author", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("author", "authors"),
-        TableSchema::new("authors", [ColumnSchema::new("name", ColumnType::String)]),
-    ]);
+    let ref_schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("author", "authors"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("authors")
+                    .column("name", PublicColumnType::Text),
+            ),
+    );
     let (_ref_dir, mut ref_core) = open_node_with_schema(node(9), ref_schema);
     let shape = Query::from("todos")
         .validate(&ref_core.catalogue.schema)
@@ -819,10 +744,11 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
     assert_eq!(ref_metrics.hits_out, 1);
 
     // Control: the same query on a table with no references is supported.
-    let plain_schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
+    let plain_schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+        ),
+    );
     let (_plain_dir, mut plain_core) = open_node_with_schema(node(9), plain_schema);
     let plain_shape = Query::from("todos")
         .validate(&plain_core.catalogue.schema)
@@ -839,19 +765,19 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
 
 #[test]
 fn maintained_subscription_view_explicit_include_keeps_other_implicit_references() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "roots",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("primary", ColumnType::Uuid),
-                ColumnSchema::new("secondary", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("primary", "targets")
-        .with_reference("secondary", "targets"),
-        TableSchema::new("targets", [ColumnSchema::new("name", ColumnType::String)]),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("roots")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("primary", "targets")
+                    .fk_column("secondary", "targets"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("targets")
+                    .column("name", PublicColumnType::Text),
+            ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let included = row(0x11);
     let excluded = row(0x22);
@@ -890,17 +816,12 @@ fn maintained_subscription_view_explicit_include_keeps_other_implicit_references
 
 #[test]
 fn retained_user_param_filter_graph_matches_literal_filter() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "docs",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("docs").filter(eq(col("owner"), claim("sub"))),
-    ))
-    .with_write_policy(Policy::public())]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("docs")
+            .column("title", PublicColumnType::Text)
+            .column("owner", PublicColumnType::Uuid)
+            .policies(public_all_policies().with_select(public_claim_eq("owner", "sub"))),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
     core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
@@ -951,15 +872,12 @@ fn retained_user_param_filter_graph_matches_literal_filter() {
 
 #[test]
 fn session_sub_claim_cannot_override_authenticated_subject() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "docs",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("docs", "owner"))
-    .with_write_policy(Policy::public())]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("docs")
+            .column("title", PublicColumnType::Text)
+            .column("owner", PublicColumnType::Uuid)
+            .policies(public_all_policies().with_select(public_claim_eq("owner", "sub"))),
+    ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
     let other = user(0xb2);

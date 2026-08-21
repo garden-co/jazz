@@ -806,8 +806,7 @@ impl NapiDb {
     /// Register and return a typed view backed by this same runtime owner.
     #[napi(js_name = "registerSchema")]
     pub fn register_schema(&self, schema: Uint8Array) -> napi::Result<Self> {
-        let schema: JazzSchema = postcard::from_bytes(&schema)
-            .map_err(|error| napi::Error::from_reason(format!("decode schema: {error}")))?;
+        let schema = decode_public_schema(&schema)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -2027,11 +2026,15 @@ fn decode_core_open_args(
     schema: &[u8],
     config: &[u8],
 ) -> napi::Result<(JazzSchema, CoreOpenDbConfig)> {
-    let schema: JazzSchema = postcard::from_bytes(schema)
-        .map_err(|error| napi::Error::from_reason(format!("decode schema: {error}")))?;
+    let schema = decode_public_schema(schema)?;
     let config: CoreOpenDbConfig = postcard::from_bytes(config)
         .map_err(|error| napi::Error::from_reason(format!("decode open config: {error}")))?;
     Ok((schema, config))
+}
+
+fn decode_public_schema(schema: &[u8]) -> napi::Result<JazzSchema> {
+    jazz::tools::public_schema_convert::decode_public_schema_json(schema)
+        .map_err(napi::Error::from_reason)
 }
 
 fn open_core_db<S>(
@@ -2810,11 +2813,7 @@ impl JazzServer {
         let core_server_shell_schema = opts
             .schema
             .take()
-            .map(|schema_bytes| {
-                postcard::from_bytes::<JazzSchema>(&schema_bytes).map_err(|error| {
-                    napi::Error::from_reason(format!("Invalid Jazz schema bytes: {error}"))
-                })
-            })
+            .map(|schema_bytes| decode_public_schema(&schema_bytes))
             .transpose()?;
 
         let app_id =
@@ -3058,14 +3057,12 @@ mod tests {
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
     use jazz::groove::records::{RecordDescriptor, ValueType};
-    use jazz::groove::schema::ColumnType as GrooveColumnType;
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-    use jazz::schema::{
-        ColumnSchema as CoreColumnSchema, JazzSchema, Policy, TableSchema as CoreTableSchema,
-    };
     use jazz::tools::OpenTransactionId as CoreOpenBatchId;
-    use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
+    use jazz::tools::{
+        ColumnType, PolicyExpr, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
+    };
     use jazz::tx::DurabilityTier;
     use napi::bindgen_prelude::{BigInt, Either, Either3, Either4};
     use serde_json::json;
@@ -3493,12 +3490,21 @@ mod tests {
     /// owner-wide OpenBatch lifetime when its JS wrapper is collected.
     #[test]
     fn attached_tx_drop_preserves_owner_batch() {
-        let schema = JazzSchema::new([CoreTableSchema::new(
-            "items",
-            [CoreColumnSchema::new("label", GrooveColumnType::String)],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public())]);
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("label", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = jazz::schema::JazzSchema::new(&source)
+            .expect("NAPI transaction fixture public schema compiles");
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let owner = Rc::new(

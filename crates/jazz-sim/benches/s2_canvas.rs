@@ -9,17 +9,21 @@ use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
-use jazz::groove::records::{ScalarEnumSchema, Value};
-use jazz::groove::schema::{ColumnSchema, ColumnType};
+use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
-use jazz::query::{Binding, Query, ValidatedQuery, claim, col, eq, lit, param};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit, param};
+use jazz::schema::JazzSchema;
 use jazz::time::GlobalSeq;
+use jazz::tools::policy_expr as public_policy_expr;
+use jazz::tools::public_schema::{
+    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_sim::distributions::Lcg;
+use jazz_sim::public_schema_fixture::{all_operation_policies, compile_public_schema};
 use jazz_sim::view_accounting::{bytes_floor, view_update_bytes};
 use jazz_sim::{
     DeterministicDriver, DriverContext, Metrics, NodeRole, PeerProfile, SimulatorTransportCodec,
@@ -1971,38 +1975,35 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
 }
 
 fn schema() -> JazzSchema {
-    let shape_kind =
-        ColumnType::EnumTag(ScalarEnumSchema::new("shape_type", ["circle", "rectangle"]).unwrap());
-    let invite_policy = Policy::shape(Query::from(SHAPES).join_via_column(
-        INVITES,
-        "canvas",
-        "canvas",
-        [eq(col("userID"), claim("sub"))],
+    let shape_kind = PublicColumnType::ScalarEnum {
+        name: "shape_type".to_owned(),
+        variants: vec!["circle".to_owned(), "rectangle".to_owned()],
+    };
+    let invite_policy = public_policy_expr::exists(public_policy_expr::table(INVITES).where_(
+        public_policy_expr::rel::all_of([
+            public_policy_expr::rel::eq_outer("canvas", "canvas"),
+            public_policy_expr::rel::eq_session("userID", "sub"),
+        ]),
     ));
-    JazzSchema::new([
-        TableSchema::new(CANVASES, [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            INVITES,
-            [
-                ColumnSchema::new("canvas", ColumnType::Uuid),
-                ColumnSchema::new("userID", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("canvas", CANVASES),
-        TableSchema::new(
-            SHAPES,
-            [
-                ColumnSchema::new("canvas", ColumnType::Uuid),
-                ColumnSchema::new("type", shape_kind),
-                ColumnSchema::new("text", ColumnType::String),
-                ColumnSchema::new("x", ColumnType::F64),
-                ColumnSchema::new("y", ColumnType::F64),
-            ],
-        )
-        .with_reference("canvas", CANVASES)
-        .with_read_policy(invite_policy.clone())
-        .with_write_policy(invite_policy),
-    ])
+    compile_public_schema(
+        SchemaBuilder::new()
+            .table(PublicTableSchema::builder(CANVASES).column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchema::builder(INVITES)
+                    .fk_column("canvas", CANVASES)
+                    .column("userID", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchema::builder(SHAPES)
+                    .fk_column("canvas", CANVASES)
+                    .column("type", shape_kind)
+                    .column("text", PublicColumnType::Text)
+                    .column("x", PublicColumnType::Double)
+                    .column("y", PublicColumnType::Double)
+                    .policies(all_operation_policies(invite_policy)),
+            )
+            .build(),
+    )
 }
 
 fn seed_fixture(
@@ -2434,10 +2435,11 @@ fn db_rows_state(schema: &JazzSchema, rows: Vec<CurrentRow>) -> BTreeMap<RowUuid
 
 fn shape_state(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, (u64, u64)> {
     let table = schema()
-        .tables
-        .into_iter()
+        .tables()
+        .iter()
         .find(|table| table.name == SHAPES)
-        .unwrap();
+        .unwrap()
+        .clone();
     node.current_rows(SHAPES, DurabilityTier::Global)
         .unwrap()
         .into_iter()

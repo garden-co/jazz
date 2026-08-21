@@ -5,7 +5,6 @@ import {
   resolveDefaultDurabilityTier,
   type Runtime,
   type TransactionalRuntime,
-  PersistedWriteRejectedError,
   type BatchId,
   type MutationErrorEvent,
   type OpenBatchId,

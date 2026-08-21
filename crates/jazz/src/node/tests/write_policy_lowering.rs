@@ -161,14 +161,17 @@ fn write_policy_child_cells(
 #[test]
 fn lowered_write_policies_normalize_integer_widths_for_equality_in_and_contains() {
     let identity = user(0x71);
-    let schema = JazzSchema::new([TableSchema::new(
-        "numbers",
-        [
-            ColumnSchema::new("number", ColumnType::U64),
-            ColumnSchema::new("allowed", ColumnType::U32.array_of()),
-            ColumnSchema::new("floating", ColumnType::F64),
-        ],
-    )]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("numbers")
+            .column("number", PublicColumnType::Timestamp)
+            .column(
+                "allowed",
+                PublicColumnType::Array {
+                    element: Box::new(PublicColumnType::Integer),
+                },
+            )
+            .column("floating", PublicColumnType::Double),
+    ));
     let table = schema.tables[0].clone();
     let (_dir, mut core) = open_node_with_schema(node(0x72), schema);
     core.set_session_claims(
@@ -180,7 +183,7 @@ fn lowered_write_policies_normalize_integer_widths_for_equality_in_and_contains(
     );
     let candidate = BTreeMap::from([
         ("number".to_owned(), Value::U64(7)),
-        ("allowed".to_owned(), Value::Array(vec![Value::U32(7)])),
+        ("allowed".to_owned(), Value::Array(vec![Value::I32(7)])),
         ("floating".to_owned(), Value::F64(7.0)),
     ]);
 
@@ -199,7 +202,7 @@ fn lowered_write_policies_normalize_integer_widths_for_equality_in_and_contains(
             true,
         ),
         (
-            "contains matches I64 claim against U32 array member",
+            "contains matches I64 claim against I32 array member",
             Query::from("numbers").filter(crate::query::contains(
                 col("allowed"),
                 claim("signed_seven"),
@@ -250,52 +253,46 @@ fn lowered_write_policy_operation_matrix() {
     let owner = user(0xa1);
     let other = user(0xb2);
     let editor = user(0xc3);
-    let parent_write_policy = Query::from("parents").filter(eq(col("editor"), claim("sub")));
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "grandparents",
-            [ColumnSchema::new("owner", ColumnType::Uuid)],
-        )
-        .with_read_policy(Policy::owner_only("grandparents", "owner"))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "parents",
-            [
-                ColumnSchema::new("grandparent_id", ColumnType::Uuid),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("editor", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("grandparent_id", "grandparents")
-        .with_read_policy(Policy::shape(Query::from("parents").inherits("grandparent_id")))
-        .with_write_policies(crate::schema::WritePolicies {
-            insert_check: Some(parent_write_policy.clone()),
-            update_using: Some(parent_write_policy.clone()),
-            update_check: Some(parent_write_policy.clone()),
-            delete_using: Some(parent_write_policy),
-        }),
-        TableSchema::new(
-            "children",
-            [
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("optional_owner", ColumnType::Uuid.nullable()),
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("access_id", ColumnType::Uuid),
-                ColumnSchema::new("marker", ColumnType::String),
-            ],
-        )
-        .with_reference("parent_id", "parents")
-        .with_reference("access_id", "access")
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "access",
-            [
-                ColumnSchema::new("child_marker", ColumnType::String),
-                ColumnSchema::new("member", ColumnType::Uuid),
-            ],
-        )
-        .with_write_policy(Policy::public()),
-    ]);
+    let parent_write_policy = public_claim_eq("editor", "sub");
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("grandparents")
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(
+                        public_all_policies().with_select(public_claim_eq("owner", "sub")),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("parents")
+                    .fk_column("grandparent_id", "grandparents")
+                    .column("owner", PublicColumnType::Uuid)
+                    .column("editor", PublicColumnType::Uuid)
+                    .policies(
+                        public_write_policies(parent_write_policy).with_select(
+                            PublicPolicyExpr::inherits(
+                                PublicOperation::Select,
+                                "grandparent_id",
+                            ),
+                        ),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("children")
+                    .column("owner", PublicColumnType::Uuid)
+                    .nullable_column("optional_owner", PublicColumnType::Uuid)
+                    .fk_column("parent_id", "parents")
+                    .fk_column("access_id", "access")
+                    .column("marker", PublicColumnType::Text)
+                    .policies(public_write_policies(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("access")
+                    .column("child_marker", PublicColumnType::Text)
+                    .column("member", PublicColumnType::Uuid)
+                    .policies(public_write_policies(PublicPolicyExpr::True)),
+            ),
+    );
     let children = schema
         .tables
         .iter()
@@ -761,49 +758,36 @@ fn lowered_write_policy_operation_matrix() {
 fn lowered_write_policy_covers_deep_inherited_write_chains() {
     let owner = user(0xf1);
     let other = user(0xf2);
-    let grandparent_policy =
-        Query::from("grandparents").filter(eq(col("owner"), claim("sub")));
-    let parent_insert =
-        Query::from("parents")
-            .inherits_operation("grandparent_id", crate::query::InheritsOperation::Insert);
-    let parent_update =
-        Query::from("parents")
-            .inherits_operation("grandparent_id", crate::query::InheritsOperation::Update);
-    let parent_delete =
-        Query::from("parents")
-            .inherits_operation("grandparent_id", crate::query::InheritsOperation::Delete);
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "grandparents",
-            [ColumnSchema::new("owner", ColumnType::Uuid)],
-        )
-        .with_read_policy(Policy::shape(
-            Query::from("grandparents").filter(crate::query::Predicate::Any(Vec::new())),
-        ))
-        .with_write_policies(crate::schema::WritePolicies {
-            insert_check: Some(grandparent_policy.clone()),
-            update_using: Some(grandparent_policy.clone()),
-            update_check: Some(grandparent_policy.clone()),
-            delete_using: Some(grandparent_policy),
-        }),
-        TableSchema::new(
-            "parents",
-            [ColumnSchema::new("grandparent_id", ColumnType::Uuid)],
-        )
-        .with_reference("grandparent_id", "grandparents")
-        .with_write_policies(crate::schema::WritePolicies {
-            insert_check: Some(parent_insert),
-            update_using: Some(parent_update.clone()),
-            update_check: Some(parent_update),
-            delete_using: Some(parent_delete),
-        }),
-        TableSchema::new(
-            "children",
-            [ColumnSchema::new("parent_id", ColumnType::Uuid)],
-        )
-        .with_reference("parent_id", "parents")
-        .with_write_policy(Policy::public()),
-    ]);
+    let grandparent_policy = public_claim_eq("owner", "sub");
+    let parent_insert = PublicPolicyExpr::inherits(PublicOperation::Insert, "grandparent_id");
+    let parent_update = PublicPolicyExpr::inherits(PublicOperation::Update, "grandparent_id");
+    let parent_delete = PublicPolicyExpr::inherits(PublicOperation::Delete, "grandparent_id");
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("grandparents")
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(
+                        public_write_policies(grandparent_policy)
+                            .with_select(PublicPolicyExpr::False),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("parents")
+                    .fk_column("grandparent_id", "grandparents")
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_insert(parent_insert)
+                            .with_update(Some(parent_update.clone()), parent_update)
+                            .with_delete(parent_delete),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("children")
+                    .fk_column("parent_id", "parents")
+                    .policies(public_write_policies(PublicPolicyExpr::True)),
+            ),
+    );
     let children = schema
         .tables
         .iter()
@@ -922,55 +906,44 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
     let owner = user(0x41);
     let other = user(0x42);
     let editor = user(0x43);
-    let parent_write_policy =
-        Query::from("parents").filter(eq(col("editor"), claim("sub")));
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "parents",
-            [
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("editor", ColumnType::Uuid),
-            ],
-        )
-        .with_read_policy(Policy::owner_only("parents", "owner"))
-        .with_write_policies(crate::schema::WritePolicies {
-            insert_check: Some(parent_write_policy.clone()),
-            update_using: Some(parent_write_policy.clone()),
-            update_check: Some(parent_write_policy.clone()),
-            delete_using: Some(parent_write_policy),
-        }),
-        TableSchema::new(
-            "docs",
-            [
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("access_id", ColumnType::Uuid),
-                ColumnSchema::new("marker", ColumnType::String),
-            ],
-        )
-        .with_reference("parent_id", "parents")
-        .with_reference("access_id", "access")
-        .with_write_policies(crate::schema::WritePolicies {
-            insert_check: Some(Query::from("docs").inherits("parent_id")),
-            update_using: Some(Query::from("docs").inherits_operation(
-                "parent_id",
-                crate::query::InheritsOperation::Update,
-            )),
-            update_check: Some(Query::from("docs").inherits_operation(
-                "parent_id",
-                crate::query::InheritsOperation::Update,
-            )),
-            delete_using: Some(Query::from("docs").inherits_operation(
-                "parent_id",
-                crate::query::InheritsOperation::Delete,
-            )),
-        }),
-        TableSchema::new(
-            "access",
-            [ColumnSchema::new("member", ColumnType::Uuid)],
-        )
-        .with_write_policy(Policy::public()),
-    ]);
+    let parent_write_policy = public_claim_eq("editor", "sub");
+    let parent_update = PublicPolicyExpr::inherits(PublicOperation::Update, "parent_id");
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("parents")
+                    .column("owner", PublicColumnType::Uuid)
+                    .column("editor", PublicColumnType::Uuid)
+                    .policies(
+                        public_write_policies(parent_write_policy)
+                            .with_select(public_claim_eq("owner", "sub")),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("owner", PublicColumnType::Uuid)
+                    .fk_column("parent_id", "parents")
+                    .fk_column("access_id", "access")
+                    .column("marker", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_insert(PublicPolicyExpr::inherits(
+                                PublicOperation::Select,
+                                "parent_id",
+                            ))
+                            .with_update(Some(parent_update.clone()), parent_update)
+                            .with_delete(PublicPolicyExpr::inherits(
+                                PublicOperation::Delete,
+                                "parent_id",
+                            )),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("access")
+                    .column("member", PublicColumnType::Uuid)
+                    .policies(public_write_policies(PublicPolicyExpr::True)),
+            ),
+    );
     let docs = schema
         .tables
         .iter()
@@ -1249,15 +1222,16 @@ fn lowered_write_policy_covers_branch_overlay_table_operations() {
 #[test]
 fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
     let owner = user(0xe1);
-    let v1 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("owner", ColumnType::Uuid)],
-    )
-    .with_write_policy(Policy::owner_only("todos", "owner"))]);
-    let v2 = JazzSchema::new([TableSchema::new(
-        "tasks",
-        [ColumnSchema::new("owner", ColumnType::Uuid)],
-    )]);
+    let v1 = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("owner", PublicColumnType::Uuid)
+            .policies(public_write_policies(public_claim_eq("owner", "sub"))),
+    ));
+    let v2 = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks").column("owner", PublicColumnType::Uuid),
+        ),
+    );
     let v2_payload = SchemaVersion::new(v2.clone());
     let (_dir, mut core) = open_node_with_schema(node(0xe2), v1.clone());
     publish_schema_lineage(

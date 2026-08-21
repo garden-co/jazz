@@ -1247,19 +1247,47 @@ pub struct NodeDescriptor {
     /// descriptor before cross-retainer reuse is valid.
     pub operator: OpType,
     pub inputs: Vec<NodeId>,
-    pub output: RecordDescriptor,
+    pub output: NodeOutput,
+}
+
+/// The typed value produced by an IVM graph node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NodeOutput {
+    Records(RecordDescriptor),
+    Arrangement(ArrangementDescriptor),
+}
+
+impl NodeOutput {
+    pub fn records(self) -> RecordDescriptor {
+        match self {
+            Self::Records(descriptor) => descriptor,
+            Self::Arrangement(arrangement) => arrangement.records,
+        }
+    }
+}
+
+impl From<RecordDescriptor> for NodeOutput {
+    fn from(value: RecordDescriptor) -> Self {
+        Self::Records(value)
+    }
+}
+
+/// Identity and record type of a reusable indexed graph dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ArrangementDescriptor {
+    pub records: RecordDescriptor,
 }
 
 impl NodeDescriptor {
     pub fn new(
         operator: OpType,
         inputs: impl IntoIterator<Item = NodeId>,
-        output: RecordDescriptor,
+        output: impl Into<NodeOutput>,
     ) -> Self {
         Self {
             operator,
             inputs: inputs.into_iter().collect(),
-            output,
+            output: output.into(),
         }
     }
 
@@ -1271,7 +1299,7 @@ impl NodeDescriptor {
         NodeId(hasher.finish())
     }
 
-    pub fn validate(&self, input_outputs: &[RecordDescriptor]) -> Result<(), GraphValidationError> {
+    pub fn validate(&self, input_outputs: &[NodeOutput]) -> Result<(), GraphValidationError> {
         if self.inputs.len() != input_outputs.len() {
             return Err(GraphValidationError::InputDescriptorArityMismatch {
                 inputs: self.inputs.len(),
@@ -1279,19 +1307,60 @@ impl NodeDescriptor {
             });
         }
 
+        let typed_inputs = input_outputs;
+        let arrangement_consumer = matches!(
+            self.operator,
+            OpType::Join(_)
+                | OpType::SemiJoin(_)
+                | OpType::AntiJoin(_)
+                | OpType::ArgMaxBy(_)
+                | OpType::ArgMinBy(_)
+                | OpType::TopBy(_)
+                | OpType::CollectBy(_)
+                | OpType::Aggregate(_)
+        );
+        if arrangement_consumer {
+            expect_arrangement_inputs(typed_inputs)?;
+        } else if typed_inputs
+            .iter()
+            .any(|input| matches!(input, NodeOutput::Arrangement(_)))
+        {
+            return Err(GraphValidationError::InvalidNodeOutput);
+        }
+        let input_outputs = typed_inputs
+            .iter()
+            .copied()
+            .map(NodeOutput::records)
+            .collect::<Vec<_>>();
+        let output = self.output.records();
+        if !matches!(self.operator, OpType::Arrange(_))
+            && matches!(self.output, NodeOutput::Arrangement(_))
+        {
+            return Err(GraphValidationError::InvalidNodeOutput);
+        }
         match &self.operator {
             OpType::TableSource(_)
             | OpType::IndexSource(_)
             | OpType::InlineRecords(_)
             | OpType::FrontierSource(_)
             | OpType::BindingSource(_) => expect_arity(&self.inputs, 0),
+            OpType::Arrange(_) => {
+                expect_arity(&self.inputs, 1)?;
+                if !matches!(typed_inputs[0], NodeOutput::Records(_))
+                    || !matches!(self.output, NodeOutput::Arrangement(_))
+                {
+                    return Err(GraphValidationError::InvalidNodeOutput);
+                }
+                expect_same_output(&output, &input_outputs[0])
+            }
             OpType::Filter(_) | OpType::Distinct | OpType::Negate => {
                 expect_arity(&self.inputs, 1)?;
-                expect_same_output(&self.output, &input_outputs[0])
+                expect_same_output(&output, &input_outputs[0])
             }
             OpType::ArgMaxBy(arg_max_by) => {
                 expect_arity(&self.inputs, 1)?;
-                expect_same_output(&self.output, &input_outputs[0])?;
+                expect_arrangement_inputs(typed_inputs)?;
+                expect_same_output(&output, &input_outputs[0])?;
                 for &field_idx in arg_max_by
                     .group_field_indices
                     .iter()
@@ -1308,7 +1377,8 @@ impl NodeDescriptor {
             }
             OpType::ArgMinBy(arg_min_by) => {
                 expect_arity(&self.inputs, 1)?;
-                expect_same_output(&self.output, &input_outputs[0])?;
+                expect_arrangement_inputs(typed_inputs)?;
+                expect_same_output(&output, &input_outputs[0])?;
                 for &field_idx in arg_min_by
                     .group_field_indices
                     .iter()
@@ -1325,7 +1395,8 @@ impl NodeDescriptor {
             }
             OpType::TopBy(top_by) => {
                 expect_arity(&self.inputs, 1)?;
-                expect_same_output(&self.output, &input_outputs[0])?;
+                expect_arrangement_inputs(typed_inputs)?;
+                expect_same_output(&output, &input_outputs[0])?;
                 for &field_idx in top_by
                     .group_field_indices
                     .iter()
@@ -1342,6 +1413,7 @@ impl NodeDescriptor {
             }
             OpType::CollectBy(collect_by) => {
                 expect_arity(&self.inputs, 1)?;
+                expect_arrangement_inputs(typed_inputs)?;
                 if collect_by.mode == CollectByMode::Expand {
                     if collect_by.tuple_fields.is_empty()
                         || collect_by.occurrence_id_field_indices.is_empty()
@@ -1350,7 +1422,7 @@ impl NodeDescriptor {
                             != collect_by.order_fields.len() + collect_by.tie_fields.len()
                         || collect_by.order_fields.is_empty()
                         || collect_by.tie_fields.is_empty()
-                        || self.output.fields().len() != collect_by.tuple_fields.len()
+                        || output.fields().len() != collect_by.tuple_fields.len()
                     {
                         return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                     }
@@ -1369,7 +1441,7 @@ impl NodeDescriptor {
                         }
                     }
                     for (output_field, projection) in
-                        self.output.fields().iter().zip(&collect_by.tuple_fields)
+                        output.fields().iter().zip(&collect_by.tuple_fields)
                     {
                         let input_field = &input_outputs[0].fields()[projection.field_idx];
                         if output_field.name.as_deref() != Some(projection.output_name.as_str())
@@ -1398,7 +1470,7 @@ impl NodeDescriptor {
                     if !collect_by.slots.is_empty()
                         || !collect_by.child_fields.is_empty()
                         || !collect_by.collection_field.is_empty()
-                        || self.output.fields().len() != collect_by.parent_fields.len()
+                        || output.fields().len() != collect_by.parent_fields.len()
                         || collect_by.sort_field_indices.len() != collect_by.sort_directions.len()
                         || collect_by.sort_field_indices.len()
                             != collect_by.order_fields.len() + collect_by.tie_fields.len()
@@ -1408,7 +1480,7 @@ impl NodeDescriptor {
                         return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                     }
                     for (output_field, projection) in
-                        self.output.fields().iter().zip(&collect_by.parent_fields)
+                        output.fields().iter().zip(&collect_by.parent_fields)
                     {
                         let input_field = input_outputs[0]
                             .fields()
@@ -1446,13 +1518,12 @@ impl NodeDescriptor {
                     return Ok(());
                 }
                 if !collect_by.slots.is_empty() {
-                    if self.output.fields().len()
+                    if output.fields().len()
                         != collect_by.parent_fields.len() + collect_by.slots.len()
                     {
                         return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                     }
-                    for (output_field, projection) in self
-                        .output
+                    for (output_field, projection) in output
                         .fields()
                         .iter()
                         .take(collect_by.parent_fields.len())
@@ -1473,8 +1544,7 @@ impl NodeDescriptor {
                             return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                         }
                     }
-                    for (output_field, slot) in self
-                        .output
+                    for (output_field, slot) in output
                         .fields()
                         .iter()
                         .skip(collect_by.parent_fields.len())
@@ -1491,22 +1561,22 @@ impl NodeDescriptor {
                     }
                     return Ok(());
                 }
-                if collect_by.collection_field_index >= self.output.fields().len() {
+                if collect_by.collection_field_index >= output.fields().len() {
                     return Err(GraphValidationError::FieldIndexOutOfBounds {
                         index: collect_by.collection_field_index,
-                        len: self.output.fields().len(),
+                        len: output.fields().len(),
                     });
                 }
                 let expected_collection = ValueType::Array(Box::new(ValueType::Record(Box::new(
                     collect_by.child_descriptor,
                 ))));
-                if self.output.fields()[collect_by.collection_field_index].value_type
+                if output.fields()[collect_by.collection_field_index].value_type
                     != expected_collection
                 {
                     return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                 }
-                if self.output.fields().len() != collect_by.parent_fields.len() + 1
-                    || self.output.fields()[collect_by.collection_field_index]
+                if output.fields().len() != collect_by.parent_fields.len() + 1
+                    || output.fields()[collect_by.collection_field_index]
                         .name
                         .as_deref()
                         != Some(collect_by.collection_field.as_str())
@@ -1542,8 +1612,7 @@ impl NodeDescriptor {
                 {
                     return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                 }
-                for (output_field, projection) in self
-                    .output
+                for (output_field, projection) in output
                     .fields()
                     .iter()
                     .take(collect_by.parent_fields.len())
@@ -1627,19 +1696,18 @@ impl NodeDescriptor {
                     }
                 }
                 if !project.expressions.is_empty()
-                    && project.expressions.len() != self.output.fields().len()
+                    && project.expressions.len() != output.fields().len()
                 {
                     return Err(GraphValidationError::OutputFieldCountMismatch {
                         expected: project.expressions.len(),
-                        actual: self.output.fields().len(),
+                        actual: output.fields().len(),
                     });
                 }
-                if project.expressions.is_empty()
-                    && project.mapping.len() != self.output.fields().len()
+                if project.expressions.is_empty() && project.mapping.len() != output.fields().len()
                 {
                     return Err(GraphValidationError::OutputFieldCountMismatch {
                         expected: project.mapping.len(),
-                        actual: self.output.fields().len(),
+                        actual: output.fields().len(),
                     });
                 }
                 Ok(())
@@ -1658,12 +1726,12 @@ impl NodeDescriptor {
             }
             OpType::Persist(persist) => {
                 expect_arity(&self.inputs, 1)?;
-                expect_same_output(&self.output, &input_outputs[0])?;
+                expect_same_output(&output, &input_outputs[0])?;
                 for &field_idx in &persist.key_fields {
-                    if field_idx >= self.output.fields().len() {
+                    if field_idx >= output.fields().len() {
                         return Err(GraphValidationError::FieldIndexOutOfBounds {
                             index: field_idx,
-                            len: self.output.fields().len(),
+                            len: output.fields().len(),
                         });
                     }
                 }
@@ -1671,6 +1739,7 @@ impl NodeDescriptor {
             }
             OpType::Join(join) | OpType::SemiJoin(join) | OpType::AntiJoin(join) => {
                 expect_arity(&self.inputs, 2)?;
+                expect_arrangement_inputs(typed_inputs)?;
                 if join.left_descriptor != input_outputs[0]
                     || join.right_descriptor != input_outputs[1]
                 {
@@ -1689,12 +1758,13 @@ impl NodeDescriptor {
                     return Ok(());
                 }
                 for input_output in input_outputs {
-                    expect_same_output(&self.output, input_output)?;
+                    expect_same_output(&output, &input_output)?;
                 }
                 Ok(())
             }
             OpType::Aggregate(_) => {
                 expect_arity(&self.inputs, 1)?;
+                expect_arrangement_inputs(typed_inputs)?;
                 if let OpType::Aggregate(aggregate) = &self.operator {
                     for &field_idx in &aggregate.group_field_indices {
                         if field_idx >= input_outputs[0].fields().len() {
@@ -1734,6 +1804,17 @@ fn expect_same_output(
     }
 }
 
+fn expect_arrangement_inputs(inputs: &[NodeOutput]) -> Result<(), GraphValidationError> {
+    if inputs
+        .iter()
+        .all(|input| matches!(input, NodeOutput::Arrangement(_)))
+    {
+        Ok(())
+    } else {
+        Err(GraphValidationError::InvalidNodeOutput)
+    }
+}
+
 fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
     match value_type {
         ValueType::Nullable(inner) => collect_by_ordered_scalar(inner),
@@ -1755,6 +1836,8 @@ fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum GraphValidationError {
+    #[error("operator has an incompatible typed output")]
+    InvalidNodeOutput,
     #[error("field index {index} out of bounds for {len} fields")]
     FieldIndexOutOfBounds { index: usize, len: usize },
     #[error("expected {expected} inputs, got {actual}")]
@@ -1784,6 +1867,7 @@ pub enum OpType {
     InlineRecords(InlineRecordsOp),
     FrontierSource(FrontierSourceOp),
     BindingSource(BindingSourceOp),
+    Arrange(ArrangeOp),
     ArgMaxBy(ArgMaxByOp),
     ArgMinBy(ArgMinByOp),
     TopBy(TopByOp),
@@ -1805,6 +1889,13 @@ pub enum OpType {
     Negate,
     Distinct,
     Aggregate(AggregateOp),
+}
+
+/// A reusable indexed view of one record-producing input.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ArrangeOp {
+    pub fields: Vec<String>,
+    pub comparison: ValueComparison,
 }
 
 /// Identity of a deduplicated graph node.
@@ -2046,7 +2137,7 @@ mod tests {
         );
 
         assert_eq!(
-            descriptor.validate(&[input]),
+            descriptor.validate(&[NodeOutput::Records(input)]),
             Err(GraphValidationError::FieldIndexOutOfBounds { index: 1, len: 1 })
         );
     }
@@ -2056,8 +2147,44 @@ mod tests {
         let descriptor = NodeDescriptor::new(OpType::Union, [NodeId(1), NodeId(2)], output());
 
         assert_eq!(
-            descriptor.validate(&[output(), string_output()]),
+            descriptor.validate(&[
+                NodeOutput::Records(output()),
+                NodeOutput::Records(string_output()),
+            ]),
             Err(GraphValidationError::OutputDescriptorMismatch)
+        );
+    }
+
+    #[test]
+    fn validation_keeps_record_and_arrangement_edges_distinct() {
+        let filter = NodeDescriptor::new(
+            OpType::Filter(FilterOp {
+                predicate: PredicateExpr::is_not_null("f0"),
+                comparison: ValueComparison::Exact,
+            }),
+            [NodeId(1)],
+            output(),
+        );
+        assert_eq!(
+            filter.validate(&[NodeOutput::Arrangement(ArrangementDescriptor {
+                records: output(),
+            })]),
+            Err(GraphValidationError::InvalidNodeOutput),
+        );
+
+        let arrangement = NodeDescriptor::new(
+            OpType::Arrange(ArrangeOp {
+                fields: vec!["f0".to_owned()],
+                comparison: ValueComparison::Exact,
+            }),
+            [NodeId(1)],
+            NodeOutput::Arrangement(ArrangementDescriptor { records: output() }),
+        );
+        assert_eq!(
+            arrangement.validate(&[NodeOutput::Arrangement(ArrangementDescriptor {
+                records: output(),
+            })]),
+            Err(GraphValidationError::InvalidNodeOutput),
         );
     }
 
@@ -2081,7 +2208,10 @@ mod tests {
         );
 
         assert_eq!(
-            descriptor.validate(&[output(), output()]),
+            descriptor.validate(&[
+                NodeOutput::Arrangement(ArrangementDescriptor { records: output() }),
+                NodeOutput::Arrangement(ArrangementDescriptor { records: output() }),
+            ]),
             Err(GraphValidationError::JoinKeyArityMismatch { left: 1, right: 2 })
         );
     }
@@ -2103,7 +2233,7 @@ mod tests {
         );
 
         assert_eq!(
-            descriptor.validate(&[output()]),
+            descriptor.validate(&[NodeOutput::Records(output())]),
             Err(GraphValidationError::FieldIndexOutOfBounds { index: 1, len: 1 })
         );
     }
@@ -2127,6 +2257,17 @@ mod tests {
             NodeDurability::Ephemeral,
         );
         let child = output();
+        let arrangement = graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::Arrange(ArrangeOp {
+                    fields: vec!["f0".to_owned()],
+                    comparison: ValueComparison::Exact,
+                }),
+                [source],
+                NodeOutput::Arrangement(ArrangementDescriptor { records: output() }),
+            ),
+            NodeDurability::Ephemeral,
+        );
         let collected_output = RecordDescriptor::new([
             ("f0", ValueType::U64),
             (
@@ -2169,7 +2310,7 @@ mod tests {
                     offset: 0,
                     limit: TopByLimit::Finite(1),
                 })),
-                [source],
+                [arrangement],
                 collected_output,
             ),
             NodeDurability::Ephemeral,

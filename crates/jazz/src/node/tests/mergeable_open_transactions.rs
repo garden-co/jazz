@@ -1,11 +1,9 @@
 fn mergeable_open_test_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("note", ColumnType::String),
-        ],
-    )])
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("note", PublicColumnType::Text),
+    ))
 }
 
 fn mergeable_open_cells(

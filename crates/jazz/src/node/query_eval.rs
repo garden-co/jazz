@@ -59,7 +59,7 @@ use crate::query::{
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
-use crate::schema::{ColumnSchema, JazzSchema, branch_metadata_table_schema};
+use crate::schema::{ColumnSchema, RuntimeSchema, branch_metadata_table_schema};
 use crate::tools::{ObjectId, OutputOccurrenceId};
 
 mod materialization;

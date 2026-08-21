@@ -43,18 +43,14 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                 ("small", 42),
                 ("huge", BIG_SAFE_PLUS_ONE),
             ];
+            let mut txs = Vec::with_capacity(rows.len());
             for (label, amount) in rows {
                 let (_, _, transaction_id) = client
                     .insert("metrics", row_input!("label" => label, "amount" => amount))
                     .expect("insert bigint row");
-                client
-                    .wait_for_transaction(
-                        transaction_id.expect("ordinary mutation commits immediately"),
-                        DurabilityTier::EdgeServer,
-                    )
-                    .await
-                    .expect("bigint row settles");
+                txs.push(transaction_id.expect("ordinary mutation commits immediately"));
             }
+            support::wait_for_edge_txs(&client, &txs).await;
 
             let ordered_query = jazz::query::Query::from("metrics")
                 .select(["label", "amount"])
@@ -130,13 +126,11 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                     row_input!("label" => "later", "amount" => BIG_SAFE_PLUS_ONE + 1),
                 )
                 .expect("insert subscribed bigint row");
-            client
-                .wait_for_transaction(
-                    transaction_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
-                )
-                .await
-                .expect("subscribed bigint row settles");
+            support::wait_for_edge_txs(
+                &client,
+                &[transaction_id.expect("ordinary mutation commits immediately")],
+            )
+            .await;
 
             wait_for_subscription_update(
                 &mut stream,

@@ -369,7 +369,7 @@ describe("Db runtime schema order", () => {
     >;
 
     expect(db.upsert(table, externalId, { title: "Buy milk", done: false })).toMatchObject({
-      batchId: Promise.resolve("transaction-upsert" as BatchId),
+      transactionId: Promise.resolve("transaction-upsert" as BatchId),
     });
 
     expect(upsert).toHaveBeenCalledWith(

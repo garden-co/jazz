@@ -666,12 +666,19 @@ impl Query {
 
     /// Validate and canonicalize this query against a Jazz schema.
     pub fn validate(&self, schema: &JazzSchema) -> Result<ValidatedQuery, QueryError> {
+        self.validate_runtime(schema.runtime())
+    }
+
+    pub(crate) fn validate_runtime(
+        &self,
+        schema: &RuntimeSchema,
+    ) -> Result<ValidatedQuery, QueryError> {
         validate_query(self, schema)
     }
 
     pub(crate) fn validate_with_schema_version(
         &self,
-        schema: &JazzSchema,
+        schema: &RuntimeSchema,
         schema_version: SchemaVersionId,
     ) -> Result<ValidatedQuery, QueryError> {
         validate_query_with_schema_version(self, schema, schema_version)

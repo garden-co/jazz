@@ -1,17 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+mod common;
+
 use jazz::block_on;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
     SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, Query, claim, col, eq};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::query::{OrderDirection, Query};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType as PublicColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
+
+use common::{
+    allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq,
+};
 
 const TEAMS: &str = "teams";
 const MEMBERSHIPS: &str = "team_memberships";
@@ -25,38 +31,38 @@ fn row(seed: u8) -> RowUuid {
 }
 
 fn schema() -> JazzSchema {
-    let document_policy = Query::from(DOCUMENTS).join_via_column(
+    let document_policy = exists(
         MEMBERSHIPS,
-        "team",
-        "team",
-        [eq(col("user"), claim("sub"))],
+        vec![
+            outer_eq("team", "team"),
+            session_eq("user", &["claims", "sub"]),
+        ],
     );
-    JazzSchema::new([
-        TableSchema::new(TEAMS, [ColumnSchema::new("name", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-        TableSchema::new(
-            MEMBERSHIPS,
-            [
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("team", TEAMS)
-        .with_read_policy(Policy::owner_only(MEMBERSHIPS, "user"))
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            DOCUMENTS,
-            [
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("rank", ColumnType::U64),
-            ],
-        )
-        .with_reference("team", TEAMS)
-        .with_indexed_columns(["team", "rank"])
-        .with_read_policy(Policy::shape(document_policy))
-        .with_write_policy(Policy::public()),
-    ])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(TEAMS)
+                    .column("name", PublicColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new(MEMBERSHIPS)
+                    .fk_column("team", TEAMS)
+                    .column("user", PublicColumnType::Uuid)
+                    .policies(read_and_allow_all_writes(session_eq(
+                        "user",
+                        &["claims", "sub"],
+                    ))),
+            )
+            .table(
+                TableSchemaBuilder::new(DOCUMENTS)
+                    .fk_column("team", TEAMS)
+                    .column("rank", PublicColumnType::Timestamp)
+                    .index_only(["team", "rank"])
+                    .policies(read_and_allow_all_writes(document_policy)),
+            )
+            .build(),
+    )
 }
 
 fn open_db() -> Db<MemoryStorage> {
@@ -439,19 +445,21 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
 
 #[test]
 fn client_subscription_skips_policy_only_compile_validation_but_identity_subscription_guards_it() {
-    let schema = JazzSchema::new([
-        TableSchema::new("profiles", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "items",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("profile", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("profile", "profiles")
-        .with_read_policy(Policy::shape(Query::from("items").include("profile")))
-        .with_write_policy(Policy::public()),
-    ]);
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("profiles")
+                    .column("name", PublicColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column("name", PublicColumnType::Text)
+                    .fk_column("profile", "profiles")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(
@@ -466,6 +474,14 @@ fn client_subscription_skips_policy_only_compile_validation_but_identity_subscri
         .with_id_source(SeededRowIdSource::new(0x8200)),
     ))
     .expect("open client subscription validation fixture");
+    db.mutate_current_compiled_schema_for_test(|compiled| {
+        compiled
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "items")
+            .expect("items table")
+            .read_policy = Some(Query::from("items").include("profile"));
+    });
     let prepared = db
         .prepare_query(&Query::from("items"))
         .expect("prepare items query");

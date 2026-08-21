@@ -861,6 +861,13 @@ parallel query identities.
   remote/settled coverage must request a coverage witness explicitly (for
   example by attaching/subscribing to the maintained view) and must error or
   report unsettled state when that witness is absent.
+- 🔶 **Explicit offline fallback for authority-tier subscriptions.** Should an
+  `edge` or `global` subscription optionally expose a clearly marked
+  provisional local result while it awaits its authoritative first snapshot?
+  Today it does not: those tiers remain pending while offline, including after
+  an explicit disconnect. `disconnect()` changes transport availability, not
+  the requested tier semantics. Any future fallback must be an explicit API
+  and must distinguish provisional delivery from the authority-tier result.
 - 🔶 **Multi-hop output-changing relation queries.** Single-hop `hopTo` uses
   the normalized relation-query path. Define the semantics for multi-hop
   traversal and `gather`, including their result identity, ordering, and

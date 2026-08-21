@@ -369,20 +369,21 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
     // its matching session or to every session when unowned. In particular,
     // this exercises the disjunctive policy plan rather than only the
     // scalar-equality fast path.
-    let read_policy = Query::from("todos").filter(any_of([
-        eq(col("ownerId"), claim("user_id")),
-        is_null(col("ownerId")),
-    ]));
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("ownerId", ColumnType::String.nullable()),
-        ],
-    )
-    .with_read_policy(Policy::shape(read_policy))
-    .with_write_policy(Policy::public())]);
+    let read_policy = PublicPolicyExpr::or(vec![
+        public_session_eq("ownerId", &["user_id"]),
+        PublicPolicyExpr::IsNull {
+            column: "ownerId".to_owned(),
+        },
+    ]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .nullable_column("ownerId", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(read_policy)),
+        ),
+    );
     let server = open_db(0x5e, AuthorId::SYSTEM, &schema);
     let alice = AuthorId::from_bytes([0xa1; 16]);
     let bob = AuthorId::from_bytes([0xb2; 16]);

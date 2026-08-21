@@ -458,7 +458,7 @@ function storedSchemaResponse(
 ) {
   return new Response(
     JSON.stringify({
-      schema,
+      schema: { tables: schema },
       publishedAt,
     }),
     { status },
@@ -2220,7 +2220,7 @@ describe("cli deploy", () => {
       }),
     );
 
-    expect(schemaPublishBody.schema.projects.columns[0].name).toBe("name");
+    expect(schemaPublishBody.schema.tables.projects.columns[0].name).toBe("name");
     expect(logs).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
     expect(logs).toContain(`Published the current schema as ${schemaHash.slice(0, 12)}.`);
     expect(logs).toContain("No permissions.ts found; skipping permissions publish.");
@@ -2282,7 +2282,7 @@ describe("cli deploy", () => {
       migrationsDir: join(root, "migrations"),
     });
 
-    expect(schemaPublishBody.schema.projects.columns[0].name).toBe("name");
+    expect(schemaPublishBody.schema.tables.projects.columns[0].name).toBe("name");
     expect(schemaPublishBody.permissions).toBeUndefined();
     expect(permissionsPublishBody.schemaHash).toBe(schemaHash);
     expect(permissionsPublishBody.expectedParentBundleObjectId).toBeNull();
@@ -2412,7 +2412,7 @@ describe("cli deploy", () => {
       migrationsDir: join(root, "migrations"),
     });
 
-    expect(schemaPublishBody.schema.todos.indexed_columns).toEqual(["ownerId"]);
+    expect(schemaPublishBody.schema.tables.todos.indexed_columns).toEqual(["ownerId"]);
   });
 
   it("fails when retargeting permissions to a schema with no local migration path from the previous head", async () => {
@@ -2611,6 +2611,203 @@ export default s.defineMigration({
 
     expect(logs.some((line) => line.includes("Pushed migration"))).toBe(true);
     expect(logs.some((line) => line.toLowerCase().includes("not connected"))).toBe(false);
+  });
+
+  // TEST_BURNDOWN_TS: cli deploy > replays a chain of local migrations when no direct file connects the head to the release schema
+  // known red; tracked in TEST_BURNDOWN.md — deploy resolves only a direct head-to-release migration file, so a chain of local migrations spanning several schemas is not replayed and deploy fails with the not-connected error.
+  it.skip("replays a chain of local migrations when no direct file connects the head to the release schema", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(
+      join(root, "schema.ts"),
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    owner: s.string(),
+  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`,
+    );
+    await writeFile(join(root, "permissions.ts"), rootAllExplicitPermissionsSchema());
+
+    const headSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "owner_id", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+    const middleSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+    const releaseSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "owner", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+    const headHash = await computeTestSchemaHash(headSchema);
+    const middleHash = await computeTestSchemaHash(middleSchema);
+    const releaseHash = await computeTestSchemaHash(releaseSchema);
+    const short = (hash: string) => hash.slice(0, 12);
+    const currentHead = {
+      schemaHash: headHash,
+      version: 4,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+
+    // Only the middle schema needs a snapshot: the head is stored on the
+    // server and the release schema is the project's own.
+    await writeFile(
+      join(snapshotsDir, `20260318T000000-${short(middleHash)}.json`),
+      JSON.stringify(middleSchema),
+    );
+    const renameMigration = (
+      fromHash: string,
+      toHash: string,
+      fromColumn: string,
+      toColumn: string,
+    ) => `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  migrate: {
+    todos: {
+      ${toColumn}: s.renameFrom(${JSON.stringify(fromColumn)}),
+    },
+  },
+  fromHash: ${JSON.stringify(fromHash)},
+  toHash: ${JSON.stringify(toHash)},
+  from: {
+    todos: s.table({
+      title: s.string(),
+      ${fromColumn}: s.string(),
+    }),
+  },
+  to: {
+    todos: s.table({
+      title: s.string(),
+      ${toColumn}: s.string(),
+    }),
+  },
+});
+`;
+    await writeFile(
+      join(migrationsDir, `20260318-first-${short(headHash)}-${short(middleHash)}.ts`),
+      renameMigration(short(headHash), short(middleHash), "owner_id", "ownerId"),
+    );
+    await writeFile(
+      join(migrationsDir, `20260319-second-${short(middleHash)}-${short(releaseHash)}.ts`),
+      renameMigration(short(middleHash), short(releaseHash), "ownerId", "owner"),
+    );
+
+    const stored = new Map<string, object>([[headHash, headSchema]]);
+    const pushedMigrations: Array<{ fromHash: string; toHash: string; forward: unknown }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [...stored.keys()] }), { status: 200 });
+      }
+
+      for (const [hash, schema] of stored) {
+        if (input.endsWith(`/apps/${APP_ID}/schema/${hash}`)) {
+          return storedSchemaResponse(schema);
+        }
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+        const body = JSON.parse(String(init?.body));
+        const hash = await computeTestSchemaHash(body.schema);
+        stored.set(hash, body.schema);
+        return new Response(JSON.stringify({ objectId: `object-${short(hash)}`, hash }), {
+          status: 201,
+        });
+      }
+
+      if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
+        const url = new URL(input);
+        const connected =
+          url.searchParams.get("fromHash") === headHash &&
+          url.searchParams.get("toHash") === releaseHash &&
+          pushedMigrations.length === 2;
+        return new Response(JSON.stringify({ connected }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+        const body = JSON.parse(String(init?.body));
+        pushedMigrations.push(body);
+        return new Response(
+          JSON.stringify({
+            objectId: `migration-${pushedMigrations.length}`,
+            fromHash: body.fromHash,
+            toHash: body.toHash,
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+        const body = JSON.parse(String(init?.body));
+        expect(body.schemaHash).toBe(releaseHash);
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash: releaseHash,
+              version: 5,
+              parentBundleObjectId: currentHead.bundleObjectId,
+              bundleObjectId: "44444444-4444-4444-4444-444444444444",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      deploy({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir,
+      }),
+    );
+
+    expect(pushedMigrations.map(({ fromHash, toHash }) => [fromHash, toHash])).toEqual([
+      [headHash, middleHash],
+      [middleHash, releaseHash],
+    ]);
+    expect(pushedMigrations.map(({ forward }) => forward)).toEqual([
+      [{ table: "todos", operations: [{ type: "rename", column: "owner_id", value: "ownerId" }] }],
+      [{ table: "todos", operations: [{ type: "rename", column: "ownerId", value: "owner" }] }],
+    ]);
+    expect([...stored.keys()]).toEqual([headHash, middleHash, releaseHash]);
+    expect(logs.filter((line) => line.includes("Pushed migration"))).toHaveLength(2);
+    expect(logs.some((line) => line.toLowerCase().includes("not connected"))).toBe(false);
+    expect(logs.some((line) => line.includes("Published permissions"))).toBe(true);
   });
 
   it("warns instead of failing with --no-verify when a migration is missing", async () => {

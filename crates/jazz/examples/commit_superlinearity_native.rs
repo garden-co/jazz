@@ -7,23 +7,22 @@ use jazz::db::{
     SubscriptionEvent,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 const BATCH_SIZE: usize = 500;
 
-fn todo_table() -> TableSchema {
-    TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())
+fn todo_schema() -> JazzSchema {
+    let source = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean),
+        )
+        .build();
+    JazzSchema::new(&source).expect("todo public schema compiles")
 }
 
 fn todo_cells(title: String, done: bool) -> RowCells {
@@ -34,7 +33,7 @@ fn todo_cells(title: String, done: bool) -> RowCells {
 }
 
 fn open_db(seed: u64) -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
-    let schema = JazzSchema::new([todo_table()]);
+    let schema = todo_schema();
     let column_families = schema.column_families();
     let column_family_refs = column_families
         .iter()

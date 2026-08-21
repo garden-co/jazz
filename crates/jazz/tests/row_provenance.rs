@@ -1,23 +1,30 @@
 use std::collections::BTreeMap;
 
+mod common;
+
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::query::Query;
-use jazz::schema::{JazzSchema, Policy, TableSchema};
-use jazz::tools::OpenTransactionId;
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
+
+use common::{allow_all_writes, compile_schema};
 
 fn author(byte: u8) -> AuthorId {
     AuthorId::from_bytes([byte; 16])
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)])
-            .with_write_policy(Policy::shape(Query::from("todos"))),
-    ])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(allow_all_writes()),
+            )
+            .build(),
+    )
 }
 
 fn open_db(identity: AuthorId) -> Db<MemoryStorage> {

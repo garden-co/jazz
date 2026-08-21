@@ -358,7 +358,7 @@ struct UpgradeAdmission {
 
 fn default_config() -> InMemoryServerShellConfig {
     InMemoryServerShellConfig::new(
-        JazzSchema::new([]),
+        JazzSchema::empty(),
         DbIdentity {
             node: NodeUuid::from_bytes([0x5e; 16]),
             author: AuthorId::SYSTEM,
@@ -560,7 +560,7 @@ struct JwtIssuerClaims {
 fn validate_auth_handshake(
     handshake: &AuthHandshake,
 ) -> std::result::Result<(), AuthAdmissionError> {
-    if handshake.sub.trim().is_empty() {
+    if !jazz::tools::identity::principal_is_nonempty(&handshake.sub) {
         return Err(AuthAdmissionError::InvalidHandshake(
             "sub must be non-empty".to_owned(),
         ));
@@ -695,4 +695,46 @@ fn decode_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
     Ok(frames)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_frame_subject_validation_rejects_blank_and_preserves_exact_subject() {
+        for sub in ["", " \t\n\x0b\x0c\r "] {
+            assert_eq!(
+                validate_auth_handshake(&AuthHandshake {
+                    bearer_jwt: Some("token".to_owned()),
+                    sub: sub.to_owned(),
+                    claims: Default::default(),
+                }),
+                Err(AuthAdmissionError::InvalidHandshake(
+                    "sub must be non-empty".to_owned()
+                ))
+            );
+        }
+
+        let sub = " WorkOS_User_01J8Y3K4M5N6P7Q8R9S0T1U2V3 ";
+        let handshake = AuthHandshake {
+            bearer_jwt: Some("token".to_owned()),
+            sub: sub.to_owned(),
+            claims: Default::default(),
+        };
+        validate_auth_handshake(&handshake).unwrap();
+        let admitted = admit_static_bearer_with_claims(
+            &AuthAdmissionConfig::static_bearer("token"),
+            handshake.bearer_jwt.as_deref(),
+            handshake.sub,
+            handshake.claims,
+            AdmissionSource::FirstFrameHandshake,
+        )
+        .unwrap();
+        assert_eq!(admitted.subject, sub);
+        assert_eq!(
+            admitted.author,
+            jazz::tools::identity::author_id_from_principal(sub)
+        );
+    }
 }

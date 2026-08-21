@@ -14,7 +14,7 @@ where
     /// authority catalogue.
     ///
     /// Unlike [`NodeState::new`], this deliberately does *not* create a
-    /// durable genesis from `JazzSchema::new([])`.  Its only valid transition
+    /// durable genesis from `JazzSchema::empty()`.  Its only valid transition
     /// is installation of a trusted catalogue snapshot; application reads,
     /// writes, and current-schema access fail closed beforehand.
     pub(crate) fn new_catalogue_uninitialized(
@@ -43,7 +43,7 @@ where
         }
         Self::new_with_options_inner(
             node_uuid,
-            JazzSchema::new([]),
+            JazzSchema::empty(),
             storage,
             false,
             CatalogueBootstrapState::Uninitialized,
@@ -55,9 +55,9 @@ where
     /// Read only the fixed catalogue metadata layout to discover an already
     /// durable authority genesis before choosing an application schema for a
     /// fresh process.  This is the inverse of the uninitialized constructor:
-    /// it never uses `JazzSchema::new([])` as a genesis candidate.
+    /// it never uses `JazzSchema::empty()` as a genesis candidate.
     fn discover_durable_catalogue_genesis(storage: S) -> Result<(S, Option<JazzSchema>), Error> {
-        let bootstrap_schema = JazzSchema::new([]);
+        let bootstrap_schema = JazzSchema::empty();
         // Dynamic discovery must inspect the fixed history/branch/fate stores
         // too: an empty catalogue does not make an existing Jazz store safe to
         // repurpose as an uninitialized edge.
