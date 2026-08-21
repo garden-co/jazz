@@ -77,6 +77,46 @@ test("dirty source changes invalidate the manifest", () => {
   );
 });
 
+test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () => {
+  const root = fixture();
+  writeManifest(root, "napi", "release");
+  const before = expectedManifest(root, "napi", "release").packageInputs;
+
+  // build.mjs uses this exact name while replacing a target binding.  Its
+  // presence must not make a manifest stale immediately after the build.
+  writeFileSync(
+    join(root, "crates/jazz-napi/jazz-napi.linux-x64-gnu.node.staged-123-456"),
+    "previous native binding",
+  );
+  assert.equal(expectedManifest(root, "napi", "release").packageInputs, before);
+  assert.equal(verifyManifest(root, "napi", "release"), null);
+  rmSync(join(root, "crates/jazz-napi/jazz-napi.linux-x64-gnu.node.staged-123-456"));
+
+  // Turbo writes this receipt after the inner NAPI build wrapper seals its
+  // manifest. It is a package-local build output, not a build input.
+  mkdirSync(join(root, "crates/jazz-napi/.turbo"));
+  writeFileSync(join(root, "crates/jazz-napi/.turbo/turbo-build.log"), "outer task receipt");
+  assert.equal(expectedManifest(root, "napi", "release").packageInputs, before);
+  assert.equal(verifyManifest(root, "napi", "release"), null);
+
+  // Near misses are ordinary inputs: accepting any made-up binding name,
+  // suffix, or appended extension would let generated source evade freshness.
+  for (const path of [
+    "jazz-napi.linux-x64-gnu.node.staged-123-456.rs",
+    "jazz-napi.attacker.node.staged-123-456",
+    "jazz-napi.linux-x64-gnu.node.staged-not-a-wrapper",
+  ]) {
+    const file = join(root, "crates/jazz-napi", path);
+    writeFileSync(file, "must remain an input");
+    assert.notEqual(expectedManifest(root, "napi", "release").packageInputs, before, path);
+    rmSync(file);
+  }
+
+  // Planted positive: an actual NAPI source remains a provenance input.
+  writeFileSync(join(root, "crates/jazz-napi/src/lib.rs"), "// changed native source\n");
+  assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/);
+});
+
 test("WASM provenance covers generated glue and declarations, not only the binary", () => {
   const root = fixture();
   for (const file of [
