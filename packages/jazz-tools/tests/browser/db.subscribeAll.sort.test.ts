@@ -6,7 +6,7 @@ import type { WasmSchema } from "../../src/drivers/types.js";
 interface Todo {
   id: string;
   title: string;
-  rank?: number;
+  rank: number | null;
   done: boolean;
 }
 
@@ -722,17 +722,25 @@ describe("db.subscribeAll sorting browser integration", () => {
     }
   });
 
-  it("keeps null/undefined sort-value ordering stable", async () => {
+  it("keeps an explicit null sort value ordering stable", async () => {
     await withDb("null-sort-values", async (db) => {
       const snapshots: Todo[][] = [];
+      let sawInitialReset = false;
       const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
+        sawInitialReset ||= delta.reset === true;
         snapshots.push(delta.all);
       });
 
       try {
+        await waitForCondition(
+          () => sawInitialReset,
+          SUBSCRIPTION_CONVERGENCE_TIMEOUT_MS,
+          "expected initial empty subscription reset",
+        );
+
         const {
           value: { id: idNull },
-        } = await db.insert(todos, { title: "N", rank: undefined, done: false });
+        } = await db.insert(todos, { title: "N", rank: null, done: false });
         const {
           value: { id: idOne },
         } = await db.insert(todos, { title: "A", rank: 1, done: false });

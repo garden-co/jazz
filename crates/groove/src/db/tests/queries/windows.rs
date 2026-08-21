@@ -430,7 +430,10 @@ fn top_by_orders_nullable_sort_keys_null_first() {
     batch.insert(
         "scores",
         vec![
-            Value::U64(2),
+            // The non-null row deliberately has the earlier tie key: this
+            // verifies NULL ordering rather than accidentally passing through
+            // the id tie-breaker.
+            Value::U64(1),
             Value::Nullable(Some(Box::new(Value::U64(10)))),
             Value::String("ten".to_owned()),
         ],
@@ -438,7 +441,7 @@ fn top_by_orders_nullable_sort_keys_null_first() {
     batch.insert(
         "scores",
         vec![
-            Value::U64(1),
+            Value::U64(2),
             Value::Nullable(None),
             Value::String("null".to_owned()),
         ],
@@ -459,7 +462,7 @@ fn top_by_orders_nullable_sort_keys_null_first() {
         subscription.recv().unwrap().to_values().unwrap(),
         [(
             vec![
-                Value::U64(1),
+                Value::U64(2),
                 Value::Nullable(None),
                 Value::String("null".to_owned()),
             ],

@@ -594,13 +594,24 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
         row(0xa1),
         BTreeMap::from([
             ("name".to_owned(), Value::String("before".to_owned())),
-            (
-                "rank".to_owned(),
-                Value::Nullable(Some(Box::new(Value::I32(1)))),
-            ),
+            ("rank".to_owned(), Value::Nullable(None)),
         ]),
     )
     .unwrap();
+    for (id, rank) in [(0xb1, 1), (0xc1, 2)] {
+        db.insert_with_id(
+            "users",
+            row(id),
+            BTreeMap::from([
+                ("name".to_owned(), Value::String(format!("rank-{rank}"))),
+                (
+                    "rank".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::I32(rank)))),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
     let query = Query::from("users").order_by("rank", OrderDirection::Asc);
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
@@ -627,10 +638,13 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
         "title-only update must retain its root payload"
     );
     assert!(
-        !terminal_operations
-            .iter()
-            .any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. })),
-        "unchanged nullable sort key must not produce a root move"
+        !terminal_operations.iter().any(|operation| matches!(
+            operation.edit,
+            groove::ivm::TerminalEdit::Move { .. }
+                | groove::ivm::TerminalEdit::Remove { .. }
+                | groove::ivm::TerminalEdit::Insert { .. }
+        )),
+        "unchanged nullable sort key must not reposition the root"
     );
 }
 
