@@ -331,6 +331,55 @@ impl RuntimeSchema {
         Ok(BranchKey { dimensions })
     }
 
+    /// Validate an authored table-local branch key without applying migration
+    /// defaults. Wire versions must carry the exact key declared by their own
+    /// schema: accepting a short or non-canonical spelling here would let a
+    /// peer change the physical branch coordinate independently of row cells.
+    pub(crate) fn validate_authored_branch_key(
+        &self,
+        table: &TableSchema,
+        key: &BranchKey,
+    ) -> Result<BTreeMap<String, Value>, String> {
+        let mut bindings = table.branch_by.iter().collect::<Vec<_>>();
+        bindings.sort_by_key(|binding| binding.dimension);
+        if key.dimensions.len() != bindings.len() {
+            return Err(format!(
+                "branch key for {} must contain exactly {} dimensions",
+                table.name,
+                bindings.len()
+            ));
+        }
+
+        let mut cells = BTreeMap::new();
+        for (binding, (actual_id, encoded)) in bindings.into_iter().zip(&key.dimensions) {
+            if *actual_id != binding.dimension {
+                return Err(format!(
+                    "branch key for {} is not in canonical dimension order",
+                    table.name
+                ));
+            }
+            let dimension = self
+                .branch_dimensions
+                .iter()
+                .find(|dimension| dimension.id == binding.dimension)
+                .ok_or_else(|| format!("unknown branch dimension on {}", table.name))?;
+            let value = encoded
+                .decode()
+                .map_err(|_| format!("invalid branch dimension {} encoding", dimension.name))?;
+            if BranchDimensionValue::from(value.clone()) != *encoded {
+                return Err(format!(
+                    "non-canonical branch dimension {} encoding",
+                    dimension.name
+                ));
+            }
+            RecordDescriptor::new([("value", dimension.column_type.clone())])
+                .create(std::slice::from_ref(&value))
+                .map_err(|_| format!("invalid branch dimension {} value", dimension.name))?;
+            cells.insert(binding.column.clone(), value);
+        }
+        Ok(cells)
+    }
+
     /// Reconstruct the table-local named selector for an exact stored key.
     pub(crate) fn branch_selector_for_key(
         &self,

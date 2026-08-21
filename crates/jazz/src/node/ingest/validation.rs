@@ -379,6 +379,50 @@ where
                     version.table()
                 ));
             }
+            if let Some(reason) = Self::malformed_authored_branch_key_reason(
+                &schema.schema,
+                table,
+                version,
+            ) {
+                return Some(reason);
+            }
+        }
+        None
+    }
+
+    fn malformed_authored_branch_key_reason(
+        schema: &JazzSchema,
+        table: &TableSchema,
+        version: &VersionRecord,
+    ) -> Option<String> {
+        let branch_cells = match schema.validate_authored_branch_key(table, version.branch_key()) {
+            Ok(cells) => cells,
+            Err(reason) => {
+                return Some(format!(
+                    "row version for table '{}' has an invalid branch key: {reason}",
+                    version.table()
+                ));
+            }
+        };
+        if version.deletion().is_none() {
+            for (column, branch_value) in branch_cells {
+                let Some(position) = table
+                    .columns
+                    .iter()
+                    .position(|candidate| candidate.name == column)
+                else {
+                    return Some(format!(
+                        "row version for table '{}' binds a missing branch column '{column}'",
+                        version.table()
+                    ));
+                };
+                if version.cell_at(position) != Some(branch_value) {
+                    return Some(format!(
+                        "row version for table '{}' has branch key content that disagrees with column '{column}'",
+                        version.table()
+                    ));
+                }
+            }
         }
         None
     }
@@ -410,6 +454,11 @@ where
             if version.record().descriptor() != &table.wire_record_descriptor() {
                 return Err(Error::MalformedViewUpdate(
                     "row version does not carry the complete descriptor of its authored schema",
+                ));
+            }
+            if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some() {
+                return Err(Error::MalformedViewUpdate(
+                    "row version does not carry a valid authored branch key",
                 ));
             }
         }

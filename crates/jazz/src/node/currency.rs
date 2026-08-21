@@ -71,6 +71,51 @@ where
         Ok(versions)
     }
 
+    pub(super) fn query_table_versions_in_branch(
+        &mut self,
+        table: &str,
+        branch_key: &BranchKey,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let mut versions = Vec::new();
+        for storage_table in self.version_storage_sources_for_layer(table, VersionLayer::Content)? {
+            let raws = self
+                .database
+                .primary_key_scan_raw(
+                    &storage_table,
+                    &[Value::Bytes(branch_key.canonical_bytes())],
+                )?
+                .into_iter()
+                .map(|raw| raw.owned_record())
+                .collect::<Vec<_>>();
+            for raw in raws {
+                versions.push(self.decode_history_owned_record(table, &storage_table, raw)?);
+            }
+        }
+        for storage_table in
+            self.version_storage_sources_for_layer(table, VersionLayer::Deletion)?
+        {
+            let prefix = self.deletion_storage_prefix_in_branch(table, branch_key, None)?;
+            let raws = self
+                .database
+                .primary_key_scan_raw(&storage_table, &prefix)?
+                .into_iter()
+                .map(|raw| raw.owned_record())
+                .collect::<Vec<_>>();
+            for raw in raws {
+                versions.push(self.decode_history_owned_record(table, &storage_table, raw)?);
+            }
+        }
+        let aliases = self.node_aliases.clone();
+        versions.sort_by_key(|version| {
+            (
+                version.row_uuid(),
+                version_tx_id_from_aliases(version, &aliases).expect("valid version tx id"),
+                version.layer(),
+            )
+        });
+        Ok(versions)
+    }
+
     #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
     pub(super) fn query_local_layer_winner(
         &mut self,

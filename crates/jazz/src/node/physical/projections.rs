@@ -110,12 +110,13 @@ where
         ))
     }
 
-    pub(super) fn physical_current_all_branches_source_graph_with_projection_target(
+    pub(super) fn physical_current_branch_source_graph_with_projection_target(
         &self,
         schema_version: SchemaVersionId,
         logical_table: &str,
         class: PhysicalCurrentClass,
         projection_target: impl Into<String>,
+        branch_key: &BranchKey,
     ) -> Result<GraphBuilder, Error> {
         let binding = physical_current_binding(
             &self.catalogue.catalogue_schemas,
@@ -124,9 +125,10 @@ where
             logical_table,
             class,
         )?;
-        Ok(GraphBuilder::variant_source(
+        Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             projection_target,
+            branch_scan(branch_key, None),
         ))
     }
 
@@ -1369,9 +1371,16 @@ where
 }
 
 fn shared_branch_scan(scan: Option<groove::ivm::StaticScanSpec>) -> groove::ivm::StaticScanSpec {
+    branch_scan(&BranchKey::default(), scan)
+}
+
+fn branch_scan(
+    branch_key: &BranchKey,
+    scan: Option<groove::ivm::StaticScanSpec>,
+) -> groove::ivm::StaticScanSpec {
     use groove::ivm::{LiteralValue, StaticScanSpec};
 
-    let branch = LiteralValue::from(Value::Bytes(BranchKey::default().canonical_bytes()));
+    let branch = LiteralValue::from(Value::Bytes(branch_key.canonical_bytes()));
     let prepend = |mut values: Vec<LiteralValue>| {
         values.insert(0, branch.clone());
         values

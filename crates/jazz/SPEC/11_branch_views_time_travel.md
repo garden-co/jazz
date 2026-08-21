@@ -13,7 +13,13 @@ A table binds zero or more ordinary application columns to globally named
 branch dimensions. The columns remain visible to queries, references, and
 policies, while their encoded values also form an immutable storage coordinate.
 Global object identity remains `RowUuid`; one object may have a distinct
-incarnation in every branch key.
+branch-local row in every branch key.
+
+User-facing prose calls that coordinate-specific object a **branch-local row**.
+The implementation may still use “incarnation” where it must distinguish the
+storage identity, but “branch version” is intentionally avoided: throughout
+Jazz, a row version is one immutable history entry, and one branch-local row
+can have many such versions.
 
 For each row and independent content/deletion layer, a branch-view read chooses the
 head-key winner when one exists and otherwise chooses the base-key
@@ -146,17 +152,17 @@ bind the same named dimension must use the same type and encoding.
 The empty branch key denotes shared data. It is not a privileged root branch key and
 has no lifecycle semantics (`INV-BVIEW-7`).
 
-#### Incarnation identity
+#### Branch-local row identity
 
 `RowUuid` remains the stable application object identity. The same `RowUuid` may
 have content and deletion histories in many branch keys. The physical
-incarnation key is:
+branch-local identity key is:
 
 ```text
 (PhysicalTableId, BranchKey, RowUuid)
 ```
 
-and each layer winner is keyed by that incarnation plus `Content` or `Deletion`
+and each layer winner is keyed by that branch-local row plus `Content` or `Deletion`
 (`INV-BVIEW-2`, `INV-BVIEW-5`). A raw fetch of a branch-keyed object therefore
 requires a read view or an exact branch key.
 
@@ -193,6 +199,13 @@ and index-result publication (`INV-BVIEW-6`). This chapter does not add a
 distributed uniqueness guarantee; the open question below records the required
 design work rather than treating Groove's local unique-index rejection as a
 replicated conflict-resolution protocol.
+
+Current branch-view sources do not scan every branch and discard non-matching
+rows. They open one physical prefix range for each exact stored spelling of the
+selected key (normally one; more only after monotone dimension additions), for
+both content and deletion winners. A head-over-base view therefore reads at
+most the head and base key ranges before masking. Secondary-index probes use
+the same branch-key prefix.
 
 ### 11.3 Branch views
 
@@ -239,6 +252,13 @@ visible(R) = effective_content exists
 For a snapshot base, both base winners are chosen at the supplied cut. The cut
 applies to every table, join, reference, and policy dependency in the read
 (`INV-BVIEW-11`).
+
+The initial frozen-base implementation scans history only inside the selected
+branch-key prefixes and reduces each source once at the cut; it does not walk
+the complete table history separately for every row. Its cost is nevertheless
+proportional to history depth within those selected branches. A future
+snapshot-current materialization or checkpoint index could make this bounded
+by current rows, but that optimization is not part of the initial contract.
 
 Layer fallback is intentionally independent. Head content does not restore an
 inherited deletion; a head `Restored` winner may reveal inherited content; a

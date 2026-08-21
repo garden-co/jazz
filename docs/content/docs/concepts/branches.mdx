@@ -89,9 +89,9 @@ Tables may bind different subsets of the same dimensions. For example, documents
 is shared by every branch view.
 
 <Callout type="warn" title="Branch columns are coordinates">
-  A bound column is non-null and immutable for one row incarnation. To move an object, write the
-  destination incarnation and remove the source incarnation explicitly. Both writes may be in one
-  transaction.
+  A bound column is non-null and immutable for one branch-local row. To move an object, write the
+  destination branch-local row and remove the source branch-local row explicitly. Both writes may be
+  in one transaction.
 </Callout>
 
 ## Construct a branch view
@@ -132,7 +132,7 @@ main. Draft deletions hide inherited rows. Filters, joins, includes, permissions
 consume that effective view; fallback is not a late union of two query result sets.
 
 The same row UUID identifies the application object across branches. Its content may differ in each
-branch-local incarnation.
+branch-local row.
 
 ### Use a frozen base
 
@@ -153,7 +153,7 @@ const frozenDraft = {
 Jazz applies that cut consistently to the base rows and to base data reached through joins and
 permissions. The app, not Jazz, decides which branch row and snapshot to use.
 
-## Write exact incarnations or through a view
+## Write exact branch-local rows or through a view
 
 An insert targets one exact branch selector:
 
@@ -181,7 +181,7 @@ db.delete(app.documents, inheritedDocumentId, {
 });
 ```
 
-The base incarnation remains unchanged. A deletion is branch-qualified too, so deleting a row in
+The base branch-local row remains unchanged. A deletion is branch-qualified too, so deleting a row in
 the draft does not delete the same object from main.
 
 Transactions may contain writes to several branch coordinates and to shared tables. They retain one

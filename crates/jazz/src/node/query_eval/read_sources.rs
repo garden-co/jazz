@@ -1336,31 +1336,29 @@ where
                 &required_fields,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let global_unfiltered = self
-            .node
-            .physical_current_all_branches_source_graph_with_projection_target(
-                self.read_view.read_schema,
-                &request.source.table,
-                PhysicalCurrentClass::Global,
-                projection_target.clone(),
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let global = global_unfiltered
-            .filter(branch_key_set_predicate(stored_keys))
+        let branch_sources = |class, target: String| {
+            stored_keys
+                .iter()
+                .map(|branch_key| {
+                    self.node
+                        .physical_current_branch_source_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            class,
+                            target.clone(),
+                            branch_key,
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(GraphBuilder::union)
+        };
+        let global = branch_sources(PhysicalCurrentClass::Global, projection_target.clone())?
             .project(physical_fields.clone());
         let content = if tier == DurabilityTier::Global {
             global
         } else {
-            let ahead_unfiltered = self
-                .node
-                .physical_current_all_branches_source_graph_with_projection_target(
-                    self.read_view.read_schema,
-                    &request.source.table,
-                    PhysicalCurrentClass::Ahead,
-                    projection_target,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-            let ahead = ahead_unfiltered.filter(branch_key_set_predicate(stored_keys));
+            let ahead = branch_sources(PhysicalCurrentClass::Ahead, projection_target)?;
             let ahead = if tier == DurabilityTier::Edge {
                 edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
             } else {
@@ -1392,14 +1390,22 @@ where
         let fields = std::iter::once("branch_key".to_owned())
             .chain(register_storage_field_names())
             .collect::<Vec<_>>();
-        let global = GraphBuilder::table(physical_register_global_current_table_name(table_id))
-            .filter(branch_key_set_predicate(stored_keys))
+        let branch_sources = |table_name: String| {
+            GraphBuilder::union(stored_keys.iter().map(|branch_key| {
+                GraphBuilder::table_scan(
+                    table_name.clone(),
+                    groove::ivm::StaticScanSpec::Prefix(vec![groove::ivm::LiteralValue::from(
+                        Value::Bytes(branch_key.canonical_bytes()),
+                    )]),
+                )
+            }))
+        };
+        let global = branch_sources(physical_register_global_current_table_name(table_id))
             .project(fields.clone());
         if tier == DurabilityTier::Global {
             return Ok(global);
         }
-        let ahead = GraphBuilder::table(physical_register_ahead_current_table_name(table_id))
-            .filter(branch_key_set_predicate(stored_keys));
+        let ahead = branch_sources(physical_register_ahead_current_table_name(table_id));
         let ahead = if tier == DurabilityTier::Edge {
             edge_visible_ahead_current_source_graph(ahead, fields.clone())
         } else {
@@ -1936,15 +1942,6 @@ pub(super) fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<Proj
         .into_iter()
         .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
         .collect()
-}
-
-fn branch_key_set_predicate(keys: &BTreeSet<BranchKey>) -> PredicateExpr {
-    PredicateExpr::Or(
-        keys.iter()
-            .map(|key| PredicateExpr::eq("branch_key", Value::Bytes(key.canonical_bytes())))
-            .collect(),
-    )
-    .canonicalize()
 }
 
 pub(super) fn register_storage_field_names() -> Vec<String> {

@@ -120,7 +120,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   `Propagation`** · **`WriteHandle` / Rust `WatchHandle` / binding
   subscription stream** · **`RowIdSource`**
   (`Production` / `Seeded`).
-- **branch dimension** · **branch key** · **row incarnation** ·
+- **branch dimension** · **branch key** · **branch-local row** ·
   **branch view** · **live base** · **frozen base** ·
   **supplying branch-key provenance**.
 

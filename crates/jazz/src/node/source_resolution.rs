@@ -170,15 +170,6 @@ where
         base: Option<&BranchViewSourceBase>,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_table = self.table_in_schema(table, read_schema_version)?;
-        let read_schema = self
-            .catalogue
-            .catalogue_schemas
-            .get(&read_schema_version)
-            .ok_or(Error::InvalidStoredValue(
-                "branch view read schema is missing",
-            ))?
-            .schema
-            .clone();
         let mut winners = |key: &BranchKey,
                            snapshot: Option<&SnapshotRef>|
          -> Result<
@@ -187,10 +178,15 @@ where
         > {
             let mut content = BTreeMap::new();
             let mut deletions = BTreeMap::new();
-            for version in self.query_table_versions(table)? {
-                if !read_schema.branch_key_matches(&read_table, version.branch_key(), key) {
-                    continue;
-                }
+            let stored_keys =
+                self.equivalent_stored_branch_keys(table, read_schema_version, key)?;
+            for version in stored_keys
+                .iter()
+                .map(|stored_key| self.query_table_versions_in_branch(table, stored_key))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+            {
                 let tx_id = self.version_tx_id(&version)?;
                 let Some(tx) = self.query_transaction(tx_id)? else {
                     continue;

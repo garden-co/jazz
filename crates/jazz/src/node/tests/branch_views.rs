@@ -21,6 +21,37 @@ fn branch_view_schema() -> JazzSchema {
     )
 }
 
+fn two_dimension_branch_view_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("workspace_id", PublicColumnType::Uuid)
+                .column("branch_id", PublicColumnType::Uuid)
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .branch_dimension(PublicBranchDimensionDescriptor {
+                    id: crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x41; 16])),
+                    name: "workspace".to_owned(),
+                    column_type: PublicColumnType::Uuid,
+                    migration_default: PublicValue::Uuid(crate::tools::ObjectId::from_uuid(
+                        uuid::Uuid::nil(),
+                    )),
+                })
+                .branch_dimension(PublicBranchDimensionDescriptor {
+                    id: crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x42; 16])),
+                    name: "branch".to_owned(),
+                    column_type: PublicColumnType::Uuid,
+                    migration_default: PublicValue::Uuid(crate::tools::ObjectId::from_uuid(
+                        uuid::Uuid::nil(),
+                    )),
+                })
+                .branch_by("workspace_id", "workspace")
+                .branch_by("branch_id", "branch")
+                .policies(public_owner_policies("owner")),
+        ),
+    )
+}
+
 fn branch_selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
@@ -231,6 +262,160 @@ fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
         "preflight failure must leave no valid sibling residue"
     );
     assert!(node.query_table_versions("todos").unwrap().is_empty());
+}
+
+// This is necessarily an internal protocol-boundary regression test: public
+// mutation APIs canonicalize branch selectors and therefore cannot construct
+// the adversarial VersionRecord values a remote peer may send.
+#[test]
+fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
+    let schema = two_dimension_branch_view_schema();
+    let table = &schema.tables[0];
+    let selector = BranchSelector::new([
+        ("workspace", Value::Uuid(uuid::Uuid::from_bytes([0x61; 16]))),
+        ("branch", Value::Uuid(uuid::Uuid::from_bytes([0x62; 16]))),
+    ]);
+    let (valid_key, branch_cells) = schema.project_branch_selector(table, &selector).unwrap();
+    let mut content_cells = branch_cells;
+    content_cells.insert("title".to_owned(), v("content"));
+    content_cells.insert("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0));
+    let content = VersionRecord::from_cells(
+        table,
+        schema.version_id(),
+        row(0x63),
+        Vec::new(),
+        AuthorId::SYSTEM,
+        TxTime(10),
+        AuthorId::SYSTEM,
+        TxTime(10),
+        &content_cells,
+        None,
+    )
+    .unwrap()
+    .with_branch_key(valid_key.clone());
+    let deletion = VersionRecord::from_cells(
+        table,
+        schema.version_id(),
+        row(0x64),
+        Vec::new(),
+        AuthorId::SYSTEM,
+        TxTime(10),
+        AuthorId::SYSTEM,
+        TxTime(10),
+        &BTreeMap::<String, Value>::new(),
+        Some(DeletionEvent::Deleted),
+    )
+    .unwrap()
+    .with_branch_key(valid_key.clone());
+
+    let first = valid_key.dimensions[0].clone();
+    let second = valid_key.dimensions[1].clone();
+    let wrong_value_key = BranchKey {
+        dimensions: vec![
+            first.clone(),
+            (
+                second.0,
+                crate::protocol::BranchDimensionValue::from(Value::Uuid(
+                    uuid::Uuid::from_bytes([0x65; 16]),
+                )),
+            ),
+        ],
+    };
+    let mut noncanonical = second.1.clone();
+    noncanonical.0.push(0);
+    let cases = vec![
+        ("missing", 0, BranchKey::default()),
+        (
+            "duplicate",
+            0,
+            BranchKey {
+                dimensions: vec![first.clone(), first.clone()],
+            },
+        ),
+        (
+            "extra",
+            0,
+            BranchKey {
+                dimensions: vec![
+                    first.clone(),
+                    second.clone(),
+                    (
+                        crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x43; 16])),
+                        second.1.clone(),
+                    ),
+                ],
+            },
+        ),
+        (
+            "out-of-order",
+            0,
+            BranchKey {
+                dimensions: vec![second.clone(), first.clone()],
+            },
+        ),
+        (
+            "wrong-type",
+            0,
+            BranchKey {
+                dimensions: vec![
+                    first.clone(),
+                    (
+                        second.0,
+                        crate::protocol::BranchDimensionValue::from(Value::String(
+                            "not-a-uuid".to_owned(),
+                        )),
+                    ),
+                ],
+            },
+        ),
+        (
+            "noncanonical-encoding",
+            0,
+            BranchKey {
+                dimensions: vec![first.clone(), (second.0, noncanonical)],
+            },
+        ),
+        ("content-disagrees", 0, wrong_value_key),
+        ("deletion-missing", 1, BranchKey::default()),
+    ];
+
+    for (case, malformed_index, malformed_key) in cases {
+        let (_dir, mut receiver) = open_history_complete_node_with_schema(
+            NodeUuid::from_bytes([case.len() as u8; 16]),
+            schema.clone(),
+        );
+        let tx_id = TxId::new(TxTime(10), NodeUuid::from_bytes([0x66; 16]));
+        let tx = Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: 2,
+            made_by: AuthorId::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        };
+        let mut versions = vec![content.clone(), deletion.clone()];
+        versions[malformed_index] = versions[malformed_index]
+            .clone()
+            .with_branch_key(malformed_key);
+        let updates = receiver
+            .apply_sync_message(SyncMessage::CommitUnit { tx, versions })
+            .unwrap();
+        assert!(matches!(
+            updates.as_slice(),
+            [SyncMessage::FateUpdate {
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
+                global_seq: None,
+                ..
+            }]
+        ), "case {case}");
+        assert!(receiver.query_table_versions("todos").unwrap().is_empty(), "case {case}");
+        assert_eq!(receiver.applied_global_watermark(), GlobalSeq(0), "case {case}");
+    }
 }
 
 #[test]
