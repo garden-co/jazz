@@ -28,7 +28,7 @@ Focused browser receipts are produced with `pnpm --filter jazz-tools test:browse
 
 A future fix must remove both the matching visible skip marker and this entry, then include a focused green receipt. Never delete or weaken the test. New known reds require both a source annotation and one row. Executable gates enforce the active annotation/entry bijection.
 
-## Active Rust quarantine (74)
+## Active Rust quarantine (72)
 
 | Test                                                                                                                                              | Definition                                                                  | Current reason                                                                                                                                                                                                                          |
 | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -104,7 +104,6 @@ A future fix must remove both the matching visible skip marker and this entry, t
 | `jazz-testkit::replica_settlement::relay_topology::detaching_the_upstream_settles_held_subscription_locally_exactly_once`                         | `crates/jazz-testkit/tests/replica_settlement.rs`                           | confirm desired semantics with adopters: current strict Edge/Global contract keeps authority-tier subscriptions pending through upstream disconnect or detach; it does not implicitly settle from local state                           |
 | `jazz-testkit::reconnect_write_durability::detaching_the_upstream_resolves_pending_global_wait`                                                   | `crates/jazz-testkit/tests/reconnect_write_durability.rs`                   | confirm desired semantics with adopters: current strict Edge/Global contract keeps durability waits pending through upstream disconnect or detach; it does not implicitly collapse to local-tier settlement                             |
 | `jazz-testkit::schema_migration_policies::v2_update_of_v1_document_preserves_untouched_columns`                                                   | `crates/jazz-testkit/tests/schema_migration_policies.rs`                    | alice's v2 update of her v1-authored row never settles at the edge (neither accepted nor rejected) when the published read policy is session-scoped; the same update settles under an allow-all head and a v2-authored row updates fine |
-| `jazz-testkit::mixed_generation_history::migration_published_at_runtime_still_converges_mixed_generation_row`                                     | `crates/jazz-testkit/tests/mixed_generation_history.rs`                     | after a runtime-published v1->v2 catalogue bundle the serving edge rejects the current-schema table shape with UnsupportedShapeCapability (gap: Source(SchemaProjection)), so post-migration writes never settle at the edge            |
 
 ## Pre-existing/dormant Rust ignores (10; separately registered)
 

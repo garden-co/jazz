@@ -494,21 +494,31 @@ where
             .filter(|column| required_fields.contains(&column.name))
             .filter_map(|column| {
                 let column_id = target_mapping.columns.get(&column.name).copied()?;
-                let has_enum_boundary = target_mapping.scalar_enum_cases.contains_key(&column_id)
-                    || target_mapping.payload_enum_cases.contains_key(&column_id)
-                    || target_mapping
-                        .nested_scalar_enum_cases
-                        .contains_key(&column_id)
-                    || target_mapping
-                        .nested_payload_enum_cases
-                        .contains_key(&column_id)
-                    || matches!(
-                        column.column_type,
-                        records::ValueType::EnumTag(_) | records::ValueType::Enum(_)
-                    );
+                let has_enum_boundary =
+                    physical_mapping_has_enum_boundary(&target_mapping, column_id)
+                    || value_type_has_enum_boundary(&column.column_type);
                 has_enum_boundary.then_some(column_id)
             })
             .collect::<BTreeSet<_>>();
+        let target_has_any_enum_boundary = target_table.columns.iter().any(|column| {
+            target_mapping
+                .columns
+                .get(&column.name)
+                .is_some_and(|column_id| {
+                    physical_mapping_has_enum_boundary(&target_mapping, *column_id)
+                })
+                || value_type_has_enum_boundary(&column.column_type)
+        });
+        // A schema with no enum boundary can use its durable target directly.
+        // For an enum-bearing table, an empty requirement set is itself a
+        // query-local compatibility boundary: unrequested enum cells must be
+        // typed-null before an old reader decodes the row.
+        if required_enum_columns.is_empty() && !target_has_any_enum_boundary {
+            return Ok(physical_current_projection_target(
+                target_alias,
+                target_table_name,
+            ));
+        }
         let projection_target = physical_current_projection_target_for_enum_columns(
             target_alias,
             target_table_name,
@@ -627,21 +637,27 @@ where
             .filter(|column| required_fields.contains(&column.name))
             .filter_map(|column| {
                 let column_id = target_mapping.columns.get(&column.name).copied()?;
-                let has_enum_boundary = target_mapping.scalar_enum_cases.contains_key(&column_id)
-                    || target_mapping.payload_enum_cases.contains_key(&column_id)
-                    || target_mapping
-                        .nested_scalar_enum_cases
-                        .contains_key(&column_id)
-                    || target_mapping
-                        .nested_payload_enum_cases
-                        .contains_key(&column_id)
-                    || matches!(
-                        column.column_type,
-                        records::ValueType::EnumTag(_) | records::ValueType::Enum(_)
-                    );
+                let has_enum_boundary =
+                    physical_mapping_has_enum_boundary(&target_mapping, column_id)
+                    || value_type_has_enum_boundary(&column.column_type);
                 has_enum_boundary.then_some(column_id)
             })
             .collect::<BTreeSet<_>>();
+        let target_has_any_enum_boundary = target_table.columns.iter().any(|column| {
+            target_mapping
+                .columns
+                .get(&column.name)
+                .is_some_and(|column_id| {
+                    physical_mapping_has_enum_boundary(&target_mapping, *column_id)
+                })
+                || value_type_has_enum_boundary(&column.column_type)
+        });
+        if required_enum_columns.is_empty() && !target_has_any_enum_boundary {
+            return Ok(physical_history_projection_target(
+                target_alias,
+                target_table_name,
+            ));
+        }
         let projection_target = physical_history_projection_target_for_enum_columns(
             target_alias,
             target_table_name,
@@ -1009,9 +1025,12 @@ where
                     }
                 }
                 Some(CurrentWinnerCellProjection::Literal(default)) => {
-                    let default = if matches!(output_type, records::ValueType::Nullable(_))
-                        && !matches!(default, Value::Nullable(_))
-                    {
+                    let default = if matches!(output_type, records::ValueType::Nullable(_)) {
+                        // A current-winner cell has one outer nullable layer
+                        // for source-field presence.  A nullable lens default
+                        // is its *inner* logical value, so it must be wrapped
+                        // too; otherwise a default null is indistinguishable
+                        // from an absent field and is lost by a partial write.
                         Value::Nullable(Some(Box::new(default)))
                     } else {
                         default
@@ -1242,6 +1261,11 @@ where
         #[derive(Clone)]
         enum CellProjection {
             Field(String),
+            /// The source variant did not author this cell, so it remains
+            /// absent in the target descriptor.
+            Missing,
+            /// A lens supplied this cell.  Its value (including a nullable
+            /// null) is a present logical value and must retain that fact.
             Literal(Value),
         }
 
@@ -1302,7 +1326,6 @@ where
                 }
             }
         }
-
         let target_storage = match shape {
             ContentProjectionShape::History => target_table.history_storage_table(),
             ContentProjectionShape::Current => {
@@ -1370,7 +1393,7 @@ where
             let output = user_column_field(&column.name);
             let projection = match cells.remove(&column.name) {
                 Some(projection) => projection,
-                None if present.is_some() => CellProjection::Literal(Value::Nullable(None)),
+                None if present.is_some() => CellProjection::Missing,
                 None => return Ok(None),
             };
             match projection {
@@ -1379,14 +1402,7 @@ where
                         Error::InvalidStoredValue("target enum physical column mapping missing"),
                     )?;
                     let has_enum_boundary =
-                        target_mapping.scalar_enum_cases.contains_key(&column_id)
-                            || target_mapping.payload_enum_cases.contains_key(&column_id)
-                            || target_mapping
-                                .nested_scalar_enum_cases
-                                .contains_key(&column_id)
-                            || target_mapping
-                                .nested_payload_enum_cases
-                                .contains_key(&column_id);
+                        physical_mapping_has_enum_boundary(target_mapping, column_id);
                     let direct_enum = matches!(
                         column.column_type,
                         records::ValueType::EnumTag(_) | records::ValueType::Enum(_)
@@ -1464,7 +1480,7 @@ where
                         fields.push(ProjectField::renamed(source, output));
                     }
                 }
-                CellProjection::Literal(Value::Nullable(None)) => {
+                CellProjection::Missing => {
                     fields.push(ProjectField::literal_typed(
                         output,
                         Value::Nullable(None),
