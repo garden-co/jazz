@@ -88,7 +88,6 @@ async fn insert_with_exists_rel_policy_denies_non_admin_inner() {
 /// Verifies that relation predicates compare NULL literals correctly inside
 /// EXISTS_REL, allowing active rows and denying revoked rows.
 #[tokio::test]
-#[ignore = "server schema conversion rejects ExistsRel equality against NULL with OperandTypeMismatch"]
 async fn insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
     tokio::task::LocalSet::new()
         .run_until(insert_with_exists_rel_null_literal_predicate_matches_null_rows_inner())

@@ -2176,6 +2176,16 @@ fn rel_predicate_to_policy(
         RelPredicateExpr::Cmp { left, op, right } => {
             let value = rel_value_to_policy_operand(table, path, right)?;
             let predicate = match (&value, op) {
+                (
+                    LoweredRelValue::Operand(Operand::Literal(GrooveValue::Nullable(None))),
+                    RelPredicateCmpOp::Eq,
+                ) => Predicate::IsNull(Operand::Column(left.column.clone())),
+                (
+                    LoweredRelValue::Operand(Operand::Literal(GrooveValue::Nullable(None))),
+                    RelPredicateCmpOp::Ne,
+                ) => Predicate::Not(Box::new(Predicate::IsNull(Operand::Column(
+                    left.column.clone(),
+                )))),
                 (LoweredRelValue::Operand(operand), RelPredicateCmpOp::Eq) => {
                     Predicate::Eq(Operand::Column(left.column.clone()), operand.clone())
                 }
