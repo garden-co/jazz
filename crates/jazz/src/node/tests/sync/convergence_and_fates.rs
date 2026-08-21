@@ -16,7 +16,7 @@ fn view_updates_drop_unknown_usage_site_bindings() {
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription: unknown_usage_site,
-            settled_through: GlobalSeq(0),
+            settled_through: GlobalTime(0),
             reset_result_set: false,
             version_carriers: Vec::new(),
             version_bundles: Vec::new(),
@@ -144,7 +144,7 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
     }
     assert_eq!(
         replacement.transaction_state(kept),
-        Some((Fate::Accepted, Some(GlobalSeq(1)), DurabilityTier::Global))
+        Some((Fate::Accepted, Some(GlobalTime::new(12, 0).unwrap()), DurabilityTier::Global))
     );
     assert_eq!(
         core.current_rows("todos", DurabilityTier::Global).unwrap(),
@@ -282,7 +282,7 @@ fn originating_causality_rejection_retains_child_payload() {
         SyncMessage::FateUpdate {
             tx_id: child,
             fate: Fate::Rejected(RejectionReason::CausalityViolation),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }
     );
@@ -341,7 +341,7 @@ fn originating_cascade_rejection_retains_root_cause() {
         SyncMessage::FateUpdate {
             tx_id: child,
             fate: Fate::Rejected(RejectionReason::Cascade { root }),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }
     );
@@ -382,7 +382,7 @@ fn commit_units_sync_upstream_and_fates_flow_back() {
     let SyncMessage::FateUpdate {
         tx_id: fate_tx,
         fate: accepted,
-        global_seq,
+        global_time,
         durability,
     } = fate
     else {
@@ -390,7 +390,7 @@ fn commit_units_sync_upstream_and_fates_flow_back() {
     };
     assert_eq!(fate_tx, tx_id);
     assert_eq!(accepted, Fate::Accepted);
-    assert_eq!(global_seq, Some(GlobalSeq(1)));
+    assert_eq!(global_time, Some(GlobalTime::new(10, 0).unwrap()));
     assert_eq!(durability, Some(DurabilityTier::Global));
 
     assert_eq!(
@@ -403,11 +403,11 @@ fn commit_units_sync_upstream_and_fates_flow_back() {
     );
 
     client
-        .apply_fate_update(fate_tx, accepted, global_seq, durability)
+        .apply_fate_update(fate_tx, accepted, global_time, durability)
         .unwrap();
     assert_eq!(
         client.transaction_state(tx_id).unwrap(),
-        (Fate::Accepted, Some(GlobalSeq(1)), DurabilityTier::Global)
+        (Fate::Accepted, Some(GlobalTime::new(10, 0).unwrap()), DurabilityTier::Global)
     );
 }
 #[test]
@@ -434,7 +434,7 @@ fn duplicate_commit_units_must_match_original_payload() {
 }
 
 #[test]
-fn fate_update_rejects_backward_global_seq_and_keeps_durability_monotone() {
+fn fate_update_rejects_backward_global_time_and_keeps_durability_monotone() {
     let (_temp_dir, mut node) = open_node();
     let tx_id = node
         .commit_mergeable(MergeableCommit::new("todos", row(7), 10).cells(title_cells("base")))
@@ -442,7 +442,7 @@ fn fate_update_rejects_backward_global_seq_and_keeps_durability_monotone() {
     node.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(5)),
+        Some(GlobalTime(5)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -451,26 +451,26 @@ fn fate_update_rejects_backward_global_seq_and_keeps_durability_monotone() {
         node.apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(GlobalSeq(4)),
+            Some(GlobalTime(4)),
             Some(DurabilityTier::Global),
         ),
         Err(Error::NonMonotoneState("global seq cannot move backwards"))
     ));
     assert_eq!(
         node.transaction_state(tx_id).unwrap(),
-        (Fate::Accepted, Some(GlobalSeq(5)), DurabilityTier::Global)
+        (Fate::Accepted, Some(GlobalTime(5)), DurabilityTier::Global)
     );
 
     node.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(6)),
+        Some(GlobalTime(6)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
     assert_eq!(
         node.transaction_state(tx_id).unwrap(),
-        (Fate::Accepted, Some(GlobalSeq(6)), DurabilityTier::Global)
+        (Fate::Accepted, Some(GlobalTime(6)), DurabilityTier::Global)
     );
 }
 
@@ -485,7 +485,7 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
         node.apply_sync_message(SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(7)),
+            global_time: Some(GlobalTime(7)),
             durability: Some(DurabilityTier::Edge),
         })
     }));
@@ -493,7 +493,7 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
     assert!(matches!(
         received.unwrap(),
         Err(Error::UnsupportedSyncMessage(
-            "global sequence requires Global durability"
+            "global timestamp requires Global durability"
         ))
     ));
     assert_eq!(
@@ -504,13 +504,13 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
     node.apply_sync_message(SyncMessage::FateUpdate {
         tx_id,
         fate: Fate::Accepted,
-        global_seq: Some(GlobalSeq(7)),
+        global_time: Some(GlobalTime(7)),
         durability: Some(DurabilityTier::Global),
     })
     .unwrap();
     assert_eq!(
         node.transaction_state(tx_id),
-        Some((Fate::Accepted, Some(GlobalSeq(7)), DurabilityTier::Global))
+        Some((Fate::Accepted, Some(GlobalTime(7)), DurabilityTier::Global))
     );
 }
 
@@ -522,7 +522,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     receiver
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
-            settled_through: GlobalSeq(0),
+            settled_through: GlobalTime(0),
             reset_result_set: true,
             version_carriers: Vec::new(),
             version_bundles: Vec::new(),
@@ -545,7 +545,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         receiver.apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
-            settled_through: GlobalSeq(0),
+            settled_through: GlobalTime(0),
             reset_result_set: true,
             version_carriers: Vec::new(),
             version_bundles: vec![VersionBundle {
@@ -565,7 +565,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                 },
                 versions: Vec::new(),
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(7)),
+                global_time: Some(GlobalTime(7)),
                 durability: DurabilityTier::Edge,
             }],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
@@ -583,7 +583,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     assert!(matches!(
         received.unwrap(),
         Err(Error::MalformedViewUpdate(
-            "global sequence requires Global durability"
+            "global timestamp requires Global durability"
         ))
     ));
     assert!(receiver.transaction_state(bad_tx).is_none());
@@ -595,7 +595,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     receiver
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
-            settled_through: GlobalSeq(1),
+            settled_through: GlobalTime(1),
             reset_result_set: true,
             version_carriers: Vec::new(),
             version_bundles: Vec::new(),
@@ -631,11 +631,9 @@ fn internal_sequenced_non_global_fate_trips_the_debug_assertion() {
         node.apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(GlobalSeq(7)),
+            Some(GlobalTime(7)),
             Some(DurabilityTier::Edge),
         )
     }));
     assert!(result.is_err());
 }
-
-

@@ -121,7 +121,7 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
     authority_transport
         .send(SyncMessage::ViewUpdate {
             subscription,
-            settled_through: GlobalSeq(1),
+            settled_through: GlobalTime(1),
             reset_result_set: true,
             version_carriers: Vec::new(),
             version_bundles: Vec::new(),
@@ -637,7 +637,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
     };
     let update = |version_bundles| SyncMessage::ViewUpdate {
         subscription,
-        settled_through: GlobalSeq(1),
+        settled_through: GlobalTime(1),
         reset_result_set: true,
         version_carriers: Vec::new(),
         version_bundles,
@@ -666,7 +666,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             },
             versions: Vec::new(),
             fate: crate::tx::Fate::Accepted,
-            global_seq: Some(GlobalSeq(44)),
+            global_time: Some(GlobalTime(44)),
             durability: DurabilityTier::Edge,
         }]))
         .unwrap();
@@ -728,7 +728,7 @@ fn parked_branch_opening_is_not_cleared_by_unrelated_applied_view() {
     }
     let empty_update = |subscription| SyncMessage::ViewUpdate {
         subscription,
-        settled_through: GlobalSeq(1),
+        settled_through: GlobalTime(1),
         reset_result_set: true,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),

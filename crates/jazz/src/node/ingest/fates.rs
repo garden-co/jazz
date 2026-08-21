@@ -7,19 +7,19 @@ where
         &mut self,
         tx_id: TxId,
         fate: Fate,
-        global_seq: Option<GlobalSeq>,
+        global_time: Option<GlobalTime>,
         durability: Option<DurabilityTier>,
     ) -> Result<(), Error> {
         self.require_catalogue_ready()?;
         debug_assert!(
-            global_seq.is_none() || durability == Some(DurabilityTier::Global),
-            "a global sequence requires Global durability"
+            global_time.is_none() || durability == Some(DurabilityTier::Global),
+            "a global timestamp requires Global durability"
         );
         let mut terminal_fate_persisted = false;
         let result = self.apply_fate_update_once(
             tx_id,
             fate,
-            global_seq,
+            global_time,
             durability,
             &mut terminal_fate_persisted,
         );
@@ -33,27 +33,27 @@ where
         &mut self,
         tx_id: TxId,
         fate: Fate,
-        global_seq: Option<GlobalSeq>,
+        global_time: Option<GlobalTime>,
         durability: Option<DurabilityTier>,
         terminal_fate_persisted: &mut bool,
     ) -> Result<(), Error> {
         let mut stored = self
             .query_transaction(tx_id)?
             .ok_or(Error::MissingTransaction(tx_id))?;
-        if let (Some(current), Some(next)) = (stored.global_seq, global_seq)
+        if let (Some(current), Some(next)) = (stored.global_time, global_time)
             && next < current
         {
             return Err(Error::NonMonotoneState("global seq cannot move backwards"));
         }
         stored.fate = next_fate(&stored.fate, fate)?;
-        stored.global_seq = global_seq.or(stored.global_seq);
+        stored.global_time = global_time.or(stored.global_time);
         if let Some(durability) = durability {
             stored.durability = stored.durability.max(durability);
         }
-        let advanced_global_seqs = if matches!(stored.fate, Fate::Accepted)
-            && let Some(global_seq) = stored.global_seq
+        let advanced_global_times = if matches!(stored.fate, Fate::Accepted)
+            && let Some(global_time) = stored.global_time
         {
-            self.record_applied_global_seq(global_seq)
+            self.record_applied_global_time(global_time)
         } else {
             Vec::new()
         };
@@ -68,7 +68,7 @@ where
             .filter(|version| version.layer() == VersionLayer::Content)
             .cloned()
             .collect::<Vec<_>>();
-        if root_target && matches!(stored.fate, Fate::Accepted) && stored.global_seq.is_some() {
+        if root_target && matches!(stored.fate, Fate::Accepted) && stored.global_time.is_some() {
             global_current_updates =
                 self.global_current_updates_for_versions(tx_id, &tx_versions)?;
         }
@@ -99,7 +99,7 @@ where
                 stored.node_alias,
                 &stored.tx,
                 stored.fate.clone(),
-                stored.global_seq,
+                stored.global_time,
                 stored.durability,
             ),
         );
@@ -108,32 +108,32 @@ where
                 self.update_merge_heads_for_content_version(&mut batch, version)?;
             }
         }
-        if let Some(global_seq) = stored.global_seq {
+        if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
-                self.write_global_current_update(&mut batch, version, global_seq)?;
+                self.write_global_current_update(&mut batch, version, global_time)?;
             }
         }
         #[cfg(test)]
         let global_current_update_versions = stored
-            .global_seq
-            .map(|global_seq| {
+            .global_time
+            .map(|global_time| {
                 global_current_updates
                     .iter()
                     .cloned()
-                    .map(|version| (version, global_seq))
+                    .map(|version| (version, global_time))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if root_target && (matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some())
+        if root_target && (matches!(stored.fate, Fate::Rejected(_)) || stored.global_time.is_some())
         {
             self.cleanup_fated_ahead_current_for_versions(&mut batch, &tx_versions)?;
         }
-        for global_seq in advanced_global_seqs
+        for global_time in advanced_global_times
             .iter()
             .copied()
-            .filter(|global_seq| Some(*global_seq) != stored.global_seq)
+            .filter(|global_time| Some(*global_time) != stored.global_time)
         {
-            self.prune_ahead_current_for_global_seq(&mut batch, global_seq)?;
+            self.prune_ahead_current_for_global_time(&mut batch, global_time)?;
         }
         let rejected_payload = if root_target && cleanup_rejected_versions {
             self.remove_rejected_local_versions(tx_id, &stored, &mut batch)?
@@ -144,7 +144,7 @@ where
         let durable_result = (|| {
             self.database.commit_batch(batch)?;
             *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
-            if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
+            if matches!(stored.fate, Fate::Rejected(_)) || stored.global_time.is_some() {
                 self.persist_storage_consistency_marker_through(tx_id.time)?;
             }
             Ok(())
@@ -238,12 +238,10 @@ where
         }
         for predicate in tx.predicate_read_set.as_deref().unwrap_or(&[]) {
             if self.predicate_read_is_degenerate_whole_table(predicate)? {
-                if self
-                    .global_currency_changed_after(&predicate.table, base_snapshot.global_base)?
-                {
+                if self.global_currency_changed_outside_snapshot(&predicate.table, base_snapshot)? {
                     return Ok(false);
                 }
-            } else if self.shape_predicate_changed_after(predicate, base_snapshot.global_base)? {
+            } else if self.shape_predicate_changed_after(predicate, base_snapshot)? {
                 return Ok(false);
             }
         }
@@ -293,7 +291,7 @@ where
     pub(super) fn shape_predicate_changed_after(
         &mut self,
         predicate: &PredicateRead,
-        global_base: GlobalSeq,
+        snapshot: &Snapshot,
     ) -> Result<bool, Error> {
         let shape = predicate.shape.validate(&self.catalogue.schema)?;
         if shape.shape_id() != predicate.shape_id {
@@ -303,7 +301,7 @@ where
         if binding.binding_id() != predicate.binding_id {
             return Ok(true);
         }
-        let at_base = self.shape_output_tx_set_at_global_base(&shape, &binding, global_base)?;
+        let at_base = self.shape_output_tx_set_at_snapshot(&shape, &binding, snapshot)?;
         let at_now = self.shape_output_tx_set_now(&shape, &binding)?;
         Ok(at_base != at_now)
     }
@@ -323,19 +321,19 @@ where
         Ok(set)
     }
 
-    fn shape_output_tx_set_at_global_base(
+    fn shape_output_tx_set_at_snapshot(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        global_base: GlobalSeq,
+        snapshot: &Snapshot,
     ) -> Result<BTreeSet<(RowUuid, TxId)>, Error> {
         let table = shape.query().table.clone();
-        let rows = self.query_rows_at(shape, binding, global_base)?;
+        let rows = self.query_rows_at_snapshot(shape, binding, snapshot)?;
         rows.into_iter()
             .map(|row| {
                 let row_uuid = row.row_uuid();
                 let Some(tx_id) =
-                    self.visible_global_content_tx_id_at(&table, row_uuid, global_base)?
+                    self.snapshot_content_witness(&table, row_uuid, snapshot)
                 else {
                     return Err(Error::InvalidStoredValue(
                         "historical query output row must have visible content",
@@ -736,7 +734,7 @@ where
             updates.push(SyncMessage::FateUpdate {
                 tx_id: descendant,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             });
         }

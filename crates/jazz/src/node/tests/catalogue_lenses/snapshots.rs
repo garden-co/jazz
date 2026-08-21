@@ -279,7 +279,7 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
             tx,
             versions,
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(GlobalTime(1)),
             DurabilityTier::Global,
         )
         .unwrap();

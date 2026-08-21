@@ -71,11 +71,11 @@ fn open_receipt_counts_physical_recovery_scans_exactly() {
     )
     .unwrap();
 
-    // The nullable global-sequence index is the actual physical access path:
+    // The nullable global-time index is the actual physical access path:
     // local pending transactions remain in its `None` bucket and must not be
     // decoded by bounded `Some`-range recovery.
-    assert_eq!(receipt.global_sequence_records_scanned, 0);
-    assert_eq!(receipt.accepted_global_sequences, 0);
+    assert_eq!(receipt.global_time_records_scanned, 0);
+    assert_eq!(receipt.accepted_global_times, 0);
     assert_eq!(receipt.ahead_current_entries, 2);
 }
 
@@ -121,7 +121,7 @@ fn opening_defers_malformed_current_row_to_read() {
         node.apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(GlobalTime(1)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -187,7 +187,7 @@ fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
 
         let mut stored = node.query_transaction(tx_id).unwrap().unwrap();
         stored.fate = Fate::Accepted;
-        stored.global_seq = Some(GlobalSeq(1));
+        stored.global_time = Some(GlobalTime(1));
         stored.durability = DurabilityTier::Global;
         let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
         let mut batch = node.database.open_batch();
@@ -197,11 +197,11 @@ fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
                 stored.node_alias,
                 &stored.tx,
                 stored.fate.clone(),
-                stored.global_seq,
+                stored.global_time,
                 stored.durability,
             ),
         );
-        node.write_global_current_update(&mut batch, &version, GlobalSeq(1))
+        node.write_global_current_update(&mut batch, &version, GlobalTime(1))
             .unwrap();
         node.database.commit_batch(batch).unwrap();
         assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
@@ -240,7 +240,7 @@ fn clean_close_reopen_skips_fated_ahead_current_sweep() {
         node.apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(GlobalTime(1)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -284,7 +284,7 @@ fn unclean_reopen_skips_fated_sweep_through_consistency_marker() {
         node.apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(GlobalTime(1)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -326,7 +326,7 @@ fn unclean_reopen_sweeps_only_transactions_after_consistency_marker() {
             node.apply_fate_update(
                 tx_id,
                 Fate::Accepted,
-                Some(GlobalSeq(1 + u64::from(offset))),
+                Some(GlobalTime(1 + u64::from(offset))),
                 Some(DurabilityTier::Global),
             )
             .unwrap();
@@ -339,7 +339,7 @@ fn unclean_reopen_sweeps_only_transactions_after_consistency_marker() {
                     .cells(title_cells("after marker crash window")),
             )
             .unwrap();
-        mark_accepted_without_ahead_cleanup(&mut node, crash_tx, GlobalSeq(1000));
+        mark_accepted_without_ahead_cleanup(&mut node, crash_tx, GlobalTime(1000));
         assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
     }
 
@@ -399,20 +399,20 @@ fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
         .apply_fate_update(
             parent,
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(GlobalTime(1)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
     assert!(reopened.rejections.child_txs_by_parent.is_empty());
 }
 
-fn mark_accepted_without_ahead_cleanup<S>(node: &mut NodeState<S>, tx_id: TxId, global_seq: GlobalSeq)
+fn mark_accepted_without_ahead_cleanup<S>(node: &mut NodeState<S>, tx_id: TxId, global_time: GlobalTime)
 where
     S: OrderedKvStorage,
 {
     let mut stored = node.query_transaction(tx_id).unwrap().unwrap();
     stored.fate = Fate::Accepted;
-    stored.global_seq = Some(global_seq);
+    stored.global_time = Some(global_time);
     stored.durability = DurabilityTier::Global;
     let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
     let mut batch = node.database.open_batch();
@@ -422,11 +422,11 @@ where
             stored.node_alias,
             &stored.tx,
             stored.fate.clone(),
-            stored.global_seq,
+            stored.global_time,
             stored.durability,
         ),
     );
-    node.write_global_current_update(&mut batch, &version, global_seq)
+    node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
     node.database.commit_batch(batch).unwrap();
 }
@@ -436,16 +436,17 @@ fn recovery_rebuilds_global_clock_from_accepted_transactions() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     {
-        let mut node = open_node_at(&temp_dir, schema.clone());
+        let mut node = open_history_complete_node_at(&temp_dir, schema.clone());
         let first = node
             .commit_mergeable(
                 MergeableCommit::new("todos", row(1), 10).cells(title_cells("first")),
             )
             .unwrap();
+        let first_global_time = node.allocate_global_time_for_test();
         node.apply_fate_update(
             first,
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(first_global_time),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -454,20 +455,24 @@ fn recovery_rebuilds_global_clock_from_accepted_transactions() {
                 MergeableCommit::new("todos", row(2), 11).cells(title_cells("second")),
             )
             .unwrap();
+        let second_global_time = node.allocate_global_time_for_test();
         node.apply_fate_update(
             second,
             Fate::Accepted,
-            Some(GlobalSeq(2)),
+            Some(second_global_time),
             Some(DurabilityTier::Global),
         )
         .unwrap();
-        assert_eq!(node.clock.applied_global_watermark, GlobalSeq(2));
-        assert_eq!(node.clock.next_global_seq, GlobalSeq(3));
+        assert_eq!(node.clock.committed_global_time, second_global_time);
+        assert_eq!(node.clock.global_time_register, second_global_time);
     }
 
-    let reopened = reopen_node_at(&temp_dir, node(1), schema);
-    assert_eq!(reopened.clock.applied_global_watermark, GlobalSeq(2));
-    assert_eq!(reopened.clock.next_global_seq, GlobalSeq(3));
+    let reopened = reopen_history_complete_node_at(&temp_dir, node(1), schema);
+    assert_eq!(
+        reopened.clock.committed_global_time,
+        GlobalTime::new(11, 0).unwrap()
+    );
+    assert_eq!(reopened.clock.global_time_register, reopened.clock.committed_global_time);
 }
 
 // This must remain an internal regression: reaching the last sequence requires
@@ -475,11 +480,11 @@ fn recovery_rebuilds_global_clock_from_accepted_transactions() {
 // feasibly do. It proves the boundary itself, while the recovery test below
 // proves that a persisted last sequence retains the exhausted state on reopen.
 #[test]
-fn global_sequence_allocates_max_once_then_stays_exhausted() {
+fn global_time_allocates_max_once_then_stays_exhausted() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let mut node = open_node_at(&temp_dir, schema);
-    node.clock.next_global_seq = GlobalSeq(u64::MAX);
+    node.clock.global_time_register = GlobalTime(u64::MAX - 1);
 
     let last_tx = node
         .commit_mergeable(
@@ -491,11 +496,11 @@ fn global_sequence_allocates_max_once_then_stays_exhausted() {
         node.transaction_state(last_tx).unwrap(),
         (
             Fate::Accepted,
-            Some(GlobalSeq(u64::MAX)),
+            Some(GlobalTime(u64::MAX)),
             DurabilityTier::Global,
         )
     );
-    assert!(node.clock.global_seq_exhausted);
+    assert_eq!(node.clock.global_time_register, GlobalTime(u64::MAX));
 
     let after_exhaustion = node
         .commit_mergeable(
@@ -504,7 +509,7 @@ fn global_sequence_allocates_max_once_then_stays_exhausted() {
         .unwrap();
     assert!(matches!(
         node.finalize_local_mergeable_commit(after_exhaustion),
-        Err(Error::InvalidStoredValue("global sequence exhausted"))
+        Err(Error::InvalidStoredValue("global HLC exhausted"))
     ));
     assert_eq!(
         node.transaction_state(after_exhaustion).unwrap(),
@@ -515,7 +520,7 @@ fn global_sequence_allocates_max_once_then_stays_exhausted() {
 // This must remain an internal recovery regression: planting a persisted
 // u64::MAX sequence is not reachable through the public allocation API.
 #[test]
-fn recovery_rejects_global_sequence_allocation_after_max() {
+fn recovery_rejects_global_time_allocation_after_max() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     {
@@ -525,15 +530,15 @@ fn recovery_rejects_global_sequence_allocation_after_max() {
                 MergeableCommit::new("todos", row(24), 24).cells(title_cells("last sequence")),
             )
             .unwrap();
-        mark_accepted_without_ahead_cleanup(&mut node, tx_id, GlobalSeq(u64::MAX));
+        mark_accepted_without_ahead_cleanup(&mut node, tx_id, GlobalTime(u64::MAX));
     }
 
     let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
     assert_eq!(
-        reopened.clock.applied_global_above_watermark,
-        BTreeSet::from([GlobalSeq(u64::MAX)])
+        reopened.clock.applied_global_times_after_frontier,
+        BTreeSet::from([GlobalTime(u64::MAX)])
     );
-    assert_eq!(reopened.clock.next_global_seq, GlobalSeq(u64::MAX));
+    assert_eq!(reopened.clock.global_time_register, GlobalTime(u64::MAX));
 
     let next_tx = reopened
         .commit_mergeable(
@@ -542,7 +547,7 @@ fn recovery_rejects_global_sequence_allocation_after_max() {
         .unwrap();
     assert!(matches!(
         reopened.finalize_local_mergeable_commit(next_tx),
-        Err(Error::InvalidStoredValue("global sequence exhausted"))
+        Err(Error::InvalidStoredValue("global HLC exhausted"))
     ));
 }
 
@@ -568,7 +573,7 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
                 stored.node_alias,
                 &stored.tx,
                 Fate::Accepted,
-                Some(GlobalSeq(7)),
+                Some(GlobalTime(7)),
                 DurabilityTier::Edge,
             ),
         );
@@ -584,7 +589,7 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
     };
     assert!(matches!(
         error,
-        Error::InvalidStoredValue("global sequence requires Global durability")
+        Error::InvalidStoredValue("global timestamp requires Global durability")
     ));
 }
 
@@ -614,14 +619,14 @@ fn seed_pending_replay_state(
     tx_id: TxId,
     made_by: AuthorId,
     fate: Fate,
-    global_seq: Option<GlobalSeq>,
+    global_time: Option<GlobalTime>,
     durability: DurabilityTier,
 ) {
     node.ingest_relay_commit_unit(pending_replay_fixture_transaction(tx_id, made_by), Vec::new())
         .unwrap();
-    if !matches!(fate, Fate::Pending) || global_seq.is_some() || durability != DurabilityTier::Local
+    if !matches!(fate, Fate::Pending) || global_time.is_some() || durability != DurabilityTier::Local
     {
-        node.apply_fate_update(tx_id, fate, global_seq, Some(durability))
+        node.apply_fate_update(tx_id, fate, global_time, Some(durability))
             .unwrap();
     }
 }
@@ -779,7 +784,7 @@ fn pending_replay_null_slice_is_a_superset_then_filters_fate_and_identity() {
             local_node,
             local_author,
             Fate::Accepted,
-            Some(GlobalSeq(7)),
+            Some(GlobalTime(7)),
             DurabilityTier::Global,
         ),
         (
@@ -792,14 +797,14 @@ fn pending_replay_null_slice_is_a_superset_then_filters_fate_and_identity() {
         (local_node, other_author, Fate::Pending, None, DurabilityTier::Local),
         (other_node, local_author, Fate::Pending, None, DurabilityTier::Local),
     ];
-    for (offset, (tx_node, author, fate, global_seq, durability)) in states.into_iter().enumerate()
+    for (offset, (tx_node, author, fate, global_time, durability)) in states.into_iter().enumerate()
     {
         seed_pending_replay_state(
             &mut node_under_test,
             TxId::new(TxTime::from((offset + 1) as u64), tx_node),
             author,
             fate,
-            global_seq,
+            global_time,
             durability,
         );
     }
@@ -827,7 +832,7 @@ fn pending_replay_lookup_work(settled_history: usize) -> (PendingTransactionScan
             TxId::new(TxTime::from((offset + 1) as u64), local_node),
             local_author,
             Fate::Accepted,
-            Some(GlobalSeq((offset + 1) as u64)),
+            Some(GlobalTime((offset + 1) as u64)),
             DurabilityTier::Global,
         );
     }
@@ -929,7 +934,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     core.apply_fate_update(
         accepted,
         Fate::Accepted,
-        Some(GlobalSeq(7)),
+        Some(GlobalTime(7)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -953,7 +958,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     let mut reopened = core.reopen_in_place().unwrap();
     assert_eq!(
         reopened.transaction_state(accepted).unwrap(),
-        (Fate::Accepted, Some(GlobalSeq(7)), DurabilityTier::Global)
+        (Fate::Accepted, Some(GlobalTime(7)), DurabilityTier::Global)
     );
     assert_eq!(
         reopened.rejections.child_txs_by_parent.get(&parent),
@@ -1166,11 +1171,11 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     core.tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
     let (exclusive, _unit) = core.commit_exclusive(tx_id, AuthorId::SYSTEM, 30).unwrap();
-    let exclusive_global_seq = core.clock.next_global_seq;
+    let exclusive_global_time = core.allocate_global_time_for_test();
     core.apply_fate_update(
         exclusive,
         Fate::Accepted,
-        Some(exclusive_global_seq),
+        Some(exclusive_global_time),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -1199,7 +1204,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
         SyncMessage::FateUpdate {
             tx_id: rejected,
             fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }
     );
@@ -1217,7 +1222,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
             && entry.parents().contains(&right)
             && entry.layer() == MergeAspect::Content
             && entry.fate() == Fate::Accepted
-            && entry.global_seq().is_some()
+            && entry.global_time().is_some()
             && entry.durability() == DurabilityTier::Global
     }));
     assert!(history.iter().any(|entry| {

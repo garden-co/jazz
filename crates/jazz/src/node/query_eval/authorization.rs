@@ -780,7 +780,7 @@ where
         table_name: &str,
         identity: AuthorId,
         param_binding_mode: ParamBindingMode,
-        position: GlobalSeq,
+        position: GlobalTime,
         binding_source_shape: Option<String>,
         binding_user_params: BTreeMap<String, ColumnType>,
         binding_claim_params: BTreeMap<String, ProgramClaimParam>,

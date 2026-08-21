@@ -475,7 +475,7 @@ pub(super) fn recursive_current_read_view() -> RequestedReadView {
 pub(super) fn snapshot() -> Snapshot {
     Snapshot {
         owner: NodeUuid::from_bytes([0x33; 16]),
-        global_base: GlobalSeq(17),
+        global_base: GlobalTime(17),
         local_base: TxTime::new(1_000, 0),
         dots: vec![TxId {
             time: TxTime::new(1_001, 0),
@@ -505,7 +505,7 @@ pub(super) fn program_frontier_requirement() -> FrontierRequirement {
     FrontierRequirement::Through(ResolvedFrontier {
         tier: DurabilityTier::Global,
         stream: Some("peer-1".to_owned()),
-        through: FrontierPosition::GlobalSeq(GlobalSeq(42)),
+        through: FrontierPosition::GlobalTime(GlobalTime(42)),
     })
 }
 

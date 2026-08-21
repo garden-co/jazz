@@ -297,7 +297,7 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
         .send(SyncMessage::FateUpdate {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
-            global_seq: None,
+            global_time: None,
             durability: Some(DurabilityTier::Edge),
         })
         .unwrap();
@@ -353,7 +353,7 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
         .send(SyncMessage::FateUpdate {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
-            global_seq: None,
+            global_time: None,
             durability: Some(DurabilityTier::Edge),
         })
         .unwrap();
@@ -398,7 +398,7 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
         .send(SyncMessage::FateUpdate {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
-            global_seq: None,
+            global_time: None,
             durability: Some(DurabilityTier::Edge),
         })
         .unwrap();
@@ -459,7 +459,7 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
         .send(SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
-            global_seq: None,
+            global_time: None,
             durability: Some(DurabilityTier::Edge),
         })
         .unwrap();

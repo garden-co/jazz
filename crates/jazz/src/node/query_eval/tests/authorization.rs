@@ -236,7 +236,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     node.apply_fate_update(
         chat_tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -253,7 +253,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     node.apply_fate_update(
         profile_tx,
         Fate::Accepted,
-        Some(GlobalSeq(2)),
+        Some(GlobalTime(2)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -274,7 +274,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     node.apply_fate_update(
         message_tx,
         Fate::Accepted,
-        Some(GlobalSeq(3)),
+        Some(GlobalTime(3)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -474,7 +474,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     node.apply_fate_update(
         member_tx,
         Fate::Accepted,
-        Some(GlobalSeq(4)),
+        Some(GlobalTime(4)),
         Some(DurabilityTier::Global),
     )
     .expect("a live invite subscription must tolerate its membership CommitUnit");
@@ -1060,7 +1060,7 @@ fn branch_program_tier_filter_preserves_claim_policy_fields() {
     node.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();

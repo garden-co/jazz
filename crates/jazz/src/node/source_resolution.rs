@@ -97,7 +97,7 @@ where
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
-        position: GlobalSeq,
+        position: GlobalTime,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_table = self.table_in_schema(table, read_schema_version)?.clone();
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
@@ -110,8 +110,79 @@ where
             };
             if !matches!(tx.fate, Fate::Accepted)
                 || tx.durability < DurabilityTier::Global
-                || tx.global_seq.is_none_or(|global_seq| global_seq > position)
+                || tx
+                    .global_time
+                    .is_none_or(|global_time| global_time > position)
             {
+                continue;
+            }
+            let target = match version.layer() {
+                VersionLayer::Content => &mut content,
+                VersionLayer::Deletion => &mut deletions,
+            };
+            let key = (version.row_uuid(), version.layer());
+            let replace = tx_ids.get(&key).is_none_or(|existing_tx_id| {
+                version.tx_time().sort_key(tx_id.node)
+                    > target
+                        .get(&version.row_uuid())
+                        .expect("tracked version exists")
+                        .tx_time()
+                        .sort_key(existing_tx_id.node)
+            });
+            if replace {
+                tx_ids.insert(key, tx_id);
+                target.insert(version.row_uuid(), version);
+            }
+        }
+        let mut rows = Vec::new();
+        for (row_uuid, content) in content {
+            if deletions
+                .get(&row_uuid)
+                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted))
+            {
+                continue;
+            }
+            let source_schema = self
+                .schema_version_for_alias(content.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "history schema version alias must exist",
+                ))?;
+            let source_table = self.table_in_schema(content.table(), source_schema)?;
+            let mut cells = self.materialized_cells_for_version(&source_table, &content)?;
+            let Some(projected_table) = self.translate_cells(
+                source_schema,
+                read_schema_version,
+                content.table(),
+                &mut cells,
+            )?
+            else {
+                continue;
+            };
+            if projected_table == table {
+                match current_row_from_cells(&read_table, row_uuid, &cells) {
+                    Ok(row) => rows.push(row),
+                    Err(error) if is_unrepresentable_enum_projection(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        sort_current_rows(&mut rows);
+        Ok(rows)
+    }
+
+    pub(super) fn projected_snapshot_current_rows(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        snapshot: &Snapshot,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let read_table = self.table_in_schema(table, read_schema_version)?.clone();
+        let mut content = BTreeMap::<RowUuid, VersionRow>::new();
+        let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
+        let mut tx_ids = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
+        for version in self.query_table_versions(table)? {
+            let tx_id = self.version_tx_id(&version)?;
+            if !self.snapshot_covers(tx_id, snapshot) {
                 continue;
             }
             let target = match version.layer() {

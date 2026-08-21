@@ -647,10 +647,10 @@ pub(super) fn storage_index_write_destination(key: &[u8]) -> StorageWriteDestina
         return StorageWriteDestination::Other;
     };
     if table == "jazz_global_changes"
-        && (index == "by_global_seq" || index == "by_table_global_seq")
+        && (index == "by_global_time" || index == "by_table_global_time")
     {
         StorageWriteDestination::GlobalChangesIndexes
-    } else if table == "jazz_transactions" && index == "by_global_seq" {
+    } else if table == "jazz_transactions" && index == "by_global_time" {
         StorageWriteDestination::TransactionsIndexes
     } else if table.starts_with("jazz_")
         && table.ends_with("_global_current")

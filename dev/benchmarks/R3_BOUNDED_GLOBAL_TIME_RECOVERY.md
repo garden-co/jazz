@@ -1,17 +1,17 @@
-# R3 bounded global-sequence recovery
+# R3 bounded global-time recovery
 
 This receipt follows `R3_JAZZ_OPEN_ATTRIBUTION.md`. It changes startup recovery
-to range-scan only non-null entries in `jazz_transactions/by_global_seq`,
+to range-scan only non-null entries in `jazz_transactions/by_global_time`,
 instead of scanning the nullable index from its empty prefix.
 
 The previous scan visited every transaction, including local pending and
-rejected transactions whose `global_seq` is null. Recovery still filters for
+rejected transactions whose `global_time` is null. Recovery still filters for
 accepted fate, sorts and deduplicates the recovered sequences, and rebuilds the
 same contiguous watermark plus above-watermark gap set.
 
 ## Correctness boundary
 
-An internal recovery regression covers accepted global sequences `{1, 3}`,
+An internal recovery regression covers accepted global timestamps `{1, 3}`,
 64 pending transactions, and one rejected transaction. Reopen must:
 
 - scan only the two sequenced transactions;
@@ -29,14 +29,14 @@ using the same generated `m` workload:
 | phase                         |   before |    after |                  delta |
 | ----------------------------- | -------: | -------: | ---------------------: |
 | Jazz open                     | 2,919 ms | 1,104 ms |                 -62.2% |
-| recover global sequences      | 1,648 ms |    31 us | effectively eliminated |
+| recover global timestamps     | 1,648 ms |    31 us | effectively eliminated |
 | recover storage               | 1,984 ms |   340 ms |                 -82.9% |
 | rebuild ahead-current indexes |   946 ms |   763 ms |                 -19.3% |
 | validate current rows         |   337 ms |   340 ms |              unchanged |
 | first read                    |   359 ms |   345 ms |    within run variance |
 
 The transaction-index work counter falls from 952,620 scanned records to zero
-because this fixture has no accepted global sequences. The optimization is
+because this fixture has no accepted global timestamps. The optimization is
 proportional to sequenced transactions rather than total transactions; the
 gap regression demonstrates the non-zero path.
 

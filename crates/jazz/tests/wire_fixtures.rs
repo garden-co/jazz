@@ -18,7 +18,7 @@ use jazz::query::{
     lit,
 };
 use jazz::schema::JazzSchema;
-use jazz::time::{GlobalSeq, TxTime};
+use jazz::time::{GlobalTime, TxTime};
 use jazz::tools::{
     ColumnType as PublicColumnType, ObjectId, ResultKey, SchemaBuilder, TableSchemaBuilder,
 };
@@ -204,7 +204,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             SyncMessage::FateUpdate {
                 tx_id,
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(7)),
+                global_time: Some(GlobalTime(7)),
                 durability: Some(DurabilityTier::Global),
             },
         ),
@@ -237,7 +237,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 known_state: Some(
                     jazz::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
                         completeness: jazz::protocol::KnownStateCompleteness::FastCurrentMembership,
-                        position: GlobalSeq(7),
+                        position: GlobalTime(7),
                         authorization_progress: 9,
                     },
                 ),
@@ -273,7 +273,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "ViewUpdate",
             SyncMessage::ViewUpdate {
                 subscription,
-                settled_through: GlobalSeq(7),
+                settled_through: GlobalTime(7),
                 reset_result_set: true,
                 version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
@@ -294,7 +294,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "ViewUpdate",
             SyncMessage::ViewUpdate {
                 subscription,
-                settled_through: GlobalSeq(8),
+                settled_through: GlobalTime(8),
                 reset_result_set: false,
                 version_carriers: mixed_version_carriers(schema_version, author),
                 version_bundles: Vec::new(),
@@ -311,7 +311,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "ViewUpdate",
             SyncMessage::ViewUpdate {
                 subscription,
-                settled_through: GlobalSeq(9),
+                settled_through: GlobalTime(9),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
@@ -518,7 +518,7 @@ fn mixed_version_carriers(
                     .expect("fixture row encodes"),
                 ],
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(100 + index)),
+                global_time: Some(GlobalTime(100 + index)),
                 durability: DurabilityTier::Global,
             }
         })

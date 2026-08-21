@@ -9,7 +9,7 @@ use crate::query::{
     Aggregate, ArraySubquery, OrderDirection, Query, col, eq, gt, is_null, lit, ne, not, param,
 };
 use crate::schema::{JazzSchema, TableSchema};
-use crate::time::{GlobalSeq, TxTime};
+use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tools::{
     ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
@@ -42,7 +42,7 @@ fn settled_member(row_uuid: RowUuid, position: u64) -> ResultMemberEntry {
             row_uuid,
             TxId::new(TxTime(position), node(0x44)),
         ))
-        .with_settle_position(Some(GlobalSeq(position))),
+        .with_settle_position(Some(GlobalTime(position))),
     )
 }
 
@@ -53,7 +53,7 @@ fn fast_cursor_membership_mismatch_detects_pre_cursor_changes() {
     let newly_granted_old_row = settled_member(row(3), 7);
     let newly_granted_at_cursor = settled_member(row(5), 10);
     let new_post_cursor_row = settled_member(row(4), 12);
-    let cursor = GlobalSeq(10);
+    let cursor = GlobalTime(10);
 
     let previous = BTreeSet::from([direct.clone(), revoked.clone()]);
     assert!(fast_cursor_membership_mismatch(
@@ -88,7 +88,7 @@ fn fast_cursor_membership_bounds_authoritative_resets() {
     // surface. End-to-end rehydrate tests cover application of its output.
     let old = settled_member(row(1), 7);
     let new = settled_member(row(2), 12);
-    let cursor = GlobalSeq(10);
+    let cursor = GlobalTime(10);
     let previous = BTreeSet::from([old.clone()]);
 
     // (1) same authorization, sufficient cursor: no reset.
@@ -140,7 +140,7 @@ fn client_fast_cursor_requires_retained_matching_authorization_progress() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_u128(2)),
         read_view: Default::default(),
     };
-    let cursor = GlobalSeq(10);
+    let cursor = GlobalTime(10);
     let known_state = Some(KnownStateDeclaration::FastWithAuthorizationProgress {
         completeness: KnownStateCompleteness::FastCurrentMembership,
         position: cursor,
@@ -186,7 +186,7 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     let known = |position, authorization_progress| {
         Some(KnownStateDeclaration::FastWithAuthorizationProgress {
             completeness: KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalSeq(position),
+            position: GlobalTime(position),
             authorization_progress,
         })
     };
@@ -310,7 +310,7 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
         target,
         Some(KnownStateDeclaration::FastWithAuthorizationProgress {
             completeness: KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalSeq(2),
+            position: GlobalTime(2),
             authorization_progress: 0,
         }),
     );
@@ -421,7 +421,7 @@ fn incremental_delivery_keeps_terminal_children_with_their_root() {
     };
     let update = |adds, removes| SyncMessage::ViewUpdate {
         subscription,
-        settled_through: GlobalSeq(0),
+        settled_through: GlobalTime(0),
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),
@@ -481,7 +481,7 @@ fn maintained_delivery_does_not_leak_intermediate_replacement_refcounts() {
     };
     let update = |adds, removes| SyncMessage::ViewUpdate {
         subscription,
-        settled_through: GlobalSeq(0),
+        settled_through: GlobalTime(0),
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),
@@ -521,7 +521,7 @@ fn maintained_delivery_rekeys_delta_and_reset_by_output_occurrence() {
     };
     let update = |reset_result_set, adds, removes| SyncMessage::ViewUpdate {
         subscription,
-        settled_through: GlobalSeq(0),
+        settled_through: GlobalTime(0),
         reset_result_set,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),
@@ -903,7 +903,7 @@ fn accept_global(core: &mut NodeState<RocksDbStorage>, tx_id: TxId, seq: u64) {
     core.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(seq)),
+        Some(GlobalTime(seq)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -2648,7 +2648,7 @@ fn maintained_subscription_view_forget_with_node_unsubscribes_and_drops_state() 
         stale_tick,
         SyncMessage::ViewUpdate {
             subscription,
-            settled_through: crate::time::GlobalSeq(1),
+            settled_through: crate::time::GlobalTime(0),
             reset_result_set: false,
             version_carriers: Vec::new(),
             version_bundles: Vec::new(),

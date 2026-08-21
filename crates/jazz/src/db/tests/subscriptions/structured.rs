@@ -177,7 +177,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
         .inject_pending_authoritative_reset_for_test(
             binding_view_key,
             std::iter::empty(),
-            GlobalSeq(0),
+            GlobalTime(0),
         );
     assert_eq!(db.refresh_subscriptions().unwrap(), 1);
     let reset = block_on(subscription.next_raw()).unwrap();

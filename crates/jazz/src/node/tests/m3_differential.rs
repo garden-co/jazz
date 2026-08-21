@@ -451,13 +451,7 @@ fn accept_churn_with_parent<S: OrderedKvStorage>(
         commit = commit.parents(vec![parent]);
     }
     let tx_id = core.commit_mergeable(commit).unwrap();
-    core.apply_fate_update(
-        tx_id,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(tx_id).unwrap();
     parents.insert(row_uuid, tx_id);
 }
 
@@ -475,13 +469,7 @@ fn delete_churn_with_parent<S: OrderedKvStorage>(
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
-    core.apply_fate_update(
-        tx_id,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(tx_id).unwrap();
     parents.insert(row_uuid, tx_id);
 }
 

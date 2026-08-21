@@ -1,7 +1,7 @@
 use super::*;
 use crate::ids::{NodeUuid, SchemaVersionId};
 use crate::schema::ColumnSchema;
-use crate::time::{GlobalSeq, TxTime};
+use crate::time::{GlobalTime, TxTime};
 use crate::tx::Snapshot;
 use groove::db::Database;
 use groove::ivm::MAX_COLLECT_BY_TREE_DEPTH;

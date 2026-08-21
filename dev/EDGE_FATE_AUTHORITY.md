@@ -14,11 +14,11 @@ From `crates/jazz/SPEC/3_transactions.md`:
 
 > Fate authority is **structural**. A node acts as fate authority exactly when the host wires it as one: the core accept path for global authority, or the edge-authority ingest entry point for edge-decided mergeable fates.
 
-> When an edge authority has already accepted a mergeable transaction, the core finalizes it by stamping the next `GlobalSeq` and `DurabilityTier::Global`; it does not re-judge write-policy authorization or the merge outcome (`INV-EDGE-8`).
+> When an edge authority has already accepted a mergeable transaction, the core finalizes it by stamping the next `GlobalTime` and `DurabilityTier::Global`; it does not re-judge write-policy authorization or the merge outcome (`INV-EDGE-8`).
 
 From `crates/jazz/SPEC/8_sync_protocol.md`:
 
-> Receiving a bare unfated commit unit is not authority. On a non-authority node, `apply_sync_message` stages or parks that commit unit as pending remote fate and waits for a `FateUpdate`; it must not accept the unit, assign global sequence, or create merge versions from it (`INV-TX-23`).
+> Receiving a bare unfated commit unit is not authority. On a non-authority node, `apply_sync_message` stages or parks that commit unit as pending remote fate and waits for a `FateUpdate`; it must not accept the unit, assign global timestamp, or create merge versions from it (`INV-TX-23`).
 
 > View updates carry **accepted/settled state only** -- pending versions are visible only on the creating node and are never emitted to non-origin peers (`INV-SYNC-12`).
 
@@ -62,7 +62,7 @@ The first fix was over-broad: it used the peer role as the authority discriminat
 
 ## 🔶 Candidates / Ambiguities
 
-- 🔶 Core promotion propagation is still underspecified at the wire level. The spec says core finalizes edge-accepted mergeables with `GlobalSeq`/`Global`, but the current wire `CommitUnit` does not carry an explicit "edge-accepted" marker. The focused regression verifies the pre-core gating bug Nico reported; a fuller follow-up should pin the exact edge-to-core finalization signal and assert Alice/Bob observe global after core ack.
+- 🔶 Core promotion propagation is still underspecified at the wire level. The spec says core finalizes edge-accepted mergeables with `GlobalTime`/`Global`, but the current wire `CommitUnit` does not carry an explicit "edge-accepted" marker. The focused regression verifies the pre-core gating bug Nico reported; a fuller follow-up should pin the exact edge-to-core finalization signal and assert Alice/Bob observe global after core ack.
 - 🔶 Remote `Edge`-tier subscription serving is still not enabled by the current DB sync contract: existing tests require edge/local live subscriptions to request global upstream coverage and require subscriber serving to reject non-global register-shape options. The "edge-tier subscriber sees pre-core data" assertion therefore remains a candidate for a later, explicit subscription-tier design change rather than part of this authority-wiring fix.
 
 ## Gate Table

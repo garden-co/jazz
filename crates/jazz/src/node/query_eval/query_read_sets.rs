@@ -82,7 +82,7 @@ fn flat_tuple_source_index(source: &SourceId) -> Option<usize> {
 pub(super) fn historical_query_read_set(
     shape: &NormalizedRowSetShape,
     schema_version: SchemaVersionId,
-    position: GlobalSeq,
+    position: GlobalTime,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {
         schema_family: SchemaFamilySelection::Current,
@@ -104,6 +104,39 @@ pub(super) fn historical_query_read_set(
             _ => None,
         })
         .collect();
+    QueryReadSet::primary(ReadView {
+        read_schema: schema_version,
+        policy_schema: schema_version,
+        sources,
+    })
+}
+
+pub(super) fn snapshot_query_read_set(
+    shape: &NormalizedRowSetShape,
+    schema_version: SchemaVersionId,
+    snapshot: Snapshot,
+) -> RequestedReadSet {
+    let projection = SchemaProjection {
+        schema_family: SchemaFamilySelection::Current,
+        storage: StorageSchemaSelection::Single(schema_version),
+        lens: LensSelection::Canonical,
+    };
+    let source_expr = || SourceExpr::SnapshotRef {
+        projection: projection.clone(),
+        data: DataSource::Current,
+        snapshot: snapshot.clone(),
+    };
+    let mut sources = shape
+        .nodes
+        .values()
+        .filter_map(|node| match node {
+            RowSetExpr::Source { source, .. } => Some((source.clone(), source_expr())),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for source in &shape.auxiliary_sources {
+        sources.insert(source.clone(), source_expr());
+    }
     QueryReadSet::primary(ReadView {
         read_schema: schema_version,
         policy_schema: schema_version,

@@ -68,7 +68,7 @@ removals are self-sufficient.
 
 Grant responses can equal or exceed the reader's prior initial snapshot. A row
 that existed before the cursor but was not authorized was never shipped to that
-reader, so restoration must carry its body despite its old global sequence. In
+reader, so restoration must carry its body despite its old global timestamp. In
 the recursive grant-only lane, the resulting three-row authoritative response
 is 1,314 bytes versus the prior two-row 895-byte snapshot. This is required
 correctness work, not resume amplification over an equivalent snapshot.

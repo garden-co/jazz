@@ -8,7 +8,7 @@
 use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid};
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
-use crate::time::{GlobalSeq, TxTime};
+use crate::time::{GlobalTime, TxTime};
 use groove::records::{OwnedRecord, Value};
 use std::collections::BTreeMap;
 
@@ -283,8 +283,8 @@ pub struct TransactionRecord {
     pub n_total_writes: u32,
     /// Latest known fate.
     pub fate: Fate,
-    /// Assigned global sequence, when accepted globally.
-    pub global_seq: Option<GlobalSeq>,
+    /// Assigned global timestamp, when accepted globally.
+    pub global_time: Option<GlobalTime>,
     /// Highest observed durability tier.
     pub durability: DurabilityTier,
     /// Optional application metadata attached at commit time.
@@ -353,9 +353,9 @@ impl HistoryEntry {
         self.transaction.fate.clone()
     }
 
-    /// Assigned global sequence, when accepted globally.
-    pub fn global_seq(&self) -> Option<GlobalSeq> {
-        self.transaction.global_seq
+    /// Assigned global timestamp, when accepted globally.
+    pub fn global_time(&self) -> Option<GlobalTime> {
+        self.transaction.global_time
     }
 
     /// Highest observed durability tier.
@@ -624,7 +624,7 @@ pub struct Snapshot {
     /// Node that opened the transaction.
     pub owner: NodeUuid,
     /// Contiguous global base visible at open time.
-    pub global_base: GlobalSeq,
+    pub global_base: GlobalTime,
     /// Local base visible at open time.
     pub local_base: TxTime,
     /// Additional visible transaction dots.
@@ -635,7 +635,7 @@ impl Snapshot {
     /// Create an exclusive base snapshot.
     pub fn exclusive_base(
         owner: NodeUuid,
-        global_base: GlobalSeq,
+        global_base: GlobalTime,
         local_base: TxTime,
         dots: Vec<TxId>,
     ) -> Result<Self, &'static str> {

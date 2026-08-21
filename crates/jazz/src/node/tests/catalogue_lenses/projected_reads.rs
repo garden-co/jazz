@@ -235,7 +235,7 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
     core.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -780,7 +780,7 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
     core.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -799,19 +799,19 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
     let unfiltered_binding = unfiltered.bind(BTreeMap::new()).unwrap();
 
     assert!(
-        core.query_rows_at(&shape, &binding, GlobalSeq(0))
+        core.query_rows_at(&shape, &binding, GlobalTime(0))
             .unwrap()
             .is_empty()
     );
     assert_eq!(
-        core.query_rows_at(&unfiltered, &unfiltered_binding, GlobalSeq(1))
+        core.query_rows_at(&unfiltered, &unfiltered_binding, GlobalTime(1))
             .unwrap()
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(0x54), title_cells("historical"))])
     );
-    let rows = core.query_rows_at(&shape, &binding, GlobalSeq(1)).unwrap();
+    let rows = core.query_rows_at(&shape, &binding, GlobalTime(1)).unwrap();
     assert_eq!(
         rows.into_iter()
             .map(current_row_pair)
@@ -837,7 +837,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     core.apply_fate_update(
         base_tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -897,7 +897,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     core.apply_fate_update(
         renamed_tx,
         Fate::Accepted,
-        Some(GlobalSeq(2)),
+        Some(GlobalTime(2)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -927,7 +927,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     let shape = Query::from("todos").validate(&base).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     assert_eq!(
-        core.query_rows_at(&shape, &binding, GlobalSeq(1))
+        core.query_rows_at(&shape, &binding, GlobalTime(1))
             .unwrap()
             .into_iter()
             .map(current_row_pair)
@@ -936,7 +936,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     );
     core.reset_query_engine_read_metrics();
     assert_eq!(
-        core.query_rows_at(&shape, &binding, GlobalSeq(2))
+        core.query_rows_at(&shape, &binding, GlobalTime(2))
             .unwrap()
             .into_iter()
             .map(current_row_pair)
@@ -948,7 +948,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     );
     assert_eq!(
         core.query_engine_read_metrics()
-            .source_global_seq_range_scans,
+            .source_global_time_range_scans,
         1,
         "a renamed lineage should use the bounded physical global-change source"
     );
@@ -957,12 +957,12 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     let mut reopened = reopen_node_at(&dir, node(0x57), base.clone());
     assert!(
         reopened
-            .global_currency_changed_after("todos", GlobalSeq(1))
+            .global_currency_changed_after("todos", GlobalTime(1))
             .unwrap()
     );
     assert_eq!(
         reopened
-            .query_rows_at(&shape, &binding, GlobalSeq(2))
+            .query_rows_at(&shape, &binding, GlobalTime(2))
             .unwrap()
             .into_iter()
             .map(current_row_pair)
@@ -1055,7 +1055,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
         core.apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(GlobalSeq(idx as u64)),
+            Some(GlobalTime(idx as u64)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -1069,7 +1069,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     core.apply_fate_update(
         doc_tx,
         Fate::Accepted,
-        Some(GlobalSeq(90)),
+        Some(GlobalTime(90)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -1085,7 +1085,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     core.apply_fate_update(
         access_tx,
         Fate::Accepted,
-        Some(GlobalSeq(91)),
+        Some(GlobalTime(91)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -1102,7 +1102,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
         core.apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(GlobalSeq(idx as u64)),
+            Some(GlobalTime(idx as u64)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -1133,13 +1133,13 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
         .unwrap();
 
     assert!(
-        core.query_rows_at(&shape, &binding, GlobalSeq(90))
+        core.query_rows_at(&shape, &binding, GlobalTime(90))
             .unwrap()
             .is_empty(),
         "access and edge rows should not be visible before their historical positions"
     );
     let rows = core
-        .query_rows_at(&shape, &binding, GlobalSeq(230))
+        .query_rows_at(&shape, &binding, GlobalTime(230))
         .unwrap();
     assert_eq!(
         rows.into_iter()

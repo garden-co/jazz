@@ -26,7 +26,7 @@ use crate::query::{
     param,
 };
 use crate::schema::WritePolicies;
-use crate::time::{GlobalSeq, TxTime};
+use crate::time::{GlobalTime, TxTime};
 use crate::tools::ObjectId as PublicObjectId;
 use crate::tools::public_schema::{
     CmpOp as PublicCmpOp, ColumnDescriptor as PublicColumnDescriptor,

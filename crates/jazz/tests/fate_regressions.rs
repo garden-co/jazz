@@ -49,7 +49,7 @@ fn stale_pending_fate_update_cannot_regress_accepted() {
         .apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(jazz::time::GlobalSeq(1)),
+            Some(jazz::time::GlobalTime(1)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -57,12 +57,12 @@ fn stale_pending_fate_update_cannot_regress_accepted() {
     // A duplicated/reordered stale fate update arrives afterwards.
     let _ = client.apply_fate_update(tx_id, Fate::Pending, None, Some(DurabilityTier::Global));
 
-    let (fate, global_seq, durability) = client.transaction_state(tx_id).unwrap();
+    let (fate, global_time, durability) = client.transaction_state(tx_id).unwrap();
     assert_eq!(
         fate,
         Fate::Accepted,
         "fate is final: accepted must never regress to pending"
     );
-    assert_eq!(global_seq, Some(jazz::time::GlobalSeq(1)));
+    assert_eq!(global_time, Some(jazz::time::GlobalTime(1)));
     assert_eq!(durability, DurabilityTier::Global);
 }

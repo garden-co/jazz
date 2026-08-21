@@ -107,7 +107,7 @@ fn global_read_ignores_a_newer_unacknowledged_local_write() {
         .try_into()
         .unwrap();
     let SyncMessage::FateUpdate {
-        global_seq: Some(authoritative_seq),
+        global_time: Some(authoritative_seq),
         ..
     } = authoritative_fate
     else {
@@ -272,7 +272,7 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
     reader
         .apply_view_update(ViewUpdateParts {
             subscription: reader.whole_table_subscription_key("todos").unwrap(),
-            settled_through: GlobalSeq(0),
+            settled_through: GlobalTime(0),
             defer_settlement: false,
             reset_result_set: false,
             version_carriers: Vec::new(),

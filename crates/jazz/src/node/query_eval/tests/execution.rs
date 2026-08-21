@@ -434,14 +434,14 @@ fn query_rows_at_lowers_reachable_against_historical_current_sources() {
         .unwrap();
 
     let before_delete = node
-        .query_rows_at(&shape, &binding, GlobalSeq(6))
+        .query_rows_at(&shape, &binding, GlobalTime(6))
         .unwrap()
         .into_iter()
         .map(|row| row.row_uuid())
         .collect::<BTreeSet<_>>();
     delete_global(&mut node, "teamTeamMemberships", row(302), 16, 7);
     let after_delete = node
-        .query_rows_at(&shape, &binding, GlobalSeq(7))
+        .query_rows_at(&shape, &binding, GlobalTime(7))
         .unwrap()
         .into_iter()
         .map(|row| row.row_uuid())

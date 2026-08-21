@@ -20,7 +20,7 @@ use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
-use jazz::time::GlobalSeq;
+use jazz::time::GlobalTime;
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
@@ -299,9 +299,9 @@ fn run_jazz(config: &Config) -> JazzSummary {
         })
         .collect::<Vec<_>>();
     let mut contents = vec![Vec::<u8>::new(); config.streams];
-    let mut global_seq = 1_u64;
+    let mut global_time = 1_u64;
     for stream in 0..config.streams {
-        seed_stream(&mut core, stream, &mut global_seq);
+        seed_stream(&mut core, stream, &mut global_time);
         for (_, tailer, peer, seen) in &mut tailers {
             let update = peer.current_rows_update(&mut core, STREAM_DOCS).unwrap();
             tailer.apply_sync_message(update).unwrap();
@@ -330,11 +330,11 @@ fn run_jazz(config: &Config) -> JazzSummary {
             core.apply_fate_update(
                 tx_id,
                 Fate::Accepted,
-                Some(GlobalSeq(global_seq)),
+                Some(GlobalTime(global_time)),
                 Some(DurabilityTier::Global),
             )
             .unwrap();
-            global_seq += 1;
+            global_time += 1;
             let append_elapsed_us = before.elapsed().as_micros();
             append_latency.record(append_elapsed_us as u64).unwrap();
             core_cpu_us += append_elapsed_us;
@@ -566,12 +566,12 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let (_client_dir, client) = open_db(node(181), schema.clone());
     let streams = config.streams.max(16);
     let mut content = Vec::new();
-    let mut global_seq = 1_u64;
+    let mut global_time = 1_u64;
     {
         let server_node = server.node();
         let mut core = server_node.borrow_mut();
         for stream in 0..streams {
-            seed_stream(&mut core, stream, &mut global_seq);
+            seed_stream(&mut core, stream, &mut global_time);
         }
     }
 
@@ -629,7 +629,7 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
         core.apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(GlobalSeq(global_seq)),
+            Some(GlobalTime(global_time)),
             Some(DurabilityTier::Global),
         )
         .expect("server fate");
@@ -699,7 +699,7 @@ fn drain_db_route(
     }
 }
 
-fn seed_stream(core: &mut NodeState<RocksDbStorage>, stream: usize, global_seq: &mut u64) {
+fn seed_stream(core: &mut NodeState<RocksDbStorage>, stream: usize, global_time: &mut u64) {
     let tx = core
         .commit_mergeable(
             MergeableCommit::new(STREAMS, stream_row(stream), 1)
@@ -709,11 +709,11 @@ fn seed_stream(core: &mut NodeState<RocksDbStorage>, stream: usize, global_seq: 
     core.apply_fate_update(
         tx,
         Fate::Accepted,
-        Some(GlobalSeq(*global_seq)),
+        Some(GlobalTime(*global_time)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    *global_seq += 1;
+    *global_time += 1;
     let tx = core
         .commit_mergeable(
             MergeableCommit::new(STREAM_DOCS, stream_doc_row(stream), 2).cells(cells([
@@ -725,11 +725,11 @@ fn seed_stream(core: &mut NodeState<RocksDbStorage>, stream: usize, global_seq: 
     core.apply_fate_update(
         tx,
         Fate::Accepted,
-        Some(GlobalSeq(*global_seq)),
+        Some(GlobalTime(*global_time)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    *global_seq += 1;
+    *global_time += 1;
 }
 
 fn run_log_floor(config: &Config) -> BaselineSummary {

@@ -100,7 +100,7 @@ authority evaluates the relevant operation-specific clause **before acceptance**
 for every version in the commit unit. If any version fails, the whole unit is
 rejected as
 `Fate::Rejected(RejectionReason::AuthorizationDenied)`: it receives no
-`global_seq`, makes no durability claim, is audit-only, contributes no accepted
+`global_time`, makes no durability claim, is audit-only, contributes no accepted
 rows, and causes descendants to cascade as described in ch. 3 (`INV-RLS-1`).
 
 For an insert, `insert_check` is evaluated against the inserted row. For an

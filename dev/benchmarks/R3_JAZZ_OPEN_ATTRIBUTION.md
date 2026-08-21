@@ -23,19 +23,19 @@ medians over one shared generated workload.
 
 `recover_storage` breaks down as:
 
-| recovery child            | clean close | unclean drop | observed work                                                                       |
-| ------------------------- | ----------: | -----------: | ----------------------------------------------------------------------------------- |
-| recover global sequences  |    1,648 ms |     1,507 ms | 952,620 transaction-index records scanned; zero accepted global sequences recovered |
-| validate current rows     |      337 ms |       338 ms | 952,620 global/ahead current rows decoded                                           |
-| unclean-close cleanup     |        0 ms |       221 ms | scoped crash recovery                                                               |
-| pending/rejected recovery |        2 ms |         2 ms | no dominant contribution                                                            |
-| catalogue/clock recovery  |       <1 ms |        <1 ms | no dominant contribution                                                            |
+| recovery child            | clean close | unclean drop | observed work                                                                        |
+| ------------------------- | ----------: | -----------: | ------------------------------------------------------------------------------------ |
+| recover global timestamps |    1,648 ms |     1,507 ms | 952,620 transaction-index records scanned; zero accepted global timestamps recovered |
+| validate current rows     |      337 ms |       338 ms | 952,620 global/ahead current rows decoded                                            |
+| unclean-close cleanup     |        0 ms |       221 ms | scoped crash recovery                                                                |
+| pending/rejected recovery |        2 ms |         2 ms | no dominant contribution                                                             |
+| catalogue/clock recovery  |       <1 ms |        <1 ms | no dominant contribution                                                             |
 
 Ahead-current index reconstruction then scans and inserts 952,620 entries
 again. Startup therefore performs multiple whole-dataset passes before the
-first read. The leading optimization question is whether global-sequence
+first read. The leading optimization question is whether global-time
 recovery can seek directly to persisted watermark metadata (or otherwise avoid
-scanning transactions that cannot contribute a global sequence). The clean
+scanning transactions that cannot contribute a global timestamp). The clean
 lifecycle still spends about 2.9 seconds in Jazz open, so crash recovery is not
 the primary problem. The second question is whether current-row validation and
 ahead-current reconstruction can share one pass or recover a persisted

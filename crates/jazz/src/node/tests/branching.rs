@@ -14,7 +14,7 @@ fn branch_read_is_base_snapshot_plus_overlay_writes() {
     );
     let branch_id = branch(1);
     let branch_record = core.create_branch(branch_id).unwrap();
-    assert_eq!(branch_record.base.unwrap().global_base, GlobalSeq(1));
+    assert_eq!(branch_record.base.unwrap().global_base, GlobalTime::new(10, 0).unwrap());
 
     commit_global_and_oracle(
         &mut writer,
@@ -49,7 +49,7 @@ fn branch_read_is_base_snapshot_plus_overlay_writes() {
     );
     assert_eq!(
         core.query_engine_read_metrics()
-            .source_global_seq_range_scans,
+            .source_global_time_range_scans,
         1,
         "branch base hydration should use the bounded historical range path"
     );
@@ -104,7 +104,7 @@ fn branch_target_commit_unit_is_visible_after_global_acceptance() {
     let SyncMessage::FateUpdate {
         tx_id: accepted,
         fate: Fate::Accepted,
-        global_seq: Some(_),
+        global_time: Some(_),
         durability: Some(DurabilityTier::Global),
     } = fate
     else {
@@ -129,7 +129,7 @@ fn branch_target_commit_unit_is_visible_after_global_acceptance() {
         SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
-            global_seq: Some(_),
+            global_time: Some(_),
             durability: Some(DurabilityTier::Global),
         } if *tx_id == update_tx
     ));
@@ -151,7 +151,7 @@ fn branch_target_commit_unit_is_visible_after_global_acceptance() {
         SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
-            global_seq: Some(_),
+            global_time: Some(_),
             durability: Some(DurabilityTier::Global),
         } if *tx_id == delete_tx
     ));
@@ -187,7 +187,7 @@ fn branch_target_commit_unit_is_visible_after_global_acceptance() {
         SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
-            global_seq: Some(_),
+            global_time: Some(_),
             durability: Some(DurabilityTier::Global),
         } if *tx_id == restore_tx
     ));
@@ -475,11 +475,11 @@ fn branches_do_not_observe_sibling_overlays_and_recover_metadata() {
     let reopened = reopen_node_at(&core_dir, node(2), schema());
     assert_eq!(
         reopened.branch_record(left).unwrap().base.as_ref().unwrap().global_base,
-        GlobalSeq(1)
+        GlobalTime::new(10, 0).unwrap()
     );
     assert_eq!(
         reopened.branch_record(right).unwrap().base.as_ref().unwrap().global_base,
-        GlobalSeq(1)
+        GlobalTime::new(10, 0).unwrap()
     );
     assert_eq!(
         reopened.branch_record(left).unwrap().created_by,
@@ -532,16 +532,45 @@ fn branch_creation_does_not_scale_with_base_row_count() {
 
     assert_eq!(
         small.branch_record(branch(5)).unwrap().base.as_ref().unwrap().global_base,
-        GlobalSeq(4)
+        GlobalTime::new(13, 0).unwrap()
     );
     assert_eq!(
         large.branch_record(branch(6)).unwrap().base.as_ref().unwrap().global_base,
-        GlobalSeq(80)
+        GlobalTime::new(179, 0).unwrap()
     );
     assert!(
         large_us < small_us.saturating_mul(50).saturating_add(50_000),
         "branch creation should be O(1)-style metadata write, small={small_us}us large={large_us}us"
     );
+}
+
+#[test]
+fn session_branch_metadata_with_sparse_global_dots_waits_for_and_accepts_payloads() {
+    let identity = user(0xa1);
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let tx_id = commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("base")),
+    );
+    let branch_id = branch(0x44);
+    let record = client.create_branch_as(branch_id, identity).unwrap();
+    let metadata = crate::protocol::BranchMetadata::from(&record);
+    let base = metadata.base.as_ref().unwrap();
+    assert_eq!(base.global_base, GlobalTime::default());
+    assert_eq!(base.dots, vec![tx_id]);
+
+    let (_empty_dir, mut receiver) = open_node_with_uuid(node(8));
+    assert!(!receiver
+        .admit_session_branch_metadata(metadata.clone(), identity)
+        .unwrap());
+    let unit = core.commit_unit_for(tx_id).unwrap();
+    receiver.apply_sync_message(unit).unwrap();
+    assert!(receiver
+        .admit_session_branch_metadata(metadata, identity)
+        .unwrap());
+    assert_eq!(receiver.branch_record(branch_id).unwrap().base, record.base);
 }
 
 #[test]
@@ -679,13 +708,7 @@ fn seed_branch_acl(
             ]),
         ))
         .unwrap();
-    core.apply_fate_update(
-        tx_id,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(tx_id).unwrap();
 }
 
 #[test]
@@ -1891,7 +1914,7 @@ fn deleted_merge_witness_uses_inherited_select_not_update_permission() {
     core.apply_fate_update(
         parent_tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();

@@ -26,10 +26,10 @@ Invariant digest:
 - `INV-TX-7`: A commit unit whose `tx_id.time.physical_ms()` exceeds the authority admission clock by more than `SKEW_TOLERANCE_MS` MUST be rejected as `RejectionReason::ClientClockTooFarAhead` and MUST NOT leave visible version rows.
 - `INV-TX-8`: Rejection MUST cascade to known pending descendants and later arriving children of rejected ancestors as `RejectionReason::Cascade { root }`, preserving the original root transaction id.
 - `INV-TX-9`: Originating nodes MUST retain rejected local payloads in retry storage and remove the rejected versions from normal history; non-origin authorities MUST NOT retain foreign rejected retry payloads.
-- `INV-TX-10`: Applying a fate update MUST NOT move `global_seq` backward and MUST update `durability` only monotonically upward.
-- `INV-TX-11`: Accepted authority commits MUST receive the next `GlobalSeq`, advance the allocator/watermark, and report `DurabilityTier::Global`.
+- `INV-TX-10`: Applying a fate update MUST NOT move `global_time` backward and MUST update `durability` only monotonically upward.
+- `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; the accepted transaction, global-current maintenance, and core `committed_global_time` MUST become durable atomically before publication, and the fate MUST report `DurabilityTier::Global`.
 - `INV-TX-12`: Local durability MUST NOT imply upstream survival; committed local transactions that have not reached an upstream tier MAY be lost if local storage is destroyed.
-- `INV-TX-13`: An exclusive transaction's `base_snapshot.global_base` MUST be the contiguous applied global watermark.
+- `INV-TX-13`: An exclusive transaction opened on a history-complete core MUST capture that core's atomically committed `GlobalTime` as `base_snapshot.global_base`; a partial edge/client MUST NOT promote query-scoped settlement into a whole-database global base.
 - `INV-TX-14`: Exclusive snapshot reads MUST remain stable after later commits and MUST record the read version (including deletion-register versions when deleted) or an absent read.
 - `INV-TX-15`: Reads inside an exclusive transaction MUST observe that transaction's own pending writes.
 - `INV-TX-16`: Exclusive authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
@@ -68,7 +68,7 @@ the sync system only at commit (`INV-TX-1`).
 Commit is the boundary that turns the work into a syncable object. Both
 transaction kinds sync _only at commit_, as one idempotent
 `SyncMessage::CommitUnit { tx, versions }`; the authority answers with
-`SyncMessage::FateUpdate { tx_id, fate, global_seq, durability }` (ch. 8).
+`SyncMessage::FateUpdate { tx_id, fate, global_time, durability }` (ch. 8).
 Nothing partial travels upstream, and the core holds no open-transaction state.
 
 The API transition is exactly `commit(OpenTransactionId) -> TransactionId`. Opening rejects
@@ -132,15 +132,31 @@ A freshly committed write on a durable local runtime is `Pending`/`Local`. An
 in-memory client instead authors it as `Pending`/`None`: the write is immediately available
 to local reads, but a `Local` wait remains pending until a durable peer explicitly
 returns `Pending`/`Local`. When the global authority accepts it, the transaction
-becomes `Accepted`, receives the next `GlobalSeq` (advancing the allocator and
-the contiguous watermark), and reaches `DurabilityTier::Global` (`INV-TX-11`).
+becomes `Accepted`, receives a strictly increasing core-assigned `GlobalTime`,
+and reaches `DurabilityTier::Global` (`INV-TX-11`). `GlobalTime` is a packed
+authority HLC: 48 bits of physical milliseconds followed by a 16-bit logical
+counter. It is ordered and monotone but intentionally not dense. Skipped values
+after failed speculative allocation carry no missing-transaction meaning.
+The authority uses its own wall-clock sample for both the forward-skew check and
+HLC allocation; an uploaded transaction timestamp is never the authority clock.
+If all 65,536 values in one physical millisecond are consumed, allocation fails
+without wrapping or reusing a value. At the packed maximum physical millisecond,
+that exhaustion is permanent.
+
+The core maintains an HLC register separately from its committed frontier. The
+register may advance speculatively; the accepted transaction, global-current
+maintenance, and `committed_global_time` advance atomically at the durable
+publication boundary (§3.2.1). Because only cores are history-complete and core
+acceptance is serialized, the latest durably committed timestamp is the complete
+core history frontier. No `+1` gap inference or above-watermark set participates
+in that proof. Recovery restores both registers from durable accepted state.
 Accepted global transactions then maintain the per-layer global-current tables
 and change stream (`INV-TX-21`, ch. 4). Crucially, **local durability does not
 imply upstream survival**: a committed local transaction that has not reached an
 upstream tier can be lost if local storage is destroyed (`INV-TX-12`).
 
 _Further invariants._ `INV-TX-10` — applying a fate update never moves
-`global_seq` backward and raises `durability` only monotonically.
+`global_time` backward and raises `durability` only monotonically.
 
 **Implementation status.** The reference implementation enforces this
 monotonicity; `fate_regressions::stale_pending_fate_update_cannot_regress_accepted`
@@ -154,7 +170,7 @@ concurrent mergeable writes to the same row merge by column LWW (ch. 4).
 
 Mergeable fate can be accepted before the transaction reaches the global
 authority. When an edge authority has already accepted a mergeable transaction,
-the core finalizes it by stamping the next `GlobalSeq` and
+the core finalizes it by stamping a new `GlobalTime` and
 `DurabilityTier::Global`; it does not re-judge write-policy authorization or the
 merge outcome (`INV-EDGE-8`). Edge mergeable authority and its
 permission-subscription gating are ch. 9.
@@ -162,9 +178,12 @@ permission-subscription gating are ch. 9.
 ### 3.5 Exclusive transactions
 
 Exclusive transactions are the serializable write path. Each one evaluates
-against a fixed `Snapshot { owner, global_base, local_base, dots }`. In that
-snapshot, `global_base` is the **contiguous applied global watermark**, not
-merely the maximum observed sequence (`INV-TX-13`). `local_base` and `dots`
+against a fixed `Snapshot { owner, global_base, local_base, dots }`. On a
+history-complete core, `global_base` is the core's atomically committed global
+time (`INV-TX-13`). A partial edge/client has no node-wide global possession
+claim: query freshness is carried by per-binding receipts (ch. 8), and locally
+held transactions outside a core base are represented by the snapshot's
+owner-local component or explicit dots. `local_base` and `dots`
 bound which local, not-yet-global transactions the snapshot also includes.
 Together these values define the snapshot's _coverage_: the exact set of
 versions it can see. The full snapshot model is ch. 5.
@@ -207,7 +226,7 @@ seconds) ahead of the authority's clock is rejected as
 `ClientClockTooFarAhead` (`INV-TX-7`). In both cases, no visible version rows
 remain. Write-policy authorization (ch. 7) and, for exclusive units, the
 validation of §3.7 follow. Only after those checks pass does the authority
-assign the next `GlobalSeq` and emit the accept fate.
+assign a new `GlobalTime` and emit the accept fate.
 
 ### 3.7 Exclusive validation (serializability)
 
@@ -220,7 +239,7 @@ recorded reads against current global state:
 - an **absent read** must still be absent (`INV-TX-17`);
 - a **predicate read** must not have gained or lost rows — checked by comparing
   the `(RowUuid, TxId)` output set for that shape+binding at
-  `base_snapshot.global_base` against the current output (`INV-TX-18`);
+  the complete dotted `base_snapshot` against the current output (`INV-TX-18`);
 - each **write** is first-committer-wins: the row's current global content `TxId`
   must equal the single recorded parent (or absence when none was recorded)
   (`INV-TX-20`).

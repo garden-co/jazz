@@ -73,7 +73,7 @@ groove::define_record! {
         6 => created_at: TxTime,
         7 => updated_by: AuthorId,
         8 => updated_at: TxTime,
-        9 => global_seq: Option<GlobalSeq>,
+        9 => global_time: Option<GlobalTime>,
         .. user_cells,
     }
 }
@@ -89,7 +89,7 @@ groove::define_record! {
         6 => created_at: TxTime,
         7 => updated_by: AuthorId,
         8 => updated_at: TxTime,
-        9 => global_seq: Option<GlobalSeq>,
+        9 => global_time: Option<GlobalTime>,
         10 => _deletion: DeletionEvent,
     }
 }
@@ -99,7 +99,7 @@ groove::define_record! {
         0 => physical_table_id: u64,
         1 => row_uuid: RowUuid,
         2 => layer: Vec<u8>,
-        3 => global_seq: GlobalSeq,
+        3 => global_time: GlobalTime,
         4 => tx_time: TxTime,
         5 => tx_node_id: NodeAlias,
         6 => _deletion: Option<DeletionEvent>,
@@ -107,7 +107,7 @@ groove::define_record! {
 }
 
 groove::impl_record_field_u64!(TxTime);
-groove::impl_record_field_u64!(GlobalSeq);
+groove::impl_record_field_u64!(GlobalTime);
 groove::impl_record_field_u64!(NodeAlias);
 groove::impl_record_field_u64!(SchemaVersionAlias);
 groove::impl_record_field_uuid!(NodeUuid);
@@ -234,7 +234,7 @@ groove::define_record! {
         // keep their fixed descriptor alignment. No core API writes or reads it.
         13 => merge_strategy: Option<String>,
         14 => fate: FateTag,
-        15 => global_seq: Option<GlobalSeq>,
+        15 => global_time: Option<GlobalTime>,
         16 => rejection_reason: Option<RejectionReasonTag>,
         17 => cascade_root: Option<Value>,
         18 => reason_detail: Option<String>,
@@ -505,7 +505,7 @@ pub(super) struct StoredTransaction {
     pub(super) tx: Transaction,
     pub(super) node_alias: NodeAlias,
     pub(super) fate: Fate,
-    pub(super) global_seq: Option<GlobalSeq>,
+    pub(super) global_time: Option<GlobalTime>,
     pub(super) durability: DurabilityTier,
 }
 
@@ -517,7 +517,7 @@ impl StoredTransaction {
             kind: self.tx.kind,
             n_total_writes: self.tx.n_total_writes,
             fate: self.fate.clone(),
-            global_seq: self.global_seq,
+            global_time: self.global_time,
             durability: self.durability,
             user_metadata_json: self.tx.user_metadata_json.clone(),
             target_lineage: self.tx.target_lineage,
@@ -827,7 +827,7 @@ impl VersionRow {
                 kind: tx.tx.kind,
                 n_total_writes: tx.tx.n_total_writes,
                 fate: tx.fate.clone(),
-                global_seq: tx.global_seq,
+                global_time: tx.global_time,
                 durability: tx.durability,
                 user_metadata_json: tx.tx.user_metadata_json.clone(),
                 target_lineage: tx.tx.target_lineage,
@@ -1019,7 +1019,7 @@ pub(super) fn transaction_values(
     node_alias: NodeAlias,
     tx: &Transaction,
     fate: Fate,
-    global_seq: Option<GlobalSeq>,
+    global_time: Option<GlobalTime>,
     durability: DurabilityTier,
 ) -> Vec<Value> {
     vec![
@@ -1051,7 +1051,7 @@ pub(super) fn transaction_values(
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
         Value::Nullable(None),
         Value::String(fate_string(&fate)),
-        Value::Nullable(global_seq.map(|seq| Box::new(Value::U64(seq.0)))),
+        Value::Nullable(global_time.map(|seq| Box::new(Value::U64(seq.0)))),
         Value::Nullable(rejection_reason_tag(&fate).map(|reason| Box::new(Value::String(reason)))),
         Value::Nullable(
             rejection_reason_cascade_root(&fate).map(|root| Box::new(tx_id_value(root))),
@@ -1436,11 +1436,11 @@ fn stored_version_prefix_values(version: &VersionRow) -> Vec<Value> {
 pub(super) fn global_current_values(
     table: &TableSchema,
     version: &VersionRow,
-    global_seq: Option<GlobalSeq>,
+    global_time: Option<GlobalTime>,
 ) -> Result<Vec<Value>, Error> {
     let mut values = stored_version_prefix_values(version);
     values.push(Value::Nullable(
-        global_seq.map(|seq| Box::new(Value::U64(seq.0))),
+        global_time.map(|seq| Box::new(Value::U64(seq.0))),
     ));
     for (idx, _column) in table.columns.iter().enumerate() {
         let field = HistoryRowRecord::USER_CELLS + idx;
@@ -1459,11 +1459,11 @@ pub(super) fn global_current_values(
 
 pub(super) fn register_global_current_values(
     version: &VersionRow,
-    global_seq: Option<GlobalSeq>,
+    global_time: Option<GlobalTime>,
 ) -> Vec<Value> {
     let mut values = stored_version_prefix_values(version);
     values.push(Value::Nullable(
-        global_seq.map(|seq| Box::new(Value::U64(seq.0))),
+        global_time.map(|seq| Box::new(Value::U64(seq.0))),
     ));
     values.push(deletion_event_value(
         version
@@ -1476,13 +1476,13 @@ pub(super) fn register_global_current_values(
 pub(super) fn global_change_values(
     table_id: PhysicalTableId,
     version: &VersionRow,
-    global_seq: GlobalSeq,
+    global_time: GlobalTime,
 ) -> Vec<Value> {
     vec![
         Value::U64(table_id.0),
         Value::Uuid(version.row_uuid().0),
         Value::Bytes(version_layer_string(version.layer()).into_bytes()),
-        Value::U64(global_seq.0),
+        Value::U64(global_time.0),
         Value::U64(version.tx_time().0),
         Value::U64(version.tx_node_alias().0),
         Value::Nullable(
@@ -1505,7 +1505,7 @@ pub(super) fn global_change_primary_key_from_record(
                 .get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
                 .to_vec(),
         ),
-        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_SEQ_IDX)?),
+        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_TIME_IDX)?),
     ]))
 }
 

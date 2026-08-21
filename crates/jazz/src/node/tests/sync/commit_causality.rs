@@ -1,16 +1,17 @@
 // Commit causality, parking, malformed units, and rejection cascades.
 
 #[test]
-fn observed_global_seq_advances_authority_allocator() {
+fn observed_global_time_advances_authority_allocator() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let fixture_tx = core
         .commit_mergeable(MergeableCommit::new("todos", row(1), 10).cells(title_cells("fixture")))
         .unwrap();
+    let fixture_global_time = core.allocate_global_time_for_test();
     core.apply_fate_update(
         fixture_tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(fixture_global_time),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -24,12 +25,15 @@ fn observed_global_seq_advances_authority_allocator() {
         SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(2)),
+            global_time: Some(GlobalTime::new(11, 0).unwrap()),
             durability: Some(DurabilityTier::Global),
         }
     );
-    assert_eq!(core.clock.applied_global_watermark, GlobalSeq(2));
-    assert_eq!(core.clock.next_global_seq, GlobalSeq(3));
+    assert_eq!(
+        core.clock.committed_global_time,
+        GlobalTime::new(11, 0).unwrap()
+    );
+    assert_eq!(core.clock.global_time_register, core.clock.committed_global_time);
 }
 #[test]
 fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
@@ -77,7 +81,7 @@ fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
         SyncMessage::FateUpdate {
             tx_id: child,
             fate: Fate::Rejected(RejectionReason::Cascade { root }),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }
     );
@@ -160,7 +164,7 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
     let SyncMessage::FateUpdate {
         tx_id,
         fate,
-        global_seq,
+        global_time,
         durability,
     } = fresh_fate
     else {
@@ -170,7 +174,7 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
     assert_eq!(fate, Fate::Accepted);
     assert_eq!(durability, Some(DurabilityTier::Global));
     client
-        .apply_fate_update(tx_id, fate, global_seq, durability)
+        .apply_fate_update(tx_id, fate, global_time, durability)
         .unwrap();
     assert_eq!(
         client.transaction_state(fresh).unwrap().0,
@@ -255,7 +259,7 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         SyncMessage::FateUpdate {
             tx_id: dependent,
             fate: Fate::Rejected(RejectionReason::Cascade { root: exclusive }),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }
     );
@@ -305,13 +309,13 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
             SyncMessage::FateUpdate {
                 tx_id: exclusive,
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(1)),
+                global_time: Some(GlobalTime::new(1, 0).unwrap()),
                 durability: Some(DurabilityTier::Global),
             },
             SyncMessage::FateUpdate {
                 tx_id: child,
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(2)),
+                global_time: Some(GlobalTime::new(2, 0).unwrap()),
                 durability: Some(DurabilityTier::Global),
             },
         ]
@@ -416,7 +420,7 @@ fn malformed_commit_unit_rejects_write_count_mismatch() {
             fate: Fate::Rejected(RejectionReason::MalformedCommit(
                 "commit unit version count does not match transaction n_total_writes".to_owned()
             )),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }
     );
@@ -454,7 +458,7 @@ fn over_limit_commit_unit_rejects_as_malformed_and_next_unit_still_applies() {
         SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
-            global_seq: None,
+            global_time: None,
             durability: None,
         } => {
             assert_eq!(tx_id, tx.tx_id);

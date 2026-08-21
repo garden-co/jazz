@@ -517,7 +517,7 @@ fn whole_table_predicate_probe_uses_table_change_watermark() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
-    let base = GlobalSeq(0);
+    let base = GlobalTime(0);
     commit_mergeable_global(
         &mut writer,
         &mut core,
@@ -634,11 +634,11 @@ fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
             parents.insert(row_uuid, tx_id);
             match action {
                 0 | 4 | 5 => {
-                    let global_seq = node.clock.next_global_seq;
+                    let global_time = node.allocate_global_time_for_test();
                     node.apply_fate_update(
                         tx_id,
                         Fate::Accepted,
-                        Some(global_seq),
+                        Some(global_time),
                         Some(DurabilityTier::Global),
                     )
                     .unwrap();
@@ -772,7 +772,7 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
     assert!(
         core.shape_predicate_changed_after(
             predicate,
-            tx.base_snapshot.as_ref().unwrap().global_base
+            tx.base_snapshot.as_ref().unwrap()
         )
         .unwrap()
     );
@@ -800,13 +800,7 @@ fn view_update_result_set_matches_groove_current_rows_for_seeded_commits() {
         MergeableCommit::new("todos", row_b, 14).deletion(DeletionEvent::Deleted),
     ] {
         let tx_id = node.commit_mergeable(commit).unwrap();
-        node.apply_fate_update(
-            tx_id,
-            Fate::Accepted,
-            Some(node.clock.next_global_seq),
-            Some(DurabilityTier::Global),
-        )
-        .unwrap();
+        node.accept_global_for_test(tx_id).unwrap();
         assert_view_update_result_set_matches_current_rows(&mut node);
     }
 }
@@ -2506,7 +2500,7 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
     core.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();

@@ -832,7 +832,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     core.apply_fate_update(
         canvas_tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -847,7 +847,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     core.apply_fate_update(
         shape_tx,
         Fate::Accepted,
-        Some(GlobalSeq(2)),
+        Some(GlobalTime(2)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -895,7 +895,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     core.apply_fate_update(
         invite_tx,
         Fate::Accepted,
-        Some(GlobalSeq(3)),
+        Some(GlobalTime(3)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -941,7 +941,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     core.apply_fate_update(
         revoke_tx,
         Fate::Accepted,
-        Some(GlobalSeq(4)),
+        Some(GlobalTime(4)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -1477,7 +1477,7 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
     core.apply_fate_update(
         content,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -1489,7 +1489,7 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
     core.apply_fate_update(
         deletion,
         Fate::Accepted,
-        Some(GlobalSeq(2)),
+        Some(GlobalTime(2)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -1530,7 +1530,7 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
     core.apply_fate_update(
         orphan_deletion,
         Fate::Accepted,
-        Some(GlobalSeq(3)),
+        Some(GlobalTime(3)),
         Some(DurabilityTier::Global),
     )
     .unwrap();

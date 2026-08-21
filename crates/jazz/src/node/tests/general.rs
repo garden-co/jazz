@@ -164,7 +164,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             content.record.raw()
         );
 
-        let current_values = global_current_values(table, &content, Some(GlobalSeq(7))).unwrap();
+        let current_values = global_current_values(table, &content, Some(GlobalTime(7))).unwrap();
         let global_current_table = table.global_current_storage_tables().remove(0);
         global_current_table
             .record_schema()
@@ -189,7 +189,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
         );
 
         let register_current_values =
-            register_global_current_values(&deletion, Some(GlobalSeq(8)));
+            register_global_current_values(&deletion, Some(GlobalTime(8)));
         let register_global_current_table = table.global_current_storage_tables().remove(1);
         register_global_current_table
             .record_schema()
@@ -366,7 +366,7 @@ fn global_fate_cleans_ahead_current_overlay() {
     node.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -421,7 +421,7 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
     client.apply_sync_message(fate).unwrap();
     assert_eq!(
         client.transaction_state(tx_id).unwrap(),
-        (Fate::Accepted, Some(GlobalSeq(1)), DurabilityTier::Global)
+        (Fate::Accepted, Some(GlobalTime::new(10, 0).unwrap()), DurabilityTier::Global)
     );
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
@@ -504,7 +504,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
         SyncMessage::FateUpdate {
             tx_id: child,
             fate: Fate::Rejected(RejectionReason::CausalityViolation),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }
     );
@@ -550,7 +550,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
         parent_state.as_slice(),
         [SyncMessage::FateUpdate {
             fate: Fate::Accepted,
-            global_seq: Some(_),
+            global_time: Some(_),
             ..
         }]
     ));
@@ -585,7 +585,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
         vec![SyncMessage::FateUpdate {
             tx_id: child,
             fate: Fate::Rejected(RejectionReason::CausalityViolation),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }]
     );

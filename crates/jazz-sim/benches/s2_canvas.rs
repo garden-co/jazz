@@ -16,7 +16,7 @@ use jazz::peer::PeerState;
 use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
 use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit, param};
 use jazz::schema::JazzSchema;
-use jazz::time::GlobalSeq;
+use jazz::time::GlobalTime;
 use jazz::tools::policy_expr as public_policy_expr;
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
@@ -219,7 +219,7 @@ struct FailureSummary {
 #[derive(Debug)]
 struct HistoricalLoadSummary {
     cut_percent: u64,
-    position: GlobalSeq,
+    position: GlobalTime,
     latency_us: u128,
     rows: usize,
 }
@@ -1728,7 +1728,7 @@ fn run_historical_loads(
 
             while next_cut < cut_targets.len() && commits >= cut_targets[next_cut].1 {
                 let (percent, _) = cut_targets[next_cut];
-                let position = core.transaction_record(tx_id).unwrap().global_seq.unwrap();
+                let position = core.transaction_record(tx_id).unwrap().global_time.unwrap();
                 let start = Instant::now();
                 let rows = match core.at(position).read(&shape, &binding) {
                     Ok(rows) => rows,
@@ -2837,7 +2837,7 @@ fn emit_historical_load_summary(coalesced: bool, config: &Config, summary: &Hist
     fields.insert("phase".to_owned(), json!("historical_load"));
     fields.insert("coalesced_16ms".to_owned(), json!(coalesced));
     fields.insert("cut_percent".to_owned(), json!(summary.cut_percent));
-    fields.insert("global_seq".to_owned(), json!(summary.position.0));
+    fields.insert("global_time".to_owned(), json!(summary.position.0));
     fields.insert("historical_load_us".to_owned(), json!(summary.latency_us));
     fields.insert("rows".to_owned(), json!(summary.rows));
     fields.insert(

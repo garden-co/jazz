@@ -131,7 +131,7 @@ JAZZ_R3_PHASE_ONLY=1 \
 ```
 
 This adds timings and work counts for catalogue recovery, full database open,
-global-sequence recovery, known-state recovery, ahead-current index
+global-time recovery, known-state recovery, ahead-current index
 reconstruction, and final catalogue persistence. The retained legacy
 current-row-validation fields report zero now that startup uses bounded recovery. `clean`
 calls `Db::close` after seeding and after every measured read; `unclean` drops

@@ -235,7 +235,7 @@ where
     pub(super) fn resolve_time_travel_position(
         &mut self,
         time: TxTime,
-    ) -> Result<GlobalSeq, Error> {
+    ) -> Result<GlobalTime, Error> {
         let raws = if time.0 == u64::MAX {
             self.database
                 .primary_key_scan_raw("jazz_transactions", &[])?
@@ -246,16 +246,16 @@ where
                 &[Value::U64(time.0 + 1), Value::U64(0)],
             )?
         };
-        let mut position = GlobalSeq(0);
+        let mut position = GlobalTime(0);
         for raw in raws {
             let record = raw.record();
-            let Some(global_seq) = record
-                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?
-                .map(GlobalSeq)
+            let Some(global_time) = record
+                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                .map(GlobalTime)
             else {
                 continue;
             };
-            position = position.max(global_seq);
+            position = position.max(global_time);
         }
         Ok(position)
     }
@@ -449,7 +449,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        position: GlobalSeq,
+        position: GlobalTime,
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
@@ -470,6 +470,38 @@ where
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
+            policy: self.query_program_policy_context(identity),
+            input,
+            output: current_query_output_request(output, shape.query()),
+        };
+        self.compile_query_program_request(request)
+    }
+
+    fn compile_snapshot_query_program(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        snapshot: &Snapshot,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+    ) -> Result<QueryProgram, Error> {
+        let input_shape = self.normalized_row_set_shape(shape, binding)?;
+        let input = RowSetProgramInput {
+            binding: self.program_binding_for_shape(
+                shape,
+                binding,
+                query_binding_source_shape_for_parts_if_needed(
+                    shape.params(),
+                    &binding_claim_params_for_shape(&input_shape, shape.params()),
+                ),
+                BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape, shape.params()),
+            ),
+            shape: input_shape,
+        };
+        let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
+            reads: snapshot_query_read_set(&input.shape, shape.schema_version(), snapshot.clone()),
             policy: self.query_program_policy_context(identity),
             input,
             output: current_query_output_request(output, shape.query()),
@@ -1597,13 +1629,13 @@ where
     /// `position`.
     ///
     /// This is a settled-history read: it considers only transactions with
-    /// `global_seq <= position`, chooses the ordinary per-row winners from
+    /// `global_time <= position`, chooses the ordinary per-row winners from
     /// that subset, and evaluates the query against that historical state.
     pub fn query_rows_at(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        position: GlobalSeq,
+        position: GlobalTime,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.require_catalogue_ready()?;
         self.query_rows_at_for_identity(shape, binding, position, AuthorId::SYSTEM)
@@ -1613,7 +1645,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        position: GlobalSeq,
+        position: GlobalTime,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut rows = self.query_rows_at_with_query_engine(shape, binding, position, identity)?;
@@ -1626,7 +1658,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        position: GlobalSeq,
+        position: GlobalTime,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_schema = self
@@ -1652,6 +1684,43 @@ where
             .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
             .clone();
         self.materialize_historical_query_rows(table, deltas)
+    }
+
+    pub(super) fn query_rows_at_snapshot(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        snapshot: &Snapshot,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let read_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+        let lowered_shape =
+            inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
+        let binding = lowered_shape.bind(BTreeMap::new())?;
+        let program = self.compile_snapshot_query_program(
+            &lowered_shape,
+            &binding,
+            snapshot,
+            AuthorId::SYSTEM,
+            CurrentQueryProgramOutput::AppRows,
+        )?;
+        let deltas = self
+            .database
+            .query_graph(lowered_app_rows_graph(&program)?)
+            .map_err(Error::Groove)?;
+        let table = self
+            .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
+            .clone();
+        let mut rows = self.materialize_historical_query_rows(table, deltas)?;
+        self.finish_engine_query_rows_in_schema(
+            lowered_shape.query(),
+            lowered_shape.schema_version(),
+            &mut rows,
+        )?;
+        Ok(rows)
     }
 
     fn query_rows_including_deleted_with_query_engine(
@@ -1698,29 +1767,30 @@ where
     pub(super) fn current_rows_at(
         &mut self,
         table: &str,
-        position: GlobalSeq,
+        position: GlobalTime,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_engine_read_metrics.source_global_seq_range_scans += 1;
+        self.query_engine_read_metrics
+            .source_global_time_range_scans += 1;
         self.bounded_historical_current_rows(table, position)
     }
 
     fn bounded_global_change_records_at(
         &mut self,
         table: &str,
-        position: GlobalSeq,
+        position: GlobalTime,
     ) -> Result<Vec<groove::db::EncodedKeyValue<'_>>, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
         if position.0 == u64::MAX {
             Ok(self.database.index_scan_raw(
                 "jazz_global_changes",
-                "by_table_global_seq",
+                "by_table_global_time",
                 &[Value::U64(table_id.0)],
             )?)
         } else {
             Ok(self.database.index_scan_range_raw(
                 "jazz_global_changes",
-                "by_table_global_seq",
+                "by_table_global_time",
                 &[Value::U64(table_id.0), Value::U64(0)],
                 &[Value::U64(table_id.0), Value::U64(position.0 + 1)],
             )?)
@@ -1730,7 +1800,7 @@ where
     fn bounded_historical_current_rows(
         &mut self,
         table: &str,
-        position: GlobalSeq,
+        position: GlobalTime,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table(table)?.clone();
         let mut rows_by_uuid = BTreeMap::<
@@ -1788,68 +1858,6 @@ where
         }
         sort_current_rows(&mut rows);
         Ok(rows)
-    }
-    fn historical_content_witness_at(
-        &mut self,
-        table: &str,
-        read_schema: SchemaVersionId,
-        row_uuid: RowUuid,
-        position: GlobalSeq,
-    ) -> Result<Option<TxId>, Error> {
-        let mut content = None::<(TxTime, NodeAlias)>;
-        let mut latest_event = None::<(TxTime, NodeAlias, Option<DeletionEvent>)>;
-        let table_id = self.physical_table_id_for_schema(read_schema, table)?;
-        let raw_records = if position.0 == u64::MAX {
-            self.database.index_scan_raw(
-                "jazz_global_changes",
-                "by_table_global_seq",
-                &[Value::U64(table_id.0)],
-            )?
-        } else {
-            self.database.index_scan_range_raw(
-                "jazz_global_changes",
-                "by_table_global_seq",
-                &[Value::U64(table_id.0), Value::U64(0)],
-                &[Value::U64(table_id.0), Value::U64(position.0 + 1)],
-            )?
-        };
-        for raw in raw_records {
-            let record = raw.record();
-            if RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?) != row_uuid {
-                continue;
-            }
-            let time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
-            let alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
-            if record.get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
-                == version_layer_string(VersionLayer::Content).as_bytes()
-                && content.is_none_or(|current| (time, alias) > current)
-            {
-                content = Some((time, alias));
-            }
-            let deletion = record
-                .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
-                .map(|value| deletion_event_from_value(Value::EnumTag(value)))
-                .transpose()?;
-            if latest_event.is_none_or(|(current_time, current_alias, _)| {
-                (time, alias) > (current_time, current_alias)
-            }) {
-                latest_event = Some((time, alias, deletion));
-            }
-        }
-        if latest_event.is_some_and(|(_, _, deletion)| deletion == Some(DeletionEvent::Deleted)) {
-            return Ok(None);
-        }
-        let Some((time, alias)) = content else {
-            return Ok(None);
-        };
-        let node = self
-            .node_aliases
-            .iter()
-            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
-            .ok_or(Error::InvalidStoredValue(
-                "historical content witness node alias is missing",
-            ))?;
-        Ok(Some(TxId::new(time, node)))
     }
     fn query_relation_snapshot_in_authorization_mode(
         &mut self,
@@ -2289,7 +2297,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        position: GlobalSeq,
+        position: GlobalTime,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_at_for_identity(shape, binding, position, identity)

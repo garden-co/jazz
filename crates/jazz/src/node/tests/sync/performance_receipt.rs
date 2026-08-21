@@ -162,7 +162,7 @@ fn seed_policy_graph_known_global(
     rows: Vec<(&str, RowUuid, BTreeMap<String, Value>)>,
 ) {
     for (idx, (table, row_uuid, cells)) in rows.iter().enumerate() {
-        let global_seq = GlobalSeq((idx + 1) as u64);
+        let global_time = GlobalTime((idx + 1) as u64);
         let tx_id = TxId::new(TxTime((idx + 1) as u64), node(0x21));
         let version = policy_graph_version(schema, table, *row_uuid, tx_id, cells);
         core.ingest_known_transaction(
@@ -182,7 +182,7 @@ fn seed_policy_graph_known_global(
             },
             vec![version],
             Fate::Accepted,
-            Some(global_seq),
+            Some(global_time),
             DurabilityTier::Global,
         )
         .unwrap();

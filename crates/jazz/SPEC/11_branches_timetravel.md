@@ -10,9 +10,9 @@ ordinary current-state rules while isolating branch overlays.
 
 Invariant digest:
 
-- `INV-BRANCH-1`: A time-travel read at `GlobalSeq` position MUST consider only globally settled transactions with `global_seq <= position` and MUST choose row/layer winners using the ordinary current-state winner rules over that subset.
+- `INV-BRANCH-1`: A time-travel read at `GlobalTime` position MUST consider only globally settled transactions with `global_time <= position` and MUST choose row/layer winners using the ordinary current-state winner rules over that subset.
 - `INV-BRANCH-2`: A time-travel read MUST evaluate read policy over the historical state at the requested cut, not over current state.
-- `INV-BRANCH-3`: `Node::at_time(time)` MUST resolve to the latest settled global position whose transaction time is `<= time`, returning `GlobalSeq(0)` when no such settled transaction exists.
+- `INV-BRANCH-3`: `Node::at_time(time)` MUST resolve to the latest settled global position whose transaction time is `<= time`, returning `GlobalTime(0)` when no such settled transaction exists.
 - `INV-BRANCH-4`: A local historical read handle MUST NOT answer from incomplete local history; if `is_history_complete_for(shape, position)` is false it MUST return `Error::HistoricalReadRequiresServer` or route to a history-complete server one-shot.
 - `INV-BRANCH-5`: A history-complete node at a sufficient watermark MUST answer `Node::at(position).read(...)` locally at exactly that position.
 - `INV-BRANCH-6`: A snapshot-base branch MUST freeze its base at creation; later parent/main commits MUST NOT appear in the branch unless represented by branch overlay writes, including ordinary calculated merge transactions.
@@ -54,18 +54,19 @@ Invariant digest:
 ### 11.1 Time-travel reads
 
 A time-travel read exposes the database as it was at a settled global cut. The
-cut is named by a `GlobalSeq`, and the read includes only globally settled
-transactions with `global_seq <= position`. Over that subset, the database uses
+cut is named by a `GlobalTime`, and the read includes only globally settled
+transactions with `global_time <= position`. Over that subset, the database uses
 the ordinary current-state rules from ch. 4 to select row and layer winners, then
 evaluates query filters, joins, and read policy against the historical state at
 that cut, not against the present state (`INV-BRANCH-1`, `INV-BRANCH-2`, ch. 7).
 The exact address is `NodeState::at(position)`.
 
-Wall-clock lookup is a convenience over the same model, not a stronger source of
-truth. `NodeState::at_time(time)` resolves to the latest settled position whose
-transaction time is `<= time`, or to `GlobalSeq(0)` if no such transaction
-exists. Because transaction timestamps can be affected by clock skew, this
-mapping is best-effort and is not wall-clock truth (`INV-BRANCH-3`).
+`GlobalTime` itself is a packed core-assigned HLC, so its physical component can
+serve as the future point-in-time address without a separate sequence lookup.
+The current `NodeState::at_time(TxTime)` API still resolves transaction-authored
+time and retains its existing best-effort clock-skew semantics
+(`INV-BRANCH-3`); a user-facing settlement-time API is a follow-up, not part of
+the `GlobalTime` transition.
 
 A historical read handle is read-only and **refuses to answer from incomplete
 local history**. If the node is not history-complete for the shape at the
@@ -89,14 +90,14 @@ creation**: later parent commits do not appear in the branch except through the
 branch's own overlay writes, including an ordinary calculated merge transaction
 that incorporates another lineage (`INV-BRANCH-6`).
 
-The branch base is conceptually a full `SnapshotRef`: an owner, a global
-sequence cut, the owner's local HLC cut, and explicit dots, all pointing at a
-concrete database cut. The branch's effective base cut is the whole `SnapshotRef`, not only
-`global_base`. v1 execution currently supports only global-only `SnapshotRef`s:
-`local_base` must be empty/zero-equivalent for its owner and `dots` must be
-empty. Persistence and protocol should still represent the full `SnapshotRef`
-shape and reject complex SnapshotRefs until branch reads can evaluate them.
-Schema-version/lens
+The branch base is a full `SnapshotRef`: an owner, a global timestamp cut, the
+owner's local HLC cut, and explicit dots, all pointing at a concrete database
+cut. The branch's effective base cut is the whole `SnapshotRef`, not only
+`global_base`. Session-authored v1 bases use the nil owner and an empty local
+cut, but may carry explicit dots naming accepted global transactions held by a
+partial creator. Every receiver parks metadata until the global prefix and all
+dotted transaction payloads are locally available, then verifies that every dot
+is globally accepted before admission. Schema-version/lens
 partitions (ch. 10) are orthogonal to branch identity.
 
 Creating a branch records metadata only. It is O(1)-style and never copies base
@@ -114,10 +115,10 @@ and a delayed exact downstream retry does not reopen an acknowledged relay.
 Branch-target data is separately parked until metadata lands.
 
 Session-authored v1 creation is deliberately narrower than trusted backend
-replay: it must be first-seen `Open`, parentless, and use the canonical settled
-global cut (`owner` is the nil node UUID, `local_base` is zero, and `dots` is
-empty). Its `created_by` must match the authenticated session identity, and its
-global base must already be available or the metadata is parked. This
+replay: it must be first-seen `Open`, parentless, and use a canonical global
+snapshot (`owner` is the nil node UUID and `local_base` is zero). Its
+`created_by` must match the authenticated session identity. Its global base and
+every accepted-global dot must already be available or the metadata is parked. This
 parentless-only rule avoids treating knowledge of a parent id as read authority;
 a self-asserted author without session context grants nothing. Exact replay is
 idempotent, immutable conflicts are rejected, and `Open` to `Discarded` is the
@@ -522,9 +523,9 @@ merge-back and discard have graduated:
 - 🔶 **Time-travel within a branch** (target). Composing `at(position)` inside a
   branch overlay requires an additional cut dimension: a branch view is already
   overlay-first over a frozen base cut, so an in-branch historical read needs to
-  distinguish the branch's own settle order from the parent base `GlobalSeq`.
+  distinguish the branch's own settle order from the parent base `GlobalTime`.
   Resolve the cut model (independent per-dimension with documented skew vs a
-  composed `(branch_seq, global_seq)` vector, cf. the sharding
+  composed `(branch_seq, global_time)` vector, cf. the sharding
   per-shard-position question, ch. 15) before allowing it. Branch-of-branch
   multiplies this per level. The implementation does not allow this composition.
 - 🔶 **Branch base persistence.** The design base is a full `SnapshotRef`

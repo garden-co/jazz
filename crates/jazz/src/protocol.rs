@@ -18,7 +18,7 @@ use crate::ids::{
 };
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
-use crate::time::GlobalSeq;
+use crate::time::GlobalTime;
 use crate::time::TxTime;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId};
@@ -59,8 +59,8 @@ pub enum SyncMessage {
         tx_id: TxId,
         /// New fate.
         fate: Fate,
-        /// Assigned global sequence, when accepted.
-        global_seq: Option<crate::time::GlobalSeq>,
+        /// Assigned global timestamp, when accepted.
+        global_time: Option<crate::time::GlobalTime>,
         /// Sender's observed durability tier, when it chooses to make a claim.
         durability: Option<DurabilityTier>,
     },
@@ -123,13 +123,13 @@ pub enum SyncMessage {
     ViewUpdate {
         /// Query binding result set addressed by this update.
         subscription: SubscriptionKey,
-        /// Core-assigned `GlobalSeq` through which the canonical binding view
+        /// Core-assigned `GlobalTime` through which the canonical binding view
         /// was evaluated. It is durable known-state evidence, reusable after
         /// reconnecting to an edge serving the same authoritative database
         /// lineage for payload dedup/repair; it is not evidence that an
         /// upstream connection is currently live and cannot alone settle a
         /// subscription.
-        settled_through: GlobalSeq,
+        settled_through: GlobalTime,
         /// Whether receiver result_set should be reset first.
         reset_result_set: bool,
         /// General carrier stream for singleton bundles and packed runs.
@@ -373,7 +373,7 @@ pub struct AuthorizationScopeReceipt {
     /// Complete authoritative history cut reflected by the support view. Like
     /// other `settled_through` cursors, this is durable history evidence; the
     /// separately scoped authority epoch supplies connection liveness.
-    pub settled_through: GlobalSeq,
+    pub settled_through: GlobalTime,
     /// Authority authorization generation paired with that cut.
     pub authorization_progress: u64,
 }
@@ -876,8 +876,8 @@ pub struct VersionBundle {
     pub versions: Vec<VersionRecord>,
     /// Fate known when the bundle was shipped.
     pub fate: Fate,
-    /// Global sequence known when shipped.
-    pub global_seq: Option<GlobalSeq>,
+    /// Global timestamp known when shipped.
+    pub global_time: Option<GlobalTime>,
     /// Durability known when shipped.
     pub durability: DurabilityTier,
 }
@@ -891,8 +891,8 @@ pub struct VersionBundleRef<'a> {
     pub versions: &'a [VersionRecord],
     /// Fate known when the bundle was shipped.
     pub fate: &'a Fate,
-    /// Global sequence known when shipped.
-    pub global_seq: Option<GlobalSeq>,
+    /// Global timestamp known when shipped.
+    pub global_time: Option<GlobalTime>,
     /// Durability known when shipped.
     pub durability: DurabilityTier,
 }
@@ -904,7 +904,7 @@ impl<'a> VersionBundleRef<'a> {
             tx: self.tx.clone(),
             versions: self.versions.to_vec(),
             fate: self.fate.clone(),
-            global_seq: self.global_seq,
+            global_time: self.global_time,
             durability: self.durability,
         }
     }
@@ -917,7 +917,7 @@ impl VersionBundle {
             tx: &self.tx,
             versions: &self.versions,
             fate: &self.fate,
-            global_seq: self.global_seq,
+            global_time: self.global_time,
             durability: self.durability,
         }
     }
@@ -984,8 +984,8 @@ impl VersionBundleRun {
                     body_index: index as u32,
                     tx: (bundle.tx != first.tx).then(|| bundle.tx.clone()),
                     fate: (bundle.fate != first.fate).then(|| bundle.fate.clone()),
-                    global_seq: (bundle.global_seq != first.global_seq)
-                        .then_some(bundle.global_seq),
+                    global_time: (bundle.global_time != first.global_time)
+                        .then_some(bundle.global_time),
                     durability: (bundle.durability != first.durability)
                         .then_some(bundle.durability),
                 };
@@ -998,7 +998,7 @@ impl VersionBundleRun {
                 tx: first.tx.clone(),
                 body_count: bodies.len() as u32,
                 fate: first.fate.clone(),
-                global_seq: first.global_seq,
+                global_time: first.global_time,
                 durability: first.durability,
             },
             bodies,
@@ -1071,9 +1071,9 @@ impl VersionBundleRun {
                     fate: override_
                         .and_then(|override_| override_.fate.clone())
                         .unwrap_or_else(|| self.header.fate.clone()),
-                    global_seq: override_
-                        .and_then(|override_| override_.global_seq)
-                        .unwrap_or(self.header.global_seq),
+                    global_time: override_
+                        .and_then(|override_| override_.global_time)
+                        .unwrap_or(self.header.global_time),
                     durability: override_
                         .and_then(|override_| override_.durability)
                         .unwrap_or(self.header.durability),
@@ -1104,9 +1104,9 @@ impl VersionBundleRun {
                     fate: override_
                         .and_then(|override_| override_.fate.as_ref())
                         .unwrap_or(&self.header.fate),
-                    global_seq: override_
-                        .and_then(|override_| override_.global_seq)
-                        .unwrap_or(self.header.global_seq),
+                    global_time: override_
+                        .and_then(|override_| override_.global_time)
+                        .unwrap_or(self.header.global_time),
                     durability: override_
                         .and_then(|override_| override_.durability)
                         .unwrap_or(self.header.durability),
@@ -1127,8 +1127,8 @@ pub struct VersionBundleRunHeader {
     pub body_count: u32,
     /// Default fate for each body.
     pub fate: Fate,
-    /// Default global sequence for each body.
-    pub global_seq: Option<GlobalSeq>,
+    /// Default global timestamp for each body.
+    pub global_time: Option<GlobalTime>,
     /// Default durability tier for each body.
     pub durability: DurabilityTier,
 }
@@ -1149,8 +1149,8 @@ pub struct VersionBundleRunOverride {
     pub tx: Option<Transaction>,
     /// Fate override for this body.
     pub fate: Option<Fate>,
-    /// Global sequence override for this body. `Some(None)` overrides to absent.
-    pub global_seq: Option<Option<GlobalSeq>>,
+    /// Global timestamp override for this body. `Some(None)` overrides to absent.
+    pub global_time: Option<Option<GlobalTime>>,
     /// Durability override for this body.
     pub durability: Option<DurabilityTier>,
 }
@@ -1159,7 +1159,7 @@ impl VersionBundleRunOverride {
     fn has_overrides(&self) -> bool {
         self.tx.is_some()
             || self.fate.is_some()
-            || self.global_seq.is_some()
+            || self.global_time.is_some()
             || self.durability.is_some()
     }
 }
@@ -1641,7 +1641,7 @@ pub struct SnapshotRef {
     /// Node that owns the local snapshot prefix.
     pub owner: NodeUuid,
     /// Contiguous global base visible at snapshot time.
-    pub global_base: GlobalSeq,
+    pub global_base: GlobalTime,
     /// Owner-local HLC prefix visible at snapshot time.
     pub local_base: TxTime,
     /// Individual transaction dots above the frontier.
@@ -1682,7 +1682,7 @@ pub enum KnownStateDeclaration {
         completeness: KnownStateCompleteness,
         /// Durable known-state cursor being echoed for payload dedup/repair;
         /// never an active-authority settlement receipt.
-        position: GlobalSeq,
+        position: GlobalTime,
     },
     /// Fast declaration qualified by the authorization state under which the
     /// receiver applied it.
@@ -1691,7 +1691,7 @@ pub enum KnownStateDeclaration {
         completeness: KnownStateCompleteness,
         /// Durable known-state cursor being echoed for payload dedup/repair;
         /// never an active-authority settlement receipt.
-        position: GlobalSeq,
+        position: GlobalTime,
         /// Server-stamped authorization generation echoed by the receiver.
         authorization_progress: u64,
     },
@@ -1874,7 +1874,7 @@ pub struct RealRowMemberEntry {
     /// known. Unfated/local members carry `None` and are never eligible for
     /// fast known-state body skipping.
     #[serde(default)]
-    pub settle_position: Option<GlobalSeq>,
+    pub settle_position: Option<GlobalTime>,
 }
 
 impl RealRowMemberEntry {
@@ -1901,7 +1901,7 @@ impl RealRowMemberEntry {
     }
 
     /// Attach the known global settle position for this member.
-    pub fn with_settle_position(mut self, settle_position: Option<GlobalSeq>) -> Self {
+    pub fn with_settle_position(mut self, settle_position: Option<GlobalTime>) -> Self {
         self.settle_position = settle_position;
         self
     }
@@ -1991,10 +1991,10 @@ pub enum ResultRowSource {
         /// Snapshot frontier.
         snapshot: SnapshotRef,
     },
-    /// Historic cut by global sequence.
+    /// Historic cut by global timestamp.
     HistoryCut {
-        /// Global sequence frontier.
-        global_seq: GlobalSeq,
+        /// Global timestamp frontier.
+        global_time: GlobalTime,
     },
     /// Merge/composition of several source alternatives.
     Merge {

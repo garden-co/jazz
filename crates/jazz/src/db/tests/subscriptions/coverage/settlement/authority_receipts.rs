@@ -164,7 +164,7 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     }
     for subscription in old_keys.values().copied() {
         old_authority
-            .send(view_update(subscription, GlobalSeq(1)))
+            .send(view_update(subscription, GlobalTime(1)))
             .unwrap();
     }
     client.tick().unwrap();
@@ -184,7 +184,7 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     }
     for subscription in new_keys.values().copied() {
         new_authority
-            .send(view_update(subscription, GlobalSeq(2)))
+            .send(view_update(subscription, GlobalTime(2)))
             .unwrap();
     }
     client.tick().unwrap();
@@ -193,7 +193,7 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
 
     let all_key = old_keys[&all_query.validate(&schema).unwrap().shape_id()];
     old_authority
-        .send(view_update(all_key, GlobalSeq(3)))
+        .send(view_update(all_key, GlobalTime(3)))
         .unwrap();
     client.tick().unwrap();
     assert!(!all_subscription._state.borrow().settled);
@@ -204,7 +204,7 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
 
     for subscription in new_keys.values().copied() {
         new_authority
-            .send(view_update(subscription, GlobalSeq(2)))
+            .send(view_update(subscription, GlobalTime(2)))
             .unwrap();
     }
     client.tick().unwrap();
@@ -215,7 +215,7 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     );
     for subscription in new_keys.values().copied() {
         new_authority
-            .send(view_update(subscription, GlobalSeq(3)))
+            .send(view_update(subscription, GlobalTime(3)))
             .unwrap();
     }
     client.tick().unwrap();
@@ -336,7 +336,7 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
             break subscribe.subscription;
         }
     };
-    old_authority.send(update(old_key, GlobalSeq(1))).unwrap();
+    old_authority.send(update(old_key, GlobalTime(1))).unwrap();
     client.tick().unwrap();
     assert!(subscription._state.borrow().settled);
 
@@ -348,22 +348,22 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
             break subscribe.subscription;
         }
     };
-    new_authority.send(update(new_key, GlobalSeq(1))).unwrap();
+    new_authority.send(update(new_key, GlobalTime(1))).unwrap();
     client.tick().unwrap();
     assert!(subscription._state.borrow().settled);
 
-    old_authority.send(update(old_key, GlobalSeq(3))).unwrap();
+    old_authority.send(update(old_key, GlobalTime(3))).unwrap();
     assert!(client.detach_connection(&new_upstream));
     client.tick().unwrap();
     assert!(!subscription._state.borrow().settled);
 
-    old_authority.send(update(old_key, GlobalSeq(2))).unwrap();
+    old_authority.send(update(old_key, GlobalTime(2))).unwrap();
     client.tick().unwrap();
     assert!(
         !subscription._state.borrow().settled,
         "eligible A@2 cannot receipt state after fallback-staged A@3"
     );
-    old_authority.send(update(old_key, GlobalSeq(3))).unwrap();
+    old_authority.send(update(old_key, GlobalTime(3))).unwrap();
     client.tick().unwrap();
     assert!(subscription._state.borrow().settled);
 }
@@ -400,7 +400,7 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
         program_fact_removes: Vec::new(),
     };
     old_authority_transport
-        .send(view_update(old_subscription, GlobalSeq(1)))
+        .send(view_update(old_subscription, GlobalTime(1)))
         .unwrap();
     client.tick().unwrap();
     assert!(subscription._state.borrow().settled);
@@ -415,7 +415,7 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
         }
     };
     new_authority_transport
-        .send(view_update(new_subscription, GlobalSeq(2)))
+        .send(view_update(new_subscription, GlobalTime(2)))
         .unwrap();
     client.tick().unwrap();
     assert!(subscription._state.borrow().settled);
@@ -430,7 +430,7 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     };
     pending_row_version_repairs.push_back(PendingRowVersionRepair {
         requests: Vec::new(),
-        update: view_update(old_subscription, GlobalSeq(3)),
+        update: view_update(old_subscription, GlobalTime(3)),
         authority_receipt_eligible: true,
     });
     drop(old);
@@ -448,7 +448,7 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     );
 
     old_authority_transport
-        .send(view_update(old_subscription, GlobalSeq(4)))
+        .send(view_update(old_subscription, GlobalTime(4)))
         .unwrap();
     client.tick().unwrap();
     assert!(subscription._state.borrow().settled);
@@ -486,7 +486,7 @@ fn fallback_replay_of_preselection_branch_view_cannot_settle() {
         program_fact_removes: Vec::new(),
     };
     old_authority_transport
-        .send(view_update(old_subscription, GlobalSeq(1)))
+        .send(view_update(old_subscription, GlobalTime(1)))
         .unwrap();
     client.tick().unwrap();
 
@@ -500,7 +500,7 @@ fn fallback_replay_of_preselection_branch_view_cannot_settle() {
         }
     };
     new_authority_transport
-        .send(view_update(new_subscription, GlobalSeq(2)))
+        .send(view_update(new_subscription, GlobalTime(2)))
         .unwrap();
     client.tick().unwrap();
     assert!(subscription._state.borrow().settled);
@@ -518,7 +518,7 @@ fn fallback_replay_of_preselection_branch_view_cannot_settle() {
         .entry(branch)
         .or_default()
         .push(PendingBranchViewUpdate {
-            message: view_update(old_subscription, GlobalSeq(3)),
+            message: view_update(old_subscription, GlobalTime(3)),
             authority_receipt_eligible: true,
         });
     drop(old);
@@ -540,7 +540,7 @@ fn fallback_replay_of_preselection_branch_view_cannot_settle() {
     );
 
     old_authority_transport
-        .send(view_update(old_subscription, GlobalSeq(4)))
+        .send(view_update(old_subscription, GlobalTime(4)))
         .unwrap();
     client.tick().unwrap();
     assert!(subscription._state.borrow().settled);

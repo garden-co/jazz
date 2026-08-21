@@ -25,7 +25,7 @@ fn edge_accept_mergeable_unit(
         vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate: Fate::Accepted,
-            global_seq: None,
+            global_time: None,
             durability: Some(DurabilityTier::Edge),
         }]
     );

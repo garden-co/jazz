@@ -371,8 +371,8 @@ where
             })
             .collect::<Result<Vec<_>, Error>>()?;
         for bundle in version_bundles {
-            ingest::validate_received_view_bundle_global_seq_durability(
-                bundle.global_seq,
+            ingest::validate_received_view_bundle_global_time_durability(
+                bundle.global_time,
                 bundle.durability,
             )?;
             let versions = bundle
@@ -420,7 +420,7 @@ where
                 bundle.tx,
                 versions,
                 bundle.fate,
-                bundle.global_seq,
+                bundle.global_time,
                 bundle.durability,
             )?;
         }

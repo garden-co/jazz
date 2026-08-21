@@ -189,7 +189,7 @@ fn historical_cut_bounded_source_matches_full_scan_graph() {
     node.apply_fate_update(
         delete_tx,
         Fate::Accepted,
-        Some(GlobalSeq(3)),
+        Some(GlobalTime(3)),
         Some(DurabilityTier::Global),
     )
     .expect("accept delete");
@@ -211,19 +211,19 @@ fn historical_cut_bounded_source_matches_full_scan_graph() {
     let binding = shape.bind(BTreeMap::new()).expect("binding");
     let bounded = current_titles(
         &table,
-        node.query_rows_at(&shape, &binding, GlobalSeq(2))
+        node.query_rows_at(&shape, &binding, GlobalTime(2))
             .expect("bounded historical query"),
     );
     let selected_metrics = node.query_engine_read_metrics().clone();
-    let full = historical_titles_via_full_scan(&mut node, &table, GlobalSeq(2));
+    let full = historical_titles_via_full_scan(&mut node, &table, GlobalTime(2));
 
     assert_eq!(bounded, full);
-    assert_eq!(selected_metrics.source_global_seq_range_scans, 1);
+    assert_eq!(selected_metrics.source_global_time_range_scans, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
 }
 
 #[test]
-fn historical_cut_reads_only_table_global_seq_range() {
+fn historical_cut_reads_only_table_global_time_range() {
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text)),
@@ -257,7 +257,7 @@ fn historical_cut_reads_only_table_global_seq_range() {
     node.reset_storage_read_metrics();
     let rows = current_titles(
         &table,
-        node.query_rows_at(&shape, &binding, GlobalSeq(1))
+        node.query_rows_at(&shape, &binding, GlobalTime(1))
             .expect("bounded historical query"),
     );
     let read_metrics = node.take_storage_read_metrics();
@@ -267,10 +267,10 @@ fn historical_cut_reads_only_table_global_seq_range() {
         rows,
         BTreeMap::from([(row(0x41), Value::String("at-cut".to_owned()))])
     );
-    assert_eq!(selected_metrics.source_global_seq_range_scans, 1);
+    assert_eq!(selected_metrics.source_global_time_range_scans, 1);
     assert_eq!(
         read_metrics.global_changes_indexes.ranges, 1,
-        "bounded cut should use one by_table_global_seq range"
+        "bounded cut should use one by_table_global_time range"
     );
     assert!(
         read_metrics.global_changes_indexes.reads <= 2,
@@ -316,7 +316,7 @@ fn denormalized_current_content_witness_matches_history_payload_bytes() {
     node.apply_fate_update(
         second,
         Fate::Accepted,
-        Some(GlobalSeq(2)),
+        Some(GlobalTime(2)),
         Some(DurabilityTier::Global),
     )
     .expect("accept second version");

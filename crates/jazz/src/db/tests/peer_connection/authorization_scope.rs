@@ -417,12 +417,12 @@ fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
         read_view: RegisterShapeOptions::default().read_view_key(),
     };
     let mut applied = BTreeMap::new();
-    applied.insert(subscription(1), (GlobalSeq(5), 100));
-    applied.insert(subscription(2), (GlobalSeq(10), 1));
+    applied.insert(subscription(1), (GlobalTime(5), 100));
+    applied.insert(subscription(2), (GlobalTime(10), 1));
 
     assert_eq!(
         aggregate_authorization_scope_bounds(&applied),
-        Some((GlobalSeq(5), 1)),
+        Some((GlobalTime(5), 1)),
         "a later support view may be the limiting authorization generation"
     );
 }
@@ -454,7 +454,7 @@ fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_claus
                 (first, (first.shape_id, first.binding_id)),
                 (second, (second.shape_id, second.binding_id)),
             ]),
-            applied: BTreeMap::from([(first, (GlobalSeq(5), 5)), (second, (GlobalSeq(5), 5))]),
+            applied: BTreeMap::from([(first, (GlobalTime(5), 5)), (second, (GlobalTime(5), 5))]),
         },
     )]);
 
@@ -479,7 +479,7 @@ fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_claus
         aggregate.applied.is_empty(),
         "the first returning clause has no receipt until its replacement view arrives"
     );
-    aggregate.applied.insert(first, (GlobalSeq(6), 6));
+    aggregate.applied.insert(first, (GlobalTime(6), 6));
     assert!(
         aggregate
             .members
@@ -493,7 +493,7 @@ fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_claus
             .keys()
             .any(|member| !aggregate.applied.contains_key(member))
     );
-    aggregate.applied.insert(second, (GlobalSeq(6), 6));
+    aggregate.applied.insert(second, (GlobalTime(6), 6));
     assert!(
         aggregate
             .members
@@ -528,13 +528,13 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
         authority_epoch: context.connection_epoch,
         claims_revision: context.claims_revision,
         policy_epoch: context.policy_epoch,
-        settled_through: GlobalSeq(17),
+        settled_through: GlobalTime(17),
         authorization_progress: 9,
     };
     assert!(authorization_scope_receipt_matches_transport_context(
         &receipt,
         context,
-        Some(GlobalSeq(17)),
+        Some(GlobalTime(17)),
     ));
     assert!(
         !authorization_scope_receipt_matches_transport_context(
@@ -543,18 +543,18 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
                 ..receipt.clone()
             },
             context,
-            Some(GlobalSeq(17)),
+            Some(GlobalTime(17)),
         ),
         "a stale authorization generation must not ride a fresh support view"
     );
     assert!(
         !authorization_scope_receipt_matches_transport_context(
             &AuthorizationScopeReceipt {
-                settled_through: GlobalSeq(16),
+                settled_through: GlobalTime(16),
                 ..receipt
             },
             context,
-            Some(GlobalSeq(17)),
+            Some(GlobalTime(17)),
         ),
         "a stale support cut must not ride a fresh authorization generation"
     );
@@ -590,7 +590,7 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
                 source: ReadViewSourceSpec::Snapshot {
                     snapshot: SnapshotRef {
                         owner: NodeUuid::from_bytes([0x54; 16]),
-                        global_base: GlobalSeq(0),
+                        global_base: GlobalTime(0),
                         local_base: TxTime(0),
                         dots: Vec::new(),
                     },
@@ -629,7 +629,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
             source: ReadViewSourceSpec::Snapshot {
                 snapshot: SnapshotRef {
                     owner: NodeUuid::from_bytes([0x61; 16]),
-                    global_base: GlobalSeq(0),
+                    global_base: GlobalTime(0),
                     local_base: TxTime(0),
                     dots: Vec::new(),
                 },
@@ -773,7 +773,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     };
     let view_update = |opening_pending, settled_through| SyncMessage::ViewUpdate {
         subscription,
-        settled_through: GlobalSeq(settled_through),
+        settled_through: GlobalTime(settled_through),
         reset_result_set: true,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),
@@ -807,7 +807,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         .node
         .borrow()
         .applied_view_update_generation(binding_view);
-    let before_watermark = edge.node.node.borrow().applied_global_watermark();
+    let before_watermark = edge.node.node.borrow().committed_global_time();
     let before_drops = edge
         .node
         .node
@@ -822,7 +822,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
 
     let node = Rc::clone(&edge.node.node);
     let node = node.borrow();
-    assert_eq!(node.applied_global_watermark(), before_watermark);
+    assert_eq!(node.committed_global_time(), before_watermark);
     assert_eq!(
         node.applied_view_update_generation(binding_view),
         before_generation,

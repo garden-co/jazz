@@ -120,14 +120,14 @@ where
             .parents(parents)
             .cells(cells);
         let merge_tx = self.commit_mergeable_at(merge_commit, made_at)?;
-        let global_seq = self.clock.allocate_global_seq()?;
+        let global_time = self.clock.allocate_global_time(made_at.physical_ms())?;
         self.apply_fate_update(
             merge_tx,
             Fate::Accepted,
-            Some(global_seq),
+            Some(global_time),
             Some(DurabilityTier::Global),
         )?;
-        debug_assert_eq!(self.clock.applied_global_watermark, global_seq);
+        debug_assert_eq!(self.clock.committed_global_time, global_time);
         Ok(())
     }
 
@@ -816,7 +816,7 @@ where
             let Some(tx) = self.query_transaction(tx_id)? else {
                 continue;
             };
-            if !matches!(tx.fate, Fate::Accepted) || tx.global_seq.is_none() {
+            if !matches!(tx.fate, Fate::Accepted) || tx.global_time.is_none() {
                 continue;
             }
             let made_at = self.version_made_at(&version)?;
@@ -833,9 +833,9 @@ where
     #[cfg(test)]
     fn assert_global_current_updates_match_history_for_test(
         &mut self,
-        updates: &[(VersionRow, GlobalSeq)],
+        updates: &[(VersionRow, GlobalTime)],
     ) -> Result<(), Error> {
-        for (version, global_seq) in updates {
+        for (version, global_time) in updates {
             let Some(expected) = self.recomputed_global_layer_winner_from_history_for_test(
                 version.table(),
                 version.row_uuid(),
@@ -861,8 +861,8 @@ where
                     actual_tx
                 );
             }
-            self.assert_global_current_row_matches_version_for_test(version, *global_seq)?;
-            self.assert_global_change_row_matches_version_for_test(version, *global_seq)?;
+            self.assert_global_current_row_matches_version_for_test(version, *global_time)?;
+            self.assert_global_change_row_matches_version_for_test(version, *global_time)?;
         }
         Ok(())
     }
@@ -871,7 +871,7 @@ where
     fn assert_global_current_row_matches_version_for_test(
         &mut self,
         version: &VersionRow,
-        global_seq: GlobalSeq,
+        global_time: GlobalTime,
     ) -> Result<(), Error> {
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
@@ -889,7 +889,7 @@ where
                     PhysicalCurrentClass::Global,
                 )?),
                 &storage_tables[0],
-                self.public_current_values(&table, version, Some(global_seq))?,
+                self.public_current_values(&table, version, Some(global_time))?,
             ),
             VersionLayer::Deletion => (
                 groove::Intern::new(self.physical_current_table_for_schema(
@@ -899,7 +899,7 @@ where
                     PhysicalCurrentClass::Global,
                 )?),
                 &storage_tables[1],
-                register_global_current_values(version, Some(global_seq)),
+                register_global_current_values(version, Some(global_time)),
             ),
         };
         let rows = self
@@ -926,7 +926,7 @@ where
     fn assert_global_change_row_matches_version_for_test(
         &mut self,
         version: &VersionRow,
-        global_seq: GlobalSeq,
+        global_time: GlobalTime,
     ) -> Result<(), Error> {
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
@@ -938,7 +938,7 @@ where
                 Value::U64(table_id.0),
                 Value::Uuid(version.row_uuid().0),
                 Value::Bytes(version_layer_string(version.layer()).into_bytes()),
-                Value::U64(global_seq.0),
+                Value::U64(global_time.0),
             ],
         )?;
         let Some(row) = rows.first() else {
@@ -947,7 +947,7 @@ where
                 version.table(),
                 version.row_uuid(),
                 version.layer(),
-                global_seq
+                global_time
             );
         };
         let record = row.record();
@@ -972,7 +972,7 @@ where
                 version.table(),
                 version.row_uuid(),
                 version.layer(),
-                global_seq,
+                global_time,
                 expected_tx,
                 expected_deletion,
                 actual_tx,
@@ -986,7 +986,7 @@ where
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
-        global_seq: GlobalSeq,
+        global_time: GlobalTime,
     ) -> Result<(), Error> {
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
@@ -1003,7 +1003,7 @@ where
                 )?;
                 let logical = owned_record_from_storage_values(
                     &table.global_current_storage_tables()[0],
-                    self.public_current_values(&table, version, Some(global_seq))?,
+                    self.public_current_values(&table, version, Some(global_time))?,
                 )
                 .expect("valid global current row");
                 let mapping = self
@@ -1053,7 +1053,7 @@ where
                         &self
                             .table_in_schema(version.table(), schema_version)?
                             .global_current_storage_tables()[1],
-                        register_global_current_values(version, Some(global_seq)),
+                        register_global_current_values(version, Some(global_time)),
                     )
                     .expect("valid register global current row"),
                 ),
@@ -1064,7 +1064,7 @@ where
             global_change_values(
                 self.physical_table_id_for_schema(schema_version, version.table())?,
                 version,
-                global_seq,
+                global_time,
             ),
         );
         Ok(())
@@ -1176,9 +1176,9 @@ where
         &mut self,
         table: &TableSchema,
         version: &VersionRow,
-        global_seq: Option<GlobalSeq>,
+        global_time: Option<GlobalTime>,
     ) -> Result<Vec<Value>, Error> {
-        global_current_values(table, version, global_seq)
+        global_current_values(table, version, global_time)
     }
 
     pub(super) fn write_ahead_current_delete(
@@ -1243,8 +1243,8 @@ where
         {
             let record = raw.record();
             let fate = fate_from_encoded_fields(record)?;
-            let global_seq = record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
-            if !matches!(fate, Fate::Rejected(_)) && global_seq.is_none() {
+            let global_time = record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?;
+            if !matches!(fate, Fate::Rejected(_)) && global_time.is_none() {
                 continue;
             }
             let tx_time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
@@ -1273,16 +1273,16 @@ where
         Ok(())
     }
 
-    fn prune_ahead_current_for_global_seq(
+    fn prune_ahead_current_for_global_time(
         &mut self,
         batch: &mut DatabaseBatch,
-        global_seq: GlobalSeq,
+        global_time: GlobalTime,
     ) -> Result<(), Error> {
         let mut tx_ids = Vec::new();
         for raw in self.database.index_scan_raw(
             "jazz_transactions",
-            "by_global_seq",
-            &[Value::U64(global_seq.0)],
+            "by_global_time",
+            &[Value::U64(global_time.0)],
         )? {
             let record = raw.record();
             tx_ids.push(TxId::new(

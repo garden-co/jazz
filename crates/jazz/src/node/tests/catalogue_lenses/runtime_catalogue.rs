@@ -512,13 +512,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
             .len(),
         1
     );
-    core.apply_fate_update(
-        tx_id,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(tx_id).unwrap();
 
     let shape = Query::from("notes").validate(&evolved).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();

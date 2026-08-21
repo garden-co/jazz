@@ -57,7 +57,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
     reader.apply_unsubscribe(usage_subscription);
     let late = SyncMessage::ViewUpdate {
         subscription: usage_subscription,
-        settled_through: GlobalSeq(2),
+        settled_through: GlobalTime(2),
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),
@@ -102,7 +102,7 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
     };
     let late = SyncMessage::ViewUpdate {
         subscription,
-        settled_through: GlobalSeq(1),
+        settled_through: GlobalTime(1),
         reset_result_set: true,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),
@@ -162,7 +162,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
     let invisible_tx = TxId::new(TxTime(999), node(44));
     let removal = SyncMessage::ViewUpdate {
         subscription,
-        settled_through: GlobalSeq(2),
+        settled_through: GlobalTime(2),
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),
@@ -193,7 +193,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
     );
     assert_eq!(
         reader.settled_through_for_binding_view(binding_view_key),
-        Some(GlobalSeq(2))
+        Some(GlobalTime(2))
     );
     assert_ne!(visible_tx, invisible_tx);
 }
@@ -211,7 +211,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
 
     let removal = SyncMessage::ViewUpdate {
         subscription,
-        settled_through: GlobalSeq(3),
+        settled_through: GlobalTime(3),
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),
@@ -242,7 +242,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
     );
     assert_eq!(
         reader.settled_through_for_binding_view(binding_view_key),
-        Some(GlobalSeq(3))
+        Some(GlobalTime(3))
     );
 }
 
@@ -307,7 +307,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription: duplicate_subscription,
-            settled_through: GlobalSeq(2),
+            settled_through: GlobalTime(2),
             reset_result_set: true,
             version_carriers: Vec::new(),
             version_bundles: Vec::new(),
@@ -331,7 +331,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
     );
     assert_eq!(
         reader.settled_through_for_binding_view(binding_view_key),
-        Some(GlobalSeq(2))
+        Some(GlobalTime(2))
     );
 }
 
@@ -360,7 +360,7 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
             tx,
             Vec::new(),
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(GlobalTime(1)),
             DurabilityTier::Global,
         )
         .unwrap();
@@ -390,7 +390,7 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
         subscription,
         Some(crate::protocol::KnownStateDeclaration::Fast {
             completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalSeq(1),
+            position: GlobalTime::new(10, 0).unwrap(),
         }),
     );
 
@@ -413,7 +413,7 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
     else {
         panic!("expected view update");
     };
-    assert_eq!(*settled_through, GlobalSeq(1));
+    assert_eq!(*settled_through, GlobalTime::new(10, 0).unwrap());
     assert!(!reset_result_set);
     assert!(result_member_adds.is_empty());
     assert!(version_bundles.is_empty());
@@ -470,7 +470,7 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
         subscription,
         Some(crate::protocol::KnownStateDeclaration::Fast {
             completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalSeq(1),
+            position: GlobalTime::new(10, 0).unwrap(),
         }),
     );
 
@@ -494,7 +494,7 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     else {
         panic!("expected view update");
     };
-    assert_eq!(*settled_through, GlobalSeq(2));
+    assert_eq!(*settled_through, GlobalTime::new(20, 0).unwrap());
     assert!(!reset_result_set);
     assert_eq!(
         result_member_adds,
@@ -504,7 +504,7 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
                 row_b,
                 tx_b,
             ))
-            .with_settle_position(Some(GlobalSeq(2)))
+            .with_settle_position(Some(GlobalTime::new(20, 0).unwrap()))
         )]
     );
     assert!(result_member_removes.is_empty());
@@ -607,7 +607,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
         subscription,
         Some(crate::protocol::KnownStateDeclaration::Fast {
             completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalSeq(1),
+            position: GlobalTime::new(10, 0).unwrap(),
         }),
     );
 
@@ -696,7 +696,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
         subscription,
         Some(crate::protocol::KnownStateDeclaration::Fast {
             completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalSeq(1),
+            position: GlobalTime::new(10, 0).unwrap(),
         }),
     );
 
@@ -761,7 +761,7 @@ fn exact_known_state_rehydrate_repairs_missing_payload() {
             tx,
             Vec::new(),
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(GlobalTime(1)),
             DurabilityTier::Global,
         )
         .unwrap();
@@ -852,7 +852,7 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             tx_a_record,
             versions_a,
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(GlobalTime(1)),
             DurabilityTier::Global,
         )
         .unwrap();
@@ -1052,7 +1052,7 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
         declaration,
         Some(crate::protocol::KnownStateDeclaration::Fast {
             completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalSeq(1),
+            position: GlobalTime::new(13, 0).unwrap(),
         })
     );
 
@@ -1113,7 +1113,7 @@ fn fast_known_state_fact_survives_storage_reopen() {
         declaration,
         Some(crate::protocol::KnownStateDeclaration::Fast {
             completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalSeq(1),
+            position: GlobalTime::new(14, 0).unwrap(),
         })
     );
 }
@@ -1149,7 +1149,7 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
         subscription,
         Some(crate::protocol::KnownStateDeclaration::Fast {
             completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalSeq(100),
+            position: GlobalTime(100),
         }),
     );
 
@@ -1176,4 +1176,3 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
     assert_eq!(version_bundles[0].versions.len(), 1);
 }
-

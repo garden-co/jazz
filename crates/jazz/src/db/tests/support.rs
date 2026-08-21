@@ -1706,7 +1706,7 @@ impl CoreDb {
         Ok(self.read(query)?.into_iter().next())
     }
 
-    pub(super) fn at(&self, position: GlobalSeq, query: &Query) -> Result<Vec<CurrentRow>, Error> {
+    pub(super) fn at(&self, position: GlobalTime, query: &Query) -> Result<Vec<CurrentRow>, Error> {
         let shape = query.validate(&self.schema)?;
         let binding = shape.bind(BTreeMap::new())?;
         self.server

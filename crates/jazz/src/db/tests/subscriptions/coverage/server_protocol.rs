@@ -405,7 +405,7 @@ fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
             values: Vec::new(),
             known_state: Some(KnownStateDeclaration::Fast {
                 completeness: KnownStateCompleteness::FastCurrentMembership,
-                position: crate::time::GlobalSeq::default(),
+                position: crate::time::GlobalTime::default(),
             }),
         }))
         .unwrap();

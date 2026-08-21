@@ -240,8 +240,8 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
             SyncMessage::FateUpdate {
                 tx_id,
                 fate: expected_fate.clone(),
-                global_seq: matches!(expected_fate, Fate::Accepted)
-                    .then_some(GlobalSeq(core.clock.next_global_seq.0 - 1)),
+                global_time: matches!(expected_fate, Fate::Accepted)
+                    .then_some(core.clock.committed_global_time),
                 durability: matches!(expected_fate, Fate::Accepted)
                     .then_some(DurabilityTier::Global),
             }
@@ -420,7 +420,7 @@ fn unbound_is_admin_claim_in_read_policy_denies_as_false() {
     core.apply_fate_update(
         tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();

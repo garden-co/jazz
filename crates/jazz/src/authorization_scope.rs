@@ -3,7 +3,7 @@
 
 use crate::protocol::{AuthorizationScopeReceipt, AuthorizationSupportScopeKey, SubscriptionKey};
 use crate::query::{BindingId, ShapeId};
-use crate::time::GlobalSeq;
+use crate::time::GlobalTime;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
@@ -18,7 +18,7 @@ pub const MAX_AUTHORIZATION_SCOPES: usize = 256;
 pub(crate) struct AuthorityScopeAggregate {
     pub(crate) expected_support: BTreeSet<(ShapeId, BindingId)>,
     pub(crate) members: BTreeMap<SubscriptionKey, (ShapeId, BindingId)>,
-    pub(crate) applied: BTreeMap<SubscriptionKey, (GlobalSeq, u64)>,
+    pub(crate) applied: BTreeMap<SubscriptionKey, (GlobalTime, u64)>,
 }
 
 impl AuthorityScopeAggregate {
@@ -65,9 +65,9 @@ impl AuthorityScopeAggregate {
     pub(crate) fn apply(
         &mut self,
         subscription: SubscriptionKey,
-        settled_through: GlobalSeq,
+        settled_through: GlobalTime,
         authorization_progress: u64,
-    ) -> Option<(GlobalSeq, u64)> {
+    ) -> Option<(GlobalTime, u64)> {
         if !self.members.contains_key(&subscription) {
             return None;
         }
@@ -76,7 +76,7 @@ impl AuthorityScopeAggregate {
         self.bounds()
     }
 
-    pub(crate) fn bounds(&self) -> Option<(GlobalSeq, u64)> {
+    pub(crate) fn bounds(&self) -> Option<(GlobalTime, u64)> {
         if self.members.len() != self.expected_support.len()
             || self
                 .expected_support
@@ -397,7 +397,7 @@ mod tests {
     use super::*;
     use crate::ids::AuthorId;
     use crate::query::{BindingId, ShapeId};
-    use crate::time::GlobalSeq;
+    use crate::time::GlobalTime;
 
     fn k(n: u8) -> AuthorizationSupportScopeKey {
         AuthorizationSupportScopeKey {
@@ -435,7 +435,7 @@ mod tests {
             authority_epoch: 1,
             claims_revision: 1,
             policy_epoch: 1,
-            settled_through: GlobalSeq(1),
+            settled_through: GlobalTime(1),
             authorization_progress: 1,
         }
     }
@@ -464,10 +464,10 @@ mod tests {
         ]));
         assert!(aggregate.register(first, (first.shape_id, first.binding_id)));
         assert!(aggregate.register(second, (second.shape_id, second.binding_id)));
-        assert_eq!(aggregate.apply(second, GlobalSeq(9), 7), None);
+        assert_eq!(aggregate.apply(second, GlobalTime(9), 7), None);
         assert_eq!(
-            aggregate.apply(first, GlobalSeq(12), 11),
-            Some((GlobalSeq(9), 7))
+            aggregate.apply(first, GlobalTime(12), 11),
+            Some((GlobalTime(9), 7))
         );
     }
 
@@ -625,7 +625,7 @@ mod tests {
                         claims_revision: changed.claims_revision,
                         policy_epoch: changed.policy_epoch,
                         authorization_progress: changed.authorization_progress,
-                        settled_through: GlobalSeq(changed.settled_through),
+                        settled_through: GlobalTime(changed.settled_through),
                         ..r(k(1))
                     }
                 ),

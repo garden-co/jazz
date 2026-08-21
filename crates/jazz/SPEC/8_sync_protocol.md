@@ -11,7 +11,7 @@ deployment roles are chapter 9.
 
 Invariant digest:
 
-- `INV-SYNC-5`: A receiver applying a fate update MUST NOT move `global_seq` backward and MUST raise observed durability only by a supplied `Some(DurabilityTier)` claim using monotone max semantics; `None` MUST leave durability unchanged.
+- `INV-SYNC-5`: A receiver applying a fate update MUST NOT move `global_time` backward and MUST raise observed durability only by a supplied `Some(DurabilityTier)` claim using monotone max semantics; `None` MUST leave durability unchanged.
 - `INV-SYNC-7`: A `ViewUpdate` result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a transaction-grained set. Ordinary current row entries are `ResultMemberEntry::Row(RealRowMemberEntry)` values with a `(table, row_uuid, content_tx_id)` projection. Synthetic payloads, relation/path, coverage, policy, and predicate material travel as typed `ProgramFactEntry` add/remove deltas. Relation facts MUST carry the dimensions needed by lowering (kind, versions, depth, edge id, branch, role, order, hole state) rather than requiring an opaque side channel.
 - `INV-SYNC-8`: A view server MUST use `peer_payload_inventory.complete_tx_payloads` only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-scoped, not subscription-scoped, and partial bundles MUST remain eligible for later payload emission until complete-tx payload coverage is established.
 - `INV-SYNC-9`: A receiver MUST reject a `ViewUpdate` that names a `peer_payload_inventory.complete_tx_payloads`, add, or remove transaction it lacks enough tx existence, row-version payload, complete-tx payload, or view-complete exclusive payload coverage to resolve for that subscription view.
@@ -45,8 +45,8 @@ Invariant digest:
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
 - `INV-TX-5`: The authority MUST park a commit unit with missing parent/schema/content prerequisites and MUST decide it only after all prerequisites are present.
-- `INV-TX-11`: Accepted authority commits MUST receive the next `GlobalSeq`, advance the allocator/watermark, and report `DurabilityTier::Global`.
-- `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it MUST NOT accept, assign global sequence, or create merge versions from that payload.
+- `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; accepted state and the core committed frontier MUST become durable atomically before publication.
+- `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it MUST NOT accept, assign global timestamp, or create merge versions from that payload.
 
 ## Details
 
@@ -120,7 +120,7 @@ The message variants and their payloads are:
 | message                                                                            | direction      | payload                                                                                                                              |
 | ---------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `CommitUnit`                                                                       | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                                  |
-| `FateUpdate`                                                                       | down           | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }`                                                 |
+| `FateUpdate`                                                                       | down           | `{ tx_id, fate, global_time: Option<GlobalTime>, durability: Option<DurabilityTier> }`                                               |
 | `RegisterShape`                                                                    | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                            |
 | `Subscribe`                                                                        | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                                    |
 | `SubscribeRejected`                                                                | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                                   |
@@ -129,7 +129,7 @@ The message variants and their payloads are:
 | `PublishSchemaWithLens` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                               |
 
 A `VersionBundle`, carried in `ViewUpdate.version_bundles`, is `{ tx, versions,
-fate, global_seq, durability }`: a settled **view payload bundle** with the fate
+fate, global_time, durability }`: a settled **view payload bundle** with the fate
 state observed when it shipped. A bundle may cover a complete transaction, a
 partial mergeable transaction, or the row/version witnesses that make an
 exclusive transaction complete for this subscription view. A bundle whose
@@ -152,7 +152,7 @@ unit until those dependencies arrive (`INV-TX-5`).
 
 Receiving a bare unfated commit unit is not authority. On a non-authority node,
 `apply_sync_message` stages or parks that commit unit as pending remote fate and
-waits for a `FateUpdate`; it must not accept the unit, assign global sequence, or
+waits for a `FateUpdate`; it must not accept the unit, assign global timestamp, or
 create merge versions from it (`INV-TX-23`). Only a structurally wired fate
 authority path may decide fate (ch. 3 §3.6, ch. 9).
 
@@ -160,13 +160,13 @@ authority path may decide fate (ch. 3 §3.6, ch. 9).
 
 Downstream fate messages tell peers how an already-submitted transaction has
 settled. A verdict travels as
-`SyncMessage::FateUpdate { tx_id, fate, global_seq, durability }`.
+`SyncMessage::FateUpdate { tx_id, fate, global_time, durability }`.
 
 The `durability` field is an optional _claim_. A receiver raises observed
 durability monotonically only when the message carries `Some(_)`; `None` leaves
-the observed durability unchanged. A receiver also never moves `global_seq`
+the observed durability unchanged. A receiver also never moves `global_time`
 backward (`INV-SYNC-5`). When an authority accepts a commit, it assigns a
-monotone `GlobalSeq` that advances the allocator and watermark (ch. 3,
+monotone `GlobalTime` that advances the allocator and watermark (ch. 3,
 `INV-TX-11`) and maintains the global-current tables and change stream (ch. 4).
 
 ### 8.4 Downstream: query-driven view updates
@@ -438,7 +438,7 @@ reset's adds and coverage/settlement state. A reset is not a separate storage
 mode. Serve-dirty marking is also a receiver-boundary effect: if applying the
 staged batch can change what any downstream subscriber would be served, the
 subscriber connections are marked dirty at the same boundary as cache
-invalidation and applied-global-sequence bookkeeping.
+invalidation and applied-global-time bookkeeping.
 
 Under the intended reconstruction model, a reset replaces the receiver's
 canonical closure manifest and every class inventory for that binding view; the
@@ -695,10 +695,14 @@ expressible incremental repair and resets only if that repair cannot be encoded
 as normal additions/removals. Conversely, an authorization-token mismatch with
 only post-cursor additions is reconstructible and therefore must not reset.
 
-Every `ViewUpdate` carries `settled_through`, the core-assigned global cursor
+Every `ViewUpdate` carries `settled_through`, the core-assigned global time
 through which the canonical binding view was evaluated. Its meaning is per
 binding view: this update reflects every global change at or before that
-position for the served view. It may be persisted and reused across reconnects
+time that can affect the served view, including authorization and revocation
+effects. It does not claim that the receiver possesses unrelated transactions,
+and neither density nor numerical adjacency is required: the authority may
+advance one binding directly across arbitrarily many irrelevant commits. It may
+be persisted and reused across reconnects
 or edges serving the same authoritative database lineage for known-state payload
 dedup and repair. It is not an active-connection receipt: a subscription is
 settled, and a usage-site one-shot attachment is remotely covered, only after
@@ -714,6 +718,15 @@ an earlier cut cannot restore settlement; its confirming `settled_through` must
 reach at least `p`. The same floor applies to fallback-staged or deferred
 updates marked ineligible for an authority receipt, even if their link becomes
 selected before the update is finally applied.
+
+Only cores are history-complete. An edge or client therefore tracks
+`settled_through` per binding/subscription and MUST NOT combine those receipts
+into a node-wide global-history watermark. A fresh subscription requires its own
+authoritative evaluation; a receipt for one binding says nothing about another.
+When a result is assembled from multiple binding views, coverage is bounded by
+the required views' confirmed cuts. A history-complete core's separate
+`committed_global_time` is specified in ch. 3 and is not reconstructed from
+downstream query receipts.
 
 For the reconstruction contract, `settled_through` is necessary but not
 sufficient. Settlement means the receiver has installed a **complete,

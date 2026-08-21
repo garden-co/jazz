@@ -470,7 +470,7 @@ fn assert_accepted(fate: &SyncMessage) {
             fate,
             SyncMessage::FateUpdate {
                 fate: Fate::Accepted,
-                global_seq: Some(_),
+                global_time: Some(_),
                 ..
             }
         ),
