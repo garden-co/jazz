@@ -574,7 +574,8 @@ impl PeerState {
                     subscription,
                     peer_complete_tx_payloads,
                     known_state,
-                    complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
+                    complete_exclusive_payloads: self.ship_complete_exclusive_payloads
+                        && self.role == PeerRole::Relay,
                     previous_result_set: previous_result_tx_ids,
                     previous_program_facts,
                     flat_tuple_source_tables: flat_tuple_source_tables(shape),
@@ -990,7 +991,8 @@ impl PeerState {
                 subscription,
                 peer_complete_tx_payloads,
                 known_state: bundle_known_state,
-                complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
+                complete_exclusive_payloads: self.ship_complete_exclusive_payloads
+                    && self.role == PeerRole::Relay,
                 previous_result_set: BTreeSet::new(),
                 // A non-reset rehydrate retains the receiver's existing fact
                 // set, so tuple-source closure must be diffed against it.
@@ -1385,7 +1387,8 @@ impl PeerState {
                     known_state: (!authorization_mismatch)
                         .then_some(known_state)
                         .flatten(),
-                    complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
+                    complete_exclusive_payloads: self.ship_complete_exclusive_payloads
+                        && self.role == PeerRole::Relay,
                     previous_result_set: BTreeSet::new(),
                     previous_program_facts: BTreeSet::new(),
                     flat_tuple_source_tables: Vec::new(),

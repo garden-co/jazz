@@ -42,9 +42,10 @@ result.
 
 The smoke gate retains these receipts and their deltas. The
 `relation_include_delivery` ladder is the quantitative `INV-INC-1` gate added by
-#1166; it holds the change fixed and enforces a `1.025x` allocation/byte ratio.
-#1192 corrects its reporting to use independent per-metric medians without
-retuning that threshold.
+#1166; it holds the change fixed and enforces a `1.03x` allocation/byte ratio.
+#1192 corrects its reporting to use independent per-metric medians. The
+branch-key storage receipt retunes only the narrow ratio threshold as documented
+in `INV_INC_1_RECEIPT.md`.
 
 ### `jazz-sim` scenarios
 
@@ -154,13 +155,13 @@ Ranked by their ability to change an engineering decision:
 
 ## Source of acceptance targets
 
-| property                                   | current evidence                                                                 | next enforcement                                                                               |
-| ------------------------------------------ | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `INV-INC-1` bounded incremental delivery   | retained 1k–20k ladder and `1.025x` gate                                         | land #1192 and extend only when a new maintained mechanism needs its own shape-specific canary |
-| PERF-4 known-state payload dedup           | retained exact-coverage sweep with bytes, bundles, reads, and correctness digest | profile the coverage-invariant serving work only if a user-facing cost justifies it            |
-| PERF-5 maintained converges to rehydrate   | exact-result, cost, bytes, reads, and retained-state scale receipt               | optimize the O(view) metrics-footprint refresh if its measured latency warrants it             |
-| PERF-7/8 current reads are O(current rows) | R3 persisted receipts, current-row and checkpoint benches                        | retained filtered/indexed-read slope where selection is held fixed                             |
-| S4 post-acceptance propagation is O(delta) | separate settlement/propagation phases                                           | fixed-delta/varying-view structural gate                                                       |
+| property                                   | current evidence                                                                 | next enforcement                                                                    |
+| ------------------------------------------ | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `INV-INC-1` bounded incremental delivery   | retained 1k–20k ladder and `1.03x` gate                                          | extend only when a new maintained mechanism needs its own shape-specific canary     |
+| PERF-4 known-state payload dedup           | retained exact-coverage sweep with bytes, bundles, reads, and correctness digest | profile the coverage-invariant serving work only if a user-facing cost justifies it |
+| PERF-5 maintained converges to rehydrate   | exact-result, cost, bytes, reads, and retained-state scale receipt               | optimize the O(view) metrics-footprint refresh if its measured latency warrants it  |
+| PERF-7/8 current reads are O(current rows) | R3 persisted receipts, current-row and checkpoint benches                        | retained filtered/indexed-read slope where selection is held fixed                  |
+| S4 post-acceptance propagation is O(delta) | separate settlement/propagation phases                                           | fixed-delta/varying-view structural gate                                            |
 
 Targets should come from specification properties and measured deterministic
 spread, not from an arbitrary percentage around today’s laptop timing.

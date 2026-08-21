@@ -607,6 +607,18 @@ where
                 let stored_tx = self
                     .query_transaction_memo(*tx_id, &mut context)?
                     .ok_or(Error::MissingTransaction(*tx_id))?;
+                // A trusted writer link that explicitly requests complete
+                // exclusive payloads must receive the whole cross-table
+                // transaction, not one permanently redacted fragment per
+                // table subscription. Identity-scoped links remain bounded
+                // by their maintained policy witnesses even when the peer
+                // preference is enabled.
+                if complete_exclusive_payloads
+                    && stored_tx.tx.kind == TxKind::Exclusive
+                    && usize::try_from(stored_tx.tx.n_total_writes).ok() != Some(tx_versions.len())
+                {
+                    *tx_versions = self.query_versions_for_tx(*tx_id)?;
+                }
                 let filtered_tx_versions = tx_versions
                     .iter()
                     .filter(|version| {
