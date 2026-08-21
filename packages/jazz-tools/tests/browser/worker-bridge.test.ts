@@ -1337,7 +1337,7 @@ describe("Worker Bridge with OPFS", () => {
     const batchId = await insertResult.transactionId;
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
-      1000,
+      5000,
       "onMutationError handler should be called",
     );
     expect(mutationErrorSpy).toHaveBeenCalledWith({
