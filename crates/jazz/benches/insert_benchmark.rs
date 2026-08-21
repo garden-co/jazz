@@ -29,7 +29,7 @@ const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-000000000
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
 fn public_schema_convert() -> JazzSchema {
-    let folder_owner = schema_fixture::session_column("owner", "sub");
+    let folder_owner = schema_fixture::session_user_id_column("owner");
     let folder_access = PolicyExpr::Exists {
         table: "folder_access".to_owned(),
         condition: Box::new(PolicyExpr::And(vec![
@@ -41,7 +41,7 @@ fn public_schema_convert() -> JazzSchema {
                     "folder".to_owned(),
                 ]),
             },
-            schema_fixture::session_column("user", "sub"),
+            schema_fixture::session_user_id_column("user"),
         ])),
     };
     schema_fixture::compile(

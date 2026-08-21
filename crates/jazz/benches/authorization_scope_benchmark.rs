@@ -33,7 +33,7 @@ fn authorization_schema(extra_columns: usize) -> JazzSchema {
         .column("name", ColumnType::Text)
         .column("score", ColumnType::Timestamp)
         .policies(
-            TablePolicies::new().with_select(schema_fixture::session_column("owner_id", "sub")),
+            TablePolicies::new().with_select(schema_fixture::session_user_id_column("owner_id")),
         );
     for index in 0..extra_columns {
         table = table.column(&format!("metadata_{index}"), ColumnType::Text);

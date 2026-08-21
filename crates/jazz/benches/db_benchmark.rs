@@ -37,7 +37,7 @@ fn schema() -> JazzSchema {
 }
 
 fn owner_write_schema() -> JazzSchema {
-    let author = schema_fixture::session_column("author", "sub");
+    let author = schema_fixture::session_user_id_column("author");
     schema_fixture::compile(
         SchemaBuilder::new()
             .table(documents_table().policies(schema_fixture::write_operations(author))),

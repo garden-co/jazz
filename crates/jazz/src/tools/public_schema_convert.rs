@@ -3162,6 +3162,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_bare_sub_session_policy_reference() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("owner", ColumnType::Uuid)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Cmp {
+                        column: "owner".to_owned(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec!["sub".to_owned()]),
+                    })),
+            )
+            .build();
+
+        let error = convert_public_schema(&schema)
+            .expect_err("JWT sub is not a public policy-session field");
+        assert_eq!(error.path, "$.todos.policies.select.using");
+        assert!(error.message.contains("got session.sub"));
+    }
+
+    #[test]
     fn converts_correlated_exists_policy_to_join() {
         let schema = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("chats").column("name", ColumnType::Text))
