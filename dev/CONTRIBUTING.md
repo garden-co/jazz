@@ -24,6 +24,21 @@ This requires a working C/C++ toolchain and `libclang` for `bindgen`:
 - macOS: `xcode-select --install` is enough.
 - Linux: install `libclang-dev` (Debian/Ubuntu) or `clang-devel` (Fedora).
 
+## API documentation
+
+Keep API documentation attached to an authoritative, maintained source rather
+than committing a point-in-time export catalogue. The public application guide
+is in `docs/content/docs/`; its runnable examples are the adjacent
+`examples/docs/` projects. The new-core Rust contract is
+`crates/jazz/SPEC/13_db_api.md`, with the engine and incremental-maintenance
+contracts in `crates/jazz/SPEC/` and `crates/groove/SPEC/`.
+
+For a package's exact TypeScript surface, use its `package.json` export map and
+the emitted declaration files for the release being consumed. For Rust, use the
+crate's public documentation and its specification. Do not add a manually
+maintained or generated-in-place API snapshot: it has no executable source of
+truth and will drift as the API evolves.
+
 ## Testing
 
 ### Pre-commit hooks in restricted shells
