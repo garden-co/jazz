@@ -8,7 +8,13 @@ import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
 ## Includes
 
-Use `include(...)` to load related rows as nested objects in a single query result. Pass `true` to resolve a relation, or a nested object to follow multi-hop references. In Rust, use `join()` with `on()` for equivalent results.
+Use `include(...)` to load related rows as nested objects in a single query result. Pass `true` to resolve a relation, or a nested object to follow multi-hop references.
+
+Rust has deliberately separate query forms. Use `flat_join(...)` when you need fields from both
+tables in one flat result: it is an inner join, so each matching pair is an output occurrence and a
+root row can produce more than one result. Use `ArraySubquery` when you need a named nested array
+on each root result. Rust does not turn a forward reference into the same nullable nested-object
+shape that TypeScript `include(...)` does.
 
 Including a relation adds the resolved object alongside the foreign-key column&hairsp;—&hairsp;it does not replace it. For example, `include({ project: true })` gives you both `projectId` (the FK string) and `project` (the resolved row).
 
@@ -47,7 +53,15 @@ then `projects` gets a `todosViaProject` reverse relation.
   </Tab>
 </Tabs>
 
-You can chain `.where()`, `.select()`, `.orderBy()` and other query methods on the included reverse relation to filter or shape the nested results.
+In TypeScript, you can chain `.where()`, `.select()`, `.orderBy()` and other query methods on the
+included reverse relation. In Rust, configure the `ArraySubquery` itself with `.filter(...)`,
+`.select(...)`, `.order_by(...)`, `.limit(...)`, and `.offset(...)` before passing it to
+`.array_subquery(...)`.
+
+Rust also has `join_via(...)`, `join_via_column(...)`, and `join_via_row_id(...)` for an
+existential relation check: they keep a root row only when a matching related row exists, without
+adding that related row to the result. Use `flat_join(...)` or `ArraySubquery` when the related
+data must be returned.
 
 ## Select
 
@@ -77,8 +91,9 @@ target can't be resolved&hairsp;—&hairsp;for example, because it has not synce
 hidden by permissions. The included field is `null`. A nullable, unset reference also produces
 `null`.
 
-Rust's `join()` / `on()` API uses an inner join instead, so it filters out source rows without a
-matching target.
+Rust's `flat_join(...)` is an inner join, so it filters out source rows without a matching target.
+An `ArraySubquery` is optional by default: its parent still appears with an empty array when no
+readable child row matches.
 
 ### Requiring includes
 
@@ -102,7 +117,10 @@ a source row if one of those required targets is unavailable.
 references and reverse relations (`todosViaOwner`, etc.) are unaffected. When used inside a nested
 `include`, it applies at that nesting level only.
 
-In Rust, call `require_result()` on the corresponding correlated subquery to require a match.
+In Rust, set the corresponding correlated `ArraySubquery` to
+`.requirement(ArraySubqueryRequirement::AtLeastOne)`. That likewise filters the parent when no
+readable related row matches. This is explicit because the normal Rust `ArraySubquery` behavior is
+to keep the parent and return an empty array.
 
 ## Magic columns
 

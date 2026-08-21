@@ -70,7 +70,7 @@ accepted it. A rejected write throws `PersistedWriteRejectedError`, which provid
 
 Use `db.onMutationError()` as a fallback for rejected writes that do not have an active `wait()`
 call. The callback receives the rejection `code`, `reason`, and local transaction record. See
-[Writing data](/docs/writing/writing-data#durability-tiers) for an example and
+[Writing data](/docs/writing/writing-data#write-durability-tiers) for an example and
 [Permissions](/docs/auth/permissions) for how the server decides whether to accept a write.
 
 </Accordion>
