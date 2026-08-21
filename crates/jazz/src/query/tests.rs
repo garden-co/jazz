@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn validates_reachability_over_explicit_scalar_equalities() {
-        let schema = JazzSchema::new([
+        let schema = RuntimeSchema::new([
             TableSchema::new(
                 "resources",
                 [
@@ -371,7 +371,7 @@ mod tests {
             .seeded_by("team_memberships", "user_id", "user_id", "team_id");
         query.reachable[0].source_column = Some("resource_key".to_owned());
 
-        query.validate(&schema).unwrap();
+        query.validate_runtime(&schema).unwrap();
     }
 
     #[test]
