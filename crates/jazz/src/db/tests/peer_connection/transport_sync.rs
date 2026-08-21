@@ -1,4 +1,4 @@
-//! General subscription transport coverage retained while legacy branch sync is quarantined.
+//! General and branch-view subscription transport coverage.
 
 use super::*;
 

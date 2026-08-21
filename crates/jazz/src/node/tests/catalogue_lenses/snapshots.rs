@@ -1390,12 +1390,7 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
     }
 }
 
-/// Branch metadata depends on a real catalogue and must not create durable
-/// branch state while an edge has no trusted authority lineage.
-///
-/// ```text
-/// alice branch create ──► edge(Uninitialized) ──reject──► no branch metadata
-/// ```
+/// Build the trusted catalogue snapshot shared by bootstrap and recovery tests.
 fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
     let base = schema();
     let evolved = SchemaVersion::new(catalogue_evolved_schema());

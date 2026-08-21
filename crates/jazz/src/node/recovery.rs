@@ -1,9 +1,9 @@
 //! Startup recovery and durable-state rehydration for a node. This module owns
-//! rebuilding aliases, schema/lens catalogues, branch metadata, pending edges,
+//! rebuilding aliases, schema/lens catalogues, pending edges,
 //! rejected payloads, and peer/subscription state from groove storage; normal
 //! ingestion lives in [`super::ingest`], storage record layouts in
-//! [`super::codec`], and branch mutation APIs in [`super::branches`]. It is the
-//! node layer's bridge from persisted groove tables back to in-memory state.
+//! [`super::codec`]. It is the node layer's bridge from persisted groove tables
+//! back to in-memory state.
 
 use super::*;
 

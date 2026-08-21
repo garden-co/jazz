@@ -2577,13 +2577,150 @@ mod tests {
     }
 
     use crate::tools::public_api::types::EnumCaseDescriptor;
-    use crate::tools::public_api::types::TableSchemaBuilder;
+    use crate::tools::public_api::types::{
+        BranchDimensionBindingDescriptor, BranchDimensionDescriptor, TableSchemaBuilder,
+    };
     use crate::tools::public_schema::{
         ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, SchemaBuilder,
         TablePolicies, TableSchema,
     };
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    fn branch_dimension(
+        id_byte: u8,
+        name: &str,
+        column_type: ColumnType,
+    ) -> BranchDimensionDescriptor {
+        BranchDimensionDescriptor {
+            id: crate::ids::BranchDimensionId(Uuid::from_bytes([id_byte; 16])),
+            name: name.to_owned(),
+            column_type,
+            migration_default: Value::Uuid(ObjectId::from_uuid(Uuid::nil())),
+        }
+    }
+
+    #[test]
+    fn compiles_named_and_shorthand_branch_dimension_bindings() {
+        let dimension = branch_dimension(0x41, "workspace", ColumnType::Uuid);
+        let todos = TableSchemaBuilder::new("todos")
+            .column("workspace_id", ColumnType::Uuid)
+            .branch_dimension(dimension.clone())
+            .branch_by("workspace_id", "workspace")
+            .build();
+        let mut notes = TableSchemaBuilder::new("notes")
+            .column("workspace", ColumnType::Uuid)
+            .build();
+        notes
+            .branch_by
+            .push(BranchDimensionBindingDescriptor::Column("workspace".into()));
+        let schema = Schema::from([
+            (TableName::new("todos"), todos),
+            (TableName::new("notes"), notes),
+        ]);
+
+        let converted = convert_public_schema(&schema).expect("branch dimensions compile");
+        assert_eq!(converted.branch_dimensions.len(), 1);
+        assert_eq!(
+            converted
+                .tables
+                .iter()
+                .map(|table| table.branch_by.len())
+                .sum::<usize>(),
+            2
+        );
+        assert!(
+            converted
+                .tables
+                .iter()
+                .flat_map(|table| &table.branch_by)
+                .all(|binding| binding.dimension == dimension.id)
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_global_branch_dimension_declarations() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("workspace_id", ColumnType::Uuid)
+                    .branch_dimension(branch_dimension(0x42, "workspace", ColumnType::Uuid))
+                    .branch_by("workspace_id", "workspace"),
+            )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("space_id", ColumnType::Uuid)
+                    .branch_dimension(branch_dimension(0x43, "workspace", ColumnType::Uuid))
+                    .branch_by("space_id", "workspace"),
+            )
+            .build();
+
+        let error = convert_public_schema(&schema).expect_err("conflicting names must fail");
+        assert!(error.to_string().contains("conflicting declaration"));
+    }
+
+    #[test]
+    fn rejects_unknown_missing_and_mistyped_branch_bindings() {
+        let unknown_dimension = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("workspace_id", ColumnType::Uuid)
+                    .branch_by("workspace_id", "workspace"),
+            )
+            .build();
+        assert!(
+            convert_public_schema(&unknown_dimension)
+                .expect_err("unknown dimension must fail")
+                .to_string()
+                .contains("unknown branch dimension")
+        );
+
+        let missing_column = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .branch_dimension(branch_dimension(0x44, "workspace", ColumnType::Uuid))
+                    .branch_by("workspace_id", "workspace"),
+            )
+            .build();
+        assert!(
+            convert_public_schema(&missing_column)
+                .expect_err("missing column must fail")
+                .to_string()
+                .contains("unknown branch column")
+        );
+
+        let mistyped_column = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("workspace_id", ColumnType::Integer)
+                    .branch_dimension(branch_dimension(0x45, "workspace", ColumnType::Uuid))
+                    .branch_by("workspace_id", "workspace"),
+            )
+            .build();
+        assert!(
+            convert_public_schema(&mistyped_column)
+                .expect_err("type mismatch must fail")
+                .to_string()
+                .contains("does not match branch dimension")
+        );
+    }
+
+    #[test]
+    fn rejects_non_key_encodable_branch_dimension_types() {
+        let mut dimension = branch_dimension(0x46, "workspace", ColumnType::Text);
+        dimension.migration_default = Value::Text(String::new());
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("workspace", ColumnType::Text)
+                    .branch_dimension(dimension)
+                    .branch_by("workspace", "workspace"),
+            )
+            .build();
+
+        let error = convert_public_schema(&schema).expect_err("text dimensions must fail");
+        assert!(error.to_string().contains("fixed-width integer values"));
+    }
 
     fn policy_graph_perf_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -102,6 +102,42 @@ users:
   branchBy: []
 ```
 
+At the durable public-schema boundary, a table fragment may contribute the
+global declarations it uses and binds its ordinary columns by stable dimension
+name. Identical declarations contributed by multiple fragments are deduplicated;
+conflicting names or ids are rejected. The explicit object form preserves the
+association across an application-column rename:
+
+```json
+{
+  "tables": {
+    "todos": {
+      "columns": [{ "name": "workspace_id", "column_type": { "type": "Uuid" }, "nullable": false }],
+      "branchDimensions": [
+        {
+          "id": "31313131-3131-3131-3131-313131313131",
+          "name": "workspace",
+          "columnType": { "type": "Uuid" },
+          "migrationDefault": {
+            "type": "Uuid",
+            "value": "00000000-0000-0000-0000-000000000000"
+          }
+        }
+      ],
+      "branchBy": [{ "column": "workspace_id", "dimension": "workspace" }]
+    }
+  }
+}
+```
+
+`branchBy: ["workspace"]` is shorthand for binding a column and dimension
+that have the same name. It is convenient for initial schemas but the explicit
+form is required when the application column has a different or later-renamed
+name. Declarations and bindings are retained in the persisted source schema and
+compiled by Rust; bindings to missing columns or dimensions, duplicate table
+dimensions, type mismatches, nullable values, and non-key-encodable types fail
+schema admission.
+
 Application columns may later be renamed while retaining the same dimension
 binding. Canonical branch-key identity uses stable dimension ids and typed bytes,
 never current column names or declaration order (`INV-BVIEW-1`). Two tables that
