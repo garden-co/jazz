@@ -180,7 +180,7 @@ impl PeerState {
                     .is_some_and(|state| state.maintained_subscription_view.is_some())
                 {
                     (
-                        node.applied_global_watermark(),
+                        node.committed_global_time(),
                         self.authorization_progress_for_subscription(subscription),
                     )
                 } else {
@@ -288,7 +288,7 @@ impl PeerState {
                 {
                     let _ = aggregate.apply(
                         subscription,
-                        node.applied_global_watermark(),
+                        node.committed_global_time(),
                         self.authorization_progress_for_subscription(subscription),
                     );
                     continue;

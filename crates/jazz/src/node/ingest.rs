@@ -43,13 +43,13 @@ include!("ingest/validation.rs");
 
 /// A sequence is the global-authority receipt. Peer payloads which pair it
 /// with a weaker durability must be rejected before they can reach storage.
-pub(super) fn validate_received_fate_update_global_seq_durability(
-    global_seq: Option<GlobalSeq>,
+pub(super) fn validate_received_fate_update_global_time_durability(
+    global_time: Option<GlobalTime>,
     durability: Option<DurabilityTier>,
 ) -> Result<(), Error> {
-    if global_seq.is_some() && durability != Some(DurabilityTier::Global) {
+    if global_time.is_some() && durability != Some(DurabilityTier::Global) {
         return Err(Error::UnsupportedSyncMessage(
-            "global sequence requires Global durability",
+            "global timestamp requires Global durability",
         ));
     }
     Ok(())
@@ -57,13 +57,13 @@ pub(super) fn validate_received_fate_update_global_seq_durability(
 
 /// View bundles are peer payloads too, including reset bundles eligible for
 /// bulk persistence.
-pub(super) fn validate_received_view_bundle_global_seq_durability(
-    global_seq: Option<GlobalSeq>,
+pub(super) fn validate_received_view_bundle_global_time_durability(
+    global_time: Option<GlobalTime>,
     durability: DurabilityTier,
 ) -> Result<(), Error> {
-    if global_seq.is_some() && durability != DurabilityTier::Global {
+    if global_time.is_some() && durability != DurabilityTier::Global {
         return Err(Error::MalformedViewUpdate(
-            "global sequence requires Global durability",
+            "global timestamp requires Global durability",
         ));
     }
     Ok(())

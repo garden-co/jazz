@@ -12,7 +12,7 @@ use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::JazzSchema;
-use jazz::time::GlobalSeq;
+use jazz::time::GlobalTime;
 use jazz::tools::OpenTransactionId;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId};
@@ -111,10 +111,10 @@ impl ValidationBench {
                 .expect("seed commit");
             let fate = core_ingest(&mut self.core, &unit);
             apply_fate(&mut self.clients[owner_idx], &fate);
-            let global_seq = accepted_global_seq(&fate);
+            let global_time = accepted_global_time(&fate);
             self.model.apply(
                 tx_id,
-                global_seq,
+                global_time,
                 unit_versions(&unit),
                 DurabilityTier::Global,
             );
@@ -199,13 +199,13 @@ impl ValidationBench {
                 SyncMessage::FateUpdate {
                     tx_id,
                     fate: Fate::Accepted,
-                    global_seq: Some(global_seq),
+                    global_time: Some(global_time),
                     ..
                 } => {
                     assert!(baseline_accepts, "baseline/core decision mismatch");
                     self.metrics.accepted += 1;
                     self.model
-                        .apply(tx_id, global_seq, versions, DurabilityTier::Global);
+                        .apply(tx_id, global_time, versions, DurabilityTier::Global);
                 }
                 SyncMessage::FateUpdate {
                     fate: Fate::Rejected(reason),
@@ -372,7 +372,7 @@ impl BaselineModel {
     fn apply(
         &mut self,
         tx_id: TxId,
-        global_seq: GlobalSeq,
+        global_time: GlobalTime,
         versions: Vec<VersionRecord>,
         _durability: DurabilityTier,
     ) {
@@ -380,16 +380,16 @@ impl BaselineModel {
             self.history
                 .entry(version.row_uuid())
                 .or_default()
-                .push(ModelVersion { tx_id, global_seq });
+                .push(ModelVersion { tx_id, global_time });
         }
     }
 
-    fn visible_at(&self, row_uuid: RowUuid, global_base: GlobalSeq) -> Option<TxId> {
+    fn visible_at(&self, row_uuid: RowUuid, global_base: GlobalTime) -> Option<TxId> {
         self.history.get(&row_uuid).and_then(|versions| {
             versions
                 .iter()
-                .filter(|version| version.global_seq <= global_base)
-                .max_by_key(|version| version.global_seq)
+                .filter(|version| version.global_time <= global_base)
+                .max_by_key(|version| version.global_time)
                 .map(|version| version.tx_id)
         })
     }
@@ -398,12 +398,12 @@ impl BaselineModel {
         self.history.get(&row_uuid).and_then(|versions| {
             versions
                 .iter()
-                .max_by_key(|version| version.global_seq)
+                .max_by_key(|version| version.global_time)
                 .map(|version| version.tx_id)
         })
     }
 
-    fn visible_content_set_at(&self, global_base: GlobalSeq) -> BTreeSet<TxId> {
+    fn visible_content_set_at(&self, global_base: GlobalTime) -> BTreeSet<TxId> {
         self.history
             .keys()
             .filter_map(|row_uuid| self.visible_at(*row_uuid, global_base))
@@ -420,7 +420,7 @@ impl BaselineModel {
 
 struct ModelVersion {
     tx_id: TxId,
-    global_seq: GlobalSeq,
+    global_time: GlobalTime,
 }
 
 struct Metrics {
@@ -561,16 +561,16 @@ fn apply_fate(node: &mut NodeState<RocksDbStorage>, fate: &SyncMessage) {
     node.apply_sync_message(fate.clone()).expect("apply fate");
 }
 
-fn accepted_global_seq(fate: &SyncMessage) -> GlobalSeq {
+fn accepted_global_time(fate: &SyncMessage) -> GlobalTime {
     let SyncMessage::FateUpdate {
         fate: Fate::Accepted,
-        global_seq: Some(global_seq),
+        global_time: Some(global_time),
         ..
     } = fate
     else {
         panic!("expected accepted fate");
     };
-    *global_seq
+    *global_time
 }
 
 fn unit_versions(unit: &SyncMessage) -> Vec<VersionRecord> {

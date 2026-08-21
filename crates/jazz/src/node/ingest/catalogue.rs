@@ -65,20 +65,27 @@ where
                 }
                 Ok(Vec::new())
             }
-            SyncMessage::CommitUnit { tx, versions } => self.ingest_commit_unit_with_context(
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-                ingest_context,
-            ),
+            SyncMessage::CommitUnit { tx, versions } => {
+                let now_ms = if ingest_context.is_some() {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_| Error::InvalidStoredValue("authority clock precedes Unix epoch"))?
+                        .as_millis()
+                        .try_into()
+                        .map_err(|_| Error::InvalidStoredValue("authority clock exceeds u64 milliseconds"))?
+                } else {
+                    tx.tx_id.time.physical_ms()
+                };
+                self.ingest_commit_unit_with_context(tx, versions, now_ms, ingest_context)
+            }
             SyncMessage::FateUpdate {
                 tx_id,
                 fate,
-                global_seq,
+                global_time,
                 durability,
             } => {
-                validate_received_fate_update_global_seq_durability(global_seq, durability)?;
-                self.apply_fate_update(tx_id, fate, global_seq, durability)?;
+                validate_received_fate_update_global_time_durability(global_time, durability)?;
+                self.apply_fate_update(tx_id, fate, global_time, durability)?;
                 self.drain_parked_commit_units()
             }
             SyncMessage::ViewUpdate {

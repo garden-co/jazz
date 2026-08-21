@@ -1,6 +1,64 @@
 //! Link admission, authority selection, permission advice, and routed fates.
 
 use super::*;
+use crate::node::SKEW_TOLERANCE_MS;
+
+#[test]
+fn authenticated_client_upload_uses_authority_clock_for_forward_skew() {
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client = open_core(0xc1, identity, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let authority_now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let future_ms = authority_now_ms + SKEW_TOLERANCE_MS + 10_000;
+    let (tx_id, unit) = client
+        .node()
+        .borrow_mut()
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", RowUuid::from_bytes([0xf1; 16]), future_ms)
+                .made_by(identity)
+                .cells(cells("future", false, identity)),
+        )
+        .unwrap();
+    let before = server.node().borrow().committed_global_time();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+
+    client_transport.send(unit).unwrap();
+    let mut response = None;
+    for _ in 0..3 {
+        subscriber.borrow_mut().tick().unwrap();
+        while let Some(message) = client_transport.try_recv() {
+            if matches!(message, SyncMessage::FateUpdate { .. }) {
+                response = Some(message);
+            }
+        }
+    }
+    let Some(SyncMessage::FateUpdate {
+        fate, global_time, ..
+    }) = response
+    else {
+        panic!("authority must return a fate");
+    };
+    assert_eq!(
+        fate,
+        Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
+    );
+    assert_eq!(global_time, None);
+    assert_eq!(server.node().borrow().committed_global_time(), before);
+    assert_eq!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_state(tx_id)
+            .unwrap()
+            .0,
+        Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
+    );
+}
 
 #[test]
 fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
@@ -130,13 +188,13 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
         authority_epoch: expected.connection_epoch,
         claims_revision: 0,
         policy_epoch: 0,
-        settled_through: GlobalSeq(0),
+        settled_through: GlobalTime(0),
         authorization_progress: 0,
     };
     assert!(authorization_scope_receipt_matches_transport_context(
         &receipt,
         expected,
-        Some(GlobalSeq(0)),
+        Some(GlobalTime(0)),
     ));
     assert!(
         !authorization_scope_receipt_matches_transport_context(
@@ -146,7 +204,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
                 ..receipt.clone()
             },
             expected,
-            Some(GlobalSeq(0)),
+            Some(GlobalTime(0)),
         ),
         "a receipt from the opposite duplex endpoint must not cross-wire"
     );
@@ -628,7 +686,7 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     let fate = SyncMessage::FateUpdate {
         tx_id,
         fate: Fate::Accepted,
-        global_seq: Some(GlobalSeq(17)),
+        global_time: Some(GlobalTime(17)),
         durability: Some(DurabilityTier::Global),
     };
 
@@ -684,7 +742,7 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
                 fate: Fate::Rejected(RejectionReason::MalformedCommit(
                     "wrong physical link".to_owned(),
                 )),
-                global_seq: None,
+                global_time: None,
                 durability: None,
             })
             .unwrap();
@@ -778,7 +836,7 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
         .send(SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(1)),
+            global_time: Some(GlobalTime(1)),
             durability: Some(DurabilityTier::Global),
         })
         .unwrap();
@@ -792,7 +850,7 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
         .send(SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(1)),
+            global_time: Some(GlobalTime(1)),
             durability: Some(DurabilityTier::Global),
         })
         .unwrap();
@@ -933,7 +991,7 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         .send(SyncMessage::FateUpdate {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::MalformedCommit("late A".to_owned())),
-            global_seq: None,
+            global_time: None,
             durability: None,
         })
         .unwrap();
@@ -1126,7 +1184,7 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         .send(SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(1)),
+            global_time: Some(GlobalTime(1)),
             durability: Some(DurabilityTier::Global),
         })
         .unwrap();
@@ -1206,7 +1264,7 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
         .send(SyncMessage::FateUpdate {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::MalformedCommit("old session".to_owned())),
-            global_seq: None,
+            global_time: None,
             durability: None,
         })
         .unwrap();
@@ -1224,7 +1282,7 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
         .send(SyncMessage::FateUpdate {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(1)),
+            global_time: Some(GlobalTime(1)),
             durability: Some(DurabilityTier::Global),
         })
         .unwrap();

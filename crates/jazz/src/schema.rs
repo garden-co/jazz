@@ -708,7 +708,7 @@ impl TableSchema {
             column("created_at", GrooveColumnType::U64),
             column("updated_by", GrooveColumnType::Uuid),
             column("updated_at", GrooveColumnType::U64),
-            column("global_seq", GrooveColumnType::U64.nullable()),
+            column("global_time", GrooveColumnType::U64.nullable()),
         ];
         // Carry every user column (not only indexed ones) so the global-current
         // table is a self-sufficient current-row index: whole-table current
@@ -750,7 +750,7 @@ impl TableSchema {
                     column("created_at", GrooveColumnType::U64),
                     column("updated_by", GrooveColumnType::Uuid),
                     column("updated_at", GrooveColumnType::U64),
-                    column("global_seq", GrooveColumnType::U64.nullable()),
+                    column("global_time", GrooveColumnType::U64.nullable()),
                     column("_deletion", deletion_column()),
                 ],
             )
@@ -770,7 +770,7 @@ impl TableSchema {
             column("created_at", GrooveColumnType::U64),
             column("updated_by", GrooveColumnType::Uuid),
             column("updated_at", GrooveColumnType::U64),
-            column("global_seq", GrooveColumnType::U64.nullable()),
+            column("global_time", GrooveColumnType::U64.nullable()),
         ];
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
@@ -805,7 +805,7 @@ impl TableSchema {
                     column("created_at", GrooveColumnType::U64),
                     column("updated_by", GrooveColumnType::Uuid),
                     column("updated_at", GrooveColumnType::U64),
-                    column("global_seq", GrooveColumnType::U64.nullable()),
+                    column("global_time", GrooveColumnType::U64.nullable()),
                     column("_deletion", deletion_column()),
                 ],
             )
@@ -956,7 +956,7 @@ fn global_changes_table() -> GrooveTableSchema {
             column("physical_table_id", GrooveColumnType::U64),
             column("row_uuid", GrooveColumnType::Uuid),
             column("layer", GrooveColumnType::Bytes),
-            column("global_seq", GrooveColumnType::U64),
+            column("global_time", GrooveColumnType::U64),
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("_deletion", deletion_column().nullable()),
@@ -966,15 +966,15 @@ fn global_changes_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("row_uuid"),
         PrimaryKeyColumn::bytes("layer"),
-        PrimaryKeyColumn::integer("global_seq", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("global_time", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new(
-        "by_global_seq",
-        ["global_seq", "physical_table_id", "row_uuid", "layer"],
+        "by_global_time",
+        ["global_time", "physical_table_id", "row_uuid", "layer"],
     ))
     .with_index(GrooveIndexSchema::new(
-        "by_table_global_seq",
-        ["physical_table_id", "global_seq", "row_uuid", "layer"],
+        "by_table_global_time",
+        ["physical_table_id", "global_time", "row_uuid", "layer"],
     ))
 }
 
@@ -1154,7 +1154,7 @@ fn transactions_table() -> GrooveTableSchema {
             // upstream-decided: written only by fate/state application.
             column("fate", fate_column()),
             // upstream-decided: written only by fate/state application.
-            column("global_seq", GrooveColumnType::U64.nullable()),
+            column("global_time", GrooveColumnType::U64.nullable()),
             // upstream-decided: written only by rejection/state application.
             column("rejection_reason", rejection_reason_column().nullable()),
             // upstream-decided: written only by rejection/state application.
@@ -1169,7 +1169,7 @@ fn transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
-    .with_index(GrooveIndexSchema::new("by_global_seq", ["global_seq"]))
+    .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
 }
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
@@ -1455,26 +1455,26 @@ mod tests {
                 .iter()
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
-            vec!["physical_table_id", "row_uuid", "layer", "global_seq"]
+            vec!["physical_table_id", "row_uuid", "layer", "global_time"]
         );
 
         let index = table
             .indices
             .iter()
-            .find(|index| index.name == "by_global_seq")
+            .find(|index| index.name == "by_global_time")
             .unwrap();
         assert_eq!(
             index.columns,
-            vec!["global_seq", "physical_table_id", "row_uuid", "layer"]
+            vec!["global_time", "physical_table_id", "row_uuid", "layer"]
         );
         let table_index = table
             .indices
             .iter()
-            .find(|index| index.name == "by_table_global_seq")
+            .find(|index| index.name == "by_table_global_time")
             .unwrap();
         assert_eq!(
             table_index.columns,
-            vec!["physical_table_id", "global_seq", "row_uuid", "layer"]
+            vec!["physical_table_id", "global_time", "row_uuid", "layer"]
         );
     }
 

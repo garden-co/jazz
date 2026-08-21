@@ -1161,15 +1161,15 @@ struct R3OpenBreakdown {
     recover_storage: Duration,
     recover_catalogue_state: Duration,
     validate_current_rows: Duration,
-    recover_global_sequences: Duration,
+    recover_global_times: Duration,
     recover_pending_and_rejected: Duration,
     recover_unclean_close: Duration,
     recover_known_state: Duration,
     rebuild_ahead_current: Duration,
     finalize_catalogue: Duration,
     validated_current_rows: usize,
-    accepted_global_sequences: usize,
-    global_sequence_records_scanned: usize,
+    accepted_global_times: usize,
+    global_time_records_scanned: usize,
     ahead_current_entries: usize,
 }
 
@@ -1317,15 +1317,15 @@ fn open_rocks_db_with_phases(
                 recover_storage: receipt.recover_storage,
                 recover_catalogue_state: receipt.recover_catalogue_state,
                 validate_current_rows: receipt.validate_current_rows,
-                recover_global_sequences: receipt.recover_global_sequences,
+                recover_global_times: receipt.recover_global_times,
                 recover_pending_and_rejected: receipt.recover_pending_and_rejected,
                 recover_unclean_close: receipt.recover_unclean_close,
                 recover_known_state: receipt.recover_known_state,
                 rebuild_ahead_current: receipt.rebuild_ahead_current,
                 finalize_catalogue: receipt.finalize_catalogue,
                 validated_current_rows: receipt.validated_current_rows,
-                accepted_global_sequences: receipt.accepted_global_sequences,
-                global_sequence_records_scanned: receipt.global_sequence_records_scanned,
+                accepted_global_times: receipt.accepted_global_times,
+                global_time_records_scanned: receipt.global_time_records_scanned,
                 ahead_current_entries: receipt.ahead_current_entries,
             }),
         )
@@ -1482,9 +1482,9 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
                         &samples,
                         |receipt| receipt.validate_current_rows,
                     ),
-                    "recover_global_sequences_p50_us": median_open_us(
+                    "recover_global_times_p50_us": median_open_us(
                         &samples,
-                        |receipt| receipt.recover_global_sequences,
+                        |receipt| receipt.recover_global_times,
                     ),
                     "recover_pending_and_rejected_p50_us": median_open_us(
                         &samples,
@@ -1510,14 +1510,14 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
                         .open_breakdown
                         .as_ref()
                         .map(|receipt| receipt.validated_current_rows),
-                    "accepted_global_sequences": samples[0]
+                    "accepted_global_times": samples[0]
                         .open_breakdown
                         .as_ref()
-                        .map(|receipt| receipt.accepted_global_sequences),
-                    "global_sequence_records_scanned": samples[0]
+                        .map(|receipt| receipt.accepted_global_times),
+                    "global_time_records_scanned": samples[0]
                         .open_breakdown
                         .as_ref()
-                        .map(|receipt| receipt.global_sequence_records_scanned),
+                        .map(|receipt| receipt.global_time_records_scanned),
                     "ahead_current_entries": samples[0]
                         .open_breakdown
                         .as_ref()

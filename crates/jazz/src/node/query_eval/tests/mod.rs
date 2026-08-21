@@ -590,7 +590,7 @@ fn commit_global_cells(
     row_uuid: RowUuid,
     cells: BTreeMap<String, Value>,
     now_ms: u64,
-    global_seq: u64,
+    global_time: u64,
 ) -> TxId {
     let tx_id = node
         .commit_mergeable(
@@ -602,7 +602,7 @@ fn commit_global_cells(
     node.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(global_seq)),
+        Some(GlobalTime(global_time)),
         Some(DurabilityTier::Global),
     )
     .expect("accept row");
@@ -627,7 +627,7 @@ fn current_titles(
 fn historical_titles_via_full_scan(
     node: &mut NodeState<RocksDbStorage>,
     table: &TableSchema,
-    position: GlobalSeq,
+    position: GlobalTime,
 ) -> BTreeMap<RowUuid, Value> {
     let table_id = node
         .physical_table_id_for_schema(node.catalogue.current_schema_version_id, &table.name)
@@ -655,7 +655,7 @@ fn delete_global(
     table: &str,
     row_uuid: RowUuid,
     now_ms: u64,
-    global_seq: u64,
+    global_time: u64,
 ) -> TxId {
     let tx_id = node
         .commit_mergeable(
@@ -667,7 +667,7 @@ fn delete_global(
     node.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(global_seq)),
+        Some(GlobalTime(global_time)),
         Some(DurabilityTier::Global),
     )
     .expect("accept delete");
@@ -731,7 +731,7 @@ fn commit_global_issue(
     node.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(seq)),
+        Some(GlobalTime(seq)),
         Some(DurabilityTier::Global),
     )
     .expect("accept issue");
@@ -764,7 +764,7 @@ fn commit_global_user(node: &mut NodeState<RocksDbStorage>, user: AuthorId, name
     node.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(seq)),
+        Some(GlobalTime(seq)),
         Some(DurabilityTier::Global),
     )
     .expect("accept user");
@@ -790,7 +790,7 @@ fn commit_global_member(
     node.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(seq)),
+        Some(GlobalTime(seq)),
         Some(DurabilityTier::Global),
     )
     .expect("accept member");

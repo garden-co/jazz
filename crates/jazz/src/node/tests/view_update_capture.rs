@@ -12,7 +12,7 @@ struct CanonicalViewUpdate {
 struct CanonicalVersionBundle {
     tx: String,
     fate: String,
-    global_seq: Option<GlobalSeq>,
+    global_time: Option<GlobalTime>,
     durability: DurabilityTier,
     versions: Vec<CanonicalVersionRecord>,
 }
@@ -41,7 +41,7 @@ fn canonical_version_bundle(bundle: VersionBundle) -> CanonicalVersionBundle {
     CanonicalVersionBundle {
         tx: format!("{:?}", bundle.tx),
         fate: format!("{:?}", bundle.fate),
-        global_seq: bundle.global_seq,
+        global_time: bundle.global_time,
         durability: bundle.durability,
         versions,
     }
@@ -666,7 +666,7 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
     core.apply_fate_update(
         sibling_tx,
         Fate::Accepted,
-        Some(GlobalSeq(100)),
+        Some(GlobalTime(100)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -709,7 +709,7 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
     core.apply_fate_update(
         multi_tx,
         Fate::Accepted,
-        Some(GlobalSeq(101)),
+        Some(GlobalTime(101)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -1612,7 +1612,7 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
     core.apply_fate_update(
         sibling_tx,
         Fate::Accepted,
-        Some(GlobalSeq(100)),
+        Some(GlobalTime(100)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -1637,7 +1637,7 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
     core.apply_fate_update(
         multi_tx,
         Fate::Accepted,
-        Some(GlobalSeq(101)),
+        Some(GlobalTime(101)),
         Some(DurabilityTier::Global),
     )
     .unwrap();

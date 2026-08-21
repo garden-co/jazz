@@ -14,7 +14,7 @@ use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
 use jazz::schema::{JazzSchema, TableSchema};
-use jazz::time::GlobalSeq;
+use jazz::time::GlobalTime;
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
@@ -1231,7 +1231,7 @@ fn accept_merge(
     core.apply_fate_update(
         tx,
         Fate::Accepted,
-        Some(GlobalSeq(*global)),
+        Some(GlobalTime(*global)),
         Some(DurabilityTier::Global),
     )
     .unwrap();

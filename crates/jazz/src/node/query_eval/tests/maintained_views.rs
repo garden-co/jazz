@@ -472,7 +472,7 @@ fn branch_program_maintained_view_settles_overlay_fates_at_every_tier() {
         (DurabilityTier::Edge, (None, DurabilityTier::Edge)),
         (
             DurabilityTier::Global,
-            (Some(GlobalSeq(4)), DurabilityTier::Global),
+            (Some(GlobalTime(4)), DurabilityTier::Global),
         ),
     ] {
         let (_dir, mut node) = open_node();
@@ -499,7 +499,7 @@ fn branch_program_maintained_view_settles_overlay_fates_at_every_tier() {
         node.apply_fate_update(
             initial_overlay,
             Fate::Accepted,
-            Some(GlobalSeq(3)),
+            Some(GlobalTime(3)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -582,7 +582,7 @@ fn branch_program_maintained_view_settles_overlay_fates_at_every_tier() {
             )
             .unwrap();
         let deletion_acceptance = match tier {
-            DurabilityTier::Global => (Some(GlobalSeq(5)), DurabilityTier::Global),
+            DurabilityTier::Global => (Some(GlobalTime(5)), DurabilityTier::Global),
             _ => (None, DurabilityTier::Edge),
         };
         if tier == DurabilityTier::Local {
@@ -635,7 +635,7 @@ fn branch_program_maintained_view_settles_overlay_fates_at_every_tier() {
             )
             .unwrap();
         let restoration_acceptance = match tier {
-            DurabilityTier::Global => (Some(GlobalSeq(6)), DurabilityTier::Global),
+            DurabilityTier::Global => (Some(GlobalTime(6)), DurabilityTier::Global),
             _ => (None, DurabilityTier::Edge),
         };
         if tier == DurabilityTier::Local {
@@ -710,7 +710,7 @@ fn branch_program_maintained_view_retracts_rejected_pending_overlay_versions() {
         node.apply_fate_update(
             accepted,
             Fate::Accepted,
-            Some(GlobalSeq(3)),
+            Some(GlobalTime(3)),
             Some(DurabilityTier::Global),
         )
         .unwrap();

@@ -248,62 +248,67 @@ where
         }
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| web_time::Instant::now());
-        let mut accepted_global_seqs = Vec::new();
+        let mut accepted_global_times = Vec::new();
         #[cfg(feature = "testing")]
-        let mut global_sequence_records_scanned = 0usize;
+        let mut global_time_records_scanned = 0usize;
         // Nullable index keys order `None` before `Some`. Range over only the
         // `Some` bucket so local pending/rejected transactions cannot make
         // recovery O(total transactions). The range end is exclusive, hence
         // the separate exact lookup preserves the prior u64::MAX behavior.
-        let first_global_seq = Value::Nullable(Some(Box::new(Value::U64(0))));
-        let last_global_seq = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
+        let first_global_time = Value::Nullable(Some(Box::new(Value::U64(0))));
+        let last_global_time = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
         let mut sequenced_transactions = self.database.index_scan_range_raw(
             "jazz_transactions",
-            "by_global_seq",
-            std::slice::from_ref(&first_global_seq),
-            std::slice::from_ref(&last_global_seq),
+            "by_global_time",
+            std::slice::from_ref(&first_global_time),
+            std::slice::from_ref(&last_global_time),
         )?;
         sequenced_transactions.extend(self.database.index_scan_raw(
             "jazz_transactions",
-            "by_global_seq",
-            std::slice::from_ref(&last_global_seq),
+            "by_global_time",
+            std::slice::from_ref(&last_global_time),
         )?);
         for raw in sequenced_transactions {
             #[cfg(feature = "testing")]
             {
-                global_sequence_records_scanned += 1;
+                global_time_records_scanned += 1;
             }
             let record = raw.record();
-            let global_seq = record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
-            if global_seq.is_some()
+            let global_time =
+                record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?;
+            if global_time.is_some()
                 && durability_from_discriminant(
                     record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
                 )? != DurabilityTier::Global
             {
                 return Err(Error::InvalidStoredValue(
-                    "global sequence requires Global durability",
+                    "global timestamp requires Global durability",
                 ));
             }
             if !matches!(fate_from_encoded_fields(record)?, Fate::Accepted) {
                 continue;
             }
-            if let Some(global_seq) = global_seq {
-                accepted_global_seqs.push(GlobalSeq(global_seq));
+            if let Some(global_time) = global_time {
+                accepted_global_times.push(GlobalTime(global_time));
             }
         }
-        accepted_global_seqs.sort();
-        accepted_global_seqs.dedup();
+        accepted_global_times.sort();
+        accepted_global_times.dedup();
         #[cfg(feature = "testing")]
         if let Some(receipt) = &mut receipt {
-            receipt.accepted_global_sequences = accepted_global_seqs.len();
-            receipt.global_sequence_records_scanned = global_sequence_records_scanned;
+            receipt.accepted_global_times = accepted_global_times.len();
+            receipt.global_time_records_scanned = global_time_records_scanned;
         }
-        for global_seq in accepted_global_seqs {
-            self.record_applied_global_seq(global_seq);
+        for global_time in accepted_global_times {
+            self.record_applied_global_time(global_time);
+        }
+        if self.history_complete {
+            self.clock.committed_global_time = self.clock.global_time_register;
+            self.clock.applied_global_times_after_frontier.clear();
         }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
-            receipt.recover_global_sequences = started.elapsed();
+            receipt.recover_global_times = started.elapsed();
         }
 
         #[cfg(feature = "testing")]

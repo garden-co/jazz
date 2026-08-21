@@ -877,32 +877,32 @@ fn commit_metrics_split_storage_writes_by_jazz_destination() {
                     ColumnSchema::new("table_name", ColumnType::Bytes),
                     ColumnSchema::new("row_uuid", ColumnType::Uuid),
                     ColumnSchema::new("layer", ColumnType::Bytes),
-                    ColumnSchema::new("global_seq", ColumnType::U64),
+                    ColumnSchema::new("global_time", ColumnType::U64),
                 ],
             )
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::bytes("table_name"),
                 PrimaryKeyColumn::uuid("row_uuid"),
                 PrimaryKeyColumn::bytes("layer"),
-                PrimaryKeyColumn::integer("global_seq", IntegerKeyType::U64),
+                PrimaryKeyColumn::integer("global_time", IntegerKeyType::U64),
             ]))
             .with_index(IndexSchema::new(
-                "by_global_seq",
-                ["global_seq", "table_name", "row_uuid", "layer"],
+                "by_global_time",
+                ["global_time", "table_name", "row_uuid", "layer"],
             )),
             TableSchema::new(
                 "jazz_transactions",
                 [
                     ColumnSchema::new("time", ColumnType::U64),
                     ColumnSchema::new("node_id", ColumnType::U64),
-                    ColumnSchema::new("global_seq", ColumnType::U64),
+                    ColumnSchema::new("global_time", ColumnType::U64),
                 ],
             )
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
                 PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
             ]))
-            .with_index(IndexSchema::new("by_global_seq", ["global_seq"])),
+            .with_index(IndexSchema::new("by_global_time", ["global_time"])),
         ]);
         let column_families = layout.physical_column_families(schema.column_families());
         let refs = column_families

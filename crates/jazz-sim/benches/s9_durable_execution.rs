@@ -16,7 +16,7 @@ use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
 use jazz::schema::{JazzSchema, TableSchema};
-use jazz::time::GlobalSeq;
+use jazz::time::GlobalTime;
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
@@ -274,8 +274,8 @@ struct BaselineSummary {
 fn run_jazz(config: &Config) -> JazzSummary {
     let schema = schema();
     let (core_dir, mut core) = open_node(node(250), schema.clone());
-    let mut global_seq = 1_u64;
-    seed_fixture(config, &mut core, &mut global_seq);
+    let mut global_time = 1_u64;
+    seed_fixture(config, &mut core, &mut global_time);
     let fixture_current_state_bytes = storage_bytes(core_dir.path());
 
     let mut dashboard_peer = PeerState::new();
@@ -362,7 +362,7 @@ fn run_jazz(config: &Config) -> JazzSummary {
                 config,
                 AcceptState {
                     core: &mut core,
-                    global_seq: &mut global_seq,
+                    global_time: &mut global_time,
                     accepted_schedule: &mut accepted_schedule,
                     oracle: &mut oracle,
                     seen_advances: &mut seen_advances,
@@ -417,7 +417,7 @@ fn run_jazz(config: &Config) -> JazzSummary {
                     config,
                     AcceptState {
                         core: &mut core,
-                        global_seq: &mut global_seq,
+                        global_time: &mut global_time,
                         accepted_schedule: &mut accepted_schedule,
                         oracle: &mut oracle,
                         seen_advances: &mut seen_advances,
@@ -517,7 +517,7 @@ fn next_runnable_instance(oracle: &[u64], offset: usize, config: &Config) -> Opt
 
 struct AcceptState<'a> {
     core: &'a mut NodeState<RocksDbStorage>,
-    global_seq: &'a mut u64,
+    global_time: &'a mut u64,
     accepted_schedule: &'a mut Vec<Transition>,
     oracle: &'a mut [u64],
     seen_advances: &'a mut BTreeSet<(usize, u64)>,
@@ -541,7 +541,7 @@ fn record_accept(
         *state.double_advances += 1;
     }
     state.oracle[instance] = to_step.min(config.steps_per_instance as u64);
-    append_step_and_event(state.core, state.global_seq, transition, now_ms);
+    append_step_and_event(state.core, state.global_time, transition, now_ms);
     state.accepted_schedule.push(transition);
 }
 
@@ -615,7 +615,7 @@ fn apply_transition(
 
 fn append_step_and_event(
     core: &mut NodeState<RocksDbStorage>,
-    global_seq: &mut u64,
+    global_time: &mut u64,
     transition: Transition,
     now_ms: u64,
 ) {
@@ -643,7 +643,7 @@ fn append_step_and_event(
             ])),
         )
         .unwrap();
-    accept_global(core, step_tx, global_seq);
+    accept_global(core, step_tx, global_time);
     let event_tx = core
         .commit_mergeable(
             MergeableCommit::new(
@@ -663,10 +663,10 @@ fn append_step_and_event(
             ])),
         )
         .unwrap();
-    accept_global(core, event_tx, global_seq);
+    accept_global(core, event_tx, global_time);
 }
 
-fn seed_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>, global_seq: &mut u64) {
+fn seed_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>, global_time: &mut u64) {
     let tx = core
         .commit_mergeable(
             MergeableCommit::new(WORKFLOWS, workflow_row(), 1).cells(cells_map([
@@ -678,7 +678,7 @@ fn seed_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>, global_se
             ])),
         )
         .unwrap();
-    accept_global(core, tx, global_seq);
+    accept_global(core, tx, global_time);
     for instance in 0..config.instances {
         let tx = core
             .commit_mergeable(
@@ -690,7 +690,7 @@ fn seed_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>, global_se
                 ])),
             )
             .unwrap();
-        accept_global(core, tx, global_seq);
+        accept_global(core, tx, global_time);
     }
 }
 
@@ -1051,15 +1051,15 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
     }
 }
 
-fn accept_global(core: &mut NodeState<RocksDbStorage>, tx: jazz::tx::TxId, global_seq: &mut u64) {
+fn accept_global(core: &mut NodeState<RocksDbStorage>, tx: jazz::tx::TxId, global_time: &mut u64) {
     core.apply_fate_update(
         tx,
         Fate::Accepted,
-        Some(GlobalSeq(*global_seq)),
+        Some(GlobalTime(*global_time)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    *global_seq += 1;
+    *global_time += 1;
 }
 
 fn schema() -> JazzSchema {

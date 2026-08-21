@@ -6,7 +6,7 @@ fn exclusive_base_snapshot_preserves_sparse_local_and_foreign_dots() {
 
     let snapshot = crate::tx::Snapshot::exclusive_base(
         owner,
-        GlobalSeq(3),
+        GlobalTime(3),
         TxTime::from(12),
         vec![own_dot, foreign_dot],
     )
@@ -37,7 +37,7 @@ fn exclusive_begin_resolves_sparse_global_dots_without_scanning_history_after_re
     core.apply_fate_update(
         sparse,
         Fate::Accepted,
-        Some(GlobalSeq(100)),
+        Some(GlobalTime(100)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -338,7 +338,7 @@ fn exclusive_tx_open_state_is_invisible_outside_transaction() {
     ));
 }
 #[test]
-fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
+fn partial_node_snapshot_does_not_promote_received_global_times() {
     let (_temp_dir, mut reader) = open_node_with_uuid(node(3));
 
     for (seq, row_byte) in [(1, 1), (3, 3)] {
@@ -366,18 +366,17 @@ fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
                     None,
                 )],
                 Fate::Accepted,
-                Some(GlobalSeq(seq)),
+                Some(GlobalTime(seq)),
                 DurabilityTier::Global,
             )
             .unwrap();
     }
 
-    let gapped = OpenTransactionId::new();
-    reader.open_exclusive(gapped).unwrap();
-    assert_eq!(
-        reader.open_tx(gapped).unwrap().base_snapshot.global_base,
-        GlobalSeq(1)
-    );
+    let first_snapshot = OpenTransactionId::new();
+    reader.open_exclusive(first_snapshot).unwrap();
+    let first_base = &reader.open_tx(first_snapshot).unwrap().base_snapshot;
+    assert_eq!(first_base.global_base, GlobalTime::default());
+    assert_eq!(first_base.dots.len(), 2);
 
     let tx_id = TxId::new(TxTime::from(12), node(9));
     reader
@@ -403,22 +402,95 @@ fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
                 None,
             )],
             Fate::Accepted,
-            Some(GlobalSeq(2)),
+            Some(GlobalTime(2)),
             DurabilityTier::Global,
         )
         .unwrap();
 
-    let contiguous = OpenTransactionId::new();
-    reader.open_exclusive(contiguous).unwrap();
-    assert_eq!(
-        reader
-            .open_tx(contiguous)
-            .unwrap()
-            .base_snapshot
-            .global_base,
-        GlobalSeq(3)
-    );
+    let second_snapshot = OpenTransactionId::new();
+    reader.open_exclusive(second_snapshot).unwrap();
+    let second_base = &reader.open_tx(second_snapshot).unwrap().base_snapshot;
+    assert_eq!(second_base.global_base, GlobalTime::default());
+    assert_eq!(second_base.dots.len(), 3);
 }
+
+#[test]
+fn core_snapshot_uses_atomically_committed_global_time() {
+    let (_temp_dir, mut core) = open_node_with_uuid(node(9));
+    let tx_id = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(1), 25).cells(title_cells("settled")),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit(tx_id).unwrap();
+
+    let open_id = OpenTransactionId::new();
+    core.open_exclusive(open_id).unwrap();
+    let base = &core.open_tx(open_id).unwrap().base_snapshot;
+    assert_eq!(base.global_base, GlobalTime::new(25, 0).unwrap());
+    assert!(base.dots.is_empty());
+}
+
+#[test]
+fn partial_snapshot_whole_table_validation_accepts_its_sparse_global_dots() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("base")),
+    );
+
+    let open_id = OpenTransactionId::new();
+    client.open_exclusive(open_id).unwrap();
+    assert_eq!(client.tx_current_rows(open_id, "todos").unwrap().len(), 1);
+    client
+        .tx_write(open_id, "todos", row(2), title_cells("next"), None)
+        .unwrap();
+    let (_, unit) = client
+        .commit_exclusive(open_id, AuthorId::SYSTEM, 11)
+        .unwrap();
+
+    let updates = core.apply_sync_message(unit).unwrap();
+    let [SyncMessage::FateUpdate { fate, .. }] = updates.as_slice()
+    else {
+        panic!("expected fate update");
+    };
+    assert_eq!(*fate, Fate::Accepted);
+}
+
+#[test]
+fn partial_snapshot_filtered_validation_accepts_its_sparse_global_dots() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("base")),
+    );
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), lit(Value::String("base".to_owned()))))
+        .validate(&client.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let open_id = OpenTransactionId::new();
+    client.open_exclusive(open_id).unwrap();
+    assert_eq!(client.tx_query(open_id, &shape, &binding).unwrap().len(), 1);
+    client
+        .tx_write(open_id, "todos", row(2), title_cells("next"), None)
+        .unwrap();
+    let (_, unit) = client
+        .commit_exclusive(open_id, AuthorId::SYSTEM, 11)
+        .unwrap();
+
+    let updates = core.apply_sync_message(unit).unwrap();
+    let [SyncMessage::FateUpdate { fate, .. }] = updates.as_slice() else {
+        panic!("expected fate update");
+    };
+    assert_eq!(*fate, Fate::Accepted);
+}
+
 #[test]
 fn exclusive_commit_accepts_clean_end_to_end() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
@@ -450,18 +522,18 @@ fn exclusive_commit_accepts_clean_end_to_end() {
     let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
     let SyncMessage::FateUpdate {
         fate: accepted,
-        global_seq,
+        global_time,
         ..
     } = &fate
     else {
         panic!("expected fate update");
     };
     assert_eq!(accepted, &Fate::Accepted);
-    assert_eq!(*global_seq, Some(GlobalSeq(2)));
+    assert_eq!(*global_time, Some(GlobalTime::new(11, 0).unwrap()));
     client.apply_sync_message(fate).unwrap();
     assert_eq!(
         client.transaction_state(tx_id).unwrap(),
-        (Fate::Accepted, Some(GlobalSeq(2)), DurabilityTier::Global)
+        (Fate::Accepted, Some(GlobalTime::new(11, 0).unwrap()), DurabilityTier::Global)
     );
     assert_eq!(
         core.current_rows("todos", DurabilityTier::Global)
@@ -1024,13 +1096,13 @@ fn authority_parks_child_until_unknown_exclusive_parent_rejects() {
             SyncMessage::FateUpdate {
                 tx_id: exclusive,
                 fate: Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-                global_seq: None,
+                global_time: None,
                 durability: None,
             },
             SyncMessage::FateUpdate {
                 tx_id: child,
                 fate: Fate::Rejected(RejectionReason::Cascade { root: exclusive }),
-                global_seq: None,
+                global_time: None,
                 durability: None,
             },
         ]
@@ -1495,7 +1567,7 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
         SyncMessage::FateUpdate {
             tx_id: rejected,
             fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }
     );

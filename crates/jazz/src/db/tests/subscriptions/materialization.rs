@@ -127,7 +127,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
                     last_write.mergeable_tx_id(),
                 )),
             ],
-            GlobalSeq(42),
+            GlobalTime(42),
         );
 
     assert_eq!(client.refresh_subscriptions().unwrap(), 1);
@@ -240,7 +240,7 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
                 row(0x7a),
                 missing_tx,
             ))],
-            GlobalSeq(42),
+            GlobalTime(42),
         );
     client
         .node
@@ -311,7 +311,7 @@ fn authoritative_reset_skips_stale_member_without_falling_back() {
                 ResultMemberEntry::row(("todos".to_owned().into(), live_row, tx_id)),
                 ResultMemberEntry::row(("todos".to_owned().into(), stale_row, tx_id)),
             ],
-            GlobalSeq(42),
+            GlobalTime(42),
         );
     client
         .node
@@ -651,7 +651,7 @@ fn propagated_authoritative_reset_uses_delivered_binding_view() {
                 live_row,
                 tx_id,
             ))],
-            GlobalSeq(42),
+            GlobalTime(42),
         );
     client
         .node
@@ -702,7 +702,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
     };
     let empty = SyncMessage::ViewUpdate {
         subscription,
-        settled_through: crate::time::GlobalSeq(0),
+        settled_through: crate::time::GlobalTime(0),
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),
@@ -717,7 +717,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
 
     let fact_only = SyncMessage::ViewUpdate {
         subscription,
-        settled_through: crate::time::GlobalSeq(0),
+        settled_through: crate::time::GlobalTime(0),
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: Vec::new(),

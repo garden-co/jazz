@@ -68,7 +68,7 @@ use crate::query::{
 };
 pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeReplacement};
 use crate::schema::{JazzSchema, TableSchema};
-use crate::time::GlobalSeq;
+use crate::time::GlobalTime;
 use crate::tools::OpenTransactionId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
@@ -311,7 +311,7 @@ const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
 #[derive(Default)]
 struct AuthorityViewReceipts {
     connection_epoch: u64,
-    confirmation_floor: GlobalSeq,
+    confirmation_floor: GlobalTime,
     binding_views: BTreeSet<BindingViewKey>,
 }
 
@@ -389,7 +389,7 @@ where
                 queue.borrow_mut().push(SyncMessage::FateUpdate {
                     tx_id: *tx_id,
                     fate: Fate::Pending,
-                    global_seq: None,
+                    global_time: None,
                     durability: Some(DurabilityTier::Local),
                 });
                 route.local_acknowledged = true;
@@ -710,7 +710,7 @@ struct AuthorizationScopeLeaseRequest {
     lease: Option<AuthorizationScopeLease>,
     owner: Option<AuthorizationScopeOwnerToken>,
     clause_count: Option<u16>,
-    applied_clauses: BTreeMap<u16, (SubscriptionKey, crate::time::GlobalSeq, u64)>,
+    applied_clauses: BTreeMap<u16, (SubscriptionKey, crate::time::GlobalTime, u64)>,
 }
 
 /// Per-upstream admission manager for scope receipts and their retained leases.

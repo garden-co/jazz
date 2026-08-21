@@ -661,6 +661,26 @@ fn reopen_node_at(
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
     NodeState::new(node_uuid, schema, storage).unwrap()
 }
+fn open_history_complete_node_at(
+    temp_dir: &tempfile::TempDir,
+    schema: JazzSchema,
+) -> NodeState<RocksDbStorage> {
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    NodeState::new_history_complete(node(1), schema, storage).unwrap()
+}
+
+fn reopen_history_complete_node_at(
+    temp_dir: &tempfile::TempDir,
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> NodeState<RocksDbStorage> {
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    NodeState::new_history_complete(node_uuid, schema, storage).unwrap()
+}
 fn open_node_with_schema(
     node_uuid: NodeUuid,
     schema: JazzSchema,
@@ -796,17 +816,17 @@ fn commit_global_and_oracle(
     core: &mut NodeState<RocksDbStorage>,
     oracle: &mut Oracle,
     commit: MergeableCommit,
-) -> (TxId, GlobalSeq) {
+) -> (TxId, GlobalTime) {
     let row_uuid = commit.row_uuid;
     let parents = commit.parents.clone();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
     let (tx_id, unit) = writer.commit_mergeable_unit(commit).unwrap();
     let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
-    let SyncMessage::FateUpdate { global_seq, .. } = &fate else {
+    let SyncMessage::FateUpdate { global_time, .. } = &fate else {
         panic!("expected accepted fate update");
     };
-    let global_seq = global_seq.expect("core commit is globally accepted");
+    let global_time = global_time.expect("core commit is globally accepted");
     writer.apply_sync_message(fate).unwrap();
     let mut version = ModelRowVersion::new(row_uuid, tx_id, tx_id.time);
     version.parents = parents;
@@ -815,9 +835,9 @@ fn commit_global_and_oracle(
     oracle.add_version(version);
     oracle.record_tx_state(
         tx_id,
-        OracleTxState::new(Fate::Accepted, Some(global_seq), DurabilityTier::Global),
+        OracleTxState::new(Fate::Accepted, Some(global_time), DurabilityTier::Global),
     );
-    (tx_id, global_seq)
+    (tx_id, global_time)
 }
 fn assert_current_rows_match_oracle(node: &mut NodeState<RocksDbStorage>, oracle: &Oracle) {
     let actual = node
@@ -906,7 +926,7 @@ impl PerNodeKnowledge {
         let SyncMessage::FateUpdate {
             tx_id,
             fate,
-            global_seq,
+            global_time,
             durability,
         } = message
         else {
@@ -921,7 +941,7 @@ impl PerNodeKnowledge {
         });
         self.states.insert(
             *tx_id,
-            OracleTxState::new(fate.clone(), *global_seq, durability),
+            OracleTxState::new(fate.clone(), *global_time, durability),
         );
     }
 
@@ -1003,7 +1023,7 @@ impl PerNodeKnowledge {
             }
             self.states.insert(
                 bundle.tx.tx_id,
-                OracleTxState::new(bundle.fate.clone(), bundle.global_seq, bundle.durability),
+                OracleTxState::new(bundle.fate.clone(), bundle.global_time, bundle.durability),
             );
         }
     }
@@ -1152,10 +1172,10 @@ fn add_core_versions_to_oracle(
             model.cells = cells;
             model.deletion = version.deletion();
             oracle.add_version(model);
-            let (fate, global_seq, durability) = core
+            let (fate, global_time, durability) = core
                 .transaction_state(tx_id)
                 .expect("core-created version must have transaction state");
-            oracle.record_tx_state(tx_id, OracleTxState::new(fate, global_seq, durability));
+            oracle.record_tx_state(tx_id, OracleTxState::new(fate, global_time, durability));
         }
     }
 }
@@ -1163,7 +1183,7 @@ fn record_fate_update_in_oracle(oracle: &mut Oracle, fate: &SyncMessage) {
     let SyncMessage::FateUpdate {
         tx_id,
         fate,
-        global_seq,
+        global_time,
         durability,
     } = fate
     else {
@@ -1177,7 +1197,7 @@ fn record_fate_update_in_oracle(oracle: &mut Oracle, fate: &SyncMessage) {
     });
     oracle.record_tx_state(
         *tx_id,
-        OracleTxState::new(fate.clone(), *global_seq, durability),
+        OracleTxState::new(fate.clone(), *global_time, durability),
     );
 }
 fn add_commit_unit_versions_to_oracle(
@@ -1208,20 +1228,20 @@ fn assert_exclusive_serialization_matches_oracle(
         if !matches!(state.fate, Fate::Accepted) {
             continue;
         }
-        let Some(global_seq) = state.global_seq else {
+        let Some(global_time) = state.global_time else {
             panic!(
                 "seed {seed}: accepted exclusive {:?} has no global seq",
                 tx.tx_id
             );
         };
-        let Some(serialization_base) = global_seq.0.checked_sub(1).map(GlobalSeq) else {
+        let Some(serialization_base) = global_time.0.checked_sub(1).map(GlobalTime) else {
             panic!("seed {seed}: invalid global seq for {:?}", tx.tx_id);
         };
-        let base = tx
+        let base_snapshot = tx
             .base_snapshot
             .as_ref()
-            .expect("accepted exclusive must carry a base snapshot")
-            .global_base;
+            .expect("accepted exclusive must carry a base snapshot");
+        let base = base_snapshot.global_base;
         for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
             assert!(
                 oracle.exclusive_row_read_matches_at(read, serialization_base),
@@ -1249,12 +1269,12 @@ fn assert_exclusive_serialization_matches_oracle(
                     );
                 };
                 (
-                    oracle.visible_global_content_set_at_owner(base, *owner),
+                    oracle.visible_content_set_at_snapshot_owner(base_snapshot, Some(*owner)),
                     oracle.visible_global_content_set_at_owner(serialization_base, *owner),
                 )
             } else {
                 (
-                    oracle.visible_global_content_set_at(base),
+                    oracle.visible_content_set_at_snapshot_owner(base_snapshot, None),
                     oracle.visible_global_content_set_at(serialization_base),
                 )
             };
@@ -1365,14 +1385,15 @@ fn commit_owner_policy_global(
                 .cells(owner_cells(owner, title)),
         )
         .unwrap();
-    let expected_global_seq = core.clock.next_global_seq;
+    let expected_global_time =
+        GlobalTime::tick(core.clock.global_time_register, tx_id.time.physical_ms()).unwrap();
     let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
-            global_seq: Some(expected_global_seq),
+            global_time: Some(expected_global_time),
             durability: Some(DurabilityTier::Global),
         }
     );
@@ -1393,13 +1414,7 @@ fn commit_core_owner_fixture(
                 .cells(owner_cells(owner, title)),
         )
         .unwrap();
-    core.apply_fate_update(
-        tx_id,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(tx_id).unwrap();
     tx_id
 }
 fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {

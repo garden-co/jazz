@@ -36,7 +36,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -76,8 +76,8 @@ where
     /// recovered sequence. If no global progress changed, the old full-clock
     /// restoration preserves retryability for a definitely-uncommitted batch.
     fn restore_clock_after_failed_authority_ingest(&mut self, before: Clock) {
-        if self.clock.applied_global_watermark == before.applied_global_watermark
-            && self.clock.applied_global_above_watermark == before.applied_global_above_watermark
+        if self.clock.committed_global_time == before.committed_global_time
+            && self.clock.applied_global_times_after_frontier == before.applied_global_times_after_frontier
         {
             self.clock = before;
             return;
@@ -85,29 +85,22 @@ where
 
         let highest_recovered = self
             .clock
-            .applied_global_above_watermark
+            .applied_global_times_after_frontier
             .iter()
             .next_back()
             .copied()
-            .unwrap_or(self.clock.applied_global_watermark);
-        if highest_recovered >= before.next_global_seq {
-            if highest_recovered == GlobalSeq(u64::MAX) {
-                self.clock.next_global_seq = GlobalSeq(u64::MAX);
-                self.clock.global_seq_exhausted = true;
-            } else {
-                self.clock.next_global_seq = highest_recovered.next();
-                self.clock.global_seq_exhausted = false;
-            }
-        } else {
-            self.clock.next_global_seq = before.next_global_seq;
-            self.clock.global_seq_exhausted = before.global_seq_exhausted;
-        }
+            .unwrap_or(self.clock.committed_global_time);
+        self.clock.global_time_register = self
+            .clock
+            .global_time_register
+            .max(before.global_time_register)
+            .max(highest_recovered);
     }
 
     /// Ingest a mergeable commit unit as an edge authority.
     ///
     /// This applies the same structural and write-policy checks as the normal
-    /// authority path, but records only edge durability: no global sequence is
+    /// authority path, but records only edge durability: no global timestamp is
     /// allocated until core later finalizes the edge-accepted unit.
     pub fn ingest_edge_authority_mergeable_commit_unit(
         &mut self,
@@ -176,7 +169,7 @@ where
     }
 
     /// Finalize a locally-authored pending mergeable commit as the global
-    /// authority: assign the next global sequence and mark it Accepted/Global.
+    /// authority: assign the next global timestamp and mark it Accepted/Global.
     ///
     /// This is the authority's self-acceptance of its own write — the path a
     /// `Core` `Db` takes when it commits through the facade (a client instead
@@ -220,11 +213,13 @@ where
             self.ingest_rejected_transaction(stored.tx, fate)?;
             return Ok(());
         }
-        let global_seq = self.clock.allocate_global_seq()?;
+        let global_time = self
+            .clock
+            .allocate_global_time(tx_id.time.physical_ms())?;
         self.apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(global_seq),
+            Some(global_time),
             Some(DurabilityTier::Global),
         )?;
         if stored.tx.target_lineage == crate::tx::BranchLineage::Root {
@@ -268,11 +263,13 @@ where
             self.ingest_rejected_transaction(tx, fate.clone())?;
             return Ok(fate);
         }
-        let global_seq = self.clock.allocate_global_seq()?;
+        let global_time = self
+            .clock
+            .allocate_global_time(tx_id.time.physical_ms())?;
         self.apply_fate_update(
             tx_id,
             Fate::Accepted,
-            Some(global_seq),
+            Some(global_time),
             Some(DurabilityTier::Global),
         )?;
         if tx.target_lineage == crate::tx::BranchLineage::Root {
@@ -300,7 +297,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -314,7 +311,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -336,13 +333,13 @@ where
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             if matches!(existing.fate, Fate::Accepted)
-                && existing.global_seq.is_some()
+                && existing.global_time.is_some()
                 && existing.durability >= DurabilityTier::Global
             {
                 return Ok(vec![SyncMessage::FateUpdate {
                     tx_id: tx.tx_id,
                     fate: existing.fate.clone(),
-                    global_seq: existing.global_seq,
+                    global_time: existing.global_time,
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
@@ -350,7 +347,7 @@ where
                 return Ok(vec![SyncMessage::FateUpdate {
                     tx_id: tx.tx_id,
                     fate: existing.fate.clone(),
-                    global_seq: existing.global_seq,
+                    global_time: existing.global_time,
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
@@ -395,7 +392,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -407,7 +404,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -419,11 +416,13 @@ where
             return Ok(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }]);
         }
-        let global_seq = self.clock.allocate_global_seq()?;
+        let authority_now_ms =
+            GlobalTime::authority_now_ms(now_ms, tx.tx_id.time.physical_ms());
+        let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
         let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
@@ -436,17 +435,17 @@ where
             tx.clone(),
             versions,
             fate.clone(),
-            Some(global_seq),
+            Some(global_time),
             durability,
         )?;
-        debug_assert_eq!(self.clock.applied_global_watermark, global_seq);
+        debug_assert_eq!(self.clock.committed_global_time, global_time);
         if root_target {
             self.create_merge_versions_for_rows(merge_rows)?;
         }
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
-            global_seq: Some(global_seq),
+            global_time: Some(global_time),
             durability: Some(durability),
         }])
     }
@@ -562,7 +561,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -579,7 +578,7 @@ where
                 return Ok(vec![SyncMessage::FateUpdate {
                     tx_id: tx.tx_id,
                     fate: existing.fate.clone(),
-                    global_seq: existing.global_seq,
+                    global_time: existing.global_time,
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
@@ -602,7 +601,7 @@ where
                 return Ok(vec![SyncMessage::FateUpdate {
                     tx_id: tx.tx_id,
                     fate: existing.fate.clone(),
-                    global_seq: existing.global_seq,
+                    global_time: existing.global_time,
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
@@ -648,7 +647,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -660,7 +659,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -673,7 +672,7 @@ where
             return Ok(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }]);
         }
@@ -683,7 +682,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -700,14 +699,16 @@ where
             return Ok(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }]);
         }
         if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive {
             return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
         }
-        let global_seq = self.clock.allocate_global_seq()?;
+        let authority_now_ms =
+            GlobalTime::authority_now_ms(now_ms, tx.tx_id.time.physical_ms());
+        let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
         let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
@@ -720,17 +721,17 @@ where
             tx.clone(),
             versions,
             fate.clone(),
-            Some(global_seq),
+            Some(global_time),
             durability,
         )?;
-        debug_assert_eq!(self.clock.applied_global_watermark, global_seq);
+        debug_assert_eq!(self.clock.committed_global_time, global_time);
         if root_target {
             self.create_merge_versions_for_rows(merge_rows)?;
         }
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
-            global_seq: Some(global_seq),
+            global_time: Some(global_time),
             durability: Some(durability),
         }])
     }
@@ -755,7 +756,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -769,7 +770,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -794,7 +795,7 @@ where
                 return Ok(vec![SyncMessage::FateUpdate {
                     tx_id: tx.tx_id,
                     fate: existing.fate.clone(),
-                    global_seq: existing.global_seq,
+                    global_time: existing.global_time,
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
@@ -840,7 +841,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -852,7 +853,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -864,7 +865,7 @@ where
             return Ok(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }]);
         }
@@ -874,7 +875,7 @@ where
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
-                global_seq: None,
+                global_time: None,
                 durability: None,
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
@@ -887,7 +888,7 @@ where
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
-            global_seq: None,
+            global_time: None,
             durability: Some(durability),
         }])
     }
@@ -897,13 +898,13 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         fate: Fate,
-        global_seq: Option<GlobalSeq>,
+        global_time: Option<GlobalTime>,
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.require_catalogue_ready()?;
         debug_assert!(
-            global_seq.is_none() || durability == DurabilityTier::Global,
-            "a global sequence requires Global durability"
+            global_time.is_none() || durability == DurabilityTier::Global,
+            "a global timestamp requires Global durability"
         );
         self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
@@ -931,18 +932,18 @@ where
                 }
             }
             if version_bundles.is_empty() {
-                self.apply_fate_update(tx.tx_id, fate, global_seq, Some(durability))?;
+                self.apply_fate_update(tx.tx_id, fate, global_time, Some(durability))?;
                 return Ok(());
             }
             return self.ingest_transaction_and_versions(
                 tx,
                 version_bundles,
                 fate,
-                global_seq,
+                global_time,
                 durability,
             );
         }
-        self.ingest_transaction_and_versions(tx, versions, fate, global_seq, durability)
+        self.ingest_transaction_and_versions(tx, versions, fate, global_time, durability)
     }
 
     pub(super) fn stage_known_transaction(
@@ -951,13 +952,13 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         fate: Fate,
-        global_seq: Option<GlobalSeq>,
+        global_time: Option<GlobalTime>,
         durability: DurabilityTier,
-        staged_global_seqs: &mut Vec<GlobalSeq>,
+        staged_global_times: &mut Vec<GlobalTime>,
     ) -> Result<(), Error> {
         debug_assert!(
-            global_seq.is_none() || durability == DurabilityTier::Global,
-            "a global sequence requires Global durability"
+            global_time.is_none() || durability == DurabilityTier::Global,
+            "a global timestamp requires Global durability"
         );
         let versions = canonical_versions(versions);
         // This is entered by the batched ViewUpdate path, which has no
@@ -967,14 +968,14 @@ where
         self.validate_view_payload_versions(&versions)?;
         self.merge_tx_time(tx.tx_id.time);
         if self.query_transaction(tx.tx_id)?.is_some() {
-            return self.ingest_known_transaction(tx, versions, fate, global_seq, durability);
+            return self.ingest_known_transaction(tx, versions, fate, global_time, durability);
         }
         self.stage_transaction_and_versions_with_current_indexes(
             batch,
             tx.clone(),
             versions,
             fate.clone(),
-            global_seq,
+            global_time,
             durability,
             true,
         )?;
@@ -982,8 +983,8 @@ where
             batch,
             tx.tx_id,
             fate,
-            global_seq,
-            staged_global_seqs,
+            global_time,
+            staged_global_times,
         )
     }
 
@@ -993,8 +994,8 @@ where
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
-            validate_received_view_bundle_global_seq_durability(
-                bundle.global_seq,
+            validate_received_view_bundle_global_time_durability(
+                bundle.global_time,
                 bundle.durability,
             )?;
             bundles_by_tx
@@ -1009,7 +1010,7 @@ where
             if tx_bundles.iter().any(|bundle| {
                 bundle.tx != first.tx
                     || bundle.fate != first.fate
-                    || bundle.global_seq != first.global_seq
+                    || bundle.global_time != first.global_time
                     || bundle.durability != first.durability
             }) {
                 continue;
@@ -1017,7 +1018,7 @@ where
             if *first.fate != Fate::Accepted {
                 continue;
             }
-            if first.global_seq.is_none() {
+            if first.global_time.is_none() {
                 continue;
             }
             if first.tx.kind != TxKind::Mergeable && first.tx.kind != TxKind::Exclusive {
@@ -1097,25 +1098,25 @@ where
             .sum::<usize>();
         batch.reserve(eligible.len() + version_count.saturating_mul(2));
         let mut current_updates =
-            BTreeMap::<(String, RowUuid, VersionLayer), (VersionRow, GlobalSeq)>::new();
+            BTreeMap::<(String, RowUuid, VersionLayer), (VersionRow, GlobalTime)>::new();
         let mut content_versions = Vec::new();
         #[cfg(test)]
         let mut content_rows = BTreeSet::<(String, RowUuid)>::new();
-        let mut applied_global_seqs = Vec::with_capacity(eligible.len());
+        let mut applied_global_times = Vec::with_capacity(eligible.len());
 
         for tx_bundles in eligible {
             let first = tx_bundles[0];
             let tx = first.tx;
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
-            let global_seq = first.global_seq.expect("checked above");
-            applied_global_seqs.push(global_seq);
+            let global_time = first.global_time.expect("checked above");
+            applied_global_times.push(global_time);
             batch.insert(
                 "jazz_transactions",
                 transaction_values(
                     tx_node_alias,
                     tx,
                     (*first.fate).clone(),
-                    first.global_seq,
+                    first.global_time,
                     first.durability,
                 ),
             );
@@ -1173,20 +1174,20 @@ where
                 });
                 if version_wins_over_open_winner(&stored, tx.tx_id, tx.tx_id.time, existing_winner)
                 {
-                    current_updates.insert(key, (stored, global_seq));
+                    current_updates.insert(key, (stored, global_time));
                 }
             }
         }
 
-        for (stored, global_seq) in current_updates.values() {
-            self.write_global_current_update(&mut batch, stored, *global_seq)?;
+        for (stored, global_time) in current_updates.values() {
+            self.write_global_current_update(&mut batch, stored, *global_time)?;
         }
         self.write_merge_heads_for_bulk_content_versions(&mut batch, &content_versions)?;
 
         #[cfg(test)]
         let current_update_versions = current_updates
             .values()
-            .map(|(stored, global_seq)| (stored.clone(), *global_seq))
+            .map(|(stored, global_time)| (stored.clone(), *global_time))
             .collect::<Vec<_>>();
         self.database.commit_batch(batch)?;
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
@@ -1204,8 +1205,8 @@ where
         for tx_id in &loaded_tx_ids {
             self.invalidate_tx_version_tables_cache(*tx_id);
         }
-        for global_seq in applied_global_seqs {
-            self.record_applied_global_seq(global_seq);
+        for global_time in applied_global_times {
+            self.record_applied_global_time(global_time);
         }
         Ok(loaded_tx_ids)
     }

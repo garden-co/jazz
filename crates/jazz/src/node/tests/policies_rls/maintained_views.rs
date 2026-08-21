@@ -14,13 +14,7 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
             MergeableCommit::new("todos", row(0x92), 10).cells(owner_cells(author_a, "skip")),
         ])
         .unwrap();
-    core.apply_fate_update(
-        sibling_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(sibling_tx).unwrap();
 
     let deleted_readable_content = accept_global(
         &mut core,
@@ -138,13 +132,7 @@ fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
             MergeableCommit::new("todos", row(0x92), 10).cells(owner_cells(author_a, "skip")),
         ])
         .unwrap();
-    core.apply_fate_update(
-        sibling_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(sibling_tx).unwrap();
 
     let deleted_readable_content = accept_global(
         &mut core,

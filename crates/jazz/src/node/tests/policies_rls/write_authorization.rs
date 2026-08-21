@@ -220,7 +220,7 @@ fn write_policy_rejection_cleans_up_client() {
         SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }
     );
@@ -265,7 +265,7 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
         SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(1)),
+            global_time: Some(GlobalTime::new(10, 0).unwrap()),
             durability: Some(DurabilityTier::Global),
         }
     );
@@ -322,7 +322,7 @@ fn owner_only_delete_requires_current_owner() {
         SyncMessage::FateUpdate {
             tx_id: bad_delete,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
-            global_seq: None,
+            global_time: None,
             durability: None,
         }
     );
@@ -345,7 +345,7 @@ fn owner_only_delete_requires_current_owner() {
         SyncMessage::FateUpdate {
             tx_id: good_delete,
             fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(2)),
+            global_time: Some(GlobalTime::new(12, 0).unwrap()),
             durability: Some(DurabilityTier::Global),
         }
     );
@@ -429,7 +429,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
     core.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -628,7 +628,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     core.apply_fate_update(
         invite_tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -716,7 +716,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     core.apply_fate_update(
         revoke_tx,
         Fate::Accepted,
-        Some(GlobalSeq(3)),
+        Some(GlobalTime(3)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -790,7 +790,7 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     core.apply_fate_update(
         invite_tx,
         Fate::Accepted,
-        Some(GlobalSeq(0)),
+        Some(GlobalTime(0)),
         Some(DurabilityTier::Global),
     )
     .unwrap();

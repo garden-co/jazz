@@ -42,7 +42,7 @@ use crate::schema::{
     JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy, SETTLED_PROGRAM_FACTS_STORE,
     SETTLED_RESULT_MEMBERS_STORE, TableSchema, registered_column_transform,
 };
-use crate::time::{GlobalSeq, TxTime};
+use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tx::{
     AbsentRead, BranchLineage, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate,
@@ -407,8 +407,8 @@ pub struct NodeOpenReceipt {
     pub recover_catalogue_state: Duration,
     /// Retained for receipt compatibility; startup no longer makes this sweep.
     pub validate_current_rows: Duration,
-    /// Accepted global-sequence recovery time.
-    pub recover_global_sequences: Duration,
+    /// Accepted global-time recovery time.
+    pub recover_global_times: Duration,
     /// Pending-edge and rejected-transaction recovery time.
     pub recover_pending_and_rejected: Duration,
     /// Bounded unclean-close cleanup time.
@@ -421,10 +421,10 @@ pub struct NodeOpenReceipt {
     pub finalize_catalogue: Duration,
     /// Current rows decoded by the retired full validation sweep.
     pub validated_current_rows: usize,
-    /// Accepted global-sequence entries recovered.
-    pub accepted_global_sequences: usize,
-    /// Transaction index records inspected for global sequences.
-    pub global_sequence_records_scanned: usize,
+    /// Accepted global-time entries recovered.
+    pub accepted_global_times: usize,
+    /// Transaction index records inspected for global timestamps.
+    pub global_time_records_scanned: usize,
     /// Physical ahead-current records consumed while rebuilding indexes.
     pub ahead_current_entries: usize,
 }
@@ -655,28 +655,45 @@ struct Branches {
 struct Clock {
     /// Highest local transaction timestamp observed or minted by this node.
     tx_time: TxTime,
-    /// Next global sequence number to allocate when accepting local work globally.
-    next_global_seq: GlobalSeq,
-    /// Whether the maximum global sequence has already been allocated or recovered.
-    global_seq_exhausted: bool,
-    /// Contiguous global sequence watermark already applied to local storage.
-    applied_global_watermark: GlobalSeq,
-    /// Applied global sequence numbers above the contiguous watermark.
-    applied_global_above_watermark: BTreeSet<GlobalSeq>,
+    /// Highest authority settlement timestamp observed or minted by this node.
+    global_time_register: GlobalTime,
+    /// Authority timestamps allocated here and awaiting accepted application.
+    locally_minted_global_times: BTreeSet<GlobalTime>,
+    /// Highest globally accepted timestamp durably committed by this core.
+    committed_global_time: GlobalTime,
+    /// Global transactions held by a partial node outside its core frontier.
+    applied_global_times_after_frontier: BTreeSet<GlobalTime>,
 }
 
 impl Clock {
-    fn allocate_global_seq(&mut self) -> Result<GlobalSeq, Error> {
-        if self.global_seq_exhausted {
-            return Err(Error::InvalidStoredValue("global sequence exhausted"));
-        }
-        let global_seq = self.next_global_seq;
-        if global_seq == GlobalSeq(u64::MAX) {
-            self.global_seq_exhausted = true;
-        } else {
-            self.next_global_seq = global_seq.next();
-        }
-        Ok(global_seq)
+    fn allocate_global_time(&mut self, now_ms: u64) -> Result<GlobalTime, Error> {
+        let global_time = GlobalTime::tick(self.global_time_register, now_ms)
+            .ok_or(Error::InvalidStoredValue("global HLC exhausted"))?;
+        self.global_time_register = global_time;
+        self.locally_minted_global_times.insert(global_time);
+        Ok(global_time)
+    }
+}
+
+#[cfg(test)]
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    fn allocate_global_time_for_test(&mut self) -> GlobalTime {
+        self.clock
+            .allocate_global_time(self.clock.tx_time.physical_ms())
+            .expect("test global HLC must have capacity")
+    }
+
+    fn accept_global_for_test(&mut self, tx_id: TxId) -> Result<(), Error> {
+        let global_time = self.allocate_global_time_for_test();
+        self.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(global_time),
+            Some(DurabilityTier::Global),
+        )
     }
 }
 
@@ -738,7 +755,7 @@ struct QueryServing {
     /// Subscriber-side settled non-row facts by canonical query binding/view.
     settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
     /// Server-stamped settled-through cursor for each canonical binding view.
-    settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalSeq>,
+    settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalTime>,
     /// Server-stamped authorization generation paired with settled fast state.
     authorization_progress_by_binding_view: BTreeMap<BindingViewKey, u64>,
     /// Binding views whose current subscription declared known-state repair.
@@ -1250,7 +1267,7 @@ where
     S: OrderedKvStorage,
 {
     node: &'node mut NodeState<S>,
-    position: GlobalSeq,
+    position: GlobalTime,
 }
 
 impl<S> HistoricalRead<'_, S>
@@ -1258,7 +1275,7 @@ where
     S: OrderedKvStorage,
 {
     /// Global settle position this handle reads at.
-    pub fn position(&self) -> GlobalSeq {
+    pub fn position(&self) -> GlobalTime {
         self.position
     }
 }
@@ -1314,8 +1331,8 @@ pub struct QueryEngineReadMetrics {
     pub source_primary_key_scans: u64,
     /// Visible-current source resolutions that used a declared secondary index.
     pub source_index_probes: u64,
-    /// Historical/branch-base source resolutions that used a bounded global-sequence range.
-    pub source_global_seq_range_scans: u64,
+    /// Historical/branch-base source resolutions that used a bounded global-time range.
+    pub source_global_time_range_scans: u64,
     /// Visible-current source resolutions that fell back to a full source scan.
     pub source_full_scans: u64,
 }
@@ -1450,7 +1467,7 @@ impl MergeableCommit {
 
 pub(crate) struct ViewUpdateParts {
     pub(crate) subscription: SubscriptionKey,
-    pub(crate) settled_through: GlobalSeq,
+    pub(crate) settled_through: GlobalTime,
     pub(crate) defer_settlement: bool,
     pub(crate) reset_result_set: bool,
     pub(crate) version_carriers: Vec<VersionCarrier>,

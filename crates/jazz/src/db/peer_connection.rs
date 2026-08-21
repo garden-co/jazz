@@ -76,7 +76,7 @@ pub(super) enum ConnectionLink {
         branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
         /// Latest support-view cut seen on this link. Receipts are accepted
         /// only after their matching `ViewUpdate` has entered the apply batch.
-        scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalSeq>,
+        scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
         /// Proofs tied to support views applied on this connection. They are
         /// connection-local, so reconnects invalidate them by construction.
         scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
@@ -1942,7 +1942,7 @@ where
                             {
                                 let update = SyncMessage::ViewUpdate {
                                     subscription,
-                                    settled_through: self.node.borrow().applied_global_watermark(),
+                                    settled_through: self.node.borrow().committed_global_time(),
                                     reset_result_set: true,
                                     version_carriers: Vec::new(),
                                     version_bundles: Vec::new(),
@@ -2030,7 +2030,7 @@ where
                             let mut update = if !permissions_ready {
                                 Some(SyncMessage::ViewUpdate {
                                     subscription,
-                                    settled_through: self.node.borrow().applied_global_watermark(),
+                                    settled_through: self.node.borrow().committed_global_time(),
                                     reset_result_set: true,
                                     version_carriers: Vec::new(),
                                     version_bundles: Vec::new(),
@@ -2412,7 +2412,7 @@ where
                                         "permissions_head_missing: no published permissions head"
                                             .to_owned(),
                                     )),
-                                    global_seq: None,
+                                    global_time: None,
                                     durability: None,
                                 };
                                 send_with_sync_context(
@@ -2541,7 +2541,7 @@ where
                                                         "no admitted authority route".to_owned(),
                                                     ),
                                                 ),
-                                                global_seq: None,
+                                                global_time: None,
                                                 durability: None,
                                             }]
                                         } else {
@@ -2553,7 +2553,7 @@ where
                                             vec![SyncMessage::FateUpdate {
                                                 tx_id,
                                                 fate: Fate::Accepted,
-                                                global_seq: None,
+                                                global_time: None,
                                                 durability: Some(DurabilityTier::Edge),
                                             }]
                                         }
@@ -3138,7 +3138,7 @@ where
     }
     let current_claims_revision = node.borrow().session_claim_revision(identity);
     let current_policy_epoch = node.borrow().active_catalogue_seq();
-    let current_cut = node.borrow().applied_global_watermark();
+    let current_cut = node.borrow().committed_global_time();
     // A cache entry is evidence, not a generic response cache.  Prune every
     // revision/cut mismatch before looking up this compiled support key.
     hydrations.retain(|_, hydration| {
@@ -3395,8 +3395,8 @@ where
 /// form a lexicographically ordered capability.
 #[cfg(test)]
 pub(super) fn aggregate_authorization_scope_bounds(
-    applied: &BTreeMap<SubscriptionKey, (crate::time::GlobalSeq, u64)>,
-) -> Option<(crate::time::GlobalSeq, u64)> {
+    applied: &BTreeMap<SubscriptionKey, (crate::time::GlobalTime, u64)>,
+) -> Option<(crate::time::GlobalTime, u64)> {
     Some((
         applied
             .values()
@@ -3411,7 +3411,7 @@ pub(super) fn aggregate_authorization_scope_bounds(
 pub(super) fn authorization_scope_receipt_matches_transport_context(
     receipt: &AuthorizationScopeReceipt,
     expected: AuthorityContext,
-    applied_cut: Option<crate::time::GlobalSeq>,
+    applied_cut: Option<crate::time::GlobalTime>,
 ) -> bool {
     receipt.link == expected.link
         && receipt.link == *receipt.key.subject.as_bytes()

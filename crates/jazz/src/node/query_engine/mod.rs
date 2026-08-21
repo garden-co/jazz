@@ -27,7 +27,7 @@ use crate::ids::{AuthorId, BranchId, RowUuid, SchemaVersionId};
 use crate::protocol::{BindingViewKey, RegisterShapeOptions};
 use crate::query::{BindingId, Query, RecursionBound, RelationQuery, ShapeId};
 use crate::schema::TableSchema;
-use crate::time::GlobalSeq;
+use crate::time::GlobalTime;
 use crate::tx::{DurabilityTier, Snapshot, TxId, TxKind};
 
 mod fields;

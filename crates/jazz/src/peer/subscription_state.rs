@@ -27,7 +27,7 @@ const DEFAULT_EDGE_SCOPE_TTL_MS: u64 = 5_000;
 
 pub(super) fn fast_current_membership_position(
     known_state: &Option<KnownStateDeclaration>,
-) -> Option<super::super::time::GlobalSeq> {
+) -> Option<super::super::time::GlobalTime> {
     match known_state {
         Some(KnownStateDeclaration::Fast {
             completeness: KnownStateCompleteness::FastCurrentMembership,
@@ -59,7 +59,7 @@ pub(super) fn fast_authorization_progress(
 
 pub(super) fn member_settle_position(
     member: &ResultMemberEntry,
-) -> Option<super::super::time::GlobalSeq> {
+) -> Option<super::super::time::GlobalTime> {
     match member {
         ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
             row.settle_position
@@ -69,7 +69,7 @@ pub(super) fn member_settle_position(
 }
 
 pub(super) fn fast_cursor_requires_authoritative_reset(
-    position: super::super::time::GlobalSeq,
+    position: super::super::time::GlobalTime,
     previous: &BTreeSet<ResultMemberEntry>,
     current: &BTreeSet<ResultMemberEntry>,
 ) -> bool {
@@ -77,7 +77,7 @@ pub(super) fn fast_cursor_requires_authoritative_reset(
 }
 
 pub(super) fn fast_cursor_membership_mismatch(
-    position: super::super::time::GlobalSeq,
+    position: super::super::time::GlobalTime,
     previous: &BTreeSet<ResultMemberEntry>,
     current: &BTreeSet<ResultMemberEntry>,
 ) -> bool {

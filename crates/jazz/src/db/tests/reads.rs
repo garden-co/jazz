@@ -229,7 +229,7 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
             .apply_fate_update(
                 tx,
                 Fate::Accepted,
-                Some(GlobalSeq(sequence as u64 + 1)),
+                Some(GlobalTime(sequence as u64 + 1)),
                 Some(DurabilityTier::Global),
             )
             .expect("globally accept root relation row");
@@ -1627,28 +1627,30 @@ fn db_at_reads_historical_cut_and_partial_requires_server() {
 
     core.insert_with_id("todos", todo, cells("draft", false, author))
         .unwrap();
+    let first = core.node().borrow().committed_global_time();
     core.update(
         "todos",
         todo,
         BTreeMap::from([("title".to_owned(), Value::String("final".to_owned()))]),
     )
     .unwrap();
+    let second = core.node().borrow().committed_global_time();
 
     let table = &schema.tables[0];
-    let at_first = core.at(GlobalSeq(1), &Query::from("todos")).unwrap();
+    let at_first = core.at(first, &Query::from("todos")).unwrap();
     assert_eq!(at_first.len(), 1);
     assert_eq!(
         at_first[0].cell(table, "title"),
         Some(Value::String("draft".to_owned()))
     );
-    let at_second = core.at(GlobalSeq(2), &Query::from("todos")).unwrap();
+    let at_second = core.at(second, &Query::from("todos")).unwrap();
     assert_eq!(
         at_second[0].cell(table, "title"),
         Some(Value::String("final".to_owned()))
     );
 
     let partial_todos = partial.prepare_query(&Query::from("todos")).unwrap();
-    let err = partial.at(GlobalSeq(1), &partial_todos).unwrap_err();
+    let err = partial.at(GlobalTime(1), &partial_todos).unwrap_err();
     assert_eq!(err.code, ErrorCode::HistoricalReadRequiresServer);
     assert_eq!(err.message, "historical read requires server evaluation");
 }

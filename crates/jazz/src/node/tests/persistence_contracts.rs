@@ -368,7 +368,7 @@ fn fate_marker_failure_poisoned_then_reopen_recovers_accepted_current_row() {
     core.apply_fate_update(
         tx_id,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .expect_err("a failed fate marker must fail-stop the live database");
@@ -380,7 +380,7 @@ fn fate_marker_failure_poisoned_then_reopen_recovers_accepted_current_row() {
         .transaction_record(tx_id)
         .expect("the pre-marker fate batch is durable and must recover coherently");
     assert_eq!(stored.fate, Fate::Accepted);
-    assert_eq!(stored.global_seq, Some(GlobalSeq(1)));
+    assert_eq!(stored.global_time, Some(GlobalTime(1)));
     assert_eq!(
         reopened
             .current_rows("todos", DurabilityTier::Global)
@@ -432,7 +432,7 @@ fn authority_post_commit_storage_error_poisoned_then_reopen_recovers_visibility(
         .transaction_record(tx_id)
         .expect("the acknowledged-lost batch is nevertheless durable");
     assert_eq!(stored.fate, Fate::Accepted);
-    assert_eq!(stored.global_seq, Some(GlobalSeq(1)));
+    assert_eq!(stored.global_time, Some(GlobalTime::new(10, 0).unwrap()));
     assert_eq!(stored.durability, DurabilityTier::Global);
     assert_eq!(
         reopened
@@ -451,7 +451,7 @@ fn authority_post_commit_storage_error_poisoned_then_reopen_recovers_visibility(
 /// rewind the authority allocator across that durable sequence. The third
 /// source unit proves the next allocation is 3 rather than reusing 2.
 #[test]
-fn derived_merge_failure_after_source_durability_does_not_reuse_global_sequence() {
+fn derived_merge_failure_after_source_durability_does_not_reuse_global_time() {
     let (mut writer, _) = fail_write_many_node();
     let (_, first) = writer
         .commit_mergeable_unit(
@@ -529,15 +529,17 @@ fn derived_merge_failure_after_source_durability_does_not_reuse_global_sequence(
     let updates = authority
         .ingest_commit_unit(third_tx, third_versions, u64::MAX - SKEW_TOLERANCE_MS)
         .expect("the durable source sequence must remain allocated after a derived failure");
-    assert!(matches!(
-        updates.as_slice(),
-        [SyncMessage::FateUpdate {
-            fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(3)),
-            durability: Some(DurabilityTier::Global),
-            ..
-        }]
-    ));
+    let [SyncMessage::FateUpdate {
+        fate: Fate::Accepted,
+        global_time: Some(global_time),
+        durability: Some(DurabilityTier::Global),
+        ..
+    }] = updates.as_slice()
+    else {
+        panic!("expected one globally accepted fate update: {updates:?}");
+    };
+    assert!(*global_time > GlobalTime::new(20, 0).unwrap());
+    assert_eq!(global_time.physical_ms(), 30);
 }
 
 /// The synchronous implementation currently has a deliberate recovery window
@@ -577,7 +579,7 @@ fn restart_after_finalization_boundary_failure_recovers_one_coherent_transaction
         .transaction_record(tx_id)
         .expect("restart must recover the canonical transaction");
     assert_eq!(stored.fate, Fate::Accepted);
-    assert_eq!(stored.global_seq, Some(GlobalSeq(1)));
+    assert_eq!(stored.global_time, Some(GlobalTime::new(10, 0).unwrap()));
     assert_eq!(stored.durability, DurabilityTier::Global);
     assert_eq!(
         reopened
@@ -628,7 +630,7 @@ fn marker_failure_publishes_no_history_or_fate_and_reopens_coherently() {
         .transaction_record(tx_id)
         .expect("restart must recover the accepted transaction before serving it");
     assert_eq!(stored.fate, Fate::Accepted);
-    assert_eq!(stored.global_seq, Some(GlobalSeq(1)));
+    assert_eq!(stored.global_time, Some(GlobalTime::new(10, 0).unwrap()));
     assert_eq!(stored.durability, DurabilityTier::Global);
     assert_eq!(
         reopened

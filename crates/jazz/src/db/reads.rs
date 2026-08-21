@@ -180,14 +180,14 @@ where
             .map_err(Into::into)
     }
 
-    /// Read local settled history at an exact global sequence cut.
+    /// Read local settled history at an exact global timestamp cut.
     ///
     /// History-incomplete facades return `HistoricalReadRequiresServer` from
     /// the node layer instead of answering from a partial local prefix
     /// (ch11/INV-BRANCH-4).
     pub fn at(
         &self,
-        position: GlobalSeq,
+        position: GlobalTime,
         prepared: &PreparedQuery,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.at_prepared(position, prepared)
@@ -195,7 +195,7 @@ where
 
     fn at_prepared(
         &self,
-        position: GlobalSeq,
+        position: GlobalTime,
         prepared: &PreparedQuery,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.node

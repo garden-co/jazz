@@ -68,6 +68,10 @@ where
             }
             return Err(Error::InvalidStoredValue("conflicting branch creation"));
         }
+        let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
+        for global_time in self.clock.applied_global_times_after_frontier.clone() {
+            dots.extend(self.transaction_ids_for_global_time(global_time)?);
+        }
         let record = BranchRecord {
             branch_id,
             created_by,
@@ -75,9 +79,9 @@ where
             base: Some(
                 Snapshot::exclusive_base(
                     NodeUuid(uuid::Uuid::nil()),
-                    self.clock.applied_global_watermark,
+                    self.clock.committed_global_time,
                     TxTime::default(),
-                    Vec::new(),
+                    dots,
                 )
                 .map_err(Error::InvalidStoredValue)?,
             ),
@@ -226,16 +230,26 @@ where
                 "session branch metadata requires a snapshot base",
             ));
         };
-        if base.owner != NodeUuid(uuid::Uuid::nil())
-            || base.local_base != TxTime::default()
-            || !base.dots.is_empty()
-        {
+        if base.owner != NodeUuid(uuid::Uuid::nil()) || base.local_base != TxTime::default() {
             return Err(Error::InvalidStoredValue(
                 "unsupported v1 branch snapshot shape",
             ));
         }
-        if base.global_base > self.clock.applied_global_watermark {
+        if base.global_base > self.clock.committed_global_time {
             return Ok(false);
+        }
+        for dot in &base.dots {
+            let Some(stored) = self.query_transaction(*dot)? else {
+                return Ok(false);
+            };
+            if stored.fate != Fate::Accepted
+                || stored.global_time.is_none()
+                || stored.durability != DurabilityTier::Global
+            {
+                return Err(Error::InvalidStoredValue(
+                    "session branch snapshot dots must name globally accepted transactions",
+                ));
+            }
         }
         // New metadata and lifecycle advances received from a client session
         // become a durable upstream relay. Exact downstream retries preserve
@@ -1170,16 +1184,8 @@ where
             .into_iter()
             .map(|row| (row.row_uuid(), row))
             .collect::<BTreeMap<_, _>>();
-        if let Some(base) = &branch.base {
-            let base_rows = if read_schema_version == self.catalogue.current_schema_version_id {
-                self.current_rows_at(table, base.global_base)?
-            } else {
-                self.projected_historical_current_rows(
-                    table,
-                    read_schema_version,
-                    base.global_base,
-                )?
-            };
+        if branch.base.is_some() {
+            let base_rows = self.branch_base_rows_for_schema(table, branch, read_schema_version)?;
             for row in base_rows {
                 if !overlay_row_ids.contains(&row.row_uuid()) {
                     by_row.insert(row.row_uuid(), row);
@@ -1212,10 +1218,14 @@ where
             // maintained overlay source supplies all branch-current rows.
             return Ok(Vec::new());
         };
-        if read_schema_version == self.catalogue.current_schema_version_id {
-            self.current_rows_at(table, base.global_base)
+        if base.dots.is_empty() {
+            if read_schema_version == self.catalogue.current_schema_version_id {
+                self.current_rows_at(table, base.global_base)
+            } else {
+                self.projected_historical_current_rows(table, read_schema_version, base.global_base)
+            }
         } else {
-            self.projected_historical_current_rows(table, read_schema_version, base.global_base)
+            self.projected_snapshot_current_rows(table, read_schema_version, base)
         }
     }
 

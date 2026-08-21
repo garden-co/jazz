@@ -7,7 +7,7 @@ fn query_rows_at_matches_oracle_across_winners_deletes_and_restores() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let row_uuid = row(1);
 
-    let expected_at = |oracle: &Oracle, position: GlobalSeq| {
+    let expected_at = |oracle: &Oracle, position: GlobalTime| {
         oracle
             .visible_global_current_versions_at(position)
             .into_iter()
@@ -16,12 +16,12 @@ fn query_rows_at_matches_oracle_across_winners_deletes_and_restores() {
     };
 
     assert_eq!(
-        core.query_rows_at(&shape, &binding, GlobalSeq(0))
+        core.query_rows_at(&shape, &binding, GlobalTime(0))
             .unwrap()
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
-        expected_at(&oracle, GlobalSeq(0)),
+        expected_at(&oracle, GlobalTime(0)),
         "cut before the first version must be empty"
     );
 
@@ -217,7 +217,7 @@ fn historical_read_at_time_resolves_latest_settle_position_by_tx_time() {
 
     assert_eq!(
         core.at_time(TxTime::from(5)).unwrap().position(),
-        GlobalSeq(0)
+        GlobalTime(0)
     );
     assert_eq!(core.at_time(TxTime::from(30)).unwrap().position(), s1);
     assert_eq!(core.at_time(TxTime::from(60)).unwrap().position(), s2);
@@ -257,7 +257,7 @@ fn snapshot_reads_survive_mid_tx_current_winner_shift() {
         .apply_fate_update(
             high,
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(GlobalTime(1)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -265,7 +265,7 @@ fn snapshot_reads_survive_mid_tx_current_winner_shift() {
         .apply_fate_update(
             parent,
             Fate::Accepted,
-            Some(GlobalSeq(2)),
+            Some(GlobalTime(2)),
             Some(DurabilityTier::Global),
         )
         .unwrap();

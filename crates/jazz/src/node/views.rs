@@ -6,7 +6,7 @@
 //! [`super::query_eval`]. It sits on the node side of the protocol boundary and
 //! emits [`crate::protocol::SyncMessage`] values.
 
-use super::ingest::validate_received_view_bundle_global_seq_durability;
+use super::ingest::validate_received_view_bundle_global_time_durability;
 use super::policy::ViewEvaluationContext;
 use super::*;
 use crate::ids::SchemaVersionId;
@@ -51,7 +51,7 @@ fn merge_receiver_version_bundle_ref(
     };
     if existing.tx != *bundle.tx
         || existing.fate != *bundle.fate
-        || existing.global_seq != bundle.global_seq
+        || existing.global_time != bundle.global_time
         || existing.durability != bundle.durability
     {
         return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
@@ -720,7 +720,7 @@ where
             .map_err(|_| Error::InvalidStoredValue("failed to build version-bundle run"))?;
         Ok(SyncMessage::ViewUpdate {
             subscription,
-            settled_through: self.clock.applied_global_watermark,
+            settled_through: self.clock.committed_global_time,
             reset_result_set: false,
             version_carriers,
             version_bundles: Vec::new(),
@@ -739,7 +739,7 @@ where
 
     /// Apply a downstream current-row view update.
     pub(super) fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
-        self.validate_received_view_update_global_seq_durability(&update)?;
+        self.validate_received_view_update_global_time_durability(&update)?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))?;
         self.apply_view_update_inner(update, None)
     }
@@ -752,7 +752,7 @@ where
             return Ok(());
         }
         for update in &updates {
-            self.validate_received_view_update_global_seq_durability(update)?;
+            self.validate_received_view_update_global_time_durability(update)?;
         }
         // A receiver tick is one atomic protocol frame. Validate every row
         // descriptor before the first reset can change flush cadence, or a
@@ -805,14 +805,14 @@ where
         }
         let mut receiver_batch = self.database.open_batch();
         let mut receiver_batch_tx_ids = BTreeSet::new();
-        let mut receiver_batch_global_seqs = Vec::new();
+        let mut receiver_batch_global_times = Vec::new();
         let mut receiver_batch_bundle_count = 0u64;
         for bundle in receiver_candidates.values() {
             let staged = self.stage_view_bundle(
                 &mut receiver_batch,
                 bundle,
                 &mut receiver_batch_tx_ids,
-                &mut receiver_batch_global_seqs,
+                &mut receiver_batch_global_times,
             )?;
             if staged {
                 receiver_batch_bundle_count += 1;
@@ -825,8 +825,8 @@ where
             for tx_id in &receiver_batch_tx_ids {
                 self.invalidate_tx_version_tables_cache(*tx_id);
             }
-            for global_seq in receiver_batch_global_seqs {
-                self.record_applied_global_seq(global_seq);
+            for global_time in receiver_batch_global_times {
+                self.record_applied_global_time(global_time);
             }
             if let Some(tx_time) = receiver_batch_tx_ids.iter().map(|tx_id| tx_id.time).max() {
                 self.persist_storage_consistency_marker_through(tx_time)?;
@@ -1233,13 +1233,16 @@ where
     }
 
     fn ingest_view_bundle(&mut self, bundle: VersionBundle) -> Result<(), Error> {
-        validate_received_view_bundle_global_seq_durability(bundle.global_seq, bundle.durability)?;
+        validate_received_view_bundle_global_time_durability(
+            bundle.global_time,
+            bundle.durability,
+        )?;
         if bundle.tx.kind != TxKind::Exclusive {
             return self.ingest_known_transaction(
                 bundle.tx,
                 bundle.versions,
                 bundle.fate,
-                bundle.global_seq,
+                bundle.global_time,
                 bundle.durability,
             );
         }
@@ -1279,7 +1282,7 @@ where
                 bundle.tx,
                 complete_versions,
                 bundle.fate.clone(),
-                bundle.global_seq,
+                bundle.global_time,
                 bundle.durability,
             )?;
             if matches!(bundle.fate, Fate::Accepted) {
@@ -1291,7 +1294,7 @@ where
                 self.apply_fate_update(
                     tx_id,
                     bundle.fate,
-                    bundle.global_seq,
+                    bundle.global_time,
                     Some(bundle.durability),
                 )?;
             }
@@ -1301,7 +1304,7 @@ where
             bundle.tx,
             bundle.versions,
             bundle.fate,
-            bundle.global_seq,
+            bundle.global_time,
             bundle.durability,
         )
     }
@@ -1315,9 +1318,12 @@ where
         batch: &mut DatabaseBatch,
         bundle: &VersionBundle,
         staged_tx_ids: &mut BTreeSet<TxId>,
-        staged_global_seqs: &mut Vec<GlobalSeq>,
+        staged_global_times: &mut Vec<GlobalTime>,
     ) -> Result<bool, Error> {
-        validate_received_view_bundle_global_seq_durability(bundle.global_seq, bundle.durability)?;
+        validate_received_view_bundle_global_time_durability(
+            bundle.global_time,
+            bundle.durability,
+        )?;
         if bundle.tx.kind == TxKind::Exclusive {
             let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
                 Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
@@ -1337,22 +1343,22 @@ where
             bundle.tx.clone(),
             bundle.versions.clone(),
             bundle.fate.clone(),
-            bundle.global_seq,
+            bundle.global_time,
             bundle.durability,
-            staged_global_seqs,
+            staged_global_times,
         )?;
         Ok(true)
     }
 
-    fn validate_received_view_update_global_seq_durability(
+    fn validate_received_view_update_global_time_durability(
         &self,
         update: &ViewUpdateParts,
     ) -> Result<(), Error> {
         for bundle in
             version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
         {
-            validate_received_view_bundle_global_seq_durability(
-                bundle.global_seq,
+            validate_received_view_bundle_global_time_durability(
+                bundle.global_time,
                 bundle.durability,
             )?;
         }
@@ -1445,7 +1451,7 @@ where
             tx: tx_payload,
             versions,
             fate: stored_tx.fate.clone(),
-            global_seq: stored_tx.global_seq,
+            global_time: stored_tx.global_time,
             durability: stored_tx.durability,
         })
     }

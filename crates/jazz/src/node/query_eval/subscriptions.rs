@@ -253,7 +253,7 @@ where
         &mut self,
         binding_view_key: BindingViewKey,
         members: impl IntoIterator<Item = ResultMemberEntry>,
-        settled_through: GlobalSeq,
+        settled_through: GlobalTime,
     ) {
         self.clear_settled_result_view(binding_view_key);
         for member in members {
@@ -519,7 +519,7 @@ where
     pub(crate) fn settled_through_for_binding_view(
         &self,
         binding_view_key: BindingViewKey,
-    ) -> Option<GlobalSeq> {
+    ) -> Option<GlobalTime> {
         self.query
             .settled_through_by_binding_view
             .get(&binding_view_key)

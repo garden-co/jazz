@@ -125,8 +125,8 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         projection: SchemaProjection<R>,
         /// Data branch/prefix selected for this source.
         data: DataSource<R::DataBranch>,
-        /// Inclusive global sequence cut.
-        position: GlobalSeq,
+        /// Inclusive global timestamp cut.
+        position: GlobalTime,
     },
     /// Dotted snapshot ref.
     SnapshotRef {
@@ -400,8 +400,8 @@ pub(crate) struct ResolvedFrontier {
 /// Stream/frontier position required by a settled signal.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum FrontierPosition {
-    /// A concrete global sequence cut.
-    GlobalSeq(GlobalSeq),
+    /// A concrete global timestamp cut.
+    GlobalTime(GlobalTime),
     /// A concrete snapshot frontier fingerprint.
     Snapshot(Vec<u8>),
     /// A concrete local/edge transaction frontier.

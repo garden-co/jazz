@@ -434,7 +434,7 @@ where
         // no settlement receipts until it sends a fresh ViewUpdate.
         *self.active_authority_view_receipts.borrow_mut() = Some(AuthorityViewReceipts {
             connection_epoch,
-            confirmation_floor: self.node.borrow().applied_global_watermark(),
+            confirmation_floor: self.node.borrow().committed_global_time(),
             binding_views: BTreeSet::new(),
         });
         for state in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
@@ -886,7 +886,7 @@ where
             *self.active_authority_view_receipts.borrow_mut() =
                 fallback_connection.map(|connection| AuthorityViewReceipts {
                     connection_epoch: connection.borrow().connection_epoch,
-                    confirmation_floor: self.node.borrow().applied_global_watermark(),
+                    confirmation_floor: self.node.borrow().committed_global_time(),
                     binding_views: BTreeSet::new(),
                 });
             // Cached rows remain readable as stale/local state, but their

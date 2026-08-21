@@ -22,7 +22,7 @@ replaced the underlying mechanism with a simpler abstraction.
 
 **Meaning today:** A compact progress position that lets a participant resume
 or deduplicate work within one explicitly defined stream or view. In sync code,
-for example, `settled_through: GlobalSeq` says that the receiver possesses the
+for example, `settled_through: GlobalTime` says that the receiver possesses the
 complete settled membership for that binding view through that global
 position. A connection resume cursor has a different, link-local scope.
 

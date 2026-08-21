@@ -54,13 +54,13 @@ where
             return Err(Error::DuplicateOpenBatch(id));
         }
         let local_base = self.clock.tx_time;
-        let mut dots = Vec::with_capacity(self.clock.applied_global_above_watermark.len());
-        for global_seq in self.clock.applied_global_above_watermark.clone() {
-            dots.extend(self.transaction_ids_for_global_seq(global_seq)?);
+        let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
+        for global_time in self.clock.applied_global_times_after_frontier.clone() {
+            dots.extend(self.transaction_ids_for_global_time(global_time)?);
         }
         let base_snapshot = Snapshot::exclusive_base(
             self.node_uuid,
-            self.clock.applied_global_watermark,
+            self.clock.committed_global_time,
             local_base,
             dots,
         )
@@ -865,41 +865,37 @@ where
             .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
-    pub(super) fn record_applied_global_seq(&mut self, global_seq: GlobalSeq) -> Vec<GlobalSeq> {
-        if global_seq == GlobalSeq(u64::MAX) {
-            self.clock.next_global_seq = global_seq;
-            self.clock.global_seq_exhausted = true;
-        } else if !self.clock.global_seq_exhausted {
-            self.clock.next_global_seq = self.clock.next_global_seq.max(global_seq.next());
-        }
-        if global_seq <= self.clock.applied_global_watermark {
+    pub(super) fn record_applied_global_time(
+        &mut self,
+        global_time: GlobalTime,
+    ) -> Vec<GlobalTime> {
+        self.clock.global_time_register = self.clock.global_time_register.max(global_time);
+        if global_time <= self.clock.committed_global_time {
             return Vec::new();
         }
-        self.clock.applied_global_above_watermark.insert(global_seq);
-        let mut advanced = Vec::new();
-        while let Some(next) = self
+        let newly_applied = self
             .clock
-            .applied_global_watermark
-            .0
-            .checked_add(1)
-            .map(GlobalSeq)
-            && self.clock.applied_global_above_watermark.remove(&next)
-        {
-            self.clock.applied_global_watermark = next;
-            advanced.push(next);
+            .applied_global_times_after_frontier
+            .insert(global_time);
+        let locally_minted = self.clock.locally_minted_global_times.remove(&global_time);
+        if self.history_complete || locally_minted {
+            self.clock.committed_global_time = global_time;
+            self.clock
+                .applied_global_times_after_frontier
+                .retain(|applied| *applied > global_time);
         }
-        advanced
+        newly_applied.then_some(global_time).into_iter().collect()
     }
 
-    fn transaction_ids_for_global_seq(
+    pub(super) fn transaction_ids_for_global_time(
         &mut self,
-        global_seq: GlobalSeq,
+        global_time: GlobalTime,
     ) -> Result<Vec<TxId>, Error> {
         let mut tx_ids = Vec::new();
         for raw in self.database.index_scan_raw(
             "jazz_transactions",
-            "by_global_seq",
-            &[Value::Nullable(Some(Box::new(Value::U64(global_seq.0))))],
+            "by_global_time",
+            &[Value::Nullable(Some(Box::new(Value::U64(global_time.0))))],
         )? {
             let record = raw.record();
             let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
@@ -922,8 +918,8 @@ where
             .flatten()
             .is_some_and(|stored| {
                 stored
-                    .global_seq
-                    .is_some_and(|global_seq| global_seq <= snapshot.global_base)
+                    .global_time
+                    .is_some_and(|global_time| global_time <= snapshot.global_base)
                     || (tx_id.node == snapshot.owner && tx_id.time <= snapshot.local_base)
                     || snapshot.dots.contains(&tx_id)
             })
@@ -1026,6 +1022,17 @@ where
         }
         current_version_index(&versions, &candidate_indices, layer, &self.node_aliases)
             .map(|idx| versions[idx].clone())
+    }
+
+    pub(super) fn snapshot_content_witness(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        snapshot: &Snapshot,
+    ) -> Option<TxId> {
+        let version =
+            self.snapshot_layer_winner(table, row_uuid, VersionLayer::Content, snapshot)?;
+        self.version_tx_id(&version).ok()
     }
 
     fn overlay_pending_writes_in_schema(

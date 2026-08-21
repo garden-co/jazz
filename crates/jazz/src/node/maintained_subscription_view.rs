@@ -24,7 +24,7 @@ use crate::protocol::{
     ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
 };
 use crate::schema::TableSchema;
-use crate::time::{GlobalSeq, TxTime};
+use crate::time::{GlobalTime, TxTime};
 use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::TxId;
 
@@ -1170,7 +1170,7 @@ fn decode_typed_terminal_record(
             let settle_position = schema
                 .settle_position_field
                 .as_ref()
-                .map(|field| nullable_u64(record, field).map(|seq| seq.map(GlobalSeq)))
+                .map(|field| nullable_u64(record, field).map(|seq| seq.map(GlobalTime)))
                 .transpose()?
                 .flatten();
             let flat_join_digest = (!schema.payload_fields.is_empty())

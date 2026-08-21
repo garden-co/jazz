@@ -45,121 +45,137 @@ where
         let Some(source) = self.read_view.sources.get(&request.source) else {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
-        let (projection, graph_tier, history_position, open_tx_overlay, branch_data) = match source
-        {
-            SourceExpr::VisibleCurrent {
-                projection,
-                data: DataSource::Current,
-                tier,
-            } => (projection, Some(*tier), None, None, None),
-            SourceExpr::VisibleCurrent {
-                projection,
-                data: DataSource::Branch(branch_id),
-                tier,
-            } => (projection, Some(*tier), None, None, Some(*branch_id)),
-            SourceExpr::HistoryCut {
-                projection,
-                data: DataSource::Current,
-                position,
-            } => (projection, None, Some(*position), None, None),
-            SourceExpr::SettledBindingView {
-                projection,
-                binding_view,
-                rows,
-            } => {
-                if request.visibility != RowVisibility::Visible {
-                    return Err(source_resolution_error(request, SourceGap::Coverage));
-                }
-                if !matches!(projection.schema_family, SchemaFamilySelection::Current)
-                    || !matches!(projection.storage, StorageSchemaSelection::Single(_))
-                    || !matches!(projection.lens, LensSelection::Canonical)
-                {
-                    return Err(source_resolution_error(
-                        request,
-                        SourceGap::SchemaProjection,
-                    ));
-                }
-                match self.node.settled_binding_view_source_rows(
-                    &request.source.table,
-                    self.read_view.read_schema,
-                    *binding_view,
-                    *rows,
-                ) {
-                    Ok(rows) => {
-                        let table = self
-                            .node
-                            .table_in_schema(&request.source.table, self.read_view.read_schema)
-                            .map_err(|_| {
-                                source_resolution_error(request, SourceGap::SchemaProjection)
-                            })?;
-                        let schema_version_alias = self
-                            .node
-                            .ensure_schema_version_alias(self.read_view.read_schema)
-                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                        let (graph, descriptor, metadata) =
-                            inline_current_graph_with_source_metadata(
-                                &table,
-                                rows,
-                                schema_version_alias,
-                                "settled-binding-view",
-                                &request.requirements,
-                            )
-                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                        return Ok(ResolvedSource {
-                            table_schema: table,
-                            graph,
-                            row_shape: SourceRowShape {
-                                source: request.source.clone(),
-                                descriptor,
-                                row_uuid_field: "row_uuid".to_owned(),
-                                metadata,
-                            },
-                            routing_fields: BTreeSet::new(),
-                            content_version: None,
-                            deletion_register: None,
-                        });
-                    }
-                    Err(Error::MissingTransaction(_)) => {}
-                    Err(_) => {
+        let (projection, graph_tier, history_position, snapshot, open_tx_overlay, branch_data) =
+            match source {
+                SourceExpr::VisibleCurrent {
+                    projection,
+                    data: DataSource::Current,
+                    tier,
+                } => (projection, Some(*tier), None, None, None, None),
+                SourceExpr::VisibleCurrent {
+                    projection,
+                    data: DataSource::Branch(branch_id),
+                    tier,
+                } => (projection, Some(*tier), None, None, None, Some(*branch_id)),
+                SourceExpr::HistoryCut {
+                    projection,
+                    data: DataSource::Current,
+                    position,
+                } => (projection, None, Some(*position), None, None, None),
+                SourceExpr::SnapshotRef {
+                    projection,
+                    data: DataSource::Current,
+                    snapshot,
+                } => (projection, None, None, Some(snapshot.clone()), None, None),
+                SourceExpr::SettledBindingView {
+                    projection,
+                    binding_view,
+                    rows,
+                } => {
+                    if request.visibility != RowVisibility::Visible {
                         return Err(source_resolution_error(request, SourceGap::Coverage));
                     }
+                    if !matches!(projection.schema_family, SchemaFamilySelection::Current)
+                        || !matches!(projection.storage, StorageSchemaSelection::Single(_))
+                        || !matches!(projection.lens, LensSelection::Canonical)
+                    {
+                        return Err(source_resolution_error(
+                            request,
+                            SourceGap::SchemaProjection,
+                        ));
+                    }
+                    match self.node.settled_binding_view_source_rows(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        *binding_view,
+                        *rows,
+                    ) {
+                        Ok(rows) => {
+                            let table = self
+                                .node
+                                .table_in_schema(&request.source.table, self.read_view.read_schema)
+                                .map_err(|_| {
+                                    source_resolution_error(request, SourceGap::SchemaProjection)
+                                })?;
+                            let schema_version_alias = self
+                                .node
+                                .ensure_schema_version_alias(self.read_view.read_schema)
+                                .map_err(|_| {
+                                    source_resolution_error(request, SourceGap::Coverage)
+                                })?;
+                            let (graph, descriptor, metadata) =
+                                inline_current_graph_with_source_metadata(
+                                    &table,
+                                    rows,
+                                    schema_version_alias,
+                                    "settled-binding-view",
+                                    &request.requirements,
+                                )
+                                .map_err(|_| {
+                                    source_resolution_error(request, SourceGap::Coverage)
+                                })?;
+                            return Ok(ResolvedSource {
+                                table_schema: table,
+                                graph,
+                                row_shape: SourceRowShape {
+                                    source: request.source.clone(),
+                                    descriptor,
+                                    row_uuid_field: "row_uuid".to_owned(),
+                                    metadata,
+                                },
+                                routing_fields: BTreeSet::new(),
+                                content_version: None,
+                                deletion_register: None,
+                            });
+                        }
+                        Err(Error::MissingTransaction(_)) => {}
+                        Err(_) => {
+                            return Err(source_resolution_error(request, SourceGap::Coverage));
+                        }
+                    }
+                    (
+                        projection,
+                        Some(DurabilityTier::Global),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
                 }
-                (projection, Some(DurabilityTier::Global), None, None, None)
-            }
-            SourceExpr::WithOverlays { input, overlays } => {
-                let (projection, tier) = match input.as_ref() {
-                    SourceExpr::VisibleCurrent {
-                        projection,
-                        data: DataSource::Current,
-                        tier,
-                    } => (projection, Some(*tier)),
-                    SourceExpr::SnapshotRef {
-                        projection,
-                        data: DataSource::Current,
-                        snapshot: _,
-                    } => (projection, None),
-                    _ => {
+                SourceExpr::WithOverlays { input, overlays } => {
+                    let (projection, tier) = match input.as_ref() {
+                        SourceExpr::VisibleCurrent {
+                            projection,
+                            data: DataSource::Current,
+                            tier,
+                        } => (projection, Some(*tier)),
+                        SourceExpr::SnapshotRef {
+                            projection,
+                            data: DataSource::Current,
+                            snapshot: _,
+                        } => (projection, None),
+                        _ => {
+                            return Err(source_resolution_error(
+                                request,
+                                SourceGap::TransactionReadOverlay,
+                            ));
+                        }
+                    };
+                    let [OverlayRef::OpenTransaction(tx_id)] = overlays.entries.as_slice() else {
                         return Err(source_resolution_error(
                             request,
                             SourceGap::TransactionReadOverlay,
                         ));
-                    }
-                };
-                let [OverlayRef::OpenTransaction(tx_id)] = overlays.entries.as_slice() else {
+                    };
+                    (projection, tier, None, None, Some(*tx_id), None)
+                }
+                _ => {
                     return Err(source_resolution_error(
                         request,
-                        SourceGap::TransactionReadOverlay,
+                        SourceGap::HistoricalStorageCut,
                     ));
-                };
-                (projection, tier, None, Some(*tx_id), None)
-            }
-            _ => {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::HistoricalStorageCut,
-                ));
-            }
-        };
+                }
+            };
         if !matches!(projection.schema_family, SchemaFamilySelection::Current)
             || !matches!(
                 projection.storage,
@@ -213,6 +229,7 @@ where
         }
         let (graph, descriptor, metadata, routing_fields) = if table.name == "jazz_branches"
             && history_position.is_none()
+            && snapshot.is_none()
             && open_tx_overlay.is_none()
         {
             if request.visibility != RowVisibility::Visible {
@@ -307,6 +324,32 @@ where
                 }
             };
             (graph, descriptor, metadata, BTreeSet::new())
+        } else if let Some(snapshot) = snapshot {
+            if request.visibility != RowVisibility::Visible
+                || !request.requirements.metadata.is_empty()
+                || !matches!(authorization, SourceAuthorizationRequest::System)
+            {
+                return Err(source_resolution_error(
+                    request,
+                    SourceGap::HistoricalStorageCut,
+                ));
+            }
+            let rows = self
+                .node
+                .projected_snapshot_current_rows(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                    &snapshot,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+            let graph = inline_current_graph(&table, rows)
+                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+            (
+                graph,
+                current_row_descriptor(&table),
+                BTreeMap::new(),
+                BTreeSet::new(),
+            )
         } else if let Some(branch_id) = branch_data {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
@@ -722,7 +765,7 @@ where
         request: &SourceRequest,
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
-        history_position: Option<GlobalSeq>,
+        history_position: Option<GlobalTime>,
         open_tx_overlay: Option<OpenTransactionId>,
         branch_data: Option<BranchId>,
     ) -> Result<Option<DeletionRegisterSource>, SourceResolutionError> {
@@ -774,7 +817,7 @@ where
         request: &SourceRequest,
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
-        history_position: Option<GlobalSeq>,
+        history_position: Option<GlobalTime>,
         open_tx_overlay: Option<OpenTransactionId>,
         branch_data: Option<BranchId>,
     ) -> Result<Option<ContentVersionSource>, SourceResolutionError> {
@@ -820,12 +863,12 @@ where
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
-        position: GlobalSeq,
+        position: GlobalTime,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         if self.can_use_bounded_historical_source(&request.source.table) {
             self.node
                 .query_engine_read_metrics
-                .source_global_seq_range_scans += 1;
+                .source_global_time_range_scans += 1;
             let rows = self
                 .node
                 .bounded_historical_current_rows(&request.source.table, position)
@@ -883,13 +926,7 @@ where
                         .as_ref()
                         .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
                     self.node
-                        .historical_content_witness_at(
-                            &request.source.table,
-                            self.read_view.read_schema,
-                            row.row_uuid(),
-                            base.global_base,
-                        )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .snapshot_content_witness(&request.source.table, row.row_uuid(), base)
                         .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?
                 };
                 let alias = self
@@ -1130,10 +1167,10 @@ where
         request: &SourceRequest,
         read_table: &TableSchema,
         tier: DurabilityTier,
-        include_global_seq: bool,
+        include_global_time: bool,
         exclude_deleted: bool,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let fields = global_current_storage_fields(read_table, true, include_global_seq);
+        let fields = global_current_storage_fields(read_table, true, include_global_time);
         // Global current storage has already selected the physical winner.  Apply
         // the ordinary lens-aware projection directly so added-column defaults
         // survive instead of being replaced with physical nulls by the raw
@@ -1478,11 +1515,11 @@ fn tier_visible_branch_history_graph(
 fn content_version_current_source_graph(
     table: &TableSchema,
     tier: DurabilityTier,
-    include_global_seq: bool,
+    include_global_time: bool,
 ) -> GraphBuilder {
     let mut fields = maintained_view_history_storage_field_names(table);
-    if include_global_seq {
-        fields.push("global_seq".to_owned());
+    if include_global_time {
+        fields.push("global_time".to_owned());
     }
     if tier == DurabilityTier::Global {
         return GraphBuilder::table(global_current_table_name(&table.name)).project(fields);
@@ -2078,7 +2115,7 @@ fn storage_to_canonical_current_source_fields(
         ]);
     }
     if include_settle_position {
-        fields.push(ProjectField::renamed("global_seq", "settle_position"));
+        fields.push(ProjectField::renamed("global_time", "settle_position"));
     }
     fields
 }
@@ -2379,7 +2416,7 @@ pub(super) fn global_current_storage_fields(
     fields.push("tx_time".to_owned());
     fields.push("tx_node_id".to_owned());
     if include_settle_position {
-        fields.push("global_seq".to_owned());
+        fields.push("global_time".to_owned());
     }
     fields
 }
@@ -2754,13 +2791,13 @@ pub(super) fn inline_branch_current_record(
 pub(super) fn historical_current_graph_full_scan(
     table: &TableSchema,
     table_id: PhysicalTableId,
-    position: GlobalSeq,
+    position: GlobalTime,
     history_rows: GraphBuilder,
 ) -> GraphBuilder {
     let cut_predicate = PredicateExpr::And(vec![
         PredicateExpr::eq("physical_table_id", Value::U64(table_id.0)),
         PredicateExpr::LtEq {
-            field: "global_seq".to_owned(),
+            field: "global_time".to_owned(),
             value: Value::U64(position.0).into(),
         },
     ])

@@ -351,7 +351,7 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
         .apply_fate_update(
             branch_write,
             Fate::Accepted,
-            Some(GlobalSeq(1)),
+            Some(GlobalTime(1)),
             Some(DurabilityTier::Global),
         )
         .expect("globally accept branch row");
@@ -488,8 +488,8 @@ fn branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity() {
     let branch_a = BranchId::from_bytes([0x42; 16]);
     let branch_b = BranchId::from_bytes([0x43; 16]);
     for (branch, row_id, title, seq) in [
-        (branch_a, row(0x44), "branch-a", GlobalSeq(1)),
-        (branch_b, row(0x45), "branch-b", GlobalSeq(2)),
+        (branch_a, row(0x44), "branch-a", GlobalTime(1)),
+        (branch_b, row(0x45), "branch-b", GlobalTime(2)),
     ] {
         server
             .node()

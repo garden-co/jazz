@@ -7,11 +7,11 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         fate: Fate,
-        global_seq: Option<GlobalSeq>,
+        global_time: Option<GlobalTime>,
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_seq, durability, true,
+            tx, versions, fate, global_time, durability, true,
         )
     }
 
@@ -20,11 +20,11 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         fate: Fate,
-        global_seq: Option<GlobalSeq>,
+        global_time: Option<GlobalTime>,
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_seq, durability, false,
+            tx, versions, fate, global_time, durability, false,
         )
     }
 
@@ -33,7 +33,7 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         fate: Fate,
-        global_seq: Option<GlobalSeq>,
+        global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         update_current_indexes: bool,
     ) -> Result<(), Error> {
@@ -46,19 +46,19 @@ where
                 tx,
                 versions,
                 fate.clone(),
-                global_seq,
+                global_time,
                 durability,
                 update_current_indexes,
             )?;
             self.database.commit_batch(batch)?;
-            let mut staged_global_seqs = Vec::new();
+            let mut staged_global_times = Vec::new();
             let mut cleanup_batch = self.database.open_batch();
             self.finalize_staged_transaction_ingest(
                 &mut cleanup_batch,
                 tx_id,
                 fate,
-                global_seq,
-                &mut staged_global_seqs,
+                global_time,
+                &mut staged_global_times,
             )?;
             if !cleanup_batch.is_empty() {
                 self.database.commit_batch(cleanup_batch)?;
@@ -84,7 +84,7 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         fate: Fate,
-        global_seq: Option<GlobalSeq>,
+        global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         update_current_indexes: bool,
     ) -> Result<(), Error> {
@@ -94,7 +94,7 @@ where
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
         let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
         let tx_values =
-            transaction_values(tx_node_alias, &tx, fate.clone(), global_seq, durability);
+            transaction_values(tx_node_alias, &tx, fate.clone(), global_time, durability);
         if tx_already_known {
             batch.update("jazz_transactions", tx_values);
         } else {
@@ -162,7 +162,7 @@ where
             }
             stored_versions.push(stored.clone());
             if update_current_indexes && matches!(fate, Fate::Accepted) {
-                if global_seq.is_some() {
+                if global_time.is_some() {
                     let previous_global_current = self.query_global_layer_winner_in_batch(
                         batch,
                         &table_schema.name,
@@ -216,7 +216,7 @@ where
             } else {
                 batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
             }
-            if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_seq.is_none()
+            if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_time.is_none()
             {
                 self.write_ahead_current_insert(batch, &stored)?;
             }
@@ -227,9 +227,9 @@ where
             }
         }
         if update_current_indexes && matches!(fate, Fate::Accepted) {
-            if let Some(global_seq) = global_seq {
+            if let Some(global_time) = global_time {
                 for stored in pending_global_updates.values() {
-                    self.write_global_current_update(batch, stored, global_seq)?;
+                    self.write_global_current_update(batch, stored, global_time)?;
                 }
             }
         }
@@ -256,22 +256,22 @@ where
         batch: &mut DatabaseBatch,
         tx_id: TxId,
         fate: Fate,
-        global_seq: Option<GlobalSeq>,
-        staged_global_seqs: &mut Vec<GlobalSeq>,
+        global_time: Option<GlobalTime>,
+        staged_global_times: &mut Vec<GlobalTime>,
     ) -> Result<(), Error> {
         self.invalidate_tx_version_table_names_cache(tx_id);
         if matches!(fate, Fate::Accepted)
-            && let Some(global_seq) = global_seq
+            && let Some(global_time) = global_time
         {
-            staged_global_seqs.push(global_seq);
-            let advanced_global_seqs = self.record_applied_global_seq(global_seq);
+            staged_global_times.push(global_time);
+            let advanced_global_times = self.record_applied_global_time(global_time);
             self.cleanup_fated_ahead_current_for_tx(batch, tx_id)?;
-            if !advanced_global_seqs.is_empty() {
-                for advanced in advanced_global_seqs
+            if !advanced_global_times.is_empty() {
+                for advanced in advanced_global_times
                     .into_iter()
-                    .filter(|advanced| *advanced != global_seq)
+                    .filter(|advanced| *advanced != global_time)
                 {
-                    self.prune_ahead_current_for_global_seq(batch, advanced)?;
+                    self.prune_ahead_current_for_global_time(batch, advanced)?;
                 }
             }
         }
@@ -374,7 +374,7 @@ where
         let mut updates = vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
-            global_seq: None,
+            global_time: None,
             durability: None,
         }];
         updates.extend(self.cascade_rejections_from(tx.tx_id)?);

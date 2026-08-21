@@ -557,7 +557,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     node.apply_fate_update(
         author_tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .expect("settle v1 author");
@@ -573,7 +573,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     node.apply_fate_update(
         post_tx,
         Fate::Accepted,
-        Some(GlobalSeq(2)),
+        Some(GlobalTime(2)),
         Some(DurabilityTier::Global),
     )
     .expect("settle v1 post");
@@ -588,7 +588,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     node.apply_fate_update(
         mismatched_author_tx,
         Fate::Accepted,
-        Some(GlobalSeq(3)),
+        Some(GlobalTime(3)),
         Some(DurabilityTier::Global),
     )
     .expect("settle mismatched v1 author");
@@ -607,7 +607,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     node.apply_fate_update(
         mismatched_post_tx,
         Fate::Accepted,
-        Some(GlobalSeq(4)),
+        Some(GlobalTime(4)),
         Some(DurabilityTier::Global),
     )
     .expect("settle mismatched v1 post");
@@ -694,7 +694,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
             .expect("validate source");
         let binding = shape.bind(BTreeMap::new()).expect("bind source");
         assert_eq!(
-            node.query_rows_at(&shape, &binding, GlobalSeq(4))
+            node.query_rows_at(&shape, &binding, GlobalTime(4))
                 .expect("read projected source")
                 .len(),
             2,
@@ -705,7 +705,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     let shape = query.validate(&v2.schema).expect("validate v2 flat join");
     let binding = shape.bind(BTreeMap::new()).expect("bind v2 flat join");
     let rows = node
-        .query_rows_at(&shape, &binding, GlobalSeq(4))
+        .query_rows_at(&shape, &binding, GlobalTime(4))
         .expect("evaluate v2 flat join");
     assert_eq!(
         rows.len(),
@@ -801,7 +801,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     node.apply_fate_update(
         updated_author_tx,
         Fate::Accepted,
-        Some(GlobalSeq(5)),
+        Some(GlobalTime(5)),
         Some(DurabilityTier::Global),
     )
     .expect("settle renamed author update");
@@ -1096,7 +1096,7 @@ fn renamed_branch_terminal_resolves_root_target_from_emitted_read_table() {
     node.apply_fate_update(
         user_tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .expect("settle root user before branch snapshot");
@@ -1168,18 +1168,17 @@ fn renamed_branch_terminal_resolves_root_target_from_emitted_read_table() {
         .get(&branch)
         .cloned()
         .expect("branch");
+    assert_eq!(branch_state.base.as_ref().unwrap().dots, vec![user_tx]);
     let branch_people = node
         .branch_current_rows_for_schema("people", &branch_state, v2.id)
         .expect("project root users into branch people view");
     assert_eq!(branch_people.len(), 1);
     assert_eq!(
-        node.historical_content_witness_at(
+        node.snapshot_content_witness(
             "people",
-            v2.id,
             user,
-            branch_state.base.as_ref().expect("branch base").global_base,
-        )
-        .expect("recover frozen root witness"),
+            branch_state.base.as_ref().expect("branch base"),
+        ),
         Some(user_tx)
     );
 
@@ -1257,7 +1256,7 @@ fn branch_relation_array_uses_frozen_root_and_overlay_target() {
     node.apply_fate_update(
         live_root_update,
         Fate::Accepted,
-        Some(GlobalSeq(2)),
+        Some(GlobalTime(2)),
         Some(DurabilityTier::Global),
     )
     .expect("accept post-branch global root update");

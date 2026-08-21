@@ -512,10 +512,10 @@ where
             },
             clock: Clock {
                 tx_time: TxTime::default(),
-                next_global_seq: GlobalSeq(1),
-                global_seq_exhausted: false,
-                applied_global_watermark: GlobalSeq(0),
-                applied_global_above_watermark: BTreeSet::new(),
+                global_time_register: GlobalTime::default(),
+                locally_minted_global_times: BTreeSet::new(),
+                committed_global_time: GlobalTime(0),
+                applied_global_times_after_frontier: BTreeSet::new(),
             },
             parking: Parking::default(),
             query: QueryServing {
@@ -649,8 +649,8 @@ where
         Database::new_with_storage_layout(lowered, storage, layout).map_err(Error::from)
     }
 
-    pub(crate) fn applied_global_watermark(&self) -> GlobalSeq {
-        self.clock.applied_global_watermark
+    pub(crate) fn committed_global_time(&self) -> GlobalTime {
+        self.clock.committed_global_time
     }
 
     /// Stable identity of the authority issuing wire-level receipts.

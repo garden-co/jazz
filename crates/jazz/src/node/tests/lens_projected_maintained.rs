@@ -11,13 +11,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
             ("title".to_owned(), v("old-title")),
         ])))
         .unwrap();
-    core.apply_fate_update(
-        old_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(old_tx).unwrap();
     publish_schema_lineage(
         &mut core,
         evolved_payload.clone(),
@@ -58,13 +52,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
             ("body".to_owned(), v("new-body")),
         ])))
         .unwrap();
-    core.apply_fate_update(
-        new_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(new_tx).unwrap();
 
     let shape = Query::from("todos").validate(&base).unwrap();
     let rows = core
@@ -144,13 +132,7 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
             ("title".to_owned(), v("old-title")),
         ])))
         .unwrap();
-    core.apply_fate_update(
-        old_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(old_tx).unwrap();
     publish_schema_lineage(
         &mut core,
         evolved_payload.clone(),
@@ -259,13 +241,7 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
     )
     .unwrap();
     let (collision_tx, _) = core.commit_exclusive(open, AuthorId::SYSTEM, 10).unwrap();
-    core.apply_fate_update(
-        collision_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(collision_tx).unwrap();
 
     publish_schema_lineage(
         &mut core,

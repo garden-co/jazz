@@ -182,7 +182,7 @@ pub(crate) enum SourceMetadataFields {
     },
     /// Nullable global settle position field.
     SettlePosition {
-        /// Field containing the global sequence where the member settled.
+        /// Field containing the global timestamp where the member settled.
         settle_position_field: String,
     },
     /// Deletion-register/deletion-marker fields.

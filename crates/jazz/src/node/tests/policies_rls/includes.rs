@@ -53,13 +53,7 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
             ])),
         ])
         .unwrap();
-    core.apply_fate_update(
-        tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(tx).unwrap();
 
     // This is the core query shape emitted by a binding-layer parent include:
     // correlate the child's foreign-key value with the parent's declared `id`.
@@ -107,13 +101,7 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
             ])),
         )
         .unwrap();
-    core.apply_fate_update(
-        tx.0,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(tx.0).unwrap();
 
     core.reset_query_engine_read_metrics();
     assert!(
@@ -158,13 +146,7 @@ fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_
                 .cells(owner_cells(readable_owner, "visible target")),
         ])
         .unwrap();
-    core.apply_fate_update(
-        target_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(target_tx).unwrap();
 
     let root_tx = core
         .commit_mergeable_many(vec![
@@ -178,13 +160,7 @@ fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_
             ])),
         ])
         .unwrap();
-    core.apply_fate_update(
-        root_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(root_tx).unwrap();
 }
 
 fn seed_missing_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
@@ -202,13 +178,7 @@ fn seed_missing_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
                 .cells(owner_cells(AuthorId::SYSTEM, "existing target")),
         ])
         .unwrap();
-    core.apply_fate_update(
-        root_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(root_tx).unwrap();
 }
 
 fn seed_null_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
@@ -224,13 +194,7 @@ fn seed_null_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
                 .cells(owner_cells(AuthorId::SYSTEM, "existing target")),
         ])
         .unwrap();
-    core.apply_fate_update(
-        root_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(root_tx).unwrap();
 }
 
 fn multi_segment_required_include_rls_schema() -> JazzSchema {
@@ -297,13 +261,7 @@ fn seed_multi_segment_include_fixture(
             ])),
         ])
         .unwrap();
-    core.apply_fate_update(
-        tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(tx).unwrap();
 }
 
 fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec<ResultRowEntry>) {
@@ -495,13 +453,7 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
                 ])),
         )
         .unwrap();
-    core.apply_fate_update(
-        update_tx,
-        Fate::Accepted,
-        Some(core.clock.next_global_seq),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
+    core.accept_global_for_test(update_tx).unwrap();
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate {

@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ids::{AuthorId, RowUuid, SchemaVersionId};
 use crate::protocol::{LensOp, MigrationLens};
 use crate::schema::MergeStrategy;
-use crate::time::{GlobalSeq, TxTime};
+use crate::time::{GlobalTime, TxTime};
 pub use crate::tx::DeletionEvent;
-use crate::tx::{AbsentRead, DurabilityTier, Fate, RowRead, TxId};
+use crate::tx::{AbsentRead, DurabilityTier, Fate, RowRead, Snapshot, TxId};
 use groove::records::Value;
 
 /// Omniscient in-memory oracle; intentionally independent of groove.
@@ -438,7 +438,7 @@ impl Oracle {
     /// Return visible global content at a serialization base.
     pub fn visible_global_content_set_at(
         &self,
-        global_base: GlobalSeq,
+        global_base: GlobalTime,
     ) -> BTreeSet<(RowUuid, TxId)> {
         self.versions
             .iter()
@@ -455,7 +455,7 @@ impl Oracle {
     /// Return visible global row versions at a serialization base.
     pub fn visible_global_current_versions_at(
         &self,
-        global_base: GlobalSeq,
+        global_base: GlobalTime,
     ) -> Vec<&ModelRowVersion> {
         self.versions
             .iter()
@@ -469,7 +469,7 @@ impl Oracle {
     /// Return visible global content at a serialization base, filtered by owner cell.
     pub fn visible_global_content_set_at_owner(
         &self,
-        global_base: GlobalSeq,
+        global_base: GlobalTime,
         owner: AuthorId,
     ) -> BTreeSet<(RowUuid, TxId)> {
         self.versions
@@ -485,11 +485,55 @@ impl Oracle {
             .collect()
     }
 
+    /// Return visible content at an exact dotted snapshot, filtered by owner.
+    pub fn visible_content_set_at_snapshot_owner(
+        &self,
+        snapshot: &Snapshot,
+        owner: Option<AuthorId>,
+    ) -> BTreeSet<(RowUuid, TxId)> {
+        self.versions
+            .iter()
+            .map(|version| version.row_uuid)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|row_uuid| {
+                let covered = self
+                    .row_versions(row_uuid)
+                    .into_iter()
+                    .filter(|version| {
+                        self.tx_states
+                            .get(&version.tx_id)
+                            .and_then(|state| state.global_time)
+                            .is_some_and(|time| time <= snapshot.global_base)
+                            || (version.tx_id.node == snapshot.owner
+                                && version.tx_id.time <= snapshot.local_base)
+                            || snapshot.dots.contains(&version.tx_id)
+                    })
+                    .collect::<Vec<_>>();
+                let deleted = covered
+                    .iter()
+                    .filter_map(|version| version.deletion.map(|event| (*version, event)))
+                    .max_by_key(|(version, _)| version.tx_id.time.sort_key(version.tx_id.node))
+                    .is_some_and(|(_, event)| event == DeletionEvent::Deleted);
+                if deleted {
+                    return None;
+                }
+                current_content_version(covered)
+                    .filter(|version| {
+                        owner.is_none_or(|owner| {
+                            version.cells.get("owner") == Some(&Value::Uuid(owner.0))
+                        })
+                    })
+                    .map(|version| (row_uuid, version.tx_id))
+            })
+            .collect()
+    }
+
     /// Return visible global current version at a serialization base.
     pub fn visible_global_current_version_at(
         &self,
         row_uuid: RowUuid,
-        global_base: GlobalSeq,
+        global_base: GlobalTime,
     ) -> Option<&ModelRowVersion> {
         if matches!(
             self.global_current_deletion_event_at(row_uuid, global_base),
@@ -501,7 +545,7 @@ impl Oracle {
     }
 
     /// Return whether an exclusive row read matches at a serialization base.
-    pub fn exclusive_row_read_matches_at(&self, read: &RowRead, global_base: GlobalSeq) -> bool {
+    pub fn exclusive_row_read_matches_at(&self, read: &RowRead, global_base: GlobalTime) -> bool {
         self.visible_global_current_version_at(read.row_uuid, global_base)
             .map(|version| version.tx_id)
             == Some(read.version)
@@ -511,7 +555,7 @@ impl Oracle {
     pub fn exclusive_absent_read_matches_at(
         &self,
         absent: &AbsentRead,
-        global_base: GlobalSeq,
+        global_base: GlobalTime,
     ) -> bool {
         self.visible_global_current_version_at(absent.row_uuid, global_base)
             .is_none()
@@ -520,7 +564,7 @@ impl Oracle {
     fn global_current_deletion_event_at(
         &self,
         row_uuid: RowUuid,
-        global_base: GlobalSeq,
+        global_base: GlobalTime,
     ) -> Option<DeletionEvent> {
         self.global_row_versions_at(row_uuid, global_base)
             .into_iter()
@@ -532,15 +576,15 @@ impl Oracle {
     fn global_row_versions_at(
         &self,
         row_uuid: RowUuid,
-        global_base: GlobalSeq,
+        global_base: GlobalTime,
     ) -> Vec<&ModelRowVersion> {
         self.row_versions(row_uuid)
             .into_iter()
             .filter(|version| {
                 self.tx_states
                     .get(&version.tx_id)
-                    .and_then(|state| state.global_seq)
-                    .is_some_and(|global_seq| global_seq <= global_base)
+                    .and_then(|state| state.global_time)
+                    .is_some_and(|global_time| global_time <= global_base)
             })
             .collect()
     }
@@ -983,24 +1027,24 @@ pub struct ModelRowVersion {
 pub struct OracleTxState {
     /// Transaction fate.
     pub fate: Fate,
-    /// Global sequence, if accepted globally.
-    pub global_seq: Option<GlobalSeq>,
+    /// Global timestamp, if accepted globally.
+    pub global_time: Option<GlobalTime>,
     /// Durability tier.
     pub durability: DurabilityTier,
 }
 
 impl OracleTxState {
     /// Construct an oracle transaction state.
-    pub fn new(fate: Fate, global_seq: Option<GlobalSeq>, durability: DurabilityTier) -> Self {
+    pub fn new(fate: Fate, global_time: Option<GlobalTime>, durability: DurabilityTier) -> Self {
         Self {
             fate,
-            global_seq,
+            global_time,
             durability,
         }
     }
 
     fn is_globally_accepted(&self) -> bool {
-        matches!(self.fate, Fate::Accepted) && self.global_seq.is_some()
+        matches!(self.fate, Fate::Accepted) && self.global_time.is_some()
     }
 
     fn is_rejected(&self) -> bool {

@@ -1,3 +1,34 @@
+fn binding_settlement_time<S>(
+    node: &NodeState<S>,
+    subscription: SubscriptionKey,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+) -> GlobalTime
+where
+    S: OrderedKvStorage,
+{
+    let key = crate::protocol::BindingViewKey::new(
+        shape.shape_id(),
+        binding.binding_id(),
+        subscription.read_view,
+    );
+    node.settled_through_for_binding_view(key)
+        .unwrap_or_else(|| node.committed_global_time())
+}
+
+fn canonical_subscription_settlement_time<S>(
+    node: &NodeState<S>,
+    subscription: SubscriptionKey,
+) -> GlobalTime
+where
+    S: OrderedKvStorage,
+{
+    node.settled_through_for_binding_view(
+        crate::protocol::BindingViewKey::from_canonical_subscription_key(subscription),
+    )
+    .unwrap_or_else(|| node.committed_global_time())
+}
+
 fn ordinary_flat_row_duplicate_view(
     shape: &ValidatedQuery,
     current_members: &BTreeSet<ResultMemberEntry>,
@@ -338,7 +369,7 @@ impl PeerState {
         let Some(state) = self.subscriptions.get(&subscription) else {
             return Ok(SyncMessage::ViewUpdate {
                 subscription,
-                settled_through: node.applied_global_watermark(),
+                settled_through: binding_settlement_time(node, subscription, shape, binding),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
@@ -396,7 +427,7 @@ impl PeerState {
         &mut self,
         node: &mut NodeState<S>,
         shape: &ValidatedQuery,
-        _binding: &Binding,
+        binding: &Binding,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
         flush_query_runtime: bool,
@@ -462,7 +493,7 @@ impl PeerState {
                 node,
                 MaintainedRehydrateRequest {
                     shape,
-                    binding: _binding,
+                    binding,
                     subscription,
                     previous_member_result_set: &previous_member_result_set,
                     reset_result_set: false,
@@ -490,7 +521,7 @@ impl PeerState {
         ) {
             return Ok(SyncMessage::ViewUpdate {
                 subscription,
-                settled_through: node.applied_global_watermark(),
+                settled_through: binding_settlement_time(node, subscription, shape, binding),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
@@ -813,7 +844,7 @@ impl PeerState {
             {
                 let update = SyncMessage::ViewUpdate {
                     subscription,
-                    settled_through: node.applied_global_watermark(),
+                    settled_through: binding_settlement_time(node, subscription, shape, binding),
                     reset_result_set,
                     version_carriers: Vec::new(),
                     version_bundles: Vec::new(),
@@ -857,7 +888,7 @@ impl PeerState {
         let known_membership_position = fast_current_membership_position(&known_state);
         let authorization_matches =
             self.fast_cursor_authorization_matches(subscription, &known_state);
-        let watermark = node.applied_global_watermark();
+        let watermark = binding_settlement_time(node, subscription, shape, binding);
         let simple_membership_delta =
             transitions.program_fact_adds.is_empty() && transitions.program_fact_removes.is_empty();
         let mut result_member_adds = transitions
@@ -1270,7 +1301,10 @@ impl PeerState {
         {
             self.apply_outgoing_view_update_result_set(&SyncMessage::ViewUpdate {
                 subscription: maintained_subscription,
-                settled_through: node.applied_global_watermark(),
+                settled_through: canonical_subscription_settlement_time(
+                    node,
+                    maintained_subscription,
+                ),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
@@ -1319,8 +1353,8 @@ impl PeerState {
         let mut reset_result_set = true;
         if !authorization_mismatch
             && let Some(position) = known_membership_position
-            && node.applied_global_watermark().0 > 0
-            && position >= node.applied_global_watermark()
+            && canonical_subscription_settlement_time(node, maintained_subscription).0 > 0
+            && position >= canonical_subscription_settlement_time(node, maintained_subscription)
         {
             result_member_adds.clear();
             reset_result_set = false;

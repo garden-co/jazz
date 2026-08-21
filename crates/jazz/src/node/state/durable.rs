@@ -138,7 +138,7 @@ where
     }
 
     /// Return a historical read handle at an exact global settle position.
-    pub fn at(&mut self, position: GlobalSeq) -> HistoricalRead<'_, S> {
+    pub fn at(&mut self, position: GlobalTime) -> HistoricalRead<'_, S> {
         HistoricalRead {
             node: self,
             position,
@@ -161,8 +161,8 @@ where
     /// v1 is conservative: authorities/history-complete nodes can answer cuts
     /// up to their contiguous applied watermark; partial clients return false
     /// so callers route the one-shot read to a server in a later protocol slice.
-    pub fn is_history_complete_for(&self, _shape: &ValidatedQuery, position: GlobalSeq) -> bool {
-        self.history_complete && position <= self.clock.applied_global_watermark
+    pub fn is_history_complete_for(&self, _shape: &ValidatedQuery, position: GlobalTime) -> bool {
+        self.history_complete && position <= self.clock.committed_global_time
     }
 
     /// Whether this node was opened as a complete serving authority.
@@ -223,9 +223,9 @@ where
     pub fn transaction_state(
         &mut self,
         tx_id: TxId,
-    ) -> Option<(Fate, Option<GlobalSeq>, DurabilityTier)> {
+    ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)> {
         self.transaction_record(tx_id)
-            .map(|record| (record.fate, record.global_seq, record.durability))
+            .map(|record| (record.fate, record.global_time, record.durability))
     }
 
     /// Return the durable audit record for a transaction, including rejected
@@ -277,7 +277,7 @@ where
         let mut candidates = Vec::new();
         for raw in self.database.index_scan_raw(
             "jazz_transactions",
-            "by_global_seq",
+            "by_global_time",
             &[Value::Nullable(None)],
         )? {
             let record = raw.record();
@@ -323,7 +323,7 @@ where
     }
 
     /// Find replayable local transactions in the null slice of
-    /// `by_global_seq`. The sequence/durability invariant makes every
+    /// `by_global_time`. The sequence/durability invariant makes every
     /// below-Global transaction sequence-null, so settled history is outside
     /// this scan without a second index or an upgrade backfill.
     fn pending_transaction_scan_for(
@@ -338,7 +338,7 @@ where
         let mut scan = PendingTransactionScan::default();
         for raw in self.database.index_scan_raw(
             "jazz_transactions",
-            "by_global_seq",
+            "by_global_time",
             &[Value::Nullable(None)],
         )? {
             scan.records_visited += 1;
@@ -380,7 +380,7 @@ where
     pub(crate) fn persist_known_state_fact(
         &self,
         binding_view_key: BindingViewKey,
-        settled_through: GlobalSeq,
+        settled_through: GlobalTime,
     ) -> Result<(), Error> {
         self.database
             .direct_record_store(KNOWN_STATE_FACTS_STORE)?
@@ -403,13 +403,13 @@ where
     pub(crate) fn load_known_state_fact(
         &mut self,
         binding_view_key: BindingViewKey,
-    ) -> Result<Option<GlobalSeq>, Error> {
+    ) -> Result<Option<GlobalTime>, Error> {
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         let Some(record) = store.get(&known_state_fact_key(binding_view_key))? else {
             return Ok(None);
         };
         let settled_through = match record.get_idx(0)? {
-            Value::U64(value) => GlobalSeq(value),
+            Value::U64(value) => GlobalTime(value),
             _ => {
                 return Err(Error::InvalidStoredValue(
                     "known-state settled-through must be u64",
@@ -654,7 +654,7 @@ where
                 }
             };
             let settled_through = match entry.value.get_idx(0)? {
-                Value::U64(value) => GlobalSeq(value),
+                Value::U64(value) => GlobalTime(value),
                 _ => {
                     return Err(Error::InvalidStoredValue(
                         "known-state settled-through must be u64",

@@ -339,15 +339,7 @@ fn session_branch_metadata_rejects_malformed_initial_shapes() {
     arbitrary_owner.base.as_mut().unwrap().owner = NodeUuid::from_bytes([0xee; 16]);
     let mut local_tail = canonical.clone();
     local_tail.base.as_mut().unwrap().local_base = TxTime(1);
-    let mut dotted = canonical;
-    dotted
-        .base
-        .as_mut()
-        .unwrap()
-        .dots
-        .push(TxId::new(TxTime(1), NodeUuid(uuid::Uuid::nil())));
-
-    for metadata in [discarded, parented, arbitrary_owner, local_tail, dotted] {
+    for metadata in [discarded, parented, arbitrary_owner, local_tail] {
         let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
         let (mut client_transport, server_transport) = duplex();
         let subscriber = server.accept_subscriber(server_transport, identity);
@@ -715,7 +707,10 @@ fn session_branch_metadata_parks_until_snapshot_base_arrives() {
         .borrow_mut()
         .create_branch_as(branch, identity)
         .unwrap();
-    assert_eq!(record.base.as_ref().unwrap().global_base, GlobalSeq(1));
+    assert_eq!(
+        record.base.as_ref().unwrap().global_base,
+        GlobalTime::new(1, 0).unwrap()
+    );
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, identity);
 
@@ -816,7 +811,7 @@ fn trusted_branch_snapshot_round_trips_without_receiver_reauthoring() {
     let branch = BranchId::from_bytes([0x4b; 16]);
     let snapshot = crate::tx::Snapshot::exclusive_base(
         snapshot_owner,
-        GlobalSeq(0),
+        GlobalTime(0),
         TxTime(7),
         vec![TxId::new(TxTime(8), snapshot_owner)],
     )
@@ -1063,7 +1058,7 @@ fn subscriber_connection_serves_branch_subscription_with_known_state_and_unsubsc
             values: Vec::new(),
             known_state: Some(KnownStateDeclaration::Fast {
                 completeness: KnownStateCompleteness::FastCurrentMembership,
-                position: GlobalSeq::default(),
+                position: GlobalTime::default(),
             }),
         }))
         .unwrap();

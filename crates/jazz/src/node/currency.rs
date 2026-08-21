@@ -731,9 +731,9 @@ where
             tx,
             node_alias: expected_alias,
             fate,
-            global_seq: record
-                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?
-                .map(GlobalSeq),
+            global_time: record
+                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                .map(GlobalTime),
             durability: durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?,

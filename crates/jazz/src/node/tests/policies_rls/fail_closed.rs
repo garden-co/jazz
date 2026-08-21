@@ -18,7 +18,7 @@ fn unsupported_policy_predicates_deny_instead_of_allowing() {
     core.apply_fate_update(
         tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -47,7 +47,7 @@ fn unresolved_policy_operands_deny_instead_of_allowing() {
     core.apply_fate_update(
         tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -85,7 +85,7 @@ fn unbound_team_claim_in_composed_read_policy_denies_without_binding_error() {
     core.apply_fate_update(
         tx,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -124,7 +124,7 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
     core.apply_fate_update(
         tx_a,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -139,7 +139,7 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
     core.apply_fate_update(
         tx_b,
         Fate::Accepted,
-        Some(GlobalSeq(2)),
+        Some(GlobalTime(2)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -184,7 +184,7 @@ fn nullable_claim_equality_policy_branch_allows_matching_row() {
     core.apply_fate_update(
         tx_matching,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .unwrap();
@@ -202,7 +202,7 @@ fn nullable_claim_equality_policy_branch_allows_matching_row() {
     core.apply_fate_update(
         tx_other,
         Fate::Accepted,
-        Some(GlobalSeq(2)),
+        Some(GlobalTime(2)),
         Some(DurabilityTier::Global),
     )
     .unwrap();

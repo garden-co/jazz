@@ -646,9 +646,9 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
     let (_reader_dir, mut reader) = open_node_with_schema(node(0x76), base);
     let clock_before = (
         reader.clock.tx_time,
-        reader.clock.next_global_seq,
-        reader.clock.applied_global_watermark,
-        reader.clock.applied_global_above_watermark.clone(),
+        reader.clock.global_time_register,
+        reader.clock.committed_global_time,
+        reader.clock.applied_global_times_after_frontier.clone(),
     );
     let node_aliases_before = reader.node_aliases.clone();
     let schema_aliases_before = reader.catalogue.schema_version_aliases.clone();
@@ -678,9 +678,9 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
     assert_eq!(
         (
             reader.clock.tx_time,
-            reader.clock.next_global_seq,
-            reader.clock.applied_global_watermark,
-            reader.clock.applied_global_above_watermark.clone(),
+            reader.clock.global_time_register,
+            reader.clock.committed_global_time,
+            reader.clock.applied_global_times_after_frontier.clone(),
         ),
         clock_before
     );

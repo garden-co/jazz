@@ -35,6 +35,7 @@ use crate::protocol::{
 use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
+use crate::time::GlobalTime;
 use crate::tx::{DurabilityTier, Transaction, TxId, TxKind};
 
 mod subscription_state;

@@ -114,7 +114,7 @@ mod tests {
         SubscriptionKey,
     };
     use jazz::query::{BindingId, ShapeId};
-    use jazz::time::{GlobalSeq, TxTime};
+    use jazz::time::{GlobalTime, TxTime};
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
     use jazz::tx::{BranchLineage, DurabilityTier, Fate, Transaction, TxId, TxKind};
 
@@ -149,7 +149,7 @@ mod tests {
                 binding_id: BindingId(uuid::Uuid::nil()),
                 read_view: ReadViewKey::default(),
             },
-            settled_through: GlobalSeq::default(),
+            settled_through: GlobalTime::default(),
             reset_result_set: false,
             version_carriers: Vec::new(),
             version_bundles: vec![VersionBundle {
@@ -169,7 +169,7 @@ mod tests {
                 },
                 versions: vec![version],
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(1)),
+                global_time: Some(GlobalTime(1)),
                 durability: DurabilityTier::Global,
             }],
             peer_payload_inventory: PeerPayloadInventory::default(),

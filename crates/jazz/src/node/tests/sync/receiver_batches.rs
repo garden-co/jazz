@@ -155,7 +155,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
         .try_into()
         .unwrap();
     let SyncMessage::FateUpdate {
-        global_seq: Some(global_seq),
+        global_time: Some(global_time),
         durability: Some(durability),
         ..
     } = fate
@@ -168,7 +168,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
         .apply_view_updates_in_batch(vec![
             ViewUpdateParts {
                 subscription,
-                settled_through: global_seq,
+                settled_through: global_time,
                 defer_settlement: false,
                 reset_result_set: true,
                 version_carriers: Vec::new(),
@@ -188,7 +188,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
             },
             ViewUpdateParts {
                 subscription,
-                settled_through: global_seq,
+                settled_through: global_time,
                 defer_settlement: false,
                 reset_result_set: false,
                 version_carriers: Vec::new(),
@@ -196,7 +196,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                     tx,
                     versions,
                     fate: Fate::Accepted,
-                    global_seq: Some(global_seq),
+                    global_time: Some(global_time),
                     durability,
                 }],
                 peer_complete_tx_payload_refs: vec![tx_id],
@@ -251,7 +251,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
         .apply_view_updates_in_batch(vec![
             ViewUpdateParts {
                 subscription,
-                settled_through: GlobalSeq(1),
+                settled_through: GlobalTime(1),
                 defer_settlement: false,
                 reset_result_set: true,
                 version_carriers: Vec::new(),
@@ -259,7 +259,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     tx: tx.clone(),
                     versions: vec![first],
                     fate: Fate::Accepted,
-                    global_seq: Some(GlobalSeq(1)),
+                    global_time: Some(GlobalTime(1)),
                     durability: DurabilityTier::Global,
                 }],
                 peer_complete_tx_payload_refs: Vec::new(),
@@ -277,7 +277,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
             },
             ViewUpdateParts {
                 subscription,
-                settled_through: GlobalSeq(1),
+                settled_through: GlobalTime(1),
                 defer_settlement: false,
                 reset_result_set: true,
                 version_carriers: Vec::new(),
@@ -285,7 +285,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     tx,
                     versions: vec![second],
                     fate: Fate::Accepted,
-                    global_seq: Some(GlobalSeq(1)),
+                    global_time: Some(GlobalTime(1)),
                     durability: DurabilityTier::Global,
                 }],
                 peer_complete_tx_payload_refs: Vec::new(),
@@ -348,7 +348,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         .try_into()
         .unwrap();
     let SyncMessage::FateUpdate {
-        global_seq: Some(global_seq),
+        global_time: Some(global_time),
         durability: Some(durability),
         ..
     } = fate
@@ -374,9 +374,9 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
     .unwrap()
     .with_authored_columns(full.authored_columns().cloned());
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let update = |version, fate, update_global_seq, update_durability, result_member_adds| ViewUpdateParts {
+    let update = |version, fate, update_global_time, update_durability, result_member_adds| ViewUpdateParts {
         subscription,
-        settled_through: global_seq,
+        settled_through: global_time,
         defer_settlement: false,
         reset_result_set: false,
         version_carriers: Vec::new(),
@@ -384,7 +384,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             tx: tx.clone(),
             versions: vec![version],
             fate,
-            global_seq: update_global_seq,
+            global_time: update_global_time,
             durability: update_durability,
         }],
         peer_complete_tx_payload_refs: Vec::new(),
@@ -402,14 +402,14 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             update(
                 full.clone(),
                 Fate::Accepted,
-                Some(global_seq),
+                Some(global_time),
                 durability,
                 Vec::new(),
             ),
             update(
                 conflicting.clone(),
                 Fate::Accepted,
-                Some(global_seq),
+                Some(global_time),
                 durability,
                 Vec::new(),
             ),
@@ -422,7 +422,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             update(
                 full.clone(),
                 Fate::Accepted,
-                Some(global_seq),
+                Some(global_time),
                 durability,
                 vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
@@ -433,7 +433,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             update(
                 full.clone(),
                 Fate::Accepted,
-                Some(global_seq),
+                Some(global_time),
                 durability,
                 vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
@@ -476,14 +476,14 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         .unwrap();
     assert_eq!(
         reader.transaction_state(tx_id).unwrap(),
-        (Fate::Accepted, Some(global_seq), DurabilityTier::Global),
+        (Fate::Accepted, Some(global_time), DurabilityTier::Global),
     );
 
     assert!(matches!(
         reader.apply_view_updates_in_batch(vec![update(
             conflicting,
             Fate::Accepted,
-            Some(global_seq),
+            Some(global_time),
             durability,
             Vec::new(),
         )]),
@@ -599,7 +599,7 @@ fn partial_exclusive_view_update(
     let tx_id = tx.tx_id;
     ViewUpdateParts {
         subscription,
-        settled_through: GlobalSeq(1),
+        settled_through: GlobalTime(1),
         defer_settlement: false,
         reset_result_set: false,
         version_carriers: Vec::new(),
@@ -607,7 +607,7 @@ fn partial_exclusive_view_update(
             tx,
             versions: vec![version],
             fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(1)),
+            global_time: Some(GlobalTime(1)),
             durability: DurabilityTier::Global,
         }],
         peer_complete_tx_payload_refs: Vec::new(),
@@ -650,7 +650,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
         .try_into()
         .unwrap();
     let SyncMessage::FateUpdate {
-        global_seq: Some(old_seq),
+        global_time: Some(old_seq),
         durability: Some(old_durability),
         ..
     } = old_fate
@@ -676,7 +676,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
         .try_into()
         .unwrap();
     let SyncMessage::FateUpdate {
-        global_seq: Some(new_seq),
+        global_time: Some(new_seq),
         durability: Some(new_durability),
         ..
     } = new_fate
@@ -697,14 +697,14 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
                     tx: new,
                     versions: new_versions,
                     fate: Fate::Accepted,
-                    global_seq: Some(new_seq),
+                    global_time: Some(new_seq),
                     durability: new_durability,
                 },
                 VersionBundle {
                     tx: old,
                     versions: old_versions,
                     fate: Fate::Accepted,
-                    global_seq: Some(old_seq),
+                    global_time: Some(old_seq),
                     durability: old_durability,
                 },
             ],
@@ -759,14 +759,14 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
-            settled_through: GlobalSeq(0),
+            settled_through: GlobalTime(0),
             reset_result_set: false,
             version_carriers: Vec::new(),
             version_bundles: vec![VersionBundle {
                 tx: tx.clone(),
                 versions: vec![first],
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(1)),
+                global_time: Some(GlobalTime(1)),
                 durability: DurabilityTier::Global,
             }],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -794,14 +794,14 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
-            settled_through: GlobalSeq(0),
+            settled_through: GlobalTime(0),
             reset_result_set: false,
             version_carriers: Vec::new(),
             version_bundles: vec![VersionBundle {
                 tx,
                 versions: vec![second],
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(1)),
+                global_time: Some(GlobalTime(1)),
                 durability: DurabilityTier::Global,
             }],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),

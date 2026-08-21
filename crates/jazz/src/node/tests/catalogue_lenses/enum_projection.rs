@@ -1047,12 +1047,12 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
     );
 
     assert!(core
-        .projected_historical_current_rows("items", base.version_id(), GlobalSeq(0))
+        .projected_historical_current_rows("items", base.version_id(), GlobalTime(0))
         .unwrap()
         .is_empty());
 
     assert!(core
-        .query_rows_at(&old_shape, &old_binding, GlobalSeq(0))
+        .query_rows_at(&old_shape, &old_binding, GlobalTime(0))
         .unwrap()
         .is_empty());
 

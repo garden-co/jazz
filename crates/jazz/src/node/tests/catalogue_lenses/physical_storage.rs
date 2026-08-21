@@ -93,7 +93,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
     core.apply_sync_message(SyncMessage::FateUpdate {
         tx_id: rejected,
         fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
-        global_seq: None,
+        global_time: None,
         durability: None,
     })
     .unwrap();
@@ -359,7 +359,7 @@ fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
     core.apply_fate_update(
         new_delete,
         Fate::Accepted,
-        Some(GlobalSeq(2)),
+        Some(GlobalTime(2)),
         Some(DurabilityTier::Global),
     )
     .expect("settle v2 deletion first");
@@ -367,7 +367,7 @@ fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
     core.apply_fate_update(
         old_delete,
         Fate::Accepted,
-        Some(GlobalSeq(1)),
+        Some(GlobalTime(1)),
         Some(DurabilityTier::Global),
     )
     .expect("late v1 fate must compare through its authored deletion prefix");

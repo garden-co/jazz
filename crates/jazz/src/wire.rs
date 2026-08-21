@@ -703,7 +703,7 @@ mod tests {
     use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
     use crate::query::{BindingId, Query, ShapeId};
     use crate::schema::{ColumnSchema, TableSchema};
-    use crate::time::{GlobalSeq, TxTime};
+    use crate::time::{GlobalTime, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
 
     #[test]
@@ -843,7 +843,7 @@ mod tests {
         let message = SyncMessage::FateUpdate {
             tx_id,
             fate: Fate::Rejected(RejectionReason::Cascade { root: tx_id }),
-            global_seq: Some(GlobalSeq(7)),
+            global_time: Some(GlobalTime(7)),
             durability: Some(DurabilityTier::Global),
         };
 
@@ -932,7 +932,7 @@ mod tests {
                 body_index: 2,
                 tx: None,
                 fate: Some(Fate::Pending),
-                global_seq: None,
+                global_time: None,
                 durability: None,
             });
 
@@ -973,7 +973,7 @@ mod tests {
                 binding_id: BindingId(uuid::Uuid::from_bytes([0x33; 16])),
                 read_view: Default::default(),
             },
-            settled_through: GlobalSeq(500),
+            settled_through: GlobalTime(500),
             reset_result_set: false,
             version_carriers,
             version_bundles: Vec::new(),
@@ -1025,7 +1025,7 @@ mod tests {
                         .unwrap(),
                     ],
                     fate: Fate::Accepted,
-                    global_seq: Some(GlobalSeq(10_000 + index as u64)),
+                    global_time: Some(GlobalTime(10_000 + index as u64)),
                     // A sequence is the global-authority receipt, and so its
                     // companion durability is Global in every valid fixture.
                     durability: DurabilityTier::Global,
@@ -1153,11 +1153,11 @@ mod tests {
                         branch_or_prefix: None,
                         row_digest: Some(vec![0xAB; 8]),
                         batch: Some(tx),
-                        settle_position: Some(GlobalSeq(10_000 + i)),
+                        settle_position: Some(GlobalTime(10_000 + i)),
                     });
                 SyncMessage::ViewUpdate {
                     subscription,
-                    settled_through: GlobalSeq(10_000 + i),
+                    settled_through: GlobalTime(10_000 + i),
                     reset_result_set: false,
                     version_carriers: Vec::new(),
                     version_bundles: Vec::new(),
@@ -1245,7 +1245,7 @@ mod tests {
             },
             SyncMessage::ViewUpdate {
                 subscription,
-                settled_through: GlobalSeq(7),
+                settled_through: GlobalTime(7),
                 reset_result_set: true,
                 version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
@@ -1280,7 +1280,7 @@ mod tests {
             SyncMessage::FateUpdate {
                 tx_id,
                 fate: Fate::Accepted,
-                global_seq: Some(GlobalSeq(7)),
+                global_time: Some(GlobalTime(7)),
                 durability: Some(DurabilityTier::Global),
             },
             SyncMessage::FetchRowVersions {
@@ -1323,7 +1323,7 @@ mod tests {
                 binding_id: BindingId(uuid::Uuid::from_bytes([0x55; 16])),
                 read_view: Default::default(),
             },
-            settled_through: GlobalSeq(7),
+            settled_through: GlobalTime(7),
             reset_result_set: true,
             version_carriers: Vec::new(),
             version_bundles: Vec::new(),
