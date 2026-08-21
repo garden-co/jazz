@@ -1,4 +1,4 @@
-import { CleanedWhere } from "better-auth/adapters";
+import type { Where } from "better-auth/adapters";
 import { describe, expect, it } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import {
@@ -67,7 +67,7 @@ describe("isQuerySupported", () => {
   } satisfies WasmSchema[string];
 
   it("supports row id comparisons and supported primitive operators", () => {
-    const where: CleanedWhere[] = [
+    const where: Where[] = [
       { field: "id", operator: "eq", value: "row-1", connector: "AND" },
       { field: "age", operator: "gte", value: 18, connector: "AND" },
       { field: "active", operator: "eq", value: true, connector: "AND" },
@@ -130,7 +130,7 @@ describe("isQuerySupported", () => {
     expect(
       isQuerySupported(tableSchema, [
         { field: "active", operator: "in", value: [true], connector: "AND" },
-      ] as unknown as CleanedWhere[]),
+      ] as unknown as Where[]),
     ).toBe(true);
 
     expect(
@@ -141,19 +141,19 @@ describe("isQuerySupported", () => {
           value: [new Date("2026-01-01T00:00:00.000Z")],
           connector: "AND",
         },
-      ] as unknown as CleanedWhere[]),
+      ] as unknown as Where[]),
     ).toBe(true);
 
     expect(
       isQuerySupported(tableSchema, [
         { field: "bytes", operator: "in", value: [[1, 2, 3]], connector: "AND" },
-      ] as unknown as CleanedWhere[]),
+      ] as unknown as Where[]),
     ).toBe(true);
 
     expect(
       isQuerySupported(tableSchema, [
         { field: "tags", operator: "in", value: [["a"]], connector: "AND" },
-      ] as unknown as CleanedWhere[]),
+      ] as unknown as Where[]),
     ).toBe(true);
   });
 
@@ -271,9 +271,7 @@ describe("filterListByWhere", () => {
 
   describe("equality operators", () => {
     it("should filter with eq operator", () => {
-      const where: CleanedWhere[] = [
-        { field: "name", operator: "eq", value: "Alice", connector: "AND" },
-      ];
+      const where: Where[] = [{ field: "name", operator: "eq", value: "Alice", connector: "AND" }];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
         {
@@ -287,9 +285,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with ne operator", () => {
-      const where: CleanedWhere[] = [
-        { field: "name", operator: "ne", value: "Alice", connector: "AND" },
-      ];
+      const where: Where[] = [{ field: "name", operator: "ne", value: "Alice", connector: "AND" }];
       const result = filterListByWhere(testData, where);
       expect(result).toHaveLength(4);
       expect(result.every((item) => item.name !== "Alice")).toBe(true);
@@ -300,9 +296,7 @@ describe("filterListByWhere", () => {
         { id: 1, name: "Alice", age: null },
         { id: 2, name: "Bob", age: 30 },
       ];
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "eq", value: null, connector: "AND" },
-      ];
+      const where: Where[] = [{ field: "age", operator: "eq", value: null, connector: "AND" }];
       const result = filterListByWhere(dataWithNull, where);
       expect(result).toEqual([{ id: 1, name: "Alice", age: null }]);
     });
@@ -314,9 +308,7 @@ describe("filterListByWhere", () => {
         { id: 3, name: "Charlie", age: 35 },
         { id: 4, name: "David", age: undefined },
       ];
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "ne", value: null, connector: "AND" },
-      ];
+      const where: Where[] = [{ field: "age", operator: "ne", value: null, connector: "AND" }];
       const result = filterListByWhere(dataWithNull, where);
       expect(result).toEqual([
         { id: 2, name: "Bob", age: 30 },
@@ -327,7 +319,7 @@ describe("filterListByWhere", () => {
 
   describe("comparison operators", () => {
     it("should filter with lt operator", () => {
-      const where: CleanedWhere[] = [{ field: "age", operator: "lt", value: 30, connector: "AND" }];
+      const where: Where[] = [{ field: "age", operator: "lt", value: 30, connector: "AND" }];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
         {
@@ -355,9 +347,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with lte operator", () => {
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "lte", value: 30, connector: "AND" },
-      ];
+      const where: Where[] = [{ field: "age", operator: "lte", value: 30, connector: "AND" }];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
         {
@@ -392,7 +382,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with gt operator", () => {
-      const where: CleanedWhere[] = [{ field: "age", operator: "gt", value: 30, connector: "AND" }];
+      const where: Where[] = [{ field: "age", operator: "gt", value: 30, connector: "AND" }];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
         {
@@ -406,9 +396,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with gte operator", () => {
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "gte", value: 30, connector: "AND" },
-      ];
+      const where: Where[] = [{ field: "age", operator: "gte", value: 30, connector: "AND" }];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
         {
@@ -429,9 +417,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should handle null values in comparison operators", () => {
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "lt", value: null, connector: "AND" },
-      ];
+      const where: Where[] = [{ field: "age", operator: "lt", value: null, connector: "AND" }];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([]);
     });
@@ -439,7 +425,7 @@ describe("filterListByWhere", () => {
 
   describe("string operators", () => {
     it("should filter with contains operator", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         {
           field: "email",
           operator: "contains",
@@ -460,7 +446,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with starts_with operator", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         {
           field: "name",
           operator: "starts_with",
@@ -481,7 +467,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with ends_with operator", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         { field: "name", operator: "ends_with", value: "e", connector: "AND" },
       ];
       const result = filterListByWhere(testData, where);
@@ -511,7 +497,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should handle non-string values in string operators", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         { field: "age", operator: "contains", value: "test", connector: "AND" },
       ];
       const result = filterListByWhere(testData, where);
@@ -521,7 +507,7 @@ describe("filterListByWhere", () => {
 
   describe("in operator", () => {
     it("should filter with in operator for strings", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         {
           field: "name",
           operator: "in",
@@ -549,7 +535,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with in operator for numbers", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         { field: "age", operator: "in", value: [25, 30, 35], connector: "AND" },
       ];
       const result = filterListByWhere(testData, where);
@@ -579,7 +565,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with in operator for booleans", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         {
           field: "active",
           operator: "in",
@@ -614,7 +600,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should handle non-array values in in operator", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         {
           field: "name",
           operator: "in",
@@ -629,7 +615,7 @@ describe("filterListByWhere", () => {
 
   describe("connectors", () => {
     it("should use explicit AND connector", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         { field: "age", operator: "gte", value: 25, connector: "AND" },
         { field: "active", operator: "eq", value: true, connector: "AND" },
       ];
@@ -660,7 +646,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should use OR connector", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         { field: "age", operator: "lt", value: 25, connector: "OR" },
         { field: "active", operator: "eq", value: false, connector: "OR" },
       ];
@@ -684,7 +670,7 @@ describe("filterListByWhere", () => {
     });
 
     it("should throw error for unsupported connector", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         { field: "name", operator: "eq", value: "Alice", connector: "AND" },
         { field: "age", operator: "eq", value: 25, connector: "XOR" as any },
       ];
@@ -694,7 +680,7 @@ describe("filterListByWhere", () => {
 
   describe("error handling", () => {
     it("should throw error for unsupported operator", () => {
-      const where: CleanedWhere[] = [
+      const where: Where[] = [
         {
           field: "name",
           operator: "unsupported" as any,
@@ -715,13 +701,13 @@ describe("filterListByWhere with id", () => {
   ] as any[];
 
   it("should match by id when where field is 'id' (eq)", () => {
-    const where: CleanedWhere[] = [{ field: "id", operator: "eq", value: "a1", connector: "AND" }];
+    const where: Where[] = [{ field: "id", operator: "eq", value: "a1", connector: "AND" }];
     const result = filterListByWhere(testData, where);
     expect(result).toEqual([{ id: "a1", name: "Alice", age: 25, active: true }]);
   });
 
   it("should return empty when no id matches", () => {
-    const where: CleanedWhere[] = [{ field: "id", operator: "eq", value: "z9", connector: "AND" }];
+    const where: Where[] = [{ field: "id", operator: "eq", value: "z9", connector: "AND" }];
     const result = filterListByWhere(testData, where);
     expect(result).toEqual([]);
   });
@@ -957,19 +943,17 @@ describe("paginateList", () => {
 
 describe("isWhereBySingleField", () => {
   it("should return true if the where condition is an id", () => {
-    const where: CleanedWhere[] = [{ field: "id", operator: "eq", value: "1", connector: "AND" }];
+    const where: Where[] = [{ field: "id", operator: "eq", value: "1", connector: "AND" }];
     expect(isWhereBySingleField("id", where)).toBe(true);
   });
 
   it("should return false if the where condition is not an id", () => {
-    const where: CleanedWhere[] = [
-      { field: "name", operator: "eq", value: "Alice", connector: "AND" },
-    ];
+    const where: Where[] = [{ field: "name", operator: "eq", value: "Alice", connector: "AND" }];
     expect(isWhereBySingleField("id", where)).toBe(false);
   });
 
   it("should return false if the where condition has more than one condition", () => {
-    const where: CleanedWhere[] = [
+    const where: Where[] = [
       { field: "name", operator: "eq", value: "Alice", connector: "AND" },
       { field: "id", operator: "eq", value: "1", connector: "AND" },
     ];
@@ -977,12 +961,12 @@ describe("isWhereBySingleField", () => {
   });
 
   it("should return false if the where condition has no condition", () => {
-    const where: CleanedWhere[] = [];
+    const where: Where[] = [];
     expect(isWhereBySingleField("id", where)).toBe(false);
   });
 
   it("should return false if the where condition on ID is not eq", () => {
-    const where: CleanedWhere[] = [{ field: "id", operator: "gt", value: "1", connector: "AND" }];
+    const where: Where[] = [{ field: "id", operator: "gt", value: "1", connector: "AND" }];
     expect(isWhereBySingleField("id", where)).toBe(false);
   });
 });

@@ -485,6 +485,15 @@ impl TableSchema {
         if column == "_id" || column == "_id_deleted" {
             return true;
         }
+        // Blob columns carry no index (see should_index_column), so the
+        // planner must not consult one.
+        if self
+            .columns
+            .column(column)
+            .is_some_and(|descriptor| matches!(descriptor.column_type, ColumnType::Bytea))
+        {
+            return false;
+        }
         self.indexed_columns
             .as_ref()
             .is_none_or(|columns| columns.iter().any(|name| name.as_str() == column))

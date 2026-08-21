@@ -224,6 +224,35 @@ describe("backend/create-jazz-context", () => {
     );
   });
 
+  it("BC-U01a: keeps query durability independent from the node tier", () => {
+    const context = createJazzContext({
+      appId: "server-app",
+      app: { wasmSchema: SCHEMA_A },
+      permissions: {},
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      tier: "local",
+      defaultDurabilityTier: "edge",
+    });
+
+    context.db();
+
+    expect(mocks.runtimeCtor).toHaveBeenCalledWith(
+      expect.any(String),
+      "server-app",
+      "dev",
+      "main",
+      "/tmp/jazz.db",
+      "local",
+    );
+    expect(mocks.connectWithRuntime).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tier: "local",
+        defaultDurabilityTier: "edge",
+      }),
+    );
+  });
+
   it("BC-U01b: rejects configuring both jwksUrl and jwtPublicKey", () => {
     expect(() =>
       createJazzContext({

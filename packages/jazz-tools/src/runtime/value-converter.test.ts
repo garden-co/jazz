@@ -35,6 +35,25 @@ describe("toValue", () => {
     const colType: ColumnType = { type: "Integer" };
     expect(toValue(42, colType)).toEqual({ type: "Integer", value: 42 });
     expect(toValue(-1, colType)).toEqual({ type: "Integer", value: -1 });
+    expect(toValue(-2_147_483_648, colType)).toEqual({
+      type: "Integer",
+      value: -2_147_483_648,
+    });
+    expect(toValue(2_147_483_647, colType)).toEqual({
+      type: "Integer",
+      value: 2_147_483_647,
+    });
+  });
+
+  it("rejects Integer values outside the signed 32-bit range", () => {
+    const colType: ColumnType = { type: "Integer" };
+    const invalidValues = [-2_147_483_649, 2_147_483_648, 1.5, NaN, Infinity];
+
+    for (const value of invalidValues) {
+      expect(() => toValue(value, colType)).toThrow(
+        "Integer values must be signed 32-bit integers between -2147483648 and 2147483647",
+      );
+    }
   });
 
   it("converts BigInt values", () => {
