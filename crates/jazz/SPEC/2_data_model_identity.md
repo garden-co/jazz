@@ -45,7 +45,7 @@ special-casing individual columns:
 
 - **replicated-immutable** — `row_uuid`, `tx_id`, `parents`, the user columns,
   `made_by`, read sets, snapshots. Written once by the author, never mutated.
-- **upstream-decided mutable state** — `fate`, `global_seq`, `rejection_reason`
+- **upstream-decided mutable state** — `fate`, `global_time`, `rejection_reason`
   (ch. 3). Written only by the fate authority, distributed as fate messages.
 - **node-local derived state** — observed durability, local currency (computed by
   groove `arg_max_by`), and the core-written global-current rows / change
@@ -60,8 +60,9 @@ node-local derived state is never shipped.
 Cross-node identity is stable because every durable name is a wire-stable UUID
 newtype (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
 `MigrationLensId`, `BranchId`, `AuthorId`, and
-`TxId { time: TxTime, node: NodeUuid }`. Global ordering uses `GlobalSeq`
-(ch. 3–4). A transaction id combines a packed hybrid logical clock (`TxTime`,
+`TxId { time: TxTime, node: NodeUuid }`. Global settlement ordering uses the
+distinct packed HLC newtype `GlobalTime` (ch. 3–4). A transaction id combines a
+packed hybrid logical clock (`TxTime`,
 physical milliseconds plus a logical counter) with the writing node; the
 transaction is identified and tie-broken by both values (`INV-DATA-5`). The
 well-known `AuthorId::SYSTEM` is a fixed, content-derived id that passes all
@@ -188,8 +189,8 @@ from those tables on recovery.
   discriminator, while deletion history uses a stable system descriptor
   (`INV-DATA-14`, `INV-DATA-15`, `INV-DATA-18`, `INV-DATA-21`);
 - _change stream_ — the append-only `jazz_global_changes`, keyed
-  `(physical_table_id, row_uuid, layer, global_seq)` with physical-table and
-  global-sequence indexes (`INV-DATA-19`);
+  `(physical_table_id, row_uuid, layer, global_time)` with physical-table and
+  global-time indexes (`INV-DATA-19`);
 
 ### 2.14 Subsumed table-first row-history notes
 

@@ -12,15 +12,15 @@ currency and deletion semantics of chapter 4 and feeds queries (ch. 6) and the
 
 Invariant digest:
 
-- `INV-READ-1`: Opening an exclusive transaction MUST capture a `Snapshot` whose `owner` is the node UUID, whose `global_base` is the node's contiguous `applied_global_watermark`, whose `local_base` is the node's current `TxTime`, and whose exclusive-base dots contain no foreign transactions.
-- `INV-READ-2`: A snapshot MUST cover exactly transactions with stored `global_seq <= Snapshot.global_base`, transactions from `Snapshot.owner` with `tx_id.time <= Snapshot.local_base`, or transactions explicitly listed in `Snapshot.dots`.
+- `INV-READ-1`: Opening an exclusive transaction on a history-complete core MUST capture a `Snapshot` whose `owner` is the node UUID, whose `global_base` is the core's atomically committed `GlobalTime`, whose `local_base` is the current `TxTime`, and whose dots are empty; a partial node MUST NOT derive a whole-database base from query-scoped receipts and MUST represent held accepted global transactions above its frontier as explicit dots.
+- `INV-READ-2`: A snapshot MUST cover exactly transactions with stored `global_time <= Snapshot.global_base`, transactions from `Snapshot.owner` with `tx_id.time <= Snapshot.local_base`, or transactions explicitly listed in `Snapshot.dots`.
 - `INV-READ-3`: Reads inside an open exclusive transaction MUST choose the domination winner among snapshot-covered versions per `VersionLayer` and MUST NOT observe later uncovered current-winner changes.
 - `INV-READ-4`: Reads inside an open exclusive transaction MUST overlay that transaction's own pending writes on top of the snapshot-covered base view.
 - `INV-READ-5`: `tx_read` MUST record a `RowRead` for a present snapshot-visible row and an `AbsentRead` for an absent snapshot-visible row.
 - `INV-READ-6`: `tx_current_rows` and `tx_query` MUST record predicate reads as `PredicateRead` values carrying `table`, `shape_id`, `shape`, `binding_id`, and `binding_values`; whole-table transaction reads are degenerate query shapes.
 - `INV-READ-7`: Local current-row reads MUST use argmax `TxId` currency per `(row_uuid, VersionLayer)` over held non-rejected versions, independent of sender arrival order.
 - `INV-READ-8`: Global current-row reads MUST use the per-lineage combined global-current source and MUST exclude rows whose stored visibility is false.
-- `INV-READ-9`: Global as-of reads at `GlobalSeq` MUST choose independent content and deletion winners from `jazz_global_changes` at or before the requested `global_base`, then derive visibility before returning content.
+- `INV-READ-9`: Global as-of reads at `GlobalTime` MUST choose independent content and deletion winners from `jazz_global_changes` at or before the requested `global_base`, then derive visibility before returning content.
 - `INV-READ-10`: Current-row visibility MUST be derived from independent content and deletion-register winners; content writes alone MUST NOT restore a deleted row, while `DeletionEvent::Restored` reveals current content.
 - `INV-READ-11`: A local-tier read on the writer node MUST include the node's own pending committed transaction, while a global-tier read MUST exclude it until global fate/current state is applied.
 - `INV-READ-12`: Per-layer global-current tables MUST equal accepted argmax winners over stored versions and remain consistent after reopen.
@@ -71,27 +71,34 @@ exercised by `sync::reopened_core_continues_sync_after_restart`.
 ### 5.3 Snapshots
 
 Snapshots give an exclusive transaction a stable read frontier. A snapshot
-(`Snapshot { owner: NodeUuid, global_base: GlobalSeq, local_base: TxTime, dots:
+(`Snapshot { owner: NodeUuid, global_base: GlobalTime, local_base: TxTime, dots:
 Vec<TxId> }` in the reference implementation) is a compact dotted description of
 that frontier, owned by the node that created it. A transaction is **covered** by
-a snapshot when its stored `global_seq <= global_base`, or it is owned by
+a snapshot when its stored `global_time <= global_base`, or it is owned by
 `owner` with `tx_id.time <= local_base`, or it is explicitly listed in `dots`
 (`INV-READ-2`).
 
-Opening an exclusive transaction captures `owner = self`,
-`global_base = the contiguous applied global watermark` (not merely the highest
-seen seq), `local_base = the current TxTime`, and empty `dots` (`INV-READ-1`).
-Using the _contiguous_ watermark for `global_base` is what makes the snapshot a
-clean prefix: gapped global seqs are excluded until their gaps fill.
+Opening an exclusive transaction on a history-complete core captures `owner =
+self`, `global_base = committed_global_time`, `local_base = the current TxTime`,
+and empty `dots` (`INV-READ-1`). Core settlement serializes HLC allocation with
+the durable accepted commit, so this is a clean prefix even though timestamp
+values are sparse. Numerical adjacency has no semantic role.
+
+Edges and clients are partial by design. Their per-binding `settled_through`
+receipts prove query-result completeness, not possession of every transaction in
+the database, and therefore MUST NOT be promoted into `Snapshot.global_base`.
+They represent locally held work through the owner-local cut and explicit dots;
+the core validates recorded row, absent, and predicate reads at commit (ch. 3).
 
 The `dots` field is the escape hatch for the general snapshot model: a snapshot
 ref can name explicit transaction dots outside the contiguous/global and
-owner-local prefixes. An exclusive base snapshot carries no foreign dots: it
-sees exactly the contiguous global prefix plus its own `owner`/`local_base`
-transactions. Snapshot creation enforces that any admitted dots are owned by the
-snapshot owner. Sync payload dedup and reconnect state are separate from this
-read-frontier model (ch. 8); they must not overload `Snapshot.dots` to mean
-"payloads already known by a peer."
+owner-local prefixes. A history-complete core needs no dots. A partial node's
+exclusive base may contain foreign dots, but only for locally held transactions
+already carrying an accepted global fate; those dots describe the actual read
+cut and authority validation evaluates the full dotted snapshot. They are not a
+claim that intervening global history is complete. Sync payload dedup and
+reconnect state remain separate (ch. 8): mere receipt of an unfated payload does
+not create a snapshot dot.
 
 ### 5.4 Reads inside an exclusive transaction
 
@@ -122,7 +129,7 @@ whole-table reads are degenerate query shapes.
 ### 5.5 Historical (as-of) reads
 
 A historical read asks what was visible at a past global position. For a read at
-a past `GlobalSeq`, the system chooses independent content and deletion winners
+a past `GlobalTime`, the system chooses independent content and deletion winners
 from `jazz_global_changes` at or before the requested position, then derives
 visibility before returning content (`INV-READ-9`). Time-travel
 and snapshot-base branches build on this mechanism (ch. 11), and read policy is

@@ -35,7 +35,7 @@ partition** explicitly for placement and does not conflate it with physical or
 branch storage identity.
 
 **Implementation status.** Shard ownership, shard cores, and cross-shard
-transactions are not implemented. The current core has one global sequencing and
+transactions are not implemented. The current core has one global settlement timeline and
 authority model; this chapter therefore specifies safety constraints on any
 future sharded design rather than current sharded behavior.
 
@@ -57,9 +57,12 @@ shared coordination surface small:
 - **Shard-cores + a tiny global catalogue.** Each shard-core is the authority for
   its shard ownership partitions. A small global catalogue/sequencer retains
   schema versions, lenses, policy bundles, and the partition-ownership map.
-- **Per-shard settle positions.** Settle streams and snapshots become per-shard
-  `(shard, seq)` vectors rather than one `GlobalSeq` line — generalizing the
-  `Snapshot`/`GlobalSeq` cuts of ch. 5 and ch. 11.
+- **Per-shard settle positions.** Each logical shard has its own packed-u64 HLC
+  register and committed frontier. Shard identity is routing context derived
+  from immutable row identity/ownership values, not bits inside `GlobalTime`.
+  Exact multi-shard snapshots carry per-shard `(logical shard, GlobalTime)`
+  frontiers, while a future wall-time query may apply one requested physical
+  time to every participating shard.
 - **Cross-shard via subscriptions.** Shard-core ↔ shard-core subscriptions carry
   permission closures and query assembly; edges subscribe to every shard-core a
   downstream shape touches.
@@ -104,7 +107,7 @@ The load-bearing unknowns are:
   picks consensus replication or restore-from-durable-log.
 - 🔶 The design is sharded authority; the implementation has a singleton global
   core that is history-complete, has exclusive authority, and maintains a single
-  `GlobalSeq` line.
+  `GlobalTime` line.
 - 🔶 **Adaptive shard growth.** Slot-based table growth and rendezvous placement
   need a concrete migration protocol before they can become part of the storage
   or topology contract.

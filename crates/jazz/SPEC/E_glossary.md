@@ -30,8 +30,10 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 
 - **`TxTime`** — packed HLC time: 48-bit ms + 16-bit counter.
 - **`TxId`** — `TxTime` + creating `NodeUuid`; the transaction's identity.
-- **`GlobalSeq`** — the core-assigned serialization position ("seq"). A
-  persisted `settled_through: GlobalSeq` is known-state possession for
+- **`GlobalTime`** — the core-assigned packed HLC settlement position: 48-bit
+  physical milliseconds plus a 16-bit logical counter. It is strictly monotone
+  per core authority but not dense. A
+  persisted `settled_through: GlobalTime` is known-state possession for
   payload dedup/repair, not proof of a live authority connection or a settled
   Edge/Global subscription (ch. 8, `INV-SYNC-30`).
 
@@ -72,7 +74,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
 ### Reads & queries (ch. 5–6)
 
 - **settled read** vs **local read**; **historical / settled-history read** at a
-  `GlobalSeq` (ch. 11).
+  `GlobalTime` (ch. 11).
 - **shape** (`ShapeId`) — a validated, schema-stamped query; **binding**
   (`BindingId`) — its parameter assignment; **claim** (`claim(name)`) —
   server-injected identity data (ch. 7).

@@ -25,7 +25,7 @@ Invariant digest:
 - `INV-LOWER-5`: Combined current rows MUST be maintained from independently selected content and deletion winners and expose an explicit visibility state.
 - `INV-LOWER-6`: Local/non-global current-row maintenance MUST use bounded per-row currency selection for both content and deletion history; deletion access MUST be prefix-bounded by branch lineage and physical table id.
 - `INV-LOWER-7`: Global current-row reads MUST use the physical lineage's combined global-current table, not scan immutable history or anti-join a register source.
-- `INV-LOWER-8`: `jazz_global_changes` MUST be keyed by `(physical_table_id, row_uuid, layer, global_seq)` and expose global-sequence and physical-table/global-sequence indexes.
+- `INV-LOWER-8`: `jazz_global_changes` MUST be keyed by `(physical_table_id, row_uuid, layer, global_time)` and expose global-time and physical-table/global-time indexes.
 - `INV-LOWER-9`: Query lowering MUST begin from a resolved visible-current source and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
 - `INV-LOWER-10`: Parameterized query plans MUST be prepared as groove shapes with binding descriptor and stable name `jazz-query:<shape_id>`, then executed through `Database::bind_shape`; maintained subscription views with hidden routing provenance MUST prepare a clean output graph plus an internal routing graph through `Database::prepare_one_sink_with_routing`.
 - `INV-LOWER-11`: Prepared graph lowering MUST preserve the semantics of every accepted predicate shape and explicitly reject unsupported predicate shapes.
@@ -40,8 +40,8 @@ Invariant digest:
 - `INV-LOWER-21`: One-shot reads, live subscriptions, sync views, and transaction-validation reads MUST consume the same lowered semantic query program; callback/reset/retry/propagation behavior MUST NOT select a second evaluator or become part of query shape identity. Runtime consumers request compiler evidence as app rows plus named terminal facts.
 - `INV-LOWER-22`: One-shot filtered current reads MUST select deterministic static access paths when sound: primary-key equality uses a primary-key scan, declared indexed-column equality uses an index probe, residual filters remain applied, and unindexed filters fall back to a loudly counted full scan.
 - `INV-LOWER-23`: Position-bounded historical cuts and branch-base reads MUST use the
-  `by_table_global_seq` bounded range path when sound, returning the same rows as the
-  full-scan currentness oracle while touching only the requested global-sequence range.
+  `by_table_global_time` bounded range path when sound, returning the same rows as the
+  full-scan currentness oracle while touching only the requested global-time range.
 - `INV-LOWER-29`: The shared deletion-history relation MUST expose seekable `(branch_lineage, physical_table_id, row_uuid)` and table-prefix access paths. No logical-table read, rebuild, or branch operation may lower to an unbounded scan over unrelated table lineages.
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the full-scan path and counters proving the selected path.
 - `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
@@ -388,15 +388,15 @@ model or statistics:
 
 1. equality on a primary-key prefix → point/prefix scan spec;
 2. equality on a declared/derived boundary-arrangement key → arrangement probe;
-3. global-sequence-bounded reads (historical cuts, branch bases, reconnect
-   enumeration) → range scan spec over the `by_table_global_seq` arrangement;
+3. global-time-bounded reads (historical cuts, branch bases, reconnect
+   enumeration) → range scan spec over the `by_table_global_time` arrangement;
 4. otherwise → full scan, loudly counted (full-scan counters are part of the
    operational surface, ch. 17).
 
 v1 consumers are implemented and tested: one-shot filtered reads;
 position-bounded historical and branch-cut reads, which take the
-`by_table_global_seq` bounded range path and must agree row-for-row with the
-full-scan currentness oracle while touching only the requested global-sequence
+`by_table_global_time` bounded range path and must agree row-for-row with the
+full-scan currentness oracle while touching only the requested global-time
 range (`INV-LOWER-23`; this is what makes branch `at()` and historical reads
 bounded rather than gated); dry-run policy
 probes; and recursion seed hydration (`INV-LOWER-22`–`INV-LOWER-24`). The

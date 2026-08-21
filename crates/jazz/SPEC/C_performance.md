@@ -82,7 +82,7 @@ canonical scale-independence canary.
 Winner metadata needed for sync payload witnesses and known-state dedup is also
 part of the compact current representation: current content/register rows carry
 the canonical version payload metadata (`schema_version`, `parents`, provenance)
-and the settle position (`global_seq` where fated). Version witnesses are sourced
+and the settle position (`global_time` where fated). Version witnesses are sourced
 from current rows, not a current-key → history join, and the current-sourced
 payload is byte-equivalent to the canonical history projection.
 
