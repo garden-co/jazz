@@ -4,14 +4,18 @@ use std::time::Instant;
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, SeededRowIdSource};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, BranchDimensionId, NodeUuid, RowUuid};
 use jazz::node::ContributionMergeRow;
 use jazz::protocol::{BranchSelector, BranchViewBase, SnapshotRef};
 use jazz::query::{Query, col, eq, lit};
-use jazz::schema::{BranchDimensionSchema, JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
 use jazz::time::GlobalSeq;
+use jazz::tools::ObjectId;
+use jazz::tools::public_schema::{
+    BranchDimensionDescriptor, ColumnType as PublicColumnType, SchemaBuilder, TableSchema,
+    Value as PublicValue,
+};
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
@@ -55,7 +59,7 @@ fn run(row_count: usize) {
                     "title".to_owned(),
                     Value::String(format!("item-{index:08}")),
                 ),
-                ("rank".to_owned(), Value::U64(index as u64)),
+                ("rank".to_owned(), Value::I64(index as i64)),
             ]),
         )
         .unwrap();
@@ -134,7 +138,7 @@ fn run(row_count: usize) {
                 cross_row,
                 BTreeMap::from([
                     ("title".to_owned(), Value::String(title.to_owned())),
-                    ("rank".to_owned(), Value::U64(row_count as u64 + 1)),
+                    ("rank".to_owned(), Value::I64(row_count as i64 + 1)),
                 ]),
             )
             .unwrap();
@@ -186,24 +190,23 @@ fn run(row_count: usize) {
 
 fn schema() -> JazzSchema {
     let dimension = BranchDimensionId(uuid::Uuid::from_bytes([0x57; 16]));
-    JazzSchema::new_with_branch_dimensions(
-        [BranchDimensionSchema::new(
-            dimension,
-            "branch",
-            ColumnType::Uuid,
-            Value::Uuid(uuid::Uuid::nil()),
-        )],
-        [TableSchema::new(
-            "items",
-            [
-                ColumnSchema::new("branch_id", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("rank", ColumnType::U64),
-            ],
+    let public_schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("items")
+                .column("branch_id", PublicColumnType::Uuid)
+                .column("title", PublicColumnType::Text)
+                .column("rank", PublicColumnType::BigInt)
+                .branch_dimension(BranchDimensionDescriptor {
+                    id: dimension,
+                    name: "branch".to_owned(),
+                    column_type: PublicColumnType::Uuid,
+                    migration_default: PublicValue::Uuid(ObjectId::from_uuid(uuid::Uuid::nil())),
+                })
+                .branch_by("branch_id", "branch")
+                .index_only(["title"]),
         )
-        .with_branch_dimension("branch_id", dimension)
-        .with_indexed_column("title")],
-    )
+        .build();
+    JazzSchema::new(&public_schema).expect("S8 public schema compiles")
 }
 
 fn selector(byte: u8) -> BranchSelector {
