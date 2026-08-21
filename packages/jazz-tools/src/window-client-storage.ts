@@ -1,5 +1,4 @@
-import type { DbConfig } from "./runtime/db.js";
-import { resolveClientSessionSync } from "./runtime/client-session.js";
+import { resolveDefaultPersistentDbName, type DbConfig } from "./runtime/db.js";
 
 type WindowJazzStorageDb = {
   getConfig(): DbConfig;
@@ -40,21 +39,7 @@ function resolveStorageNamespace(config: DbConfig): string | null {
     return null;
   }
 
-  const explicitDbName = driver.dbName?.trim() || config.dbName?.trim();
-  if (explicitDbName) {
-    return explicitDbName;
-  }
-
-  const sessionUserId = resolveClientSessionSync({
-    appId: config.appId,
-    jwtToken: config.jwtToken,
-  })?.user_id;
-
-  if (!sessionUserId) {
-    return config.appId;
-  }
-
-  return `${config.appId}::${encodeURIComponent(sessionUserId)}`;
+  return resolveDefaultPersistentDbName(config);
 }
 
 function getLiveStorageContexts(currentWindow: Window): Set<LiveStorageContext> {

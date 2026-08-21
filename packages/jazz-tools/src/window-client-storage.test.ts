@@ -15,9 +15,7 @@ describe("registerWindowJazzStorageClient", () => {
     vi.unstubAllGlobals();
   });
 
-  // TEST_BURNDOWN_TS: registerWindowJazzStorageClient > scopes the reported namespace for cookie sessions and leaves anonymous cookie sessions unscoped
-  // known red; tracked in TEST_BURNDOWN.md — resolveStorageNamespace resolves the session from jwtToken only, so an external cookie session reports the unscoped appId namespace and the anonymous authMode carve-out is never applied.
-  it.skip("scopes the reported namespace for cookie sessions and leaves anonymous cookie sessions unscoped", () => {
+  it("scopes the reported namespace for cookie sessions and leaves anonymous cookie sessions unscoped", () => {
     vi.stubGlobal("window", {});
 
     const unregisterExternal = registerWindowJazzStorageClient(
@@ -42,13 +40,38 @@ describe("registerWindowJazzStorageClient", () => {
         },
       }),
     );
+    const unregisterSameExternal = registerWindowJazzStorageClient(
+      makeStorageDb({
+        appId: "chat-app",
+        driver: { type: "persistent" },
+        cookieSession: {
+          user_id: "alice@example.com",
+          claims: {},
+          authMode: "external",
+        },
+      }),
+    );
+    const unregisterOtherExternal = registerWindowJazzStorageClient(
+      makeStorageDb({
+        appId: "chat-app",
+        driver: { type: "persistent" },
+        cookieSession: {
+          user_id: "bob@example.com",
+          claims: {},
+          authMode: "external",
+        },
+      }),
+    );
 
     expect(window.__jazz?.listLiveStorageNamespaces()).toEqual([
       "chat-app",
       "chat-app::alice%40example.com",
+      "chat-app::bob%40example.com",
     ]);
 
     unregisterExternal();
     unregisterAnonymous();
+    unregisterSameExternal();
+    unregisterOtherExternal();
   });
 });
