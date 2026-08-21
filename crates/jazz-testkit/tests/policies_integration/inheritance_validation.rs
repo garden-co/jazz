@@ -6,7 +6,6 @@ use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
 /// Verifies that recursive inherited access fails closed when row data forms a
 /// cycle and no reachable ancestor grants the session access.
 #[tokio::test]
-#[ignore = "the update that closes the cycle times out waiting for edge-server durability"]
 async fn rebac_recursive_inherits_cycle_does_not_overgrant() {
     tokio::task::LocalSet::new()
         .run_until(rebac_recursive_inherits_cycle_does_not_overgrant_inner())
@@ -14,7 +13,21 @@ async fn rebac_recursive_inherits_cycle_does_not_overgrant() {
 }
 
 async fn rebac_recursive_inherits_cycle_does_not_overgrant_inner() {
-    let schema = recursive_folders_schema(Some(10));
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("folders")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text)
+                .nullable_fk_column("parent_id", "folders")
+                .policies(permissions(|p| {
+                    p.allow_read().where_(pe::any_of([
+                        pe::eq("owner_id", pe::session("user_id")),
+                        pe::allowed_to_read_with_depth("parent_id", 10),
+                    ]));
+                    p.allow_update().always();
+                })),
+        )
+        .build();
     let server = JazzServer::start_with_schema(schema.clone()).await;
     let admin = connect_ready_client(
         &server,
