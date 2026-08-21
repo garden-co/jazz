@@ -81,8 +81,8 @@ subscriptions.
 A schema lineage declares globally named branch dimensions. Each dimension
 has a stable internal `BranchDimensionId`, a stable semantic name, one
 non-null key-encodable type, one canonical wire/storage encoding, and a stable
-ordering position. A table binds an application column to any subset of those
-dimensions:
+identity across schema lineage. A table binds an application column to any
+subset of those dimensions:
 
 ```text
 dimensions:

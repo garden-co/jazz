@@ -972,3 +972,28 @@ fn branch_dimension_evolution_rejects_non_monotone_changes() {
         ));
     }
 }
+
+#[test]
+fn branch_dimension_evolution_accepts_addition_without_prefix_order_dependence() {
+    let source = branch_view_schema();
+    let mut target = source.clone();
+    target.runtime_mut_for_testing().branch_dimensions.insert(
+        0,
+        crate::schema::BranchDimensionSchema::new(
+            crate::ids::BranchDimensionId(uuid::Uuid::from_bytes([0x9a; 16])),
+            "alpha",
+            ColumnType::Uuid,
+            Value::Uuid(uuid::Uuid::nil()),
+        ),
+    );
+    let source = SchemaVersion::new(source);
+    let target = SchemaVersion::new(target);
+    let lens = MigrationLens::new(
+        source.id,
+        target.id,
+        Vec::<TableLens>::new(),
+    );
+
+    NodeState::<RocksDbStorage>::validate_migration_lens_between(&lens, &source, &target)
+        .expect("a monotone addition remains valid regardless of canonical declaration order");
+}

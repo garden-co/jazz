@@ -709,12 +709,13 @@ where
         target: &SchemaVersion,
     ) -> Result<(), Error> {
         if target.schema.branch_dimensions.len() < source.schema.branch_dimensions.len()
-            || !source
-                .schema
-                .branch_dimensions
-                .iter()
-                .zip(&target.schema.branch_dimensions)
-                .all(|(source, target)| source == target)
+            || !source.schema.branch_dimensions.iter().all(|source_dimension| {
+                target
+                    .schema
+                    .branch_dimensions
+                    .iter()
+                    .any(|target_dimension| target_dimension == source_dimension)
+            })
         {
             return Err(Error::InvalidCatalogueUpdate(
                 "branch dimensions may only be appended with immutable identity, type, and default",

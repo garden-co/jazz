@@ -81,7 +81,8 @@ fn convert_branch_dimensions(
     ),
     SchemaConversionError,
 > {
-    let mut declarations = BTreeMap::new();
+    let mut declarations = Vec::new();
+    let mut declaration_indexes = BTreeMap::new();
     let mut ids = BTreeMap::new();
     for (table_name, table) in schema.iter() {
         for dimension in &table.branch_dimensions {
@@ -93,7 +94,8 @@ fn convert_branch_dimensions(
             if dimension.name.is_empty() {
                 return Err(err(path, "branch dimension name cannot be empty"));
             }
-            if let Some(existing) = declarations.get(&dimension.name) {
+            if let Some(index) = declaration_indexes.get(&dimension.name) {
+                let existing = &declarations[*index];
                 if existing != dimension {
                     return Err(err(
                         path,
@@ -110,13 +112,15 @@ fn convert_branch_dimensions(
                     ));
                 }
             }
-            declarations.insert(dimension.name.clone(), dimension.clone());
+            declaration_indexes.insert(dimension.name.clone(), declarations.len());
+            declarations.push(dimension.clone());
         }
     }
 
     let mut converted = Vec::with_capacity(declarations.len());
     let mut ids_by_name = BTreeMap::new();
-    for (name, dimension) in declarations {
+    for dimension in declarations {
+        let name = dimension.name.clone();
         let synthetic_table = TableName::new("branchDimensions");
         let column_type = convert_column_type(&synthetic_table, &name, &dimension.column_type)?;
         let migration_default = convert_default_for_column_type(
@@ -2635,6 +2639,34 @@ mod tests {
                 .iter()
                 .flat_map(|table| &table.branch_by)
                 .all(|binding| binding.dimension == dimension.id)
+        );
+    }
+
+    #[test]
+    fn preserves_branch_dimension_declaration_order_for_monotone_evolution() {
+        let zeta = branch_dimension(0x47, "zeta", ColumnType::Uuid);
+        let alpha = branch_dimension(0x48, "alpha", ColumnType::Uuid);
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("zeta_id", ColumnType::Uuid)
+                    .column("alpha_id", ColumnType::Uuid)
+                    .branch_dimension(zeta.clone())
+                    .branch_dimension(alpha.clone())
+                    .branch_by("zeta_id", "zeta")
+                    .branch_by("alpha_id", "alpha"),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).expect("ordered dimensions compile");
+        assert_eq!(
+            converted
+                .branch_dimensions
+                .iter()
+                .map(|dimension| dimension.id)
+                .collect::<Vec<_>>(),
+            vec![zeta.id, alpha.id],
+            "a later lexicographically earlier name must not reorder the lineage prefix"
         );
     }
 
