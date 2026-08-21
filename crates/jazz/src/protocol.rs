@@ -2486,13 +2486,7 @@ struct SchemaVersionWire {
 }
 
 fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
-    let public_schema = schema.public_schema();
-    let recompiled = crate::tools::public_schema_convert::convert_public_schema(public_schema)
-        .map_err(|error| error.to_string())?;
-    if recompiled != *schema {
-        return Err("compiled schema no longer matches its retained public schema".to_owned());
-    }
-    serde_json::to_vec(public_schema).map_err(|error| error.to_string())
+    serde_json::to_vec(schema.public_schema()).map_err(|error| error.to_string())
 }
 
 fn compile_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
@@ -3019,6 +3013,26 @@ mod tests {
             decoded.schema.public_schema(),
             version.schema.public_schema()
         );
+    }
+
+    #[test]
+    fn schema_version_serialization_trusts_the_retained_source_without_recompiling() {
+        let source = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .build();
+        let compiled = crate::schema::JazzSchema::new(&source).expect("source schema compiles");
+        let mut version = SchemaVersion::new(compiled);
+
+        // A test-only mutation makes recompilation observably disagree with the
+        // runtime value. Wire serialization must remain a source encoding step;
+        // recompiling here puts schema-size work on every propagated write.
+        version.schema.runtime_mut_for_testing().tables.clear();
+
+        let encoded = postcard::to_allocvec(&version)
+            .expect("serialization trusts the source established at construction");
+        let decoded: SchemaVersion = postcard::from_bytes(&encoded).expect("source recompiles");
+        assert_eq!(decoded.schema.public_schema(), &source);
+        assert_eq!(decoded.schema.tables().len(), 1);
     }
 
     #[test]
