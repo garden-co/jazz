@@ -31,12 +31,12 @@ use jazz::tools::public_schema::{
 };
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::TransportError;
-use jazz_sim::public_schema_fixture::{
-    all_operation_policies, compile_public_schema, seeded_recursive_access_policy,
-};
 use jazz_sim::fixture::{
     apply_sync_message_settled, commit_mergeable_unit_settled, ingest_commit_unit_settled,
     settle_outcome,
+};
+use jazz_sim::public_schema_fixture::{
+    all_operation_policies, compile_public_schema, seeded_recursive_access_policy,
 };
 use jazz_sim::{
     DeterministicDriver, DriverContext, NodeRole, PeerProfile, ThreadedDriver, Topology,

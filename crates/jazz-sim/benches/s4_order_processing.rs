@@ -20,8 +20,8 @@ use jazz::tools::public_schema::{
 };
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
-use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::fixture::{apply_sync_message_settled, commit_mergeable_unit_settled};
+use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields, profiling};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};

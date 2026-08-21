@@ -22,8 +22,8 @@ use jazz::tools::public_schema::{
 };
 use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
-use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::fixture::{apply_sync_message_settled, settle_outcome};
+use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::{emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};

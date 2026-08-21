@@ -23,11 +23,11 @@ use jazz::tools::public_schema::{
 };
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_sim::distributions::Lcg;
-use jazz_sim::public_schema_fixture::{all_operation_policies, compile_public_schema};
 use jazz_sim::fixture::{
     apply_sync_message_settled, commit_mergeable_unit_settled, ingest_commit_unit_settled,
     settle_outcome,
 };
+use jazz_sim::public_schema_fixture::{all_operation_policies, compile_public_schema};
 use jazz_sim::view_accounting::{bytes_floor, view_update_bytes};
 use jazz_sim::{
     DeterministicDriver, DriverContext, Metrics, NodeRole, PeerProfile, SimulatorTransportCodec,
