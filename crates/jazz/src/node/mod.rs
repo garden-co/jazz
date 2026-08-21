@@ -1115,16 +1115,34 @@ impl CurrentRow {
     pub(crate) fn provenance(&self) -> Result<Option<RowProvenance>, Error> {
         let descriptor = self.record.descriptor();
         let borrowed = self.record.borrowed();
-        let Some(created_by_idx) = descriptor.field_index("$createdBy") else {
-            return Ok(None);
+        let indices = match (
+            descriptor.field_index("$createdBy"),
+            descriptor.field_index("$createdAt"),
+            descriptor.field_index("$updatedBy"),
+            descriptor.field_index("$updatedAt"),
+        ) {
+            (Some(created_by), Some(created_at), Some(updated_by), Some(updated_at)) => {
+                Some((created_by, created_at, updated_by, updated_at))
+            }
+            _ if descriptor.field_index("schema_version").is_some()
+                && descriptor.field_index("parents").is_some()
+                && descriptor.field_index("authored_columns").is_some() =>
+            {
+                match (
+                    descriptor.field_index("created_by"),
+                    descriptor.field_index("created_at"),
+                    descriptor.field_index("updated_by"),
+                    descriptor.field_index("updated_at"),
+                ) {
+                    (Some(created_by), Some(created_at), Some(updated_by), Some(updated_at)) => {
+                        Some((created_by, created_at, updated_by, updated_at))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
         };
-        let Some(created_at_idx) = descriptor.field_index("$createdAt") else {
-            return Ok(None);
-        };
-        let Some(updated_by_idx) = descriptor.field_index("$updatedBy") else {
-            return Ok(None);
-        };
-        let Some(updated_at_idx) = descriptor.field_index("$updatedAt") else {
+        let Some((created_by_idx, created_at_idx, updated_by_idx, updated_at_idx)) = indices else {
             return Ok(None);
         };
         Ok(Some(RowProvenance {
@@ -1220,8 +1238,23 @@ impl CurrentRow {
         Some((TxTime(time), NodeAlias(alias)))
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_cells_by_descriptor(&self) -> BTreeMap<String, Value> {
+    pub(crate) fn subscription_equivalent(&self, other: &Self) -> bool {
+        let provenance_matches = match (self.provenance(), other.provenance()) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        };
+        self.table == other.table
+            && self.row_uuid() == other.row_uuid()
+            && self.deleted == other.deleted
+            && self.subscription_cells() == other.subscription_cells()
+            && provenance_matches
+    }
+
+    fn subscription_cells(&self) -> BTreeMap<String, Option<Value>> {
+        let descriptor = self.record.descriptor();
+        let physical_current = descriptor.field_index("schema_version").is_some()
+            && descriptor.field_index("parents").is_some()
+            && descriptor.field_index("authored_columns").is_some();
         self.record
             .descriptor()
             .fields()
@@ -1237,19 +1270,44 @@ impl CurrentRow {
                         .to_owned()
                 } else if let Some(name) = self::query_engine::aggregate_output_logical_name(name) {
                     name.to_owned()
-                } else if matches!(field.value_type, records::ValueType::Nullable(_))
-                    && !matches!(name, "authored_columns" | "settle_position")
+                } else if matches!(
+                    name,
+                    "$createdBy"
+                        | "$createdAt"
+                        | "$updatedBy"
+                        | "$updatedAt"
+                        | "tx_time"
+                        | "tx_node_id"
+                        | "schema_version"
+                        | "parents"
+                        | "authored_columns"
+                        | "global_seq"
+                        | "settle_position"
+                ) || name.starts_with("__jazz_")
+                    || (physical_current
+                        && matches!(
+                            name,
+                            "created_by" | "created_at" | "updated_by" | "updated_at"
+                        ))
                 {
-                    name.to_owned()
-                } else {
                     return None;
+                } else {
+                    name.to_owned()
                 };
                 let value = match self.record.borrowed().get_idx(idx).ok()? {
-                    Value::Nullable(value) => value.map(|value| *value)?,
-                    value => value,
+                    Value::Nullable(value) => value.map(|value| *value),
+                    value => Some(value),
                 };
                 Some((name, value))
             })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cells_by_descriptor(&self) -> BTreeMap<String, Value> {
+        self.subscription_cells()
+            .into_iter()
+            .filter_map(|(name, value)| value.map(|value| (name, value)))
             .collect()
     }
 }

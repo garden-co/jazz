@@ -2035,7 +2035,6 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
 /// Verifies that reverse inheritance over `UUID[] REFERENCES` grants access
 /// and that reordering or duplicating the array does not change semantics.
 #[tokio::test]
-#[ignore = "reordering a reverse-inherited UUID array emits spurious target-row update deltas despite unchanged set membership"]
 async fn inherited_referencing_array_membership_preserves_set_semantics() {
     tokio::task::LocalSet::new()
         .run_until(inherited_referencing_array_membership_preserves_set_semantics_inner())

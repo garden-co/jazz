@@ -441,7 +441,6 @@ async fn admin_role_claims_reject_member_mutations_inner() {
 /// observer ────────────────────────────► sees only the allowed update persist
 /// ```
 #[tokio::test]
-#[ignore = "a rejected update broadcasts a spurious observer delta containing the unchanged row"]
 async fn claim_array_id_policy_gates_updates_by_primary_key() {
     tokio::task::LocalSet::new()
         .run_until(claim_array_id_policy_gates_updates_by_primary_key_inner())
