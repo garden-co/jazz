@@ -5,7 +5,7 @@ use jazz::query::Query;
 
 use super::support::{
     collect_stream_deltas, connect_ready_client, connect_ready_user, has_added_id, has_any_change,
-    has_removed, wait_for_query, wait_for_rows, wait_for_subscription_update,
+    has_removed, wait_for_edge_txs, wait_for_query, wait_for_rows, wait_for_subscription_update,
 };
 use super::{pe, permissions};
 use jazz::tools::TableName;
@@ -17,7 +17,7 @@ use jazz::tools::public_schema::{
 };
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies,
-    TableSchema, TableSchemaBuilder, Value,
+    TableSchema, TableSchemaBuilder, TransactionId, Value,
 };
 use jazz::tools::{Operation, PolicyExpr};
 use jazz_server::JazzServer;
@@ -274,13 +274,19 @@ async fn create_team(client: &JazzClient, name: &str) -> ObjectId {
         .0
 }
 
-async fn create_team_edge(client: &JazzClient, child_team: ObjectId, parent_team: ObjectId) {
+async fn create_team_edge(
+    client: &JazzClient,
+    child_team: ObjectId,
+    parent_team: ObjectId,
+) -> TransactionId {
     client
         .insert(
             "team_edges",
             jazz::row_input!("child_team" => Value::Uuid(child_team), "parent_team" => Value::Uuid(parent_team)))
 
-        .expect("create team edge");
+        .expect("create team edge")
+        .2
+        .expect("team edge should commit immediately")
 }
 
 async fn create_team_membership(client: &JazzClient, user_id: &str, team_id: ObjectId) {
@@ -805,8 +811,11 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
     collect_stream_deltas(&mut bob_stream, &mut bob_log, NO_DELTA_WINDOW).await;
     bob_log.clear();
 
-    create_team_edge(&admin, leaf, mid_b).await;
-    create_team_edge(&admin, mid_b, root).await;
+    let second_path_txs = [
+        create_team_edge(&admin, leaf, mid_b).await,
+        create_team_edge(&admin, mid_b, root).await,
+    ];
+    wait_for_edge_txs(&admin, &second_path_txs).await;
 
     let rows_after_second_path = bob
         .query(query, Some(DurabilityTier::EdgeServer))

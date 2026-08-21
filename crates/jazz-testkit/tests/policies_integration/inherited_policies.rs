@@ -12,7 +12,7 @@ use super::{pe, permissions};
 use jazz::tools::{ColumnDescriptor, RowDescriptor, Schema, TableName};
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, TablePolicies, TableSchema,
-    TableSchemaBuilder, Value,
+    TableSchemaBuilder, TransactionId, Value,
 };
 use jazz::tools::{Operation, PolicyExpr};
 use jazz_server::JazzServer;
@@ -365,8 +365,15 @@ async fn create_array_ref_todo(
         .0
 }
 
-async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String, Value)>) {
-    client.update(row_id, changes).expect("update row");
+async fn update_row(
+    client: &JazzClient,
+    row_id: ObjectId,
+    changes: Vec<(String, Value)>,
+) -> TransactionId {
+    client
+        .update(row_id, changes)
+        .expect("update row")
+        .expect("update should commit immediately")
 }
 
 // -- Tests --
@@ -2080,7 +2087,7 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
     collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
     log.clear();
 
-    update_row(
+    let reorder_tx = update_row(
         &alice,
         todo_id,
         vec![(
@@ -2089,6 +2096,7 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
         )],
     )
     .await;
+    wait_for_edge_txs(&alice, &[reorder_tx]).await;
     let rows_after_reorder = wait_for_rows(
         &alice,
         query.clone(),
@@ -2112,7 +2120,7 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
     assert_eq!(file_row_count(&rows_after_reorder, file_b), 1);
 
     log.clear();
-    update_row(
+    let duplicate_tx = update_row(
         &alice,
         todo_id,
         vec![(
@@ -2125,6 +2133,7 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
         )],
     )
     .await;
+    wait_for_edge_txs(&alice, &[duplicate_tx]).await;
     let rows_after_duplicate = wait_for_rows(
         &alice,
         query,
