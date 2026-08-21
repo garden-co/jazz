@@ -879,7 +879,6 @@ async fn v2_document_with_v1_membership_dependency_is_served_impl() {
 /// mallory (v2) ──local-tier query──✗ empty
 /// ```
 #[tokio::test]
-#[ignore = "a Local-tier read of a v1-authored row through the v2 schema errors that the lens-added labels column has no value instead of applying the lens default"]
 async fn local_query_honors_v1_membership_dependency() {
     tokio::task::LocalSet::new()
         .run_until(local_query_honors_v1_membership_dependency_impl())
@@ -968,7 +967,6 @@ async fn local_query_honors_v1_membership_dependency_impl() {
 /// mallory (v2) ──local-tier query──✗ empty
 /// ```
 #[tokio::test]
-#[ignore = "under a two-generation catalogue even a v2-authored row inserted with an explicit Null labels value fails a Local-tier read with a missing value for the labels column; the identical read passes on a single-generation server"]
 async fn local_query_honors_v1_membership_for_v2_documents() {
     tokio::task::LocalSet::new()
         .run_until(local_query_honors_v1_membership_for_v2_documents_impl())

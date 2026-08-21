@@ -758,7 +758,6 @@ async fn draft_schema_without_lineage_does_not_affect_active_generation_reads_im
 /// bob (v2) ──query──► tags = "sess-new", labels = null, v1 columns kept
 /// ```
 #[tokio::test]
-#[ignore = "a v2 update touching only one lens-added column leaves the other added column with no value, so every v2 read of the row fails with 'row missing projected value for column labels'"]
 async fn partial_current_schema_update_keeps_untouched_added_column_readable() {
     tokio::task::LocalSet::new()
         .run_until(partial_current_schema_update_keeps_untouched_added_column_readable_impl())

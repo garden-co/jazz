@@ -2178,19 +2178,13 @@ impl PublicQueryDecoder {
                             .ok_or_else(|| {
                                 JazzError::Query(format!("row missing column {column}"))
                             })?;
-                        let value = match value {
-                            CoreValue::Nullable(None) => {
-                                return Err(JazzError::Query(format!(
-                                    "row missing projected value for column {column}"
-                                )));
-                            }
-                            CoreValue::Nullable(Some(value)) => *value,
-                            value => value,
-                        };
-                        core_to_public_value_for_column_type(
-                            value,
-                            &table_schema.columns.columns[position].column_type,
-                        )
+                        let column_schema = &table_schema.columns.columns[position];
+                        if matches!(value, CoreValue::Nullable(None)) && !column_schema.nullable {
+                            return Err(JazzError::Query(format!(
+                                "row missing projected value for column {column}"
+                            )));
+                        }
+                        core_to_public_value_for_column_type(value, &column_schema.column_type)
                     })
                     .chain(query.array_subqueries.iter().map(|subquery| {
                         row.raw_field(&subquery.column_name)
