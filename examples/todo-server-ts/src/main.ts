@@ -72,7 +72,6 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     permissions,
     driver: { type: "persistent", dataPath: dbPath },
     env: "dev",
-    userBranch: "main",
   });
   const db = context.asBackend();
 

@@ -107,7 +107,6 @@ async function createTestContext(
     backendSecret,
     adminSecret,
     env: "test",
-    userBranch: "main",
     tier: "local",
   });
 
@@ -324,7 +323,6 @@ describe("forRequest auth and policy", () => {
       backendSecret,
       adminSecret,
       env: "test",
-      userBranch: "main",
     });
 
     onTestFinished(async () => {

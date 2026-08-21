@@ -58,7 +58,6 @@ const jazzContext = createJazzContext({
   driver: { type: "memory" },
   serverUrl: process.env.SYNC_SERVER_URL!,
   env: process.env.NODE_ENV === "production" ? "prod" : "dev",
-  userBranch: "main",
   backendSecret: process.env.BACKEND_SECRET!,
 });
 

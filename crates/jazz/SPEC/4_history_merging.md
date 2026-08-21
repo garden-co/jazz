@@ -133,10 +133,10 @@ writes never touch the register (`INV-HIST-11`).
 
 Physically, deletion history is one sparse, schema-independent relation shared
 by all content lineages. Every event is keyed by stable physical table and
-canonical branch key before row identity, so a seek for one incarnation is
+canonical branch key before row identity, so a seek for one branch-local row is
 bounded to `(physical_table_id, branch_key, row_uuid)` and a branch-key scan
 is bounded to `(physical_table_id, branch_key)`. It is not a universal scan
-and it never identifies an incarnation by `RowUuid` alone.
+and it never identifies an branch-local row by `RowUuid` alone.
 
 ### 4.5 Global-current as derived state
 

@@ -649,8 +649,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       1,
       true,
     );
-    const head = { dimensions: { workspace: [14, 14] } };
-    const base = { Current: { dimensions: { workspace: [14, 2] } } };
+    const head = { values: { workspace: [14, 14] } };
+    const base = { Current: { values: { workspace: [14, 2] } } };
 
     runtime.insert(
       "todos",

@@ -287,6 +287,9 @@ export function tableSchemasEqual(
   if (!indexedColumnsEqual(left.indexed_columns, right.indexed_columns)) {
     return false;
   }
+  if (!indexedColumnsEqual(left.branchBy, right.branchBy)) {
+    return false;
+  }
 
   const leftColumns = [...left.columns].sort((a, b) => a.name.localeCompare(b.name));
   const rightColumns = [...right.columns].sort((a, b) => a.name.localeCompare(b.name));

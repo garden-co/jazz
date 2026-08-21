@@ -29,13 +29,13 @@ where
             .clone();
         let full_key = |selector: &BranchSelector| -> Result<BranchKey, Error> {
             let branch_columns = schema.tables.iter().flat_map(|table| table.branch_by.iter().cloned()).collect::<BTreeSet<_>>();
-            if selector.dimensions.keys().cloned().collect::<BTreeSet<_>>() != branch_columns {
+            if selector.values.keys().cloned().collect::<BTreeSet<_>>() != branch_columns {
                 return Err(Error::InvalidBranchKey(
                     "contribution selector must bind every schema branch column".to_owned(),
                 ));
             }
-            let dimensions = selector.dimensions.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
-            Ok(BranchKey { dimensions })
+            let values = selector.values.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
+            Ok(BranchKey { values })
         };
         let source_full = full_key(&request.source)?;
         let target_full = full_key(&request.target)?;

@@ -36,7 +36,6 @@ pub async fn push_catalogue_in_memory(
     state: Arc<ServerState>,
     _app_id: AppId,
     _env: &str,
-    _user_branch: &str,
     schemas: &[jazz::tools::Schema],
     lenses: &[jazz::tools::Lens],
 ) -> Result<(), Box<dyn std::error::Error>> {

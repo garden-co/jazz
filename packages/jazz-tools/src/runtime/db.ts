@@ -79,8 +79,6 @@ export type DbConfig = {
   runtimeSources?: RuntimeSourcesConfig;
   /** Environment (e.g., "dev", "prod") */
   env?: string;
-  /** User branch name (default: "main") */
-  userBranch?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
   /** Backend secret for backend-scoped sync auth with cookieSession. */
@@ -1786,12 +1784,12 @@ export class Db {
 
       return {
         table,
-        branches: branches.length > 0 ? branches : [this.config.userBranch ?? "main"],
+        branches,
       };
     } catch {
       return {
         table: "unknown",
-        branches: [this.config.userBranch ?? "main"],
+        branches: [],
       };
     }
   }

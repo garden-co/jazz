@@ -502,7 +502,7 @@ pub struct PeerPayloadInventory {
 pub struct VersionRecord {
     table: groove::Intern<String>,
     schema_version: SchemaVersionId,
-    /// Exact branch coordinate of this version's row incarnation.
+    /// Exact branch coordinate of this version's branch-local row.
     #[serde(default)]
     branch_key: BranchKey,
     record: OwnedRecord,
@@ -1496,11 +1496,6 @@ fn default_propagate_upstream() -> bool {
 pub struct ReadViewSpec {
     /// Which branch/snapshot family this read observes.
     pub source: ReadViewSourceSpec,
-    /// Optional schema lens for the application-facing row shape.
-    pub schema: ReadViewSchemaSpec,
-    /// Local overlays made visible in front of the persisted source.
-    #[serde(default)]
-    pub overlays: Vec<ReadOverlaySpec>,
 }
 
 impl ReadViewSpec {
@@ -1513,7 +1508,6 @@ impl ReadViewSpec {
     pub fn branch_view(head: BranchSelector, base: Option<BranchViewBase>) -> Self {
         Self {
             source: ReadViewSourceSpec::BranchView { head, base },
-            ..Self::default()
         }
     }
 }
@@ -1590,14 +1584,14 @@ impl ReadViewSourceSpec {
 )]
 pub struct BranchSelector {
     /// Canonically encoded typed values keyed by branch-column name.
-    pub dimensions: BTreeMap<String, BranchColumnValue>,
+    pub values: BTreeMap<String, BranchColumnValue>,
 }
 
 impl BranchSelector {
     /// Construct a selector from named branch-column values.
-    pub fn new(dimensions: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Self {
+    pub fn new(values: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Self {
         Self {
-            dimensions: dimensions
+            values: values
                 .into_iter()
                 .map(|(name, value)| (name.into(), BranchColumnValue::from(value)))
                 .collect(),
@@ -1651,11 +1645,11 @@ impl BranchColumnValue {
 )]
 pub struct BranchKey {
     /// Values ordered by branch-column name.
-    pub dimensions: Vec<(String, BranchColumnValue)>,
+    pub values: Vec<(String, BranchColumnValue)>,
 }
 
 impl BranchKey {
-    /// Canonical bytes used as the physical incarnation-key prefix.
+    /// Canonical bytes used as the physical branch-local row-key prefix.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         postcard::to_allocvec(self).expect("branch keys are encodable")
     }
@@ -1701,7 +1695,7 @@ pub enum ReadViewSourceSpec {
     Current,
     /// A live branch head, optionally composed over one live or frozen base.
     BranchView {
-        /// Named values for the requested head incarnation.
+        /// Named values for the requested head coordinate.
         head: BranchSelector,
         /// Optional single fallback source.
         base: Option<BranchViewBase>,
@@ -1710,52 +1704,6 @@ pub enum ReadViewSourceSpec {
     Snapshot {
         /// Historic frontier to read.
         snapshot: SnapshotRef,
-    },
-}
-
-/// Wire schema/lens selected by a read view.
-#[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Deserialize,
-    serde::Serialize,
-)]
-pub enum ReadViewSchemaSpec {
-    /// Use the receiver's current read schema.
-    #[default]
-    Current,
-    /// Read rows through a concrete schema-version lens.
-    SchemaVersion {
-        /// Application schema version to project rows through.
-        schema_version: SchemaVersionId,
-    },
-}
-
-/// Local overlay selected by a read view.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub enum ReadOverlaySpec {
-    /// Direct, non-durable batch overlay.
-    DirectBatch {
-        /// Non-durable batch transaction.
-        batch: TxId,
-    },
-    /// Accepted transaction overlay.
-    AcceptedTransaction {
-        /// Accepted transaction.
-        tx: TxId,
-    },
-    /// Open exclusive transaction overlay.
-    OpenTransaction {
-        /// Open transaction.
-        tx: TxId,
     },
 }
 

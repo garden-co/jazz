@@ -104,7 +104,7 @@ where
         )
     }
 
-    /// Insert one exact branch-keyed incarnation with a caller-supplied row id.
+    /// Insert one exact branch-local row with a caller-supplied row id.
     pub fn insert_with_id_in_branch(
         &self,
         table: &str,
@@ -112,7 +112,7 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_exact_incarnation_absent(table, &branch, row)?;
+        self.ensure_exact_branch_row_absent(table, &branch, row)?;
         self.write_mergeable_at_ms_with_authorship_in_branch(
             self.identity.author,
             None,
@@ -127,7 +127,7 @@ where
         )
     }
 
-    /// Insert one exact branch incarnation while evaluating policy as `identity`.
+    /// Insert one exact branch-local row while evaluating policy as `identity`.
     pub fn insert_with_id_in_branch_for_identity(
         &self,
         identity: AuthorId,
@@ -136,7 +136,7 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_exact_incarnation_absent(table, &branch, row)?;
+        self.ensure_exact_branch_row_absent(table, &branch, row)?;
         self.write_mergeable_at_ms_with_authorship_in_branch(
             identity,
             Some(identity),
@@ -330,7 +330,7 @@ where
         )
     }
 
-    /// Patch one exact branch-keyed incarnation.
+    /// Patch one exact branch-local row.
     pub fn update_in_branch(
         &self,
         table: &str,
@@ -348,7 +348,7 @@ where
         let Some(mut cells) = node.visible_current_cells_in_branch(table, &branch, row)? else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
-                format!("branch incarnation not observed: {}", row.0),
+                format!("branch-local row not observed: {}", row.0),
             ));
         };
         let parent = node.local_content_winner_tx_id_in_branch(table, &branch, row)?;
@@ -369,7 +369,7 @@ where
         )
     }
 
-    /// Patch one exact branch incarnation while evaluating policy as `identity`.
+    /// Patch one exact branch-local row while evaluating policy as `identity`.
     pub fn update_in_branch_for_identity(
         &self,
         identity: AuthorId,
@@ -388,7 +388,7 @@ where
         let Some(mut cells) = node.visible_current_cells_in_branch(table, &branch, row)? else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
-                format!("branch incarnation not observed: {}", row.0),
+                format!("branch-local row not observed: {}", row.0),
             ));
         };
         let parent = node.local_content_winner_tx_id_in_branch(table, &branch, row)?;
@@ -410,7 +410,7 @@ where
     }
 
     /// Patch a row through a head-over-base view, copying inherited content
-    /// into the head incarnation without a cross-branch causal parent.
+    /// into the head branch-local row without a cross-branch causal parent.
     pub fn update_in_branch_view(
         &self,
         table: &str,
@@ -477,7 +477,7 @@ where
         self.insert_with_id_in_branch_for_identity(identity, table, head, row, inherited)
     }
 
-    /// Insert or patch one exact branch-keyed incarnation.
+    /// Insert or patch one exact branch-local row.
     pub fn upsert_in_branch(
         &self,
         table: &str,
@@ -770,7 +770,7 @@ where
         self.delete_at_ms_option(table, row, None)
     }
 
-    /// Soft-delete one exact branch-keyed incarnation.
+    /// Soft-delete one exact branch-local row.
     pub fn delete_in_branch(
         &self,
         table: &str,
@@ -784,7 +784,7 @@ where
         {
             return Err(Error::new(
                 ErrorCode::NotObserved,
-                format!("branch incarnation not observed: {}", row.0),
+                format!("branch-local row not observed: {}", row.0),
             ));
         }
         let parents = node
@@ -807,7 +807,7 @@ where
         )
     }
 
-    /// Delete one exact branch incarnation while evaluating policy as `identity`.
+    /// Delete one exact branch-local row while evaluating policy as `identity`.
     pub fn delete_in_branch_for_identity(
         &self,
         identity: AuthorId,
@@ -822,7 +822,7 @@ where
         {
             return Err(Error::new(
                 ErrorCode::NotObserved,
-                format!("branch incarnation not observed: {}", row.0),
+                format!("branch-local row not observed: {}", row.0),
             ));
         }
         let parents = node
@@ -846,7 +846,7 @@ where
     }
 
     /// Delete a row through a head-over-base view. An inherited base row is
-    /// masked by a deletion register in the head incarnation.
+    /// masked by a deletion register in the head branch-local row.
     pub fn delete_in_branch_view(
         &self,
         table: &str,
@@ -943,7 +943,7 @@ where
         )
     }
 
-    /// Restore the deletion register of one exact branch-keyed incarnation.
+    /// Restore the deletion register of one exact branch-local row.
     pub fn restore_in_branch(
         &self,
         table: &str,
@@ -975,7 +975,7 @@ where
         )
     }
 
-    /// Restore an exact branch incarnation and replace its content atomically.
+    /// Restore an exact branch-local row and replace its content atomically.
     pub fn restore_with_cells_in_branch(
         &self,
         table: &str,
@@ -993,7 +993,7 @@ where
         )
     }
 
-    /// Restore an exact branch incarnation while evaluating policy as `identity`.
+    /// Restore an exact branch-local row while evaluating policy as `identity`.
     pub fn restore_with_cells_in_branch_as_identity(
         &self,
         identity: AuthorId,
@@ -1840,7 +1840,7 @@ where
         Ok(())
     }
 
-    fn ensure_exact_incarnation_absent(
+    fn ensure_exact_branch_row_absent(
         &self,
         table: &str,
         branch: &BranchSelector,
@@ -1856,10 +1856,7 @@ where
         if content.is_some() {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
-                format!(
-                    "encoding error: branch incarnation already exists: {}",
-                    row.0
-                ),
+                format!("encoding error: branch-local row already exists: {}", row.0),
             ));
         }
         Ok(())

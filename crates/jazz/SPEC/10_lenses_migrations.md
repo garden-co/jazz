@@ -72,7 +72,7 @@ Exactly one database-wide catalogue sequencer assigns a dense monotone
 `CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;
 edges forward authenticated, prevalidated requests to that sequencer. Catalogue
 sequence is an administrative ordering domain, not a Jazz data transaction and
-not branch-incarnation causality. A receiver parks an envelope whose earlier catalogue
+not branch-branch-local row causality. A receiver parks an envelope whose earlier catalogue
 sequence or active source schema is missing. The same sequence with different
 canonical content is fatal catalogue corruption, not first-arrival wins.
 Validation happens before consuming sequence. If a sequenced operation must be
@@ -149,7 +149,7 @@ alias select the row's descriptor. The alias, its schema mapping, and the
 descriptor registry are durable local storage state and are recovered before
 any payload is decoded. They never appear in a public value or on the wire.
 An alias or mapping remains retained while any retained history, current row,
-branch incarnation, snapshot, or rejected payload can name it.
+branch-local row, snapshot, or rejected payload can name it.
 
 Jazz registers a schema variant and every projection needed for its logical
 views before activating a catalogue bundle or accepting a row under that

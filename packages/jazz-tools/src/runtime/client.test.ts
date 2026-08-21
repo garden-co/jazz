@@ -294,8 +294,8 @@ describe("JazzClient transaction query plumbing", () => {
   it("encodes exact and head-over-base branch mutation targets", () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const head = { dimensions: { workspace: { type: "Integer", value: 7 } as const } };
-    const base = { dimensions: { workspace: { type: "Integer", value: 1 } as const } };
+    const head = { values: { workspace: { type: "Integer", value: 7 } as const } };
+    const base = { values: { workspace: { type: "Integer", value: 1 } as const } };
 
     client.insert("todos", {}, { branch: head });
     client.update(
@@ -308,12 +308,12 @@ describe("JazzClient transaction query plumbing", () => {
     );
 
     expect(JSON.parse(runtime.insert.mock.calls[0][2] as string)).toMatchObject({
-      branch_view: { head: { dimensions: { workspace: [14, 14] } } },
+      branch_view: { head: { values: { workspace: [14, 14] } } },
     });
     expect(JSON.parse(runtime.update.mock.calls[0][3] as string)).toMatchObject({
       branch_view: {
-        head: { dimensions: { workspace: [14, 14] } },
-        base: { Current: { dimensions: { workspace: [14, 2] } } },
+        head: { values: { workspace: [14, 14] } },
+        base: { Current: { values: { workspace: [14, 2] } } },
       },
     });
   });
@@ -325,11 +325,11 @@ describe("JazzClient transaction query plumbing", () => {
 
     await client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
       branch: {
-        head: { dimensions: { workspace: { type: "Integer", value: 7 } } },
+        head: { values: { workspace: { type: "Integer", value: 7 } } },
         base: {
           kind: "current",
           branch: {
-            dimensions: {
+            values: {
               workspace: { type: "Integer", value: 1 },
               tenant: { type: "Uuid", value: "42424242-4242-4242-4242-424242424242" },
             },
@@ -343,10 +343,10 @@ describe("JazzClient transaction query plumbing", () => {
       read_view: {
         source: {
           BranchView: {
-            head: { dimensions: { workspace: [14, 14] } },
+            head: { values: { workspace: [14, 14] } },
             base: {
               Current: {
-                dimensions: {
+                values: {
                   workspace: [14, 2],
                   tenant: [8, ...Array(16).fill(0x42)],
                 },
@@ -354,8 +354,6 @@ describe("JazzClient transaction query plumbing", () => {
             },
           },
         },
-        schema: "Current",
-        overlays: [],
       },
     });
   });
@@ -372,9 +370,9 @@ describe("JazzClient transaction query plumbing", () => {
 
     await expect(
       client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
-        branch: { head: { dimensions: { workspace: value } } },
+        branch: { head: { values: { workspace: value } } },
       }),
-    ).rejects.toThrow(/branch (Integer|BigInt) dimensions/);
+    ).rejects.toThrow(/branch (Integer|BigInt) values/);
     expect(runtime.query).not.toHaveBeenCalled();
   });
 

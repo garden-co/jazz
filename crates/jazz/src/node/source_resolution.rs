@@ -45,11 +45,7 @@ where
             .tables
             .get(table)
             .ok_or(Error::TableNotFound(table.to_owned()))?;
-        let selected_by_name = selected
-            .dimensions
-            .iter()
-            .cloned()
-            .collect::<BTreeMap<_, _>>();
+        let selected_by_name = selected.values.iter().cloned().collect::<BTreeMap<_, _>>();
         let selected_by_physical = read_table
             .branch_by
             .iter()
@@ -89,25 +85,26 @@ where
                 .filter_map(|name| table_mapping.columns.get(name))
                 .copied()
                 .collect::<BTreeSet<_>>();
-            let missing_dimension_is_non_default = read_table.branch_by.iter().any(|column_name| {
-                let Some(physical) = read_table_mapping.columns.get(column_name) else {
-                    return true;
-                };
-                if historical_physical_columns.contains(physical) {
-                    return false;
-                }
-                let default = read_table
-                    .columns
-                    .iter()
-                    .find(|column| column.name == *column_name)
-                    .and_then(|column| column.default.clone())
-                    .map(crate::protocol::BranchColumnValue::from);
-                selected_by_physical.get(physical) != default.as_ref()
-            });
-            if missing_dimension_is_non_default {
+            let missing_branch_value_is_non_default =
+                read_table.branch_by.iter().any(|column_name| {
+                    let Some(physical) = read_table_mapping.columns.get(column_name) else {
+                        return true;
+                    };
+                    if historical_physical_columns.contains(physical) {
+                        return false;
+                    }
+                    let default = read_table
+                        .columns
+                        .iter()
+                        .find(|column| column.name == *column_name)
+                        .and_then(|column| column.default.clone())
+                        .map(crate::protocol::BranchColumnValue::from);
+                    selected_by_physical.get(physical) != default.as_ref()
+                });
+            if missing_branch_value_is_non_default {
                 continue;
             }
-            let mut dimensions =
+            let mut values =
                 table
                     .branch_by
                     .iter()
@@ -126,12 +123,12 @@ where
                             ))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-            dimensions.sort_by(|left, right| left.0.cmp(&right.0));
-            keys.insert(BranchKey { dimensions });
+            values.sort_by(|left, right| left.0.cmp(&right.0));
+            keys.insert(BranchKey { values });
         }
         if keys.is_empty() {
             keys.insert(BranchKey {
-                dimensions: selected_by_name.into_iter().collect(),
+                values: selected_by_name.into_iter().collect(),
             });
         }
         Ok(keys)
@@ -317,7 +314,7 @@ where
             }
             for column_name in &read_table.branch_by {
                 let (_, encoded) = head
-                    .dimensions
+                    .values
                     .iter()
                     .find(|(name, _)| name == column_name)
                     .ok_or_else(|| {

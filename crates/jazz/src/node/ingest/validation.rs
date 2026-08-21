@@ -181,7 +181,7 @@ where
                         .any(|candidate| candidate.branch_key() == stored.branch_key())
                 {
                     return Err(Error::InvalidMergeableCommit(
-                        "version parent belongs to a different branch-keyed incarnation",
+                        "version parent belongs to a different branch-local row",
                     ));
                 }
             }

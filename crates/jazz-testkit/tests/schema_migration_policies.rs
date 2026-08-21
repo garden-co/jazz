@@ -60,7 +60,6 @@ async fn publish_generation(server: &JazzServer, schemas: &[Schema], lenses: &[L
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         schemas,
         lenses,
     )
@@ -78,7 +77,6 @@ async fn push_full_catalogue(server: &JazzServer, schemas: &[Schema], lenses: &[
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         schemas,
         lenses,
     )

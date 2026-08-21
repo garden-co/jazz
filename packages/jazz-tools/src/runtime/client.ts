@@ -27,18 +27,18 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
         value.value < -0x80000000 ||
         value.value > 0x7fffffff
       ) {
-        throw new Error("branch Integer dimensions must be signed 32-bit integers");
+        throw new Error("branch Integer values must be signed 32-bit integers");
       }
       writer.enumUnit(14); // groove::Value::I32
       writer.i64(value.value);
       break;
     case "BigInt": {
       if (typeof value.value === "number" && !Number.isSafeInteger(value.value)) {
-        throw new Error("branch BigInt dimensions supplied as numbers must be safe integers");
+        throw new Error("branch BigInt values supplied as numbers must be safe integers");
       }
       const integer = BigInt(value.value);
       if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
-        throw new Error("branch BigInt dimensions must be signed 64-bit integers");
+        throw new Error("branch BigInt values must be signed 64-bit integers");
       }
       writer.enumUnit(13); // groove::Value::I64
       writer.i64(integer);
@@ -64,17 +64,17 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
   return writer.finish();
 }
 
-type WireBranchSelector = { dimensions: Record<string, number[]> };
+type WireBranchSelector = { values: Record<string, number[]> };
 type WireBranchViewBase =
   | { Current: WireBranchSelector }
   | { Snapshot: { branch: WireBranchSelector; snapshot: unknown } };
 
 function encodeBranchSelector(value: BranchSelector): WireBranchSelector {
   return {
-    dimensions: Object.fromEntries(
-      Object.entries(value.dimensions).map(([name, dimension]) => [
+    values: Object.fromEntries(
+      Object.entries(value.values).map(([name, branchValue]) => [
         name,
-        Array.from(encodeBranchColumnValue(dimension)),
+        Array.from(encodeBranchColumnValue(branchValue)),
       ]),
     ),
   };
@@ -282,9 +282,9 @@ export type QueryPropagation = "full" | "local-only";
  */
 export type QueryVisibility = "public" | "hidden_from_live_query_list";
 
-/** Named values selecting one exact branch incarnation. */
+/** Named values selecting one exact branch-local row coordinate. */
 export interface BranchSelector {
-  dimensions: Record<string, Value>;
+  values: Record<string, Value>;
 }
 
 /** A live or application-resolved frozen base underneath a branch head. */
@@ -489,8 +489,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
             | { Snapshot: { branch: WireBranchSelector; snapshot: unknown } };
         };
       };
-      schema: "Current";
-      overlays: [];
     };
   } = {};
   if ((options.propagation ?? "full") !== "full") {
@@ -511,8 +509,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
           base: encodeBranchViewBase(base),
         },
       },
-      schema: "Current",
-      overlays: [],
     };
   }
 

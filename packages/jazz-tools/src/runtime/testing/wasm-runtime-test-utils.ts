@@ -90,7 +90,7 @@ export async function createWasmRuntime(
   opts?: {
     appId?: string;
     env?: string;
-    userBranch?: string;
+    identityScope?: string;
     tier?: string;
     useBinaryEncoding?: boolean;
   },
@@ -98,12 +98,12 @@ export async function createWasmRuntime(
   const wasmModule = await loadWasmModule();
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
-  const userBranch = opts?.userBranch ?? "main";
+  const identityScope = opts?.identityScope ?? "default";
   const runtime = new NativeRuntimeAdapter(
     wasmModule.WasmDb,
     schema,
-    deterministicBytes(`${appId}:${env}:${userBranch}:node`),
-    deterministicBytes(`${appId}:${env}:${userBranch}:author`),
+    deterministicBytes(`${appId}:${env}:${identityScope}:node`),
+    deterministicBytes(`${appId}:${env}:${identityScope}:author`),
     1,
     true,
   );

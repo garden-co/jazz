@@ -100,7 +100,6 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     jwtPublicKey,
     allowLocalFirstAuth,
     env: "dev",
-    userBranch: "main",
   });
   const db = context.asBackend();
   // #endregion context-setup-ts-backend

@@ -35,11 +35,10 @@ afterEach(async () => {
   }
 });
 
-async function makeDb(devMode?: boolean, userBranch?: string): Promise<Db> {
+async function makeDb(devMode?: boolean): Promise<Db> {
   const db = await createDb({
     appId: `dev-mode-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     devMode,
-    userBranch,
   });
   dbs.push(db);
   return db;
@@ -56,7 +55,7 @@ describe("Db devMode active query tracing", () => {
   });
 
   it("tracks visible subscriptions with default metadata and cleanup", async () => {
-    const db = await makeDb(true, "feature-branch");
+    const db = await makeDb(true);
     const observed: Array<ReturnType<Db["getActiveQuerySubscriptions"]>> = [];
     const stop = db.onActiveQuerySubscriptionsChange((traces) => {
       observed.push(traces.map((trace) => ({ ...trace })));
@@ -66,7 +65,7 @@ describe("Db devMode active query tracing", () => {
     const [trace] = db.getActiveQuerySubscriptions();
 
     expect(trace?.table).toBe("todos");
-    expect(trace?.branches).toEqual(["feature-branch"]);
+    expect(trace?.branches).toEqual([]);
     expect(trace?.tier).toBe("local");
     expect(trace?.propagation).toBe("full");
     expect(trace?.query).toContain('"table":"todos"');
@@ -107,7 +106,7 @@ describe("Db devMode active query tracing", () => {
   });
 
   it("reports unknown for trace payloads without parseable table metadata", async () => {
-    const db = await makeDb(true, "feature-branch");
+    const db = await makeDb(true);
     const parseTracePayload = (
       db as unknown as {
         parseRuntimeQueryTracePayload(queryJson: string): { table: string; branches: string[] };
@@ -120,7 +119,7 @@ describe("Db devMode active query tracing", () => {
     });
     expect(parseTracePayload("{not-json")).toEqual({
       table: "unknown",
-      branches: ["feature-branch"],
+      branches: [],
     });
   });
 

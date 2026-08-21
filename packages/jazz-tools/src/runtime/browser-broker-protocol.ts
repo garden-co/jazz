@@ -61,7 +61,6 @@ export interface BrowserBrokerFingerprintInput {
   appId: string;
   dbName: string;
   env: string;
-  userBranch: string;
   serverUrl?: string | null;
   schemaHash?: string | null;
   authClass: string;
@@ -382,7 +381,6 @@ export function createBrowserBrokerFingerprint(input: BrowserBrokerFingerprintIn
     dbName: input.dbName,
     persistentDriverNamespace: input.persistentDriverNamespace,
     env: input.env,
-    userBranch: input.userBranch,
     serverUrl: input.serverUrl ?? null,
     schemaHash: input.schemaHash ?? null,
     runtimeSourceIdentity: input.runtimeSourceIdentity,

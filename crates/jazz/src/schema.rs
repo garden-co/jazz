@@ -152,14 +152,14 @@ impl RuntimeSchema {
         table: &TableSchema,
         selector: &BranchSelector,
     ) -> Result<(BranchKey, BTreeMap<String, Value>), String> {
-        if selector.dimensions.len() != table.branch_by.len() {
+        if selector.values.len() != table.branch_by.len() {
             return Err(format!(
                 "branch selector for {} must provide exactly {} values",
                 table.name,
                 table.branch_by.len()
             ));
         }
-        let mut dimensions = Vec::with_capacity(table.branch_by.len());
+        let mut values = Vec::with_capacity(table.branch_by.len());
         let mut cells = BTreeMap::new();
         for column_name in &table.branch_by {
             let column = table
@@ -170,7 +170,7 @@ impl RuntimeSchema {
                     format!("unknown branch column {column_name:?} on {}", table.name)
                 })?;
             let encoded = selector
-                .dimensions
+                .values
                 .get(column_name)
                 .ok_or_else(|| format!("missing branch column {column_name}"))?;
             let value = encoded
@@ -184,11 +184,11 @@ impl RuntimeSchema {
             RecordDescriptor::new([("value", column.column_type.clone())])
                 .create(std::slice::from_ref(&value))
                 .map_err(|_| format!("invalid branch column {column_name} value"))?;
-            dimensions.push((column_name.clone(), encoded.clone()));
+            values.push((column_name.clone(), encoded.clone()));
             cells.insert(column_name.clone(), value);
         }
-        dimensions.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok((BranchKey { dimensions }, cells))
+        values.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok((BranchKey { values }, cells))
     }
 
     /// Validate a schema-wide view selector, then project it onto one table's subset.
@@ -202,17 +202,17 @@ impl RuntimeSchema {
             .iter()
             .flat_map(|table| table.branch_by.iter().cloned())
             .collect::<BTreeSet<_>>();
-        if selector.dimensions.keys().cloned().collect::<BTreeSet<_>>() != schema_branch_columns {
+        if selector.values.keys().cloned().collect::<BTreeSet<_>>() != schema_branch_columns {
             return Err(
                 "branch view selector must provide every schema branch column exactly once"
                     .to_owned(),
             );
         }
         let projected = BranchSelector {
-            dimensions: table
+            values: table
                 .branch_by
                 .iter()
-                .map(|column| (column.clone(), selector.dimensions[column].clone()))
+                .map(|column| (column.clone(), selector.values[column].clone()))
                 .collect(),
         };
         self.project_branch_selector(table, &projected)
@@ -233,12 +233,12 @@ impl RuntimeSchema {
                 .find(|column| column.name == *column_name)
                 .expect("validated branch column");
             let selected = selected
-                .dimensions
+                .values
                 .iter()
                 .find(|(name, _)| name == column_name)
                 .map(|(_, value)| value);
             let stored = stored
-                .dimensions
+                .values
                 .iter()
                 .find(|(name, _)| name == column_name)
                 .map(|(_, value)| value)
@@ -246,7 +246,7 @@ impl RuntimeSchema {
                 .or_else(|| column.default.clone().map(BranchColumnValue::from));
             selected == stored.as_ref()
         }) && stored
-            .dimensions
+            .values
             .iter()
             .all(|(name, _)| table.branch_by.contains(name))
     }
@@ -259,7 +259,7 @@ impl RuntimeSchema {
         stored: &BranchKey,
     ) -> Result<BranchKey, String> {
         if stored
-            .dimensions
+            .values
             .iter()
             .any(|(name, _)| !table.branch_by.contains(name))
         {
@@ -268,7 +268,7 @@ impl RuntimeSchema {
                 table.name
             ));
         }
-        let mut dimensions = table
+        let mut values = table
             .branch_by
             .iter()
             .map(|column_name| {
@@ -278,7 +278,7 @@ impl RuntimeSchema {
                     .find(|column| column.name == *column_name)
                     .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
                 let value = stored
-                    .dimensions
+                    .values
                     .iter()
                     .find(|(name, _)| name == column_name)
                     .map(|(_, value)| value.clone())
@@ -291,8 +291,8 @@ impl RuntimeSchema {
                 Ok((column_name.clone(), value))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        dimensions.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok(BranchKey { dimensions })
+        values.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(BranchKey { values })
     }
 
     /// Validate an authored table-local branch key without applying migration
@@ -306,7 +306,7 @@ impl RuntimeSchema {
     ) -> Result<BTreeMap<String, Value>, String> {
         let mut bindings = table.branch_by.iter().collect::<Vec<_>>();
         bindings.sort();
-        if key.dimensions.len() != bindings.len() {
+        if key.values.len() != bindings.len() {
             return Err(format!(
                 "branch key for {} must contain exactly {} values",
                 table.name,
@@ -315,7 +315,7 @@ impl RuntimeSchema {
         }
 
         let mut cells = BTreeMap::new();
-        for (column_name, (actual_name, encoded)) in bindings.into_iter().zip(&key.dimensions) {
+        for (column_name, (actual_name, encoded)) in bindings.into_iter().zip(&key.values) {
             if actual_name != column_name {
                 return Err(format!(
                     "branch key for {} is not in canonical column order",
@@ -349,7 +349,7 @@ impl RuntimeSchema {
         table: &TableSchema,
         key: &BranchKey,
     ) -> Result<BranchSelector, String> {
-        let mut dimensions = BTreeMap::new();
+        let mut values = BTreeMap::new();
         for column_name in &table.branch_by {
             let column = table
                 .columns
@@ -357,7 +357,7 @@ impl RuntimeSchema {
                 .find(|column| column.name == *column_name)
                 .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
             let value = key
-                .dimensions
+                .values
                 .iter()
                 .find(|(name, _)| name == column_name)
                 .map(|(_, value)| value.clone())
@@ -365,9 +365,9 @@ impl RuntimeSchema {
                 .ok_or_else(|| {
                     format!("branch key is missing {column_name} without a migration default")
                 })?;
-            dimensions.insert(column_name.clone(), value);
+            values.insert(column_name.clone(), value);
         }
-        Ok(BranchSelector { dimensions })
+        Ok(BranchSelector { values })
     }
 
     #[cfg(test)]
@@ -1218,7 +1218,7 @@ fn global_changes_table() -> GrooveTableSchema {
 ///
 /// This is intentionally a fixed system table rather than a schema-variant
 /// table: deletion payload has no user cells. Branch-key routing is added by
-/// the physical incarnation layer rather than transaction metadata.
+/// the physical branch-local row layer rather than transaction metadata.
 pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_deletion_history",

@@ -33,7 +33,6 @@ describe("NAPI on_auth_failure", () => {
     const runtime = await createNapiNativeRuntimeAdapter(MINIMAL_SCHEMA, {
       appId,
       env: "test",
-      userBranch: "main",
     });
 
     try {

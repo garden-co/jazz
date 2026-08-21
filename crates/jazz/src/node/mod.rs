@@ -1371,7 +1371,7 @@ pub struct QueryReadProfile {
 pub struct ContributionMergeRow {
     /// Logical table containing the row.
     pub table: String,
-    /// Global object identity shared by its branch-local incarnations.
+    /// Global object identity shared by its branch-local branch-local rows.
     pub row_uuid: RowUuid,
 }
 
@@ -1399,7 +1399,7 @@ pub struct MergeableCommit {
     pub table: String,
     /// Target row.
     pub row_uuid: RowUuid,
-    /// Exact named branch coordinate for this row incarnation.
+    /// Exact named branch coordinate for this row branch-local row.
     pub branch: BranchSelector,
     /// Author making the commit.
     pub made_by: AuthorId,
@@ -1437,7 +1437,7 @@ impl MergeableCommit {
         }
     }
 
-    /// Target an exact branch-keyed row incarnation.
+    /// Target an exact branch-keyed row branch-local row.
     pub fn branch(mut self, branch: BranchSelector) -> Self {
         self.branch = branch;
         self

@@ -12,7 +12,6 @@ function makeFakeDb(overrides: Record<string, unknown> = {}) {
         appId: "app1",
         serverUrl: "http://server",
         env: "dev",
-        userBranch: "main",
         adminSecret: "sek",
       }),
       getRuntimeSchema: () => ({ todos: { columns: [] } }),

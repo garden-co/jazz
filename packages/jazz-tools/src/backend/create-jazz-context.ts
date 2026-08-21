@@ -108,14 +108,11 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.initializedSchemaJson = schemaJson;
     const nodeTier = this.config.tier ?? "edge";
     const env = this.config.env ?? "dev";
-    const userBranch = this.config.userBranch ?? "main";
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,
       schema,
-      deterministicBytes(
-        `${this.config.appId}:${env}:${userBranch}:${this.nodeIdentityScope}:node`,
-      ),
-      deterministicBytes(`${this.config.appId}:${env}:${userBranch}:author`),
+      deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
+      deterministicBytes(`${this.config.appId}:${env}:author`),
       1,
       true,
       this.config.driver.type === "persistent"
@@ -133,7 +130,6 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         schema,
         serverUrl: config.serverUrl,
         env: config.env,
-        userBranch: config.userBranch,
         jwtToken: config.jwtToken,
         backendSecret: config.backendSecret,
         adminSecret: config.adminSecret,
@@ -274,7 +270,6 @@ export class JazzContext {
       driver: this.config.driver.type === "memory" ? { type: "memory" } : { type: "persistent" },
       serverUrl: this.config.serverUrl,
       env: this.config.env,
-      userBranch: this.config.userBranch,
       jwtToken: this.config.jwtToken,
       adminSecret: this.config.adminSecret,
       backendSecret: this.config.backendSecret,

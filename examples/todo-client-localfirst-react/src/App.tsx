@@ -11,7 +11,6 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
   return {
     appId,
     env: "dev",
-    userBranch: "main",
     serverUrl,
     secret,
     ...overrides,

@@ -107,7 +107,7 @@ pub struct ContributionSubstitution {
     pub sources: Vec<ContributionDot>,
 }
 
-/// Stable field-grained coordinate within one branch-keyed row incarnation.
+/// Stable field-grained coordinate within one branch-keyed row branch-local row.
 #[derive(
     Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]

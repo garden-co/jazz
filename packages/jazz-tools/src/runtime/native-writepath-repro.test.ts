@@ -95,7 +95,6 @@ describe("native write path", () => {
       adminSecret: server.adminSecret,
       backendSecret: server.backendSecret,
       env: "test",
-      userBranch: "main",
       tier: "local",
     });
     const db = context.asBackend();

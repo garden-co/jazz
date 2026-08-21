@@ -70,7 +70,6 @@ const context = createJazzContext({
   backendSecret,
   adminSecret,
   env: "dev",
-  userBranch: "main",
 });
 
 try {

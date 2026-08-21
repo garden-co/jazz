@@ -49,9 +49,9 @@ use crate::protocol::expand_version_carriers;
 use crate::protocol::{
     AuthorizationScopeReceipt, BindingViewKey, BranchSelector, BranchViewBase, CoverageKey,
     CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
-    ReadViewKey, ReadViewSchemaSpec, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
+    ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
+    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
+    SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
     validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
@@ -1147,13 +1147,10 @@ fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
 }
 
 fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
-    if opts.read_view.overlays.is_empty()
-        && matches!(opts.read_view.schema, ReadViewSchemaSpec::Current)
-        && matches!(
-            opts.read_view.source,
-            ReadViewSourceSpec::Current | ReadViewSourceSpec::BranchView { .. }
-        )
-    {
+    if matches!(
+        opts.read_view.source,
+        ReadViewSourceSpec::Current | ReadViewSourceSpec::BranchView { .. }
+    ) {
         return Ok(());
     }
     Err(Error::new(
@@ -1412,7 +1409,7 @@ where
         self.insert_with_id_at_ms_option(table, row, cells, None)
     }
 
-    /// Stage an insert in one exact branch incarnation.
+    /// Stage an insert in one exact branch-local row.
     fn insert_with_id_in_branch(
         &self,
         table: &str,
@@ -1498,7 +1495,7 @@ where
         self.restore_at_ms_option(table, row, cells, None)
     }
 
-    /// Stage a restore in one exact branch incarnation.
+    /// Stage a restore in one exact branch-local row.
     fn restore_in_branch(
         &self,
         table: &str,
@@ -1510,7 +1507,7 @@ where
             .stage_mergeable_restore_in_branch(self.tx_id(), table, branch, row, cells, None)
     }
 
-    /// Stage an atomic move of one object incarnation between exact branch
+    /// Stage an atomic move of one object branch-local row between exact branch
     /// keys. The destination receives an explicit content write and restore,
     /// while the source receives an explicit deletion in the same transaction.
     fn move_between_branches(
@@ -1535,7 +1532,7 @@ where
             .ok_or_else(|| {
                 Error::new(
                     ErrorCode::NotObserved,
-                    format!("source incarnation is not visible: {}", row.0),
+                    format!("source branch-local row is not visible: {}", row.0),
                 )
             })?;
         let table_schema = self

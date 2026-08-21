@@ -72,9 +72,6 @@ export interface AppContext {
   /** Environment (e.g., "dev", "prod") */
   env?: string;
 
-  /** User branch name (default: "main") */
-  userBranch?: string;
-
   // Authentication fields
 
   /**

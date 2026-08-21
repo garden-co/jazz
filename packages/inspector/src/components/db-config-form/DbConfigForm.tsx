@@ -12,7 +12,6 @@ export interface DbConfigFormValues {
   appId: string;
   adminSecret: string;
   env: string;
-  branch: string;
 }
 
 type SchemaHashesResult = Awaited<ReturnType<typeof fetchSchemaHashes>> & {
@@ -39,7 +38,6 @@ export function DbConfigForm({
   const [appId, setAppId] = useState(initialValues?.appId ?? "");
   const [adminSecret, setAdminSecret] = useState(initialValues?.adminSecret ?? "");
   const [env, setEnv] = useState(initialValues?.env ?? "dev");
-  const [branch, setBranch] = useState(initialValues?.branch ?? "main");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -49,7 +47,6 @@ export function DbConfigForm({
     setAppId(initialValues?.appId ?? "");
     setAdminSecret(initialValues?.adminSecret ?? "");
     setEnv(initialValues?.env ?? "dev");
-    setBranch(initialValues?.branch ?? "main");
     setIsSubmitting(false);
     setErrorMessage(null);
   }, [initialValues]);
@@ -65,7 +62,6 @@ export function DbConfigForm({
       appId: appId.trim(),
       adminSecret: adminSecret.trim(),
       env: env.trim() || "dev",
-      branch: branch.trim() || "main",
     };
 
     try {
@@ -135,16 +131,6 @@ export function DbConfigForm({
           value={env}
           onChange={(e) => setEnv(e.target.value)}
           placeholder="dev"
-          className={styles.input}
-        />
-      </label>
-      <label className={styles.field}>
-        Branch
-        <input
-          type="text"
-          value={branch}
-          onChange={(e) => setBranch(e.target.value)}
-          placeholder="main"
           className={styles.input}
         />
       </label>

@@ -87,7 +87,6 @@ export function App() {
     const sharedConfig = {
       appId: DEFAULT_APP_ID,
       env: "dev" as const,
-      userBranch: "main" as const,
       serverUrl: SYNC_SERVER_URL,
       driver: { type: "memory" as const },
     };

@@ -1213,7 +1213,7 @@ pub(super) struct PendingWrite {
     pub(super) row_uuid: RowUuid,
     /// Schema version used to encode staged cells.
     pub(super) schema_version: SchemaVersionId,
-    /// Exact branch coordinate of this row incarnation.
+    /// Exact branch coordinate of this row branch-local row.
     pub(super) branch: BranchSelector,
     /// Replacement cells or an update patch resolved when the transaction commits.
     cells: PendingCells,

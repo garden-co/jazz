@@ -59,7 +59,6 @@ export async function startApp(
   const db = await createDb({
     appId: readEnvAppId() ?? "todo-client-example",
     env: "dev",
-    userBranch: "main",
     ...config,
   });
   // #endregion context-setup-ts-client

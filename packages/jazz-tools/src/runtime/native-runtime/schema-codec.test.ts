@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WasmSchema } from "../../drivers/types.js";
+import { schema as s } from "../../index.js";
 import { encodeSchema } from "./schema-codec.js";
 
 describe("branch-aware schema codec", () => {
@@ -14,5 +15,19 @@ describe("branch-aware schema codec", () => {
 
     const source = JSON.parse(new TextDecoder().decode(encodeSchema(schema)));
     expect(source).toEqual({ tables: schema });
+  });
+
+  it("exposes branchBy through the typed schema DSL", () => {
+    const app = s.defineApp({
+      branches: s.table({ name: s.string() }),
+      todos: s
+        .table({
+          branch_id: s.ref("branches"),
+          title: s.string(),
+        })
+        .branchBy(["branch_id"]),
+    });
+
+    expect(app.wasmSchema.todos?.branchBy).toEqual(["branch_id"]);
   });
 });

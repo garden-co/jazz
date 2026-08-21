@@ -61,7 +61,6 @@ describe("browser broker protocol", () => {
       appId: "app",
       dbName: "db",
       env: "dev",
-      userBranch: "main",
       serverUrl: "ws://example.test",
       schemaHash: "schema-a",
       authClass: "user:stable-id",

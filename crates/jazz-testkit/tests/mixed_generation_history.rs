@@ -95,7 +95,6 @@ async fn push_catalogue(server: &JazzServer, schemas: &[Schema], lenses: &[Lens]
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         schemas,
         lenses,
     )

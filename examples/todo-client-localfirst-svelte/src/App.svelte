@@ -38,7 +38,6 @@
 		return {
 			appId,
 			env: 'dev',
-			userBranch: 'main',
 			auth: { localFirstSecret: secret },
 			...(serverUrl ? { serverUrl } : {}),
 			...overrides,

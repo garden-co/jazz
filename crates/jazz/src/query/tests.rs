@@ -906,7 +906,7 @@ mod tests {
             .validate_runtime(&schema())
             .unwrap();
         // Branch-view selection is part of the canonical query shape, even
-        // when it selects the shared/default incarnation.
+        // when it selects the shared/default branch-local row.
         assert_eq!(
             validated.shape_id().0.to_string(),
             "b0dc6f46-cbc2-5003-928c-f607d7943c77"

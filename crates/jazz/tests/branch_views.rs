@@ -189,7 +189,7 @@ fn indexed_branch_view_masks_base_before_applying_the_predicate() {
     assert_eq!(
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         vec![inherited],
-        "the non-matching head incarnation must still mask the base index hit"
+        "the non-matching head branch-local row must still mask the base index hit"
     );
 }
 
@@ -248,7 +248,7 @@ fn branch_view_reduction_precedes_aggregation_and_ordered_windows() {
 }
 
 #[test]
-fn branch_view_join_projects_dimension_subsets_and_shared_tables() {
+fn branch_view_join_projects_branch_column_subsets_and_shared_tables() {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(TableSchemaBuilder::new("workspaces").column("name", ColumnType::Text))
@@ -451,7 +451,7 @@ fn branch_view_reachability_consumes_effective_sources() {
         ))
         .unwrap()
         .is_empty(),
-        "the head access incarnation must mask reachable base evidence"
+        "the head access branch-local row must mask reachable base evidence"
     );
 }
 

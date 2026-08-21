@@ -13,7 +13,7 @@ fn branch_view_schema() -> JazzSchema {
     )
 }
 
-fn two_dimension_branch_view_schema() -> JazzSchema {
+fn two_column_branch_view_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
@@ -245,7 +245,7 @@ fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
 // the adversarial VersionRecord values a remote peer may send.
 #[test]
 fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
-    let schema = two_dimension_branch_view_schema();
+    let schema = two_column_branch_view_schema();
     let table = &schema.tables[0];
     let selector = BranchSelector::new([
         ("workspace_id", Value::Uuid(uuid::Uuid::from_bytes([0x61; 16]))),
@@ -284,10 +284,10 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
     .unwrap()
     .with_branch_key(valid_key.clone());
 
-    let first = valid_key.dimensions[0].clone();
-    let second = valid_key.dimensions[1].clone();
+    let first = valid_key.values[0].clone();
+    let second = valid_key.values[1].clone();
     let wrong_value_key = BranchKey {
-        dimensions: vec![
+        values: vec![
             first.clone(),
             (
                 second.0.clone(),
@@ -305,14 +305,14 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
             "duplicate",
             0,
             BranchKey {
-                dimensions: vec![first.clone(), first.clone()],
+                values: vec![first.clone(), first.clone()],
             },
         ),
         (
             "extra",
             0,
             BranchKey {
-                dimensions: vec![
+                values: vec![
                     first.clone(),
                     second.clone(),
                     (
@@ -326,14 +326,14 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
             "out-of-order",
             0,
             BranchKey {
-                dimensions: vec![second.clone(), first.clone()],
+                values: vec![second.clone(), first.clone()],
             },
         ),
         (
             "wrong-type",
             0,
             BranchKey {
-                dimensions: vec![
+                values: vec![
                     first.clone(),
                     (
                         second.0.clone(),
@@ -348,7 +348,7 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
             "noncanonical-encoding",
             0,
             BranchKey {
-                dimensions: vec![first.clone(), (second.0.clone(), noncanonical)],
+                values: vec![first.clone(), (second.0.clone(), noncanonical)],
             },
         ),
         ("content-disagrees", 0, wrong_value_key),

@@ -30,7 +30,7 @@ Invariant digest:
 - `INV-DATA-18`: Derived global-current storage MUST identify the per-layer winner by row and preserve the content fields needed for global current reads.
 - `INV-DATA-19`: The global change stream MUST retain enough table, row, layer, and sequence information to reconstruct global as-of reads.
 - `INV-DATA-20`: Schema lowering MUST provide storage for metadata, transaction outcomes, row-version layers, globally accepted current state, and change history.
-- `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(physical_table_id, branch_key, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or branch-key incarnations.
+- `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(physical_table_id, branch_key, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or branch-key branch-local rows.
 - `INV-DATA-22`: A per-lineage derived current row MUST carry the independently selected content winner and deletion winner/event, an explicit visibility bit, and projected content cells. It is node-local derived state, never replicated payload.
 
 ## Details
@@ -132,7 +132,7 @@ with no user cells. The record names the stable `PhysicalTableId` of its content
 lineage, rather than a logical table name or schema version. `PhysicalTableId`
 is allocated once when a table lineage is created and retained through
 compatible schema changes, including table renames; a dropped lineage is never
-silently reused. Its full incarnation identity also contains the canonical
+silently reused. Its full branch-local row identity also contains the canonical
 branch key declared by ch. 11, so content and deletion events for one
 application object in different tuples remain independent. This permits exactly
 one sparse immutable deletion history across the database without cross-table or
@@ -176,7 +176,7 @@ from those tables on recovery.
 **Lowered tables.** `lower_to_groove()` produces:
 
 - _metadata_ — `jazz_nodes`, `jazz_schema_versions` (including durable physical
-  and branch-dimension mappings), `jazz_catalogue`, and
+  and branch mappings), `jazz_catalogue`, and
   `jazz_catalogue_pointer`;
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
   `jazz_rejected_transactions`;

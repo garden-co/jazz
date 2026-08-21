@@ -238,6 +238,7 @@ export interface Table {
   name: string;
   columns: Column[];
   indexedColumns?: string[];
+  branchBy?: string[];
   policies?: TablePolicies;
 }
 

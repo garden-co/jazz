@@ -23,7 +23,7 @@ Invariant digest:
 - `INV-LOWER-3`: Node-local aliases in `jazz_nodes.id` and `jazz_schema_versions.id` MUST NOT be wire identities; wire tx/schema references MUST use `NodeUuid` and `SchemaVersionId`.
 - `INV-LOWER-4`: Content versions MUST resolve through their schema's durable physical mapping while deletion-register versions resolve through the shared deletion-history relation by stable physical-table and canonical branch key; a single immutable version row MUST NOT contain both user cells and `_deletion`.
 - `INV-LOWER-5`: Combined current rows MUST be maintained from independently selected content and deletion winners and expose an explicit visibility state.
-- `INV-LOWER-6`: Local/non-global current-row maintenance MUST use bounded per-incarnation currency selection for both content and deletion history; deletion access MUST be prefix-bounded by branch key and physical table id.
+- `INV-LOWER-6`: Local/non-global current-row maintenance MUST use bounded per-branch-local row currency selection for both content and deletion history; deletion access MUST be prefix-bounded by branch key and physical table id.
 - `INV-LOWER-7`: Global current-row reads MUST use the physical lineage's combined global-current table, not scan immutable history or anti-join a register source.
 - `INV-LOWER-8`: `jazz_global_changes` MUST be keyed by `(physical_table_id, row_uuid, layer, global_time)` and expose global-time and physical-table/global-time indexes.
 - `INV-LOWER-9`: Query lowering MUST begin from a resolved visible-current source and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.

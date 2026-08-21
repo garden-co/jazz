@@ -163,7 +163,7 @@ fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() 
     assert_eq!(row_ids(&snapshot.rows), vec![selected_row]);
     assert_eq!(
         snapshot.rows[0].cell(&schema.tables[0], "branch_id"),
-        Some(head.dimensions["branch_id"].decode().unwrap()),
+        Some(head.values["branch_id"].decode().unwrap()),
         "an inherited base row must project the requested head coordinate"
     );
 
@@ -344,10 +344,10 @@ fn branch_view_subscriptions_disambiguate_same_row_and_tx_by_branch() {
     );
     assert_eq!(
         left_snapshot.rows[0].cell(table, "branch_id"),
-        Some(left.dimensions["branch_id"].decode().unwrap())
+        Some(left.values["branch_id"].decode().unwrap())
     );
     assert_eq!(
         right_snapshot.rows[0].cell(table, "branch_id"),
-        Some(right.dimensions["branch_id"].decode().unwrap())
+        Some(right.values["branch_id"].decode().unwrap())
     );
 }

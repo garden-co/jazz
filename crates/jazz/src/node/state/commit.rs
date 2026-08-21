@@ -303,7 +303,7 @@ where
                     && !same_row.into_iter().any(|version| version.branch_key() == &branch_key)
                 {
                     return Err(Error::InvalidMergeableCommit(
-                        "version parent belongs to a different branch-keyed incarnation",
+                        "version parent belongs to a different branch-local row",
                     ));
                 }
             }
@@ -488,7 +488,7 @@ where
             }))
     }
 
-    /// Read one exact branch-keyed incarnation for mutation preparation.
+    /// Read one exact branch-local row for mutation preparation.
     pub fn visible_current_cells_in_branch(
         &mut self,
         table: &str,
@@ -545,7 +545,7 @@ where
             .map(Some)
     }
 
-    /// Return the exact local content parent for a branch-keyed incarnation.
+    /// Return the exact local content parent for a branch-local row.
     pub fn local_content_winner_tx_id_in_branch(
         &mut self,
         table: &str,
@@ -560,7 +560,7 @@ where
         )
     }
 
-    /// Return the exact local deletion parent for a branch-keyed incarnation.
+    /// Return the exact local deletion parent for a branch-local row.
     pub fn local_deletion_winner_tx_id_in_branch(
         &mut self,
         table: &str,

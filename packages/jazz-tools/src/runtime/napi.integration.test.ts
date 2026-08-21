@@ -405,7 +405,6 @@ describe("NAPI integration", () => {
       first = (await createPersistentNapiNativeRuntimeAdapter(wasmSchema, runtimeData.dataPath, {
         appId: randomUUID(),
         env: "test",
-        userBranch: "main",
       })) as TestRuntimeWithTransport;
 
       first.connect("ws://127.0.0.1/jazz/ws", "{}");
@@ -415,7 +414,6 @@ describe("NAPI integration", () => {
       second = (await createPersistentNapiNativeRuntimeAdapter(wasmSchema, runtimeData.dataPath, {
         appId: randomUUID(),
         env: "test",
-        userBranch: "main",
       })) as TestRuntimeWithTransport;
       expect(second).toBeDefined();
     } finally {
@@ -433,7 +431,6 @@ describe("NAPI integration", () => {
     const runtime = (await createPersistentNapiNativeRuntimeAdapter(TEST_SCHEMA, dataPath, {
       appId: `napi-large-index-${randomUUID()}`,
       env: "test",
-      userBranch: "main",
     })) as unknown as {
       insert(table: string, values: unknown): RuntimeCommittedRow;
       update(
@@ -534,7 +531,6 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         backendSecret,
         env: "test",
-        userBranch: "main",
       });
       await settleAsyncSyncWork();
 
@@ -680,7 +676,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         env: "test",
-        userBranch: "main",
         tier: "global",
       });
       await settleAsyncSyncWork();
@@ -749,7 +744,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         env: "test",
-        userBranch: "main",
         tier: "global",
       });
       await settleAsyncSyncWork();
@@ -825,7 +819,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         env: "test",
-        userBranch: "main",
         tier: "global",
       });
       await settleAsyncSyncWork();
@@ -895,7 +888,6 @@ describe("NAPI integration", () => {
         adminSecret,
         jwksUrl: jwtIssuer.jwksUrl,
         env: "test",
-        userBranch: "main",
         tier: "global",
       });
       await settleAsyncSyncWork();
@@ -1124,7 +1116,6 @@ describe("NAPI integration", () => {
         adminSecret,
         jwksUrl: jwtIssuer.jwksUrl,
         env: "test",
-        userBranch: "main",
         tier: "global",
       });
       await settleAsyncSyncWork();
@@ -1220,7 +1211,6 @@ describe("NAPI integration", () => {
         adminSecret,
         jwksUrl: jwtIssuer.jwksUrl,
         env: "test",
-        userBranch: "main",
         tier: "global",
       });
       await settleAsyncSyncWork();
@@ -1413,7 +1403,6 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         backendSecret,
         env: "test",
-        userBranch: "main",
       });
       await settleAsyncSyncWork();
 
@@ -1750,7 +1739,6 @@ describe("NAPI integration", () => {
       seedRuntime = (await createPersistentNapiNativeRuntimeAdapter(BYTEA_SCHEMA, dataPath, {
         appId,
         env: "dev",
-        userBranch: "main",
         tier: "edge",
       })) as unknown as {
         insert(table: string, values: unknown): { id: string };

@@ -11,7 +11,7 @@ that overlays one current branch key over an optional live or frozen base.
 
 A table names zero or more ordinary application columns in `branchBy`. The
 columns remain visible to queries, references, and policies, while their encoded
-values also form an immutable storage coordinate. There is no stored dimension
+values also form an immutable storage coordinate. There is no stored branch-column
 identity, binding, declaration, or branch object.
 Global object identity remains `RowUuid`; one object may have a distinct
 branch-local row in every branch key.
@@ -124,7 +124,7 @@ Column names provide the uniform selector vocabulary, not durable identities.
 Ordinary schema lineage may rename a branch column because the migration lens
 retains the column's existing physical identity. Historical keys authored with
 the old name are projected through that lineage. Jazz stores no separate
-dimension declaration or binding abstraction.
+branch-specific declaration or binding abstraction.
 
 The empty branch key denotes shared data. It is not a privileged root branch key and
 has no lifecycle semantics (`INV-BVIEW-7`).
@@ -186,7 +186,7 @@ the same branch-key prefix.
 
 ### 11.3 Branch views
 
-The canonical request uses named dimension values even when an ergonomic facade
+The canonical request uses named branch-column values even when an ergonomic facade
 accepts schema-ordered arrays:
 
 ```text
@@ -202,7 +202,7 @@ bases, and dynamic base traversal are later capabilities. The application reads
 whatever ordinary row represents its branch and supplies the resolved selector;
 Jazz neither knows nor validates that representation.
 
-Each participating table projects the selector onto its declared dimension
+Each participating table projects the selector onto its declared branch-column
 subset (`INV-BVIEW-8`). With the example schema above:
 
 ```text
@@ -211,8 +211,8 @@ memberships: head=(W),       base=(W)       -> one shared source
 users:       head=(),        base=()        -> one global shared source
 ```
 
-A missing required named dimension is a validation error. An unrecognized extra
-dimension is rejected rather than silently ignored. Positional syntax is only
+A missing required named branch-column is a validation error. An unrecognized extra
+branch-column value is rejected rather than silently ignored. Positional syntax is only
 facade sugar and is canonicalized immediately.
 
 #### Independent layer reduction
@@ -255,14 +255,14 @@ late result filter.
 #### Effective values and source provenance
 
 An effective row distinguishes its requested view from its supplying history.
-Ordinary bound branch-dimension columns project to the head selector even when content
+Ordinary bound branch columns project to the head selector even when content
 or deletion fell back to the base. Hidden typed provenance records the exact
 branch key and version that supplied each selected layer (`INV-BVIEW-15`). This
 gives application code a coherent draft-shaped row while preserving exact
 history for authorization diagnostics, synchronization, and merge calculation.
 
-Normal `RowUuid` references resolve the visible target incarnation through the
-same effective view. An exact-incarnation reference containing a branch key
+Normal `RowUuid` references resolve the visible target branch-local row through the
+same effective view. An exact branch-local row reference containing a branch key
 is a distinct future capability (`INV-BVIEW-13`). Policy reference traversal uses
 the same rule.
 
@@ -295,7 +295,7 @@ admission decision (`INV-BVIEW-16`). Any malformed branch key or denied write re
 the complete unit.
 
 Version-parent edges remain branch-key-local. Cross-branch-key atomic grouping does
-not make one incarnation causally descend from another.
+not make one branch-local row causally descend from another.
 
 Trusted history replication may carry complete commit units. Client-facing
 selected delivery must not reveal unauthorized sibling versions or even hidden
@@ -433,7 +433,7 @@ values)`), deterministic arbitration, loser visibility, transaction-level
   canonical coordinates.
 - **Multiple bases.** An ordered fallback stack is a natural extension, but the
   initial implementation supports at most one base.
-- **Exact-incarnation references.** Add only if product use cases cannot be
+- **Exact branch-local row references.** Add only if product use cases cannot be
   expressed by view-relative `RowUuid` references.
 - **Dynamic base resolution.** Applications resolve branch rows initially;
   relation-driven base selection, cycle handling, and live base-pointer changes

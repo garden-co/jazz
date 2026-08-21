@@ -2362,7 +2362,7 @@ fn branch_view_storage_source_fields(
     table: &TableSchema,
     head: &BranchKey,
 ) -> Result<Vec<ProjectField>, Error> {
-    let head_values = head.dimensions.iter().cloned().collect::<BTreeMap<_, _>>();
+    let head_values = head.values.iter().cloned().collect::<BTreeMap<_, _>>();
     let mut fields = vec![
         ProjectField::renamed("branch_key", "supplying_branch_key"),
         ProjectField::named("row_uuid"),
