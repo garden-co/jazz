@@ -224,7 +224,7 @@ describe("backend/create-jazz-context", () => {
     );
   });
 
-  it("BC-U01a: keeps query durability independent from the node tier", () => {
+  it("BC-U01a: respects an explicit default durability tier over the node tier", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
@@ -236,20 +236,35 @@ describe("backend/create-jazz-context", () => {
 
     context.db();
 
-    expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      expect.any(String),
-      "server-app",
-      "dev",
-      "main",
-      "/tmp/jazz.db",
-      "local",
-    );
     expect(mocks.connectWithRuntime).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         tier: "local",
         defaultDurabilityTier: "edge",
       }),
+      expect.anything(),
+    );
+  });
+
+  it("BC-U01aa: defaults a connected backend context to its node tier", () => {
+    const context = createJazzContext({
+      appId: "server-app",
+      app: { wasmSchema: SCHEMA_A },
+      permissions: {},
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      serverUrl: "http://localhost:1625",
+      tier: "global",
+    });
+
+    context.db();
+
+    expect(mocks.connectWithRuntime).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tier: "global",
+        defaultDurabilityTier: "global",
+      }),
+      expect.anything(),
     );
   });
 
