@@ -206,6 +206,10 @@ pub enum SubscriptionStreamItem {
 #[cfg(feature = "runtime")]
 pub struct SubscriptionStream {
     receiver: tokio::sync::mpsc::UnboundedReceiver<SubscriptionStreamItem>,
+    /// Signals the facade's forwarding task to drop its core subscription when
+    /// the public stream is dropped. Closing `receiver` alone cannot do that
+    /// for an otherwise idle core subscription.
+    cancellation: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 #[cfg(feature = "runtime")]
@@ -214,12 +218,27 @@ impl SubscriptionStream {
     #[allow(dead_code)]
     pub(crate) fn new(
         receiver: tokio::sync::mpsc::UnboundedReceiver<SubscriptionStreamItem>,
+        cancellation: tokio::sync::oneshot::Sender<()>,
     ) -> Self {
-        Self { receiver }
+        Self {
+            receiver,
+            cancellation: Some(cancellation),
+        }
     }
 
     /// Get the next subscription item, waiting if necessary.
     pub async fn next(&mut self) -> Option<SubscriptionStreamItem> {
         self.receiver.recv().await
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl Drop for SubscriptionStream {
+    fn drop(&mut self) {
+        // Wake the forwarding task even when no core event is pending;
+        // dropping its core stream then runs subscription cleanup.
+        if let Some(cancellation) = self.cancellation.take() {
+            let _ = cancellation.send(());
+        }
     }
 }
