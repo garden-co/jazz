@@ -948,7 +948,7 @@ fn project_emits_copied_literal_and_null_columns() {
             && !projection_uses_raw_copy(
                 &project.expressions,
                 &project.mapping,
-                node.descriptor.output,
+                node.descriptor.output.records(),
             )
     }));
 
@@ -1656,7 +1656,7 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
         &["albums", "artists"],
     )
     .unwrap();
-    let _first = runtime
+    let first = runtime
         .subscribe_one_sink(
             GraphBuilder::join(
                 GraphBuilder::table("albums"),
@@ -1667,7 +1667,7 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
             &storage,
         )
         .unwrap();
-    let _second = runtime
+    let second = runtime
         .subscribe_one_sink(
             GraphBuilder::join(
                 GraphBuilder::table("albums").filter(PredicateExpr::gt("id", Value::U64(0))),
@@ -1678,6 +1678,23 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
             &storage,
         )
         .unwrap();
+
+    let artist_arrangement_nodes = runtime
+        .graph()
+        .nodes()
+        .values()
+        .filter(|node| {
+            matches!(
+                (&node.descriptor.operator, node.descriptor.output),
+                (
+                    OpType::Arrange(ArrangeOp { fields, .. }),
+                    NodeOutput::Arrangement(ArrangementDescriptor { records })
+                ) if fields == &["id"] && records == schema.table("artists").unwrap().record_schema()
+            )
+        })
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+    assert_eq!(artist_arrangement_nodes.len(), 1);
 
     let albums = schema.table("albums").unwrap().record_schema();
     let artists = schema.table("artists").unwrap().record_schema();
@@ -1722,8 +1739,15 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
         .keys()
         .filter(|key| {
             key.scope == ScopeId::root()
-                && key.descriptor == artists
-                && key.fields.as_ref() == ["id"]
+                && runtime.graph().node(key.input).is_some_and(|node| {
+                    matches!(
+                        (&node.descriptor.operator, node.descriptor.output),
+                        (
+                            OpType::Arrange(ArrangeOp { fields, .. }),
+                            NodeOutput::Arrangement(ArrangementDescriptor { records })
+                        ) if fields == &["id"] && records == artists
+                    )
+                })
         })
         .count();
 
@@ -1734,6 +1758,18 @@ fn similar_join_subscriptions_share_context_independent_base_arrangements() {
     assert!(stats.arrangement_encoded_bytes > 0);
     assert!(stats.logical_nodes_requested > stats.deduped_graph_nodes as u64);
     assert!(stats.dedupe_ratio() < 1.0);
+
+    assert!(runtime.unsubscribe(first.id()));
+    assert!(
+        runtime.graph().node(artist_arrangement_nodes[0]).is_some(),
+        "the shared arrangement node must survive its first consumer"
+    );
+    assert!(runtime.unsubscribe(second.id()));
+    assert!(
+        runtime.graph().node(artist_arrangement_nodes[0]).is_none(),
+        "the final consumer must release the arrangement through graph reachability"
+    );
+    assert_eq!(runtime.stats().arrangement_count, 0);
 }
 
 #[test]
