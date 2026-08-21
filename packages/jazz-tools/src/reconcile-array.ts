@@ -58,6 +58,14 @@ export function reconcileArray<T extends { id: string }>(target: T[], source: T[
     }
   }
   if (target.length > result.length) {
+    // Assigning Array#length removes the elements in JavaScript, but reactive
+    // proxies commonly only invalidate cached per-index reads from their
+    // deleteProperty trap. Delete each obsolete index explicitly before
+    // shrinking the array so those caches cannot retain rows that have left
+    // the subscription.
+    for (let i = result.length; i < target.length; i++) {
+      delete target[i];
+    }
     target.length = result.length;
   }
 }
