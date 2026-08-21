@@ -1977,7 +1977,6 @@ async fn delete_policies_block_unauthorized_server_mutations_inner() {
 ///   broken:   owner=super::BOB_ID, title="nope"      (out-of-order: title accepted before lockout)
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "queuing 500 post-lockout updates currently overflows the Rust policy/sync stack"]
 async fn single_client_operations_reach_server_in_causal_order() {
     tokio::task::LocalSet::new()
         .run_until(single_client_operations_reach_server_in_causal_order_inner())

@@ -22,6 +22,7 @@ where
             global_time,
             durability,
             &mut terminal_fate_persisted,
+            true,
         );
         if terminal_fate_persisted {
             self.open_tx.local_permission_subjects.remove(&tx_id);
@@ -36,6 +37,7 @@ where
         global_time: Option<GlobalTime>,
         durability: Option<DurabilityTier>,
         terminal_fate_persisted: &mut bool,
+        cascade_descendants: bool,
     ) -> Result<(), Error> {
         let mut stored = self
             .query_transaction(tx_id)?
@@ -182,6 +184,10 @@ where
             self.prune_child_edges(tx_id);
         } else if let Some(root) = rejected_root {
             self.prune_child_edges(tx_id);
+            if !cascade_descendants {
+                self.rejections.child_txs_by_parent.remove(&tx_id);
+                return Ok(());
+            }
             let cascades = self.local_cascade_descendants(tx_id, root)?;
             for descendant in cascades {
                 // Authority-side parking resolves parents before children, so
@@ -195,12 +201,19 @@ where
                                 if *existing == root
                         )
                 );
-                self.apply_fate_update(
+                let mut descendant_terminal_fate_persisted = false;
+                let result = self.apply_fate_update_once(
                     descendant,
                     Fate::Rejected(RejectionReason::Cascade { root }),
                     None,
                     None,
-                )?;
+                    &mut descendant_terminal_fate_persisted,
+                    false,
+                );
+                if descendant_terminal_fate_persisted {
+                    self.open_tx.local_permission_subjects.remove(&descendant);
+                }
+                result?;
             }
         }
         Ok(())
