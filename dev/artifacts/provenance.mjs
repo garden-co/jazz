@@ -65,6 +65,23 @@ function wasmPackToolVersion(root, name) {
   return toolVersion(root, candidates[0]);
 }
 
+// build.mjs temporarily renames the current target binding while napi-rs
+// produces its replacement.  The suffix intentionally does not end in
+// `.node`, so the ordinary generated-artifact exclusion below would otherwise
+// mistake it for a source input.  Keep this exact to the build wrapper's
+// ephemeral filename contract: real NAPI sources and any other generated
+// inputs remain provenance inputs.
+const isStagedNapiBinding = (repoPath) =>
+  /^crates\/jazz-napi\/jazz-napi\.(?:linux-x64-gnu|win32-x64-msvc|darwin-x64|darwin-arm64)\.node\.staged-\d+-\d+$/.test(
+    repoPath,
+  );
+
+// Turbo writes its task receipt after the package's build command returns.
+// The NAPI wrapper seals provenance inside that command, so this local output
+// directory must not be part of the inputs it validates.  This is deliberately
+// scoped to the NAPI package; root turbo.json remains an input.
+const isNapiTurboOutputDirectory = (repoPath) => repoPath === "crates/jazz-napi/.turbo";
+
 function files(root, paths) {
   const found = [];
   const visit = (path) => {
@@ -73,11 +90,18 @@ function files(root, paths) {
     if (stat.isDirectory())
       for (const name of readdirSync(path).sort()) {
         if (["pkg", "target", "node_modules"].includes(name)) continue;
-        visit(join(path, name));
+        const child = join(path, name);
+        if (isNapiTurboOutputDirectory(relative(root, child))) continue;
+        visit(child);
       }
     else if (stat.isFile()) {
       const repoPath = relative(root, path);
-      if (repoPath.endsWith(".node") || repoPath.endsWith(".jazz-artifact-manifest.json")) return;
+      if (
+        repoPath.endsWith(".node") ||
+        repoPath.endsWith(".jazz-artifact-manifest.json") ||
+        isStagedNapiBinding(repoPath)
+      )
+        return;
       found.push(repoPath);
     }
   };
