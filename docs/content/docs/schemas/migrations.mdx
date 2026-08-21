@@ -12,7 +12,7 @@ reviewedAt: "b29b48d1a"
 
 Most migration systems are one-way: rewrite every row to the new shape, then cut over. That assumes you can stop the world long enough to upgrade&hairsp;—&hairsp;which doesn't hold when your clients are local-first, frequently offline, and updating their app on their own schedule.
 
-Jazz keeps every schema version addressable by hash and translates rows between them on read and write. Clients on different versions stay interoperable, and nothing on disk is rewritten when you ship a new schema.
+Jazz keeps every schema version usable and translates rows between them on read and write. Clients on different versions stay interoperable, and nothing on disk is rewritten when you ship a new schema.
 
 ## Schemas and lenses
 
@@ -21,8 +21,7 @@ Every unique version of your `schema.ts` has a hash which can be used to refer t
 <LensDiagram />
 
 Rows retain the physical schema identity under which they were written. A read in another compatible
-schema uses lenses to project those rows into the requested shape; schema versions are not
-application branches. Non-adjacent reads compose lenses in sequence to bridge multiple schema
+schema uses lenses to project those rows into the requested shape. Non-adjacent reads compose lenses in sequence to bridge multiple schema
 versions.
 
 In practice, this lets you:
