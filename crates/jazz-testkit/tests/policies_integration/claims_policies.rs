@@ -1143,7 +1143,6 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
 /// anyOf: group="public" OR (group="eng" AND groups CONTAINS "eng")
 /// ```
 #[tokio::test]
-#[ignore = "server schema conversion does not support nested session claim paths such as claims.org.slug"]
 async fn row_and_claim_predicates_compose_under_and_and_or() {
     tokio::task::LocalSet::new()
         .run_until(row_and_claim_predicates_compose_under_and_and_or_inner())

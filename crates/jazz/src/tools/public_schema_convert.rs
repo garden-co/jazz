@@ -2786,6 +2786,13 @@ fn convert_policy_predicate(
             Operand::Column(column.clone()),
             convert_policy_operand(table, path, value)?,
         )),
+        PolicyExpr::SessionContains {
+            path: path_segments,
+            value,
+        } => Ok(Predicate::Contains(
+            convert_session_path_operand(table, path, path_segments)?,
+            Operand::Literal(convert_policy_literal(table, path, value)?),
+        )),
         PolicyExpr::In {
             column,
             session_path,
@@ -2852,8 +2859,8 @@ fn convert_session_path_operand(
     {
         return Ok(Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()));
     }
-    if path_segments.len() == 2 && path_segments[0] == "claims" {
-        return Ok(Operand::Claim(path_segments[1].clone()));
+    if path_segments.len() >= 2 && path_segments[0] == "claims" {
+        return Ok(Operand::Claim(path_segments[1..].join(".")));
     }
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
@@ -4185,6 +4192,39 @@ mod tests {
             vec![Predicate::Eq(
                 Operand::Claim("role".to_owned()),
                 Operand::Literal(GrooveValue::String("admin".to_owned())),
+            )]
+        );
+    }
+
+    #[test]
+    fn converts_nested_session_claim_path_to_dotted_claim_operand() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .column("body", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::SessionCmp {
+                        path: vec![
+                            "claims".to_owned(),
+                            "organization".to_owned(),
+                            "slug".to_owned(),
+                        ],
+                        op: CmpOp::Eq,
+                        value: Value::Text("north".to_owned()),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let messages = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "messages")
+            .unwrap();
+        assert_eq!(
+            messages.read_policy.as_ref().unwrap().filters,
+            vec![Predicate::Eq(
+                Operand::Claim("organization.slug".to_owned()),
+                Operand::Literal(GrooveValue::String("north".to_owned())),
             )]
         );
     }

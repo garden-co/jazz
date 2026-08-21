@@ -3059,8 +3059,12 @@ fn lower_contains(
                     .collect(),
             ))
         }
+        (
+            LoweredValueRef::Literal(LiteralValue::Array(values)),
+            LoweredValueRef::Literal(needle),
+        ) => Ok(constant_predicate(values.contains(&needle))),
         _ => Err(UnsupportedReason::Operator(
-            "array contains requires a source field haystack".to_owned(),
+            "array contains requires a source field or literal array haystack".to_owned(),
         )),
     }
 }
@@ -3306,12 +3310,8 @@ pub(super) fn claim_value(
             ));
         }
     };
-    let [name] = path.0.as_slice() else {
-        return Err(UnsupportedReason::Operator(
-            "nested claim paths are not lowered yet".to_owned(),
-        ));
-    };
-    if let Some(value) = claims.get(name) {
+    let name = path.0.join(".");
+    if let Some(value) = claims.get(&name) {
         return Ok(value.clone());
     }
     match name.as_str() {

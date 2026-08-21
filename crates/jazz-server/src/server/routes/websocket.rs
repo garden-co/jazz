@@ -285,9 +285,7 @@ fn session_claims(
             .to_owned(),
         ),
     );
-    json.into_iter()
-        .map(|(key, value)| json_claim_to_core_value(value).map(|value| (key, value)))
-        .collect()
+    jazz::tools::policy_claims::flatten_json_policy_claims(json, json_claim_to_core_value)
 }
 
 fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue, String> {
@@ -1006,7 +1004,7 @@ mod tests {
     use crate::server::{ServerBuilder, StorageBackend};
     use jazz::tools::AppId;
     use jazz::tools::public_schema::{
-        ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies,
+        ColumnType, PolicyExpr, Schema, SchemaBuilder, Session, TablePolicies,
         TableSchema as PublicTableSchema,
     };
 
@@ -1084,6 +1082,19 @@ mod tests {
             CoreValue::U64(9_007_199_254_740_992)
         );
         assert!(json_claim_to_core_value(serde_json::json!({ "role": "admin" })).is_err());
+    }
+
+    #[test]
+    fn websocket_session_claims_flatten_nested_paths() {
+        let claims = session_claims(Session::new("alice").with_claims(serde_json::json!({
+            "organization": { "slug": "north" }
+        })))
+        .unwrap();
+
+        assert_eq!(
+            claims["organization.slug"],
+            CoreValue::String("north".to_owned())
+        );
     }
 
     #[test]

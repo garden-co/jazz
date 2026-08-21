@@ -391,14 +391,13 @@ fn jwt_json_claims_to_policy_claims(
                     "JWT claims claim must be an object".to_owned(),
                 ));
             };
-            for (nested_name, nested_value) in nested {
-                let value = json_claim_to_policy_claim(nested_value)?.ok_or_else(|| {
-                    AuthAdmissionError::InvalidJwt(
-                        "nested JWT claim objects are not supported".to_owned(),
-                    )
-                })?;
-                claims.insert(nested_name, value);
-            }
+            let nested = crate::tools::policy_claims::flatten_json_policy_claims(nested, |value| {
+                json_claim_to_policy_claim(value)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "unsupported application claim value".to_owned())
+            })
+            .map_err(AuthAdmissionError::InvalidJwt)?;
+            claims.extend(nested);
             continue;
         }
         if let Some(value) = json_claim_to_policy_claim(value)? {
@@ -493,13 +492,15 @@ mod tests {
             claims.is_empty(),
             "unrepresentable OIDC metadata stays ignored"
         );
-        assert!(
-            jwt_json_claims_to_policy_claims(BTreeMap::from([(
-                "claims".to_owned(),
-                serde_json::json!({ "profile": { "department": "engineering" } }),
-            )]))
-            .is_err(),
-            "the dedicated policy claims object rejects nested objects"
+        let nested = jwt_json_claims_to_policy_claims(BTreeMap::from([(
+            "claims".to_owned(),
+            serde_json::json!({ "profile": { "department": "engineering" } }),
+        )]))
+        .unwrap();
+        assert_eq!(
+            nested["profile.department"],
+            Value::String("engineering".to_owned()),
+            "the dedicated policy claims object exposes nested dotted paths"
         );
     }
 }

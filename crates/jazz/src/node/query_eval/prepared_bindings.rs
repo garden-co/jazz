@@ -173,15 +173,11 @@ pub(super) fn prepared_claim_value(
             ));
         }
     };
-    let [name] = path.0.as_slice() else {
-        return Err(Error::InvalidStoredValue(
-            "nested claim prepared params are not supported yet",
-        ));
-    };
-    if let Some(value) = claims.get(name) {
+    let name = path.0.join(".");
+    if let Some(value) = claims.get(&name) {
         return Ok(Some(value.clone()));
     }
-    if let Some(value) = default_policy_claim_values(*permission_subject).get(name) {
+    if let Some(value) = default_policy_claim_values(*permission_subject).get(&name) {
         return Ok(Some(value.clone()));
     }
     Ok(None)

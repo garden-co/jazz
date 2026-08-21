@@ -1752,10 +1752,12 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
             "JWT claims payload must be a JSON object".to_string(),
         ));
     };
-    let mut core_claims = HashMap::new();
-    for (name, value) in claims {
-        core_claims.insert(name, json_claim_to_core_value(value)?);
-    }
+    let application_claims =
+        crate::tools::policy_claims::flatten_json_policy_claims(claims, |value| {
+            json_claim_to_core_value(value).map_err(|error| error.to_string())
+        })
+        .map_err(JazzError::Connection)?;
+    let mut core_claims = HashMap::from_iter(application_claims);
     core_claims.insert("sub".to_owned(), CoreValue::String(session.user_id.clone()));
     core_claims.insert(
         "user_id".to_owned(),
@@ -3428,6 +3430,21 @@ mod tests {
 
         assert_eq!(session.claims, json!({}));
         assert!(session_claims_to_core_claims(&session).is_ok());
+    }
+
+    #[test]
+    fn session_claims_flatten_nested_application_claim_paths() {
+        let session = Session::new("alice").with_claims(json!({
+            "org": { "slug": "north" },
+            "groups": ["eng"]
+        }));
+
+        let claims = session_claims_to_core_claims(&session).unwrap();
+        assert_eq!(claims["org.slug"], CoreValue::String("north".to_owned()));
+        assert_eq!(
+            claims["groups"],
+            CoreValue::Array(vec![CoreValue::String("eng".to_owned())])
+        );
     }
 
     #[test]

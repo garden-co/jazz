@@ -1,6 +1,47 @@
 //! Shared conversion rules for JSON session claims at public transport boundaries.
 
+use std::collections::BTreeMap;
+
 use crate::groove::records::Value;
+
+/// Flatten a JSON application-claims object into the dotted paths consumed by
+/// policy expressions.
+///
+/// Objects define path segments while arrays and scalar values remain claim
+/// values. A literal dotted key and an equivalent nested object are ambiguous,
+/// so claim admission rejects that collision instead of choosing one value.
+pub fn flatten_json_policy_claims(
+    claims: serde_json::Map<String, serde_json::Value>,
+    mut convert_leaf: impl FnMut(serde_json::Value) -> Result<Value, String>,
+) -> Result<BTreeMap<String, Value>, String> {
+    fn visit(
+        claims: serde_json::Map<String, serde_json::Value>,
+        path: &mut Vec<String>,
+        flattened: &mut BTreeMap<String, Value>,
+        convert_leaf: &mut impl FnMut(serde_json::Value) -> Result<Value, String>,
+    ) -> Result<(), String> {
+        for (name, value) in claims {
+            path.push(name);
+            if let serde_json::Value::Object(nested) = value {
+                visit(nested, path, flattened, convert_leaf)?;
+            } else {
+                let dotted_path = path.join(".");
+                let value = convert_leaf(value)?;
+                if flattened.insert(dotted_path.clone(), value).is_some() {
+                    return Err(format!(
+                        "application claims contain ambiguous dotted path {dotted_path}"
+                    ));
+                }
+            }
+            path.pop();
+        }
+        Ok(())
+    }
+
+    let mut flattened = BTreeMap::new();
+    visit(claims, &mut Vec::new(), &mut flattened, &mut convert_leaf)?;
+    Ok(flattened)
+}
 
 /// Largest integer that a JavaScript `number` represents exactly.
 pub const MAX_SAFE_JS_INTEGER: u64 = 9_007_199_254_740_991;
@@ -112,6 +153,59 @@ mod tests {
             )
             .unwrap(),
             Value::U64(9_007_199_254_740_992)
+        );
+    }
+
+    #[test]
+    fn nested_application_claims_flatten_to_unambiguous_dotted_paths() {
+        let serde_json::Value::Object(claims) = serde_json::json!({
+            "org": { "slug": "north" },
+            "groups": ["eng", "ops"]
+        }) else {
+            unreachable!()
+        };
+        let flattened = flatten_json_policy_claims(claims, |value| match value {
+            serde_json::Value::String(value) => Ok(Value::String(value)),
+            serde_json::Value::Array(values) => Ok(Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| match value {
+                        serde_json::Value::String(value) => Ok(Value::String(value)),
+                        _ => Err("unsupported test claim".to_owned()),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            _ => Err("unsupported test claim".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(flattened["org.slug"], Value::String("north".to_owned()));
+        assert_eq!(
+            flattened["groups"],
+            Value::Array(vec![
+                Value::String("eng".to_owned()),
+                Value::String("ops".to_owned())
+            ])
+        );
+    }
+
+    #[test]
+    fn nested_application_claims_reject_ambiguous_dotted_paths() {
+        let serde_json::Value::Object(claims) = serde_json::json!({
+            "org.slug": "flat",
+            "org": { "slug": "nested" }
+        }) else {
+            unreachable!()
+        };
+        let error = flatten_json_policy_claims(claims, |value| match value {
+            serde_json::Value::String(value) => Ok(Value::String(value)),
+            _ => Err("unsupported test claim".to_owned()),
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "application claims contain ambiguous dotted path org.slug"
         );
     }
 }

@@ -377,7 +377,8 @@ fn bind_scope_claim_operand(
     let Some(value) = claim_values.get(name).cloned() else {
         return;
     };
-    let param = claim_param_field(&ClaimPath(vec![name.clone()]));
+    let path = ClaimPath(name.split('.').map(str::to_owned).collect());
+    let param = claim_param_field(&path);
     binding_values.insert(param.clone(), value);
     *operand = Operand::Param(param);
 }
