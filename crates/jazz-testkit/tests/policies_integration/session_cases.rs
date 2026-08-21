@@ -5,8 +5,8 @@ use jazz::query::Query;
 
 use super::support::{
     TestingClient, collect_stream_deltas, connect_ready_claims, connect_ready_user, has_added_id,
-    has_any_change, has_removed, has_updated, wait_for_query, wait_for_rows,
-    wait_for_subscription_update,
+    has_any_change, has_removed, has_updated, wait_for_query, wait_for_query_results,
+    wait_for_rows, wait_for_subscription_update,
 };
 use super::{pe, permissions};
 use jazz::tools::{
@@ -1128,7 +1128,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 ///   result:          [Bob Org]
 /// ```
 #[tokio::test]
-#[ignore = "policy-filtered nested join queries hang for more than 60 seconds"]
+#[ignore = "policy-filtered nested query_results settles empty despite a visible membership path"]
 async fn select_policy_excludes_rows_from_join_results() {
     tokio::task::LocalSet::new()
         .run_until(select_policy_excludes_rows_from_join_results_inner())
@@ -1179,26 +1179,36 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
         .into_iter()
         .next()
         .expect("membership join");
-    let query =
-        Query::from("orgs").join_via_with_nested_joins("teams", "org_id", [], [membership_join]);
+    let query = Query::from("orgs")
+        .join_via_with_nested_joins("teams", "org_id", [], [membership_join])
+        .select(["id", "name"]);
 
-    let alice_rows = wait_for_rows(
+    let alice_rows = wait_for_query_results(
         &alice,
         query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
         "alice visible orgs via membership",
-        |rows| (rows.len() == 1 && rows[0].0 == alice_org).then_some(rows),
+        |rows| (rows.len() == 1).then_some(rows),
     )
     .await;
-    assert_eq!(alice_rows[0].1, vec![Value::from("Alice Org")]);
+    assert_eq!(
+        alice_rows[0].clone().into_values(),
+        vec![Value::Uuid(alice_org), Value::from("Alice Org")]
+    );
 
-    let bob_rows = wait_for_rows(&bob, query, "bob visible orgs via membership", |rows| {
-        (rows.len() == 1 && rows[0].0 == bob_org).then_some(rows)
-    })
+    let bob_rows = wait_for_query_results(
+        &bob,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob visible orgs via membership",
+        |rows| (rows.len() == 1).then_some(rows),
+    )
     .await;
-    assert_eq!(bob_rows[0].1, vec![Value::from("Bob Org")]);
-    assert!(
-        bob_rows.iter().all(|(id, _)| *id != alice_org),
-        "bob should not see org rows reachable only via alice's hidden membership"
+    assert_eq!(
+        bob_rows[0].clone().into_values(),
+        vec![Value::Uuid(bob_org), Value::from("Bob Org")]
     );
 
     admin.shutdown().await.expect("shutdown admin");

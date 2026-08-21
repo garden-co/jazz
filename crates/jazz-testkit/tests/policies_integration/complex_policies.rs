@@ -4,7 +4,7 @@ use jazz::query::Query;
 
 use super::support::{
     collect_stream_deltas, connect_ready_claims, connect_ready_client, connect_ready_user,
-    has_added_id, has_removed, has_updated, wait_for_query, wait_for_rows,
+    has_added_id, has_removed, has_updated, wait_for_query, wait_for_query_results, wait_for_rows,
     wait_for_subscription_update,
 };
 use super::{pe, permissions};
@@ -608,7 +608,6 @@ async fn exists_rel_join_grants_and_denies_correctly_inner() {
 /// Verifies that join queries apply `SELECT` policies to rows from joined
 /// tables, not only to the base table.
 #[tokio::test]
-#[ignore = "flat-join policy filtering hangs for more than 45 seconds without returning results"]
 async fn join_query_applies_policy_filter_on_joined_table() {
     tokio::task::LocalSet::new()
         .run_until(join_query_applies_policy_filter_on_joined_table_inner())
@@ -633,8 +632,8 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
     let bob =
         connect_ready_user(&server, &schema, super::BOB_ID, "join_users", READY_TIMEOUT).await;
 
-    let alice_user = create_join_policy_user(&admin, super::ALICE_ID).await;
-    let bob_user = create_join_policy_user(&admin, super::BOB_ID).await;
+    create_join_policy_user(&admin, super::ALICE_ID).await;
+    create_join_policy_user(&admin, super::BOB_ID).await;
     create_join_policy_post(&admin, super::ALICE_ID, "Alice post").await;
     create_join_policy_post(&admin, super::BOB_ID, "Bob post").await;
 
@@ -644,15 +643,17 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
         "join_posts.owner_name",
     );
 
-    let alice_rows = wait_for_rows(
+    let alice_rows = wait_for_query_results(
         &alice,
         query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
         "alice sees joined row allowed by joined-table policy",
-        |rows| (rows.len() == 1 && rows[0].0 == alice_user).then_some(rows),
+        |rows| (rows.len() == 1).then_some(rows),
     )
     .await;
     assert_eq!(
-        alice_rows[0].1,
+        alice_rows[0].clone().into_values(),
         vec![
             Value::Text(super::ALICE_ID.to_string()),
             Value::Text(super::ALICE_ID.to_string()),
@@ -660,15 +661,17 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
         ]
     );
 
-    let bob_rows = wait_for_rows(
+    let bob_rows = wait_for_query_results(
         &bob,
         query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
         "bob sees joined row allowed by joined-table policy",
-        |rows| (rows.len() == 1 && rows[0].0 == bob_user).then_some(rows),
+        |rows| (rows.len() == 1).then_some(rows),
     )
     .await;
     assert_eq!(
-        bob_rows[0].1,
+        bob_rows[0].clone().into_values(),
         vec![
             Value::Text(super::BOB_ID.to_string()),
             Value::Text(super::BOB_ID.to_string()),
