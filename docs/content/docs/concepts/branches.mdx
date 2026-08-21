@@ -202,3 +202,7 @@ That leaves the app in control of merge strategy and UX while Jazz transaction m
 precise contribution provenance. Concurrent offline merges are still subject to Jazz's normal
 mergeable transaction semantics; branch views do not introduce a distributed exactly-once or
 distributed uniqueness guarantee.
+
+See the [branching project planner example](https://github.com/garden-co/jazz/tree/main/examples/branching-project-planner-ts)
+for a complete userland model with scenario rows, reference-based authorization, a live base, and
+copy-on-write editing.

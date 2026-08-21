@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jazz branching project planner</title>
+    <style>
+      body {
+        font: 16px/1.5 system-ui;
+        max-width: 960px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+      }
+      section {
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        padding: 1rem;
+      }
+      li {
+        margin: 0.6rem 0;
+      }
+      button {
+        margin-left: 0.5rem;
+      }
+      code {
+        background: #eee;
+        padding: 0.1rem 0.3rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Branching project planner</h1>
+    <p>
+      The right side is a draft scenario over the live main scenario. Edit an inherited task and
+      notice that only the draft changes.
+    </p>
+    <main>
+      <section>
+        <h2>Main</h2>
+        <ul id="main-tasks"></ul>
+      </section>
+      <section>
+        <h2>Draft over main</h2>
+        <ul id="draft-tasks"></ul>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
