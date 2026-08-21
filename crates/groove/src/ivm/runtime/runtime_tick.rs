@@ -729,16 +729,16 @@ impl<'a> EvaluationSession<'a> {
         })
     }
 
-    fn advance_binding_input(&mut self, shape: &str) {
+    fn advance_binding_input(&mut self, graph: &IvmGraph, shape: &str) {
         *self.binding_frontiers.entry(shape.to_owned()).or_default() += 1;
-        for meta in self.node_meta.values_mut() {
-            if meta
-                .input_signature
-                .as_ref()
-                .is_some_and(|signature| signature.bindings.iter().any(|binding| binding == shape))
-            {
-                meta.input_generation = meta.input_generation.wrapping_add(1);
-            }
+        let affected = graph
+            .affected_nodes(std::iter::empty(), std::iter::once(shape))
+            .intersection(&self.relevant_nodes)
+            .copied()
+            .collect::<HashSet<_>>();
+        for node in &affected {
+            let meta = self.node_meta.entry(*node).or_default();
+            meta.input_generation = meta.input_generation.wrapping_add(1);
         }
     }
 
@@ -1295,25 +1295,12 @@ impl IvmRuntime {
         if changed_tables.is_empty() && changed_bindings.is_empty() {
             return;
         }
-        for meta in self.node_meta.values_mut() {
-            let Some(signature) = meta.input_signature.as_ref() else {
-                continue;
-            };
-            let table_changed = changed_tables.iter().any(|changed| {
-                signature
-                    .tables
-                    .iter()
-                    .any(|table| table.as_str() == *changed)
-            });
-            let binding_changed = changed_bindings.iter().any(|changed| {
-                signature
-                    .bindings
-                    .iter()
-                    .any(|binding| binding.as_str() == *changed)
-            });
-            if table_changed || binding_changed {
-                meta.input_generation = meta.input_generation.wrapping_add(1);
-            }
+        for node in self.graph.affected_nodes(
+            changed_tables.iter().copied(),
+            changed_bindings.iter().copied(),
+        ) {
+            let meta = self.node_meta.entry(node).or_default();
+            meta.input_generation = meta.input_generation.wrapping_add(1);
         }
     }
 
@@ -1429,7 +1416,7 @@ impl IvmRuntime {
             })?;
         let mut session = EvaluationSession::hydration(self, roots, owned_storage)?;
         if let Some(shape) = binding_frontier_advance {
-            session.advance_binding_input(shape);
+            session.advance_binding_input(&self.graph, shape);
         }
         std::future::poll_fn(|cx| {
             session.poll(

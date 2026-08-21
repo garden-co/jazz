@@ -1061,6 +1061,7 @@ impl TickEvaluator<'_> {
             bindings.extend(child.bindings.iter().cloned());
             frontier_bindings.extend(child.frontier_bindings.iter().cloned());
         }
+        seen.remove(&node);
         let signature = Arc::new(NodeInputSignature::from_sets(
             tables,
             bindings,
@@ -2148,6 +2149,7 @@ impl TickEvaluator<'_> {
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let storage = self.storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
         let operator_key = self.operator_key(node)?;
+        let input_generation = self.input_generation(node);
         if self.context.eval_mode == EvalMode::Tick {
             let state = match self.operator_states.get(&operator_key) {
                 Some(OperatorState::Recursive(state)) => Some(state.value()),
@@ -2178,6 +2180,7 @@ impl TickEvaluator<'_> {
         if self.context.eval_mode == EvalMode::Hydrate {
             if recursive_as_of.value().step_arrangements_hydrated()
                 && recursive_as_of.as_of() == Some(Tick(self.current_tick))
+                && recursive_as_of.value().hydrated_input_generation() == Some(input_generation)
             {
                 let deltas = recursive_as_of
                     .value_at(Tick(self.current_tick))?
@@ -2237,6 +2240,9 @@ impl TickEvaluator<'_> {
             recursive_as_of
                 .value_mut()
                 .mark_step_arrangements_hydrated();
+            recursive_as_of
+                .value_mut()
+                .mark_hydrated_input_generation(input_generation);
             recursive_as_of.mark_forward_as_of(Tick(self.current_tick))?;
             self.operator_states.insert(operator_key, operator);
             return Ok(accumulated);
@@ -2280,6 +2286,9 @@ impl TickEvaluator<'_> {
             }
         };
         recursive_as_of.mark_forward_as_of(Tick(self.current_tick))?;
+        recursive_as_of
+            .value_mut()
+            .mark_hydrated_input_generation(input_generation);
         self.operator_states.insert(operator_key, operator);
         Ok(RecordDeltas {
             descriptor: output_desc,

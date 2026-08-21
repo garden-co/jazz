@@ -34,6 +34,10 @@ pub(super) struct RecursiveState {
     /// Positive incremental ticks rely on step-side arrangements already
     /// containing the full base/accumulated state after a recompute.
     step_arrangements_hydrated: bool,
+    /// Input generation represented by `accumulated`. Database ticks alone do
+    /// not capture same-tick binding changes made while installing a prepared
+    /// subscription.
+    hydrated_input_generation: Option<u64>,
 }
 
 impl RecursiveState {
@@ -58,6 +62,14 @@ impl RecursiveState {
 
     pub(super) fn mark_step_arrangements_hydrated(&mut self) {
         self.step_arrangements_hydrated = true;
+    }
+
+    pub(super) fn hydrated_input_generation(&self) -> Option<u64> {
+        self.hydrated_input_generation
+    }
+
+    pub(super) fn mark_hydrated_input_generation(&mut self, generation: u64) {
+        self.hydrated_input_generation = Some(generation);
     }
 
     pub(super) fn accumulated_deltas(&self) -> Vec<RecordDelta> {
