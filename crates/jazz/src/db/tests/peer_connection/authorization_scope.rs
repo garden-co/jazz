@@ -585,7 +585,6 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
                         dots: Vec::new(),
                     },
                 },
-                ..ReadViewSpec::default()
             },
             ..RegisterShapeOptions::default()
         },
@@ -624,7 +623,6 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
                     dots: Vec::new(),
                 },
             },
-            ..ReadViewSpec::default()
         },
         ..RegisterShapeOptions::default()
     };

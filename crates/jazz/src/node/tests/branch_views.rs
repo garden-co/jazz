@@ -75,7 +75,6 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
             head: head.clone(),
             base: Some(crate::protocol::BranchViewBase::Current(base)),
         },
-        ..crate::protocol::ReadViewSpec::default()
     };
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -967,7 +966,6 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
                 head: BranchSelector::new([(branch_column, Value::Uuid(workspace))]),
                 base: None,
             },
-            ..Default::default()
         };
         node.query_relation_snapshot_for_serving_in_read_view(
             &shape,

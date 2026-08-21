@@ -123,6 +123,7 @@ pub(crate) mod legacy_test_future {
     use crate::tx::{DurabilityTier, Fate, Transaction, TxId};
     use groove::storage::{OrderedKvStorage, ReopenableStorage};
 
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) trait ResultFutureExt<T, E>: Future<Output = Result<T, E>> {
         fn unwrap(self) -> T
         where
@@ -177,18 +178,11 @@ pub(crate) mod legacy_test_future {
         {
             crate::db::block_on(self).is_ok()
         }
-
-        fn map_err<F, O>(self, op: F) -> Result<T, O>
-        where
-            Self: Sized,
-            F: FnOnce(E) -> O,
-        {
-            crate::db::block_on(self).map_err(op)
-        }
     }
 
     impl<F, T, E> ResultFutureExt<T, E> for F where F: Future<Output = Result<T, E>> {}
 
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) trait OptionFutureExt<T>: Future<Output = Option<T>> {
         fn unwrap(self) -> T
         where
@@ -281,11 +275,6 @@ pub(crate) mod legacy_test_future {
             now_ms: u64,
         ) -> Result<Vec<SyncMessage>, Error>;
         fn finalize_local_mergeable_commit_settled(&mut self, tx_id: TxId) -> Result<(), Error>;
-        fn finalize_local_exclusive_commit_settled(
-            &mut self,
-            tx: Transaction,
-            versions: Vec<VersionRecord>,
-        ) -> Result<Fate, Error>;
         fn transaction_state_settled(
             &mut self,
             tx_id: TxId,
@@ -432,17 +421,6 @@ pub(crate) mod legacy_test_future {
         fn finalize_local_mergeable_commit_settled(&mut self, tx_id: TxId) -> Result<(), Error> {
             crate::db::block_on(async {
                 let outcome = self.finalize_local_mergeable_commit(tx_id).await?;
-                self.persist_and_settle_outcome(outcome).await
-            })
-        }
-
-        fn finalize_local_exclusive_commit_settled(
-            &mut self,
-            tx: Transaction,
-            versions: Vec<VersionRecord>,
-        ) -> Result<Fate, Error> {
-            crate::db::block_on(async {
-                let outcome = self.finalize_local_exclusive_commit(tx, versions).await?;
                 self.persist_and_settle_outcome(outcome).await
             })
         }

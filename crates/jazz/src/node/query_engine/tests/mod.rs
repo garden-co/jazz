@@ -1,8 +1,6 @@
 use super::*;
 use crate::ids::{NodeUuid, SchemaVersionId};
-use crate::legacy_test_future::{
-    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _,
-};
+use crate::legacy_test_future::{FutureResolveExt as _, ResultFutureExt as _};
 use crate::schema::ColumnSchema;
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::Snapshot;

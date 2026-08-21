@@ -4,9 +4,6 @@
 //! model comparisons use [`crate::oracle`].
 
 use super::*;
-use crate::legacy_test_future::{
-    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
-};
 use crate::oracle::{ModelRowVersion, Oracle, OracleTxState, ParallelMaterializationOracle};
 use crate::peer::{PeerEvictionPins, PeerMetrics, PeerState};
 use crate::protocol::{
@@ -31,8 +28,8 @@ use crate::tools::public_schema::{
 use crate::tx::MergeAspect;
 use groove::schema::{ColumnSchema, ColumnType};
 use groove::storage::{
-    BtreeSyncPolicy, ColumnFamilyName, Key, MemoryStorage, NativeBtreeStorage, OrderedKvStorage,
-    ReopenableStorage, ScanVisitor, Value as StorageValue, WriteOperation, YieldingStorage,
+    BtreeSyncPolicy, MemoryStorage, NativeBtreeStorage, OrderedKvStorage, ReopenableStorage,
+    Value as StorageValue, YieldingStorage,
 };
 use jazz_storage_rocksdb::RocksDbStorage as ImmediateRocksDbStorage;
 use std::path::Path;

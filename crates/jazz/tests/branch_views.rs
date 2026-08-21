@@ -1138,7 +1138,6 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
                 head: head.clone(),
                 base: Some(BranchViewBase::Current(base)),
             },
-            ..ReadViewSpec::default()
         },
         ..ReadOpts::default()
     };
@@ -1233,7 +1232,6 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
                 head: head.clone(),
                 base: Some(BranchViewBase::Current(base)),
             },
-            ..ReadViewSpec::default()
         },
         ..ReadOpts::default()
     };

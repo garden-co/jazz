@@ -1,6 +1,6 @@
 use super::*;
 use crate::legacy_test_future::{
-    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+    FutureResolveExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
 };
 
 use std::collections::BTreeMap;
