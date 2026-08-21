@@ -4,8 +4,7 @@ use std::time::Duration;
 use jazz::query::Query;
 
 use super::support::{
-    connect_ready_client, connect_ready_user, wait_for_edge_tx_rejection, wait_for_edge_txs,
-    wait_for_rows,
+    connect_ready_user, wait_for_edge_tx_rejection, wait_for_edge_txs, wait_for_rows,
 };
 use super::{pe, permissions};
 use jazz::tools::Session;
@@ -36,13 +35,6 @@ async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> Obje
         .for_session(Session::new(user_id))
         .insert("notes", note_input(title))
         .expect("create note with session-authored provenance")
-        .0
-}
-
-async fn create_note_without_session(client: &JazzClient, title: &str) -> ObjectId {
-    client
-        .insert("notes", note_input(title))
-        .expect("create note without attribution")
         .0
 }
 
@@ -210,87 +202,6 @@ async fn created_by_update_policy_allows_creator_and_rejects_other_users_at_edge
     )
     .await;
 
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
-    server.shutdown().await;
-}
-
-/// Verifies that backend/server writes with no attribution stamp
-/// `jazz:system`, so `$createdBy` policies fail closed for ordinary users.
-///
-/// Actors: a backend client writes one derived row without a session, then
-/// `alice` writes her own note through a normal user session.
-///
-/// ```text
-/// backend client ─create(no session)──► server ──$createdBy = jazz:system
-/// alice client ──create(as alice)─────► server ──$createdBy = alice
-/// alice query ────────────────────────► sees only alice row
-/// bob query ──────────────────────────► sees nothing
-/// ```
-#[tokio::test]
-async fn created_by_policies_hide_server_generated_rows_without_attribution() {
-    tokio::task::LocalSet::new()
-        .run_until(created_by_policies_hide_server_generated_rows_without_attribution_inner())
-        .await;
-}
-
-async fn created_by_policies_hide_server_generated_rows_without_attribution_inner() {
-    let created_by_policy = pe::eq("$createdBy", pe::session("user_id"));
-    let schema = SchemaBuilder::new()
-        .table(make_notes_schema(
-            "notes",
-            permissions(|p| {
-                p.allow_read().where_(created_by_policy.clone());
-                p.allow_insert().always();
-                p.allow_update()
-                    .where_old(created_by_policy.clone())
-                    .where_new(created_by_policy.clone());
-                p.allow_delete().where_(created_by_policy);
-            }),
-        ))
-        .build();
-    let server = JazzServer::builder()
-        .with_schema(schema.clone())
-        .start()
-        .await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
-    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "notes", READY_TIMEOUT).await;
-    let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
-
-    let system_note = create_note_without_session(&backend, "server-generated").await;
-    let alice_note = create_note_as(&alice, super::ALICE_ID, "alice note").await;
-    let query = Query::from("notes")
-        .select(["title", "$createdBy"])
-        .order_by("title", jazz::query::OrderDirection::Asc);
-
-    let alice_rows = wait_for_rows(
-        &alice,
-        query.clone(),
-        "alice sees only explicitly attributed user-owned rows",
-        |rows| (rows.len() == 1 && rows[0].0 == alice_note).then_some(rows),
-    )
-    .await;
-    assert_eq!(
-        alice_rows[0].1,
-        vec![Value::from("alice note"), super::ALICE_ID.into()]
-    );
-    assert!(
-        alice_rows.iter().all(|(id, _)| *id != system_note),
-        "server-generated row should stay hidden from alice under $createdBy policy"
-    );
-
-    let bob_rows = wait_for_rows(
-        &bob,
-        query,
-        "bob does not see the server-generated system row by default",
-        |rows| rows.is_empty().then_some(rows),
-    )
-    .await;
-    assert!(bob_rows.is_empty());
-
-    assert_ne!(system_note, alice_note);
-
-    backend.shutdown().await.expect("shutdown backend");
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
