@@ -1173,6 +1173,7 @@ fn validate_predicate(
         Predicate::IsNull(operand) => match operand_type(table, operand, params)? {
             Some(ColumnType::Nullable(_)) => Ok(()),
             Some(_) => Err(QueryError::OperandTypeMismatch),
+            None if matches!(operand, Operand::Claim(_) | Operand::Param(_)) => Ok(()),
             None => Err(QueryError::OperandTypeMismatch),
         },
     }

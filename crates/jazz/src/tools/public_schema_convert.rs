@@ -2641,6 +2641,18 @@ fn convert_policy_predicate(
                 }
             })
         }
+        PolicyExpr::SessionIsNull {
+            path: path_segments,
+        } => Ok(Predicate::IsNull(convert_session_path_operand(
+            table,
+            path,
+            path_segments,
+        )?)),
+        PolicyExpr::SessionIsNotNull {
+            path: path_segments,
+        } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
+            convert_session_path_operand(table, path, path_segments)?,
+        )))),
         PolicyExpr::IsNull { column } => Ok(Predicate::IsNull(Operand::Column(column.clone()))),
         PolicyExpr::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
             Operand::Column(column.clone()),

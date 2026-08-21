@@ -196,7 +196,10 @@ pub(super) fn rewrite_claim_predicate_for_binding(
             case,
             payload: Box::new(rewrite_claim_predicate_for_binding(*payload, claims)),
         },
-        Predicate::IsNull(_) => false_predicate(),
+        Predicate::IsNull(operand) if operand_contains_unbound_claim(&operand, claims) => {
+            false_predicate()
+        }
+        Predicate::IsNull(operand) => Predicate::IsNull(operand),
     }
 }
 
