@@ -131,17 +131,17 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
 
     use jazz::db::{Db, DbConfig, DbIdentity, block_on};
     use jazz::groove::records::Value;
-    use jazz::groove::schema::{ColumnSchema, ColumnType};
     use jazz::groove::storage::MemoryStorage;
     use jazz::ids::{AuthorId, NodeUuid};
-    use jazz::schema::{JazzSchema, TableSchema};
+    use jazz::schema::JazzSchema;
+    use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
     use jazz::tx::DurabilityTier;
     use jazz_testkit::duplex_transport::duplex;
 
-    let schema = JazzSchema::new([TableSchema::new(
-        "documents",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
+    let source = SchemaBuilder::new()
+        .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+        .build();
+    let schema = JazzSchema::new(&source).expect("reconnect durability public schema compiles");
     let column_families = schema.column_families();
     let refs = column_families
         .iter()

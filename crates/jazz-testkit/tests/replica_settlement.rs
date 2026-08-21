@@ -15,18 +15,18 @@ mod relay_topology {
 
     use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SubscriptionEvent, block_on};
     use jazz::groove::records::Value;
-    use jazz::groove::schema::{ColumnSchema, ColumnType};
     use jazz::groove::storage::MemoryStorage;
     use jazz::ids::{AuthorId, NodeUuid};
-    use jazz::schema::{JazzSchema, TableSchema};
+    use jazz::schema::JazzSchema;
+    use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
     use jazz::tx::DurabilityTier;
     use jazz_testkit::duplex_transport::duplex;
 
     fn schema() -> JazzSchema {
-        JazzSchema::new([TableSchema::new(
-            "documents",
-            [ColumnSchema::new("title", ColumnType::String)],
-        )])
+        let source = SchemaBuilder::new()
+            .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+            .build();
+        JazzSchema::new(&source).expect("replica settlement public schema compiles")
     }
 
     fn open_db(node: u8, author: AuthorId) -> Db<MemoryStorage> {

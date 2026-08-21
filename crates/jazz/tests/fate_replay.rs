@@ -6,12 +6,15 @@
 use std::collections::BTreeMap;
 
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
-use jazz::schema::{JazzSchema, MergeStrategy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, RowDescriptor, Schema, TableName,
+    TableSchema,
+};
 use jazz::tx::{DurabilityTier, Fate, TxId};
 use jazz_storage_rocksdb::RocksDbStorage;
 
@@ -26,14 +29,15 @@ fn row(byte: u8) -> RowUuid {
 /// `count` uses the counter merge strategy so a reprocessed commit unit would
 /// be observable as a doubled delta instead of an unchanged current row.
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "tasks",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("count", ColumnType::U64),
-        ],
-    )
-    .with_column_merge_strategy("count", MergeStrategy::Counter)])
+    let source = Schema::from([(
+        TableName::new("tasks"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("count", ColumnType::Integer)
+                .merge_strategy(ColumnMergeStrategy::Counter),
+        ])),
+    )]);
+    JazzSchema::new(&source).expect("fate replay public schema compiles")
 }
 
 fn open_node(
@@ -59,10 +63,10 @@ fn reopen_node(
     NodeState::new(node_uuid, schema, storage).unwrap()
 }
 
-fn task_cells(title: &str, count: u64) -> BTreeMap<String, Value> {
+fn task_cells(title: &str, count: i32) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("count".to_owned(), Value::U64(count)),
+        ("count".to_owned(), Value::I32(count)),
     ])
 }
 
@@ -72,7 +76,7 @@ fn commit(
     row_uuid: RowUuid,
     made_at: u64,
     title: &str,
-    count: u64,
+    count: i32,
     parents: impl IntoIterator<Item = TxId>,
 ) -> (TxId, SyncMessage) {
     client
@@ -156,7 +160,7 @@ fn redelivered_identical_commit_unit_returns_known_fate_without_reprocessing() {
     let settled_rows = task_rows(&mut core, DurabilityTier::Global);
     assert_eq!(
         settled_rows,
-        vec![(task_row, Value::String("seed".to_owned()), Value::U64(8),)]
+        vec![(task_row, Value::String("seed".to_owned()), Value::I32(8),)]
     );
     let seed_state = core.transaction_state(seed_tx).unwrap();
     let bump_state = core.transaction_state(bump_tx).unwrap();
@@ -303,7 +307,7 @@ fn fate_replay_repairs_partially_applied_state() {
         vec![(
             task_row,
             Value::String("repair me".to_owned()),
-            Value::U64(5),
+            Value::I32(5),
         )],
         "fate replay repairs the row state the crash interrupted"
     );
