@@ -22,13 +22,28 @@ function encodeBranchDimensionValue(value: Value): Uint8Array {
   const writer = new PostcardWriter();
   switch (value.type) {
     case "Integer":
+      if (
+        !Number.isSafeInteger(value.value) ||
+        value.value < -0x80000000 ||
+        value.value > 0x7fffffff
+      ) {
+        throw new Error("branch Integer dimensions must be signed 32-bit integers");
+      }
       writer.enumUnit(14); // groove::Value::I32
       writer.i64(value.value);
       break;
-    case "BigInt":
+    case "BigInt": {
+      if (typeof value.value === "number" && !Number.isSafeInteger(value.value)) {
+        throw new Error("branch BigInt dimensions supplied as numbers must be safe integers");
+      }
+      const integer = BigInt(value.value);
+      if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
+        throw new Error("branch BigInt dimensions must be signed 64-bit integers");
+      }
       writer.enumUnit(13); // groove::Value::I64
-      writer.i64(value.value);
+      writer.i64(integer);
       break;
+    }
     case "Uuid": {
       writer.enumUnit(8); // groove::Value::Uuid
       const hex = value.value.replaceAll("-", "");

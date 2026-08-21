@@ -360,6 +360,24 @@ describe("JazzClient transaction query plumbing", () => {
     });
   });
 
+  it.each([
+    { type: "Integer", value: 0x80000000 },
+    { type: "Integer", value: 1.5 },
+    { type: "BigInt", value: Number.MAX_SAFE_INTEGER + 1 },
+    { type: "BigInt", value: 1n << 63n },
+  ] as const)("rejects invalid branch dimension value $type:$value", async (value) => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    await expect(
+      client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+        branch: { head: { dimensions: { workspace: value } } },
+      }),
+    ).rejects.toThrow(/branch (Integer|BigInt) dimensions/);
+    expect(runtime.query).not.toHaveBeenCalled();
+  });
+
   it("supports raw reads scoped to the open transaction", async () => {
     const runtime = makeFakeRuntime();
     runtime.query.mockResolvedValue([{ id: "todo-transaction-query", values: [] }]);
