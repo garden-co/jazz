@@ -15,7 +15,7 @@ rows=0
 missing_tests=0
 uncited_covered=0
 now_untested=0
-declare -A known_functions=()
+declare -A known_test_sources=()
 
 fail() {
     printf 'invariant-registry: ERROR: %s\n' "$*" >&2
@@ -125,23 +125,68 @@ PERL
 }
 
 index_test_functions() {
-    local output status source_line function
-    output="$(git grep -h -E 'fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(' -- crates)"
+    local output status function source_path
+    output="$(perl - <<'PERL'
+use strict;
+use warnings;
+for my $file (grep { chomp; /\.rs\z/ } `git ls-files -- crates`) {
+    open my $fh, '<', $file or die "cannot read $file: $!\n";
+    my @lines = <$fh>;
+    close $fh;
+    for my $index (0 .. $#lines) {
+        my $line = $lines[$index];
+        next unless $line =~ /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/;
+        my $name = $1;
+        my $attrs = join '', @lines[($index > 4 ? $index - 4 : 0) .. $index - 1];
+        next unless $attrs =~ /#\[\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*test(?:\s*\([^]]*\))?\s*\]/;
+        print "$name\x1f$file\n";
+    }
+}
+PERL
+)"
     status=$?
     if (( status != 0 )); then
-        fail "git grep could not build the Rust test-function index (exit $status)"
+        fail "could not build the Rust test-item index (exit $status)"
         return
     fi
-    while IFS= read -r source_line; do
-        if [[ $source_line =~ fn[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\( ]]; then
-            function=${BASH_REMATCH[1]}
-            known_functions[$function]=1
-        fi
+    while IFS=$'\x1f' read -r function source_path; do
+        [[ -n $function && -n $source_path ]] || continue
+        known_test_sources[$function]+=" $source_path"
     done <<< "$output"
 }
 
+citation_matches_test_source() {
+    local citation=$1 source_path=$2 crate leaf citation_parts modules source_component position=0
+    citation_parts=${citation//::/ }
+    read -r -a modules <<< "$citation_parts"
+    crate=${modules[0]}
+    leaf=${modules[${#modules[@]} - 1]}
+    case $crate in
+        jazz) [[ $source_path == crates/jazz/* ]] || return 1 ;;
+        groove) [[ $source_path == crates/groove/* ]] || return 1 ;;
+        jazz_tools) [[ $source_path == crates/jazz-testkit/* ]] || return 1 ;;
+    esac
+    if [[ $crate != jazz && $crate != groove && $crate != jazz_tools ]]; then
+        [[ $source_path == "crates/"*"/tests/$crate.rs" ]] && return 0
+        return 1
+    fi
+    source_path=${source_path%.rs}
+    source_path=${source_path//\//::}
+    source_path="::${source_path}::"
+    for ((i = 1; i < ${#modules[@]} - 1; i++)); do
+        # `harness` is the registry's stable logical mount for node test helpers;
+        # physical test files remain free to move beneath `node/tests/`.
+        [[ ${modules[i]} == tests || ${modules[i]} == harness || ${modules[i]} == *_tests ]] && continue
+        source_component="::${modules[i]}::"
+        position=${source_path#*"$source_component"}
+        [[ $position != "$source_path" ]] || return 1
+        source_path="::$position"
+    done
+    return 0
+}
+
 check_test_citations() {
-    local registry=$1 id=$2 text=$3 remaining citation function prefix brace_names brace_name
+    local registry=$1 id=$2 text=$3 remaining citation prefix brace_names brace_name test_path function source_path matched
     remaining=$text
     while [[ $remaining =~ ([a-z][a-z0-9_]*(::[A-Za-z0-9_]+)+)::\{([^}]*)\} ]]; do
         citation=${BASH_REMATCH[0]}
@@ -157,9 +202,27 @@ check_test_citations() {
     while [[ $remaining =~ [a-z][a-z0-9_]*(::[A-Za-z0-9_*]+)+ ]]; do
         citation=${BASH_REMATCH[0]}
         remaining=${remaining#*"$citation"}
+        [[ $citation == rs::* ]] && continue
         function=${citation##*::}
-        if [[ ! $function =~ ^[A-Za-z_][A-Za-z0-9_]*$ || -z ${known_functions[$function]+present} ]]; then
+        matched=0
+        for source_path in ${known_test_sources[$function]-}; do
+            if citation_matches_test_source "$citation" "$source_path"; then
+                matched=1
+                break
+            fi
+        done
+        if (( ! matched )); then
             printf 'invariant-registry: missing test: %s:%s: %s\n' "$registry" "$id" "$citation" >&2
+            missing_tests=$((missing_tests + 1))
+            failures=$((failures + 1))
+        fi
+    done
+    remaining=$text
+    while [[ $remaining =~ (packages/[A-Za-z0-9_./-]+\.test\.(ts|tsx)) ]]; do
+        test_path=${BASH_REMATCH[1]}
+        remaining=${remaining#*"$test_path"}
+        if [[ $test_path == *'..'* || $test_path != packages/* || -z $(git ls-files -- "$test_path") ]]; then
+            printf 'invariant-registry: missing test file: %s:%s: %s\n' "$registry" "$id" "$test_path" >&2
             missing_tests=$((missing_tests + 1))
             failures=$((failures + 1))
         fi
@@ -184,7 +247,9 @@ check_registry() {
         if [[ -z $status || -z $coverage ]]; then
             fail "$registry:$id: status and coverage must not be empty"
         fi
-        if [[ $coverage == '✓' && ! $tests =~ [a-z][a-z0-9_]*(::[A-Za-z0-9_*]+)+ ]]; then
+        if [[ $coverage == '✓' \
+            && ! $tests =~ [a-z][a-z0-9_]*(::[A-Za-z0-9_*]+)+ \
+            && ! $tests =~ packages/[A-Za-z0-9_./-]+\.test\.(ts|tsx) ]]; then
             printf 'invariant-registry: covered without test: %s:%s\n' "$registry" "$id" >&2
             uncited_covered=$((uncited_covered + 1))
             failures=$((failures + 1))
