@@ -2613,9 +2613,7 @@ export default s.defineMigration({
     expect(logs.some((line) => line.toLowerCase().includes("not connected"))).toBe(false);
   });
 
-  // TEST_BURNDOWN_TS: cli deploy > replays a chain of local migrations when no direct file connects the head to the release schema
-  // known red; tracked in TEST_BURNDOWN.md — deploy resolves only a direct head-to-release migration file, so a chain of local migrations spanning several schemas is not replayed and deploy fails with the not-connected error.
-  it.skip("replays a chain of local migrations when no direct file connects the head to the release schema", async () => {
+  it("replays a chain of local migrations when no direct file connects the head to the release schema", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const snapshotsDir = join(migrationsDir, "snapshots");
@@ -2684,7 +2682,15 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
       toHash: string,
       fromColumn: string,
       toColumn: string,
-    ) => `
+      reverseWitnessColumns = false,
+    ) => {
+      const fromFields = reverseWitnessColumns
+        ? `${fromColumn}: s.string(),\n      title: s.string(),`
+        : `title: s.string(),\n      ${fromColumn}: s.string(),`;
+      const toFields = reverseWitnessColumns
+        ? `${toColumn}: s.string(),\n      title: s.string(),`
+        : `title: s.string(),\n      ${toColumn}: s.string(),`;
+      return `
 import { schema as s } from ${JSON.stringify(indexPath)};
 
 export default s.defineMigration({
@@ -2697,29 +2703,31 @@ export default s.defineMigration({
   toHash: ${JSON.stringify(toHash)},
   from: {
     todos: s.table({
-      title: s.string(),
-      ${fromColumn}: s.string(),
+      ${fromFields}
     }),
   },
   to: {
     todos: s.table({
-      title: s.string(),
-      ${toColumn}: s.string(),
+      ${toFields}
     }),
   },
 });
 `;
+    };
     await writeFile(
       join(migrationsDir, `20260318-first-${short(headHash)}-${short(middleHash)}.ts`),
       renameMigration(short(headHash), short(middleHash), "owner_id", "ownerId"),
     );
     await writeFile(
       join(migrationsDir, `20260319-second-${short(middleHash)}-${short(releaseHash)}.ts`),
-      renameMigration(short(middleHash), short(releaseHash), "ownerId", "owner"),
+      // Witness ordering is intentionally different from the stored schemas.
+      // Reviewed filename hashes, not witness serialization, identify the edge.
+      renameMigration(short(middleHash), short(releaseHash), "ownerId", "owner", true),
     );
 
     const stored = new Map<string, object>([[headHash, headSchema]]);
     const pushedMigrations: Array<{ fromHash: string; toHash: string; forward: unknown }> = [];
+    const connectedEdges = new Set<string>();
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [...stored.keys()] }), { status: 200 });
@@ -2733,8 +2741,8 @@ export default s.defineMigration({
 
       if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
         const body = JSON.parse(String(init?.body));
-        const hash = await computeTestSchemaHash(body.schema);
-        stored.set(hash, body.schema);
+        const hash = await computeTestSchemaHash(body.schema.tables);
+        stored.set(hash, body.schema.tables);
         return new Response(JSON.stringify({ objectId: `object-${short(hash)}`, hash }), {
           status: 201,
         });
@@ -2742,10 +2750,9 @@ export default s.defineMigration({
 
       if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
         const url = new URL(input);
-        const connected =
-          url.searchParams.get("fromHash") === headHash &&
-          url.searchParams.get("toHash") === releaseHash &&
-          pushedMigrations.length === 2;
+        const connected = connectedEdges.has(
+          `${url.searchParams.get("fromHash")}->${url.searchParams.get("toHash")}`,
+        );
         return new Response(JSON.stringify({ connected }), { status: 200 });
       }
 
@@ -2756,6 +2763,7 @@ export default s.defineMigration({
       if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
         const body = JSON.parse(String(init?.body));
         pushedMigrations.push(body);
+        connectedEdges.add(`${body.fromHash}->${body.toHash}`);
         return new Response(
           JSON.stringify({
             objectId: `migration-${pushedMigrations.length}`,
@@ -2808,6 +2816,16 @@ export default s.defineMigration({
     expect(logs.filter((line) => line.includes("Pushed migration"))).toHaveLength(2);
     expect(logs.some((line) => line.toLowerCase().includes("not connected"))).toBe(false);
     expect(logs.some((line) => line.includes("Published permissions"))).toBe(true);
+
+    // A replay is idempotent: already-connected edges are not published twice.
+    await deploy({
+      appId: APP_ID,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+      migrationsDir,
+    });
+    expect(pushedMigrations).toHaveLength(2);
   });
 
   it("warns instead of failing with --no-verify when a migration is missing", async () => {
