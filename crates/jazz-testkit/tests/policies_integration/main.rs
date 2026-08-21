@@ -84,24 +84,6 @@ fn provenance_notes_schema() -> Schema {
         .build()
 }
 
-fn authorship_permissions_schema() -> Schema {
-    let created_by_is_session = pe::eq("$createdBy", pe::session("user_id"));
-    let notes_policies = permissions(|p| {
-        p.allow_read().where_(created_by_is_session.clone());
-        p.allow_insert().where_(created_by_is_session.clone());
-        p.allow_update().where_(created_by_is_session.clone());
-        p.allow_delete().where_(created_by_is_session);
-    });
-
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("notes")
-                .column("title", ColumnType::Text)
-                .policies(notes_policies),
-        )
-        .build()
-}
-
 fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
     let select_inherited = match max_depth {
         Some(max_depth) => pe::allowed_to_read_with_depth("parent_id", max_depth),

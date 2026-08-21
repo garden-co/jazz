@@ -349,6 +349,17 @@ where
         cells: RowCells,
     ) -> Result<(), Error> {
         let now_ms = self.next_now_ms();
+        self.stage_exclusive_insert_at_ms(tx_id, table, row, cells, now_ms)
+    }
+
+    pub(crate) fn stage_exclusive_insert_at_ms(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
@@ -372,6 +383,16 @@ where
         row: RowUuid,
     ) -> Result<(), Error> {
         let now_ms = self.next_now_ms();
+        self.stage_exclusive_delete_at_ms(tx_id, table, row, now_ms)
+    }
+
+    pub(crate) fn stage_exclusive_delete_at_ms(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        now_ms: u64,
+    ) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()

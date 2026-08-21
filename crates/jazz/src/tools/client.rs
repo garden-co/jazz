@@ -310,8 +310,13 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.upsert(table, row_id, cells)?.mergeable_tx_id())
+        let write = match updated_at {
+            Some(updated_at) => self.0.upsert_at_ms(table, row_id, cells, updated_at),
+            None => self.0.upsert(table, row_id, cells),
+        }?;
+        Ok(write.mergeable_tx_id())
     }
 
     fn upsert_for_identity(
@@ -320,11 +325,15 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .upsert_for_identity(identity, table, row_id, cells)?
-            .mergeable_tx_id())
+        let write = match updated_at {
+            Some(updated_at) => self
+                .0
+                .upsert_for_identity_at_ms(identity, table, row_id, cells, updated_at),
+            None => self.0.upsert_for_identity(identity, table, row_id, cells),
+        }?;
+        Ok(write.mergeable_tx_id())
     }
 
     fn update(
@@ -332,8 +341,13 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.update(table, row_id, cells)?.mergeable_tx_id())
+        let write = match updated_at {
+            Some(updated_at) => self.0.update_at_ms(table, row_id, cells, updated_at),
+            None => self.0.update(table, row_id, cells),
+        }?;
+        Ok(write.mergeable_tx_id())
     }
 
     fn update_for_identity(
@@ -342,11 +356,15 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .update_for_identity(identity, table, row_id, cells)?
-            .mergeable_tx_id())
+        let write = match updated_at {
+            Some(updated_at) => self
+                .0
+                .update_for_identity_at_ms(identity, table, row_id, cells, updated_at),
+            None => self.0.update_for_identity(identity, table, row_id, cells),
+        }?;
+        Ok(write.mergeable_tx_id())
     }
 
     fn delete_for_identity(
@@ -354,19 +372,28 @@ impl Backend {
         identity: CoreAuthorId,
         table: &str,
         row_id: CoreRowUuid,
+        updated_at: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self
-            .0
-            .delete_for_identity(identity, table, row_id)?
-            .mergeable_tx_id())
+        let write = match updated_at {
+            Some(updated_at) => self
+                .0
+                .delete_for_identity_at_ms(identity, table, row_id, updated_at),
+            None => self.0.delete_for_identity(identity, table, row_id),
+        }?;
+        Ok(write.mergeable_tx_id())
     }
 
     fn delete(
         &self,
         table: &str,
         row_id: CoreRowUuid,
+        updated_at: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.delete(table, row_id)?.mergeable_tx_id())
+        let write = match updated_at {
+            Some(updated_at) => self.0.delete_at_ms(table, row_id, updated_at),
+            None => self.0.delete(table, row_id),
+        }?;
+        Ok(write.mergeable_tx_id())
     }
 
     fn prepare_query(
@@ -447,10 +474,17 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at: Option<u64>,
     ) -> std::result::Result<(), CoreDbError> {
-        self.0
-            .exclusive_tx_ref(tx_id)
-            .insert_with_id(table, row_id, cells)
+        match updated_at {
+            Some(updated_at) => self
+                .0
+                .stage_exclusive_insert_at_ms(tx_id, table, row_id, cells, updated_at),
+            None => self
+                .0
+                .exclusive_tx_ref(tx_id)
+                .insert_with_id(table, row_id, cells),
+        }
     }
 
     fn exclusive_update(
@@ -459,8 +493,18 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at: Option<u64>,
     ) -> std::result::Result<(), CoreDbError> {
-        self.0.exclusive_tx_ref(tx_id).update(table, row_id, cells)
+        let tx = self.0.exclusive_tx_ref(tx_id);
+        match updated_at {
+            Some(updated_at) => {
+                let mut merged = tx.read(table, row_id)?.unwrap_or_default();
+                merged.extend(cells);
+                self.0
+                    .stage_exclusive_insert_at_ms(tx_id, table, row_id, merged, updated_at)
+            }
+            None => tx.update(table, row_id, cells),
+        }
     }
 
     fn exclusive_delete(
@@ -468,8 +512,14 @@ impl Backend {
         tx_id: OpenTransactionId,
         table: &str,
         row_id: CoreRowUuid,
+        updated_at: Option<u64>,
     ) -> std::result::Result<(), CoreDbError> {
-        self.0.exclusive_tx_ref(tx_id).delete(table, row_id)
+        match updated_at {
+            Some(updated_at) => self
+                .0
+                .stage_exclusive_delete_at_ms(tx_id, table, row_id, updated_at),
+            None => self.0.exclusive_tx_ref(tx_id).delete(table, row_id),
+        }
     }
 
     fn commit_exclusive_handle(
@@ -680,7 +730,13 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .db
-            .exclusive_write(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
+            .exclusive_write(
+                tx_id,
+                &table,
+                CoreRowUuid(*row_id.uuid()),
+                cells.clone(),
+                None,
+            )
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
@@ -700,15 +756,20 @@ impl ClientDb {
         row_id: Uuid,
         cells: crate::db::RowCells,
         identity: Option<CoreAuthorId>,
+        updated_at: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let write = match identity {
-            Some(identity) => {
-                inner
-                    .db
-                    .upsert_for_identity(identity, &table, CoreRowUuid(row_id), cells)
-            }
-            None => inner.db.upsert(&table, CoreRowUuid(row_id), cells),
+            Some(identity) => inner.db.upsert_for_identity(
+                identity,
+                &table,
+                CoreRowUuid(row_id),
+                cells,
+                updated_at,
+            ),
+            None => inner
+                .db
+                .upsert(&table, CoreRowUuid(row_id), cells, updated_at),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
@@ -724,6 +785,7 @@ impl ClientDb {
         table: String,
         row_id: Uuid,
         cells: crate::db::RowCells,
+        updated_at: Option<u64>,
     ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let object_id = ObjectId::from_uuid(row_id);
@@ -731,7 +793,13 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .db
-            .exclusive_write(tx_id, &table, CoreRowUuid(row_id), cells.clone())
+            .exclusive_write(
+                tx_id,
+                &table,
+                CoreRowUuid(row_id),
+                cells.clone(),
+                updated_at,
+            )
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
@@ -750,18 +818,23 @@ impl ClientDb {
         row_id: ObjectId,
         cells: crate::db::RowCells,
         identity: Option<CoreAuthorId>,
+        updated_at: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("update requires a row created or observed by this client".to_string())
         })?;
         let write = match identity {
-            Some(identity) => {
-                inner
-                    .db
-                    .update_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()), cells)
-            }
-            None => inner.db.update(&table, CoreRowUuid(*row_id.uuid()), cells),
+            Some(identity) => inner.db.update_for_identity(
+                identity,
+                &table,
+                CoreRowUuid(*row_id.uuid()),
+                cells,
+                updated_at,
+            ),
+            None => inner
+                .db
+                .update(&table, CoreRowUuid(*row_id.uuid()), cells, updated_at),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
@@ -775,6 +848,7 @@ impl ClientDb {
         transaction_id: OpenTransactionId,
         row_id: ObjectId,
         cells: crate::db::RowCells,
+        updated_at: Option<u64>,
     ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
@@ -784,7 +858,13 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .db
-            .exclusive_update(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
+            .exclusive_update(
+                tx_id,
+                &table,
+                CoreRowUuid(*row_id.uuid()),
+                cells.clone(),
+                updated_at,
+            )
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
@@ -794,18 +874,26 @@ impl ClientDb {
         Ok(())
     }
 
-    fn delete(&self, row_id: ObjectId, identity: Option<CoreAuthorId>) -> Result<CoreTxId> {
+    fn delete(
+        &self,
+        row_id: ObjectId,
+        identity: Option<CoreAuthorId>,
+        updated_at: Option<u64>,
+    ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("delete requires a row created or observed by this client".to_string())
         })?;
         let write = match identity {
-            Some(identity) => {
-                inner
-                    .db
-                    .delete_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()))
-            }
-            None => inner.db.delete(&table, CoreRowUuid(*row_id.uuid())),
+            Some(identity) => inner.db.delete_for_identity(
+                identity,
+                &table,
+                CoreRowUuid(*row_id.uuid()),
+                updated_at,
+            ),
+            None => inner
+                .db
+                .delete(&table, CoreRowUuid(*row_id.uuid()), updated_at),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
@@ -814,7 +902,12 @@ impl ClientDb {
         Ok(tx_id)
     }
 
-    fn stage_delete(&self, transaction_id: OpenTransactionId, row_id: ObjectId) -> Result<()> {
+    fn stage_delete(
+        &self,
+        transaction_id: OpenTransactionId,
+        row_id: ObjectId,
+        updated_at: Option<u64>,
+    ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("delete requires a row created or observed by this client".to_string())
@@ -823,7 +916,7 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .db
-            .exclusive_delete(tx_id, &table, CoreRowUuid(*row_id.uuid()))
+            .exclusive_delete(tx_id, &table, CoreRowUuid(*row_id.uuid()), updated_at)
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
@@ -2069,6 +2162,12 @@ impl JazzClient {
             .map(|session| core_author_from_principal(session.get_user_id()))
     }
 
+    fn write_updated_at(&self) -> Option<u64> {
+        self.write_context
+            .as_ref()
+            .and_then(WriteContext::updated_at)
+    }
+
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
         let state = db
             .write_state(tx_id)
@@ -2940,13 +3039,22 @@ impl JazzClient {
                 .as_ref()
                 .and_then(|ctx| ctx.transaction_id)
             {
-                self.db
-                    .stage_upsert(transaction_id, table.to_string(), object_id, cells)?;
+                self.db.stage_upsert(
+                    transaction_id,
+                    table.to_string(),
+                    object_id,
+                    cells,
+                    self.write_updated_at(),
+                )?;
                 Ok(None)
             } else {
-                let tx_id =
-                    self.db
-                        .upsert(table.to_string(), object_id, cells, self.write_identity())?;
+                let tx_id = self.db.upsert(
+                    table.to_string(),
+                    object_id,
+                    cells,
+                    self.write_identity(),
+                    self.write_updated_at(),
+                )?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -2977,10 +3085,16 @@ impl JazzClient {
                 .as_ref()
                 .and_then(|ctx| ctx.transaction_id)
             {
-                self.db.stage_update(transaction_id, object_id, cells)?;
+                self.db
+                    .stage_update(transaction_id, object_id, cells, self.write_updated_at())?;
                 Ok(None)
             } else {
-                let tx_id = self.db.update(object_id, cells, self.write_identity())?;
+                let tx_id = self.db.update(
+                    object_id,
+                    cells,
+                    self.write_identity(),
+                    self.write_updated_at(),
+                )?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -2994,10 +3108,13 @@ impl JazzClient {
                 .as_ref()
                 .and_then(|ctx| ctx.transaction_id)
             {
-                self.db.stage_delete(transaction_id, object_id)?;
+                self.db
+                    .stage_delete(transaction_id, object_id, self.write_updated_at())?;
                 Ok(None)
             } else {
-                let tx_id = self.db.delete(object_id, self.write_identity())?;
+                let tx_id =
+                    self.db
+                        .delete(object_id, self.write_identity(), self.write_updated_at())?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }

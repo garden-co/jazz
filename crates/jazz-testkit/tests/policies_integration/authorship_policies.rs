@@ -8,11 +8,11 @@ use super::support::{
     wait_for_rows,
 };
 use super::{pe, permissions};
+use jazz::tools::Session;
 use jazz::tools::{
     ColumnType, JazzClient, ObjectId, SchemaBuilder, TablePolicies, TableSchema,
     TableSchemaBuilder, Value,
 };
-use jazz::tools::{Session, WriteContext};
 use jazz_server::JazzServer;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -44,28 +44,6 @@ async fn create_note_without_session(client: &JazzClient, title: &str) -> Object
         .insert("notes", note_input(title))
         .expect("create note without attribution")
         .0
-}
-
-async fn create_note_with_backend_attribution(
-    backend: &JazzClient,
-    attributed_user_id: &str,
-    title: &str,
-) -> ObjectId {
-    let write_context = WriteContext {
-        attribution: Some(attributed_user_id.to_string()),
-        ..Default::default()
-    };
-    let (note_id, _, transaction_id) = backend
-        .with_write_context(write_context)
-        .insert("notes", note_input(title))
-        .expect("create note with backend attribution");
-    wait_for_edge_txs(
-        backend,
-        &[transaction_id.expect("backend attributed insert should commit immediately")],
-    )
-    .await;
-
-    note_id
 }
 
 /// Verifies that `$createdBy` SELECT policies scope rows to their creators.
@@ -411,79 +389,6 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
         bob_rows[0].1,
         vec![Value::from("server-generated"), "jazz:system".into()]
     );
-
-    backend.shutdown().await.expect("shutdown backend");
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
-    server.shutdown().await;
-}
-
-/// Verifies that backend writes can keep backend permissions while stamping
-/// row authorship as `alice`, so `$createdBy` policies treat the row as hers.
-///
-/// Actors: a backend runtime creates one row with `alice` attribution and both
-/// users query under a creator-only policy.
-///
-/// ```text
-/// backend runtime ─create(attribution=alice)──► server ──$createdBy = alice
-/// alice query ────────────────────────────────► sees attributed row
-/// bob query ──────────────────────────────────► sees nothing
-/// ```
-#[tokio::test]
-#[ignore = "trusted backend attribution is ignored by the Rust client, so an INSERT policy of never is rejected with authorization_denied"]
-async fn created_by_policies_allow_backend_attribution_to_specific_user() {
-    tokio::task::LocalSet::new()
-        .run_until(created_by_policies_allow_backend_attribution_to_specific_user_inner())
-        .await;
-}
-
-async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() {
-    let created_by_policy = pe::eq("$createdBy", pe::session("user_id"));
-    let schema = SchemaBuilder::new()
-        .table(make_notes_schema(
-            "notes",
-            permissions(|p| {
-                p.allow_read().where_(created_by_policy.clone());
-                p.allow_insert().never();
-                p.allow_update()
-                    .where_old(created_by_policy.clone())
-                    .where_new(created_by_policy.clone());
-                p.allow_delete().where_(created_by_policy);
-            }),
-        ))
-        .build();
-    let server = JazzServer::builder()
-        .with_schema(schema.clone())
-        .start()
-        .await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
-    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "notes", READY_TIMEOUT).await;
-    let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
-
-    let attributed_note =
-        create_note_with_backend_attribution(&backend, super::ALICE_ID, "backend for alice").await;
-    let query = Query::from("notes").select(["title", "$createdBy", "$updatedBy"]);
-
-    let alice_rows = wait_for_rows(
-        &alice,
-        query.clone(),
-        "alice sees the backend-attributed row as her own",
-        |rows| (rows.len() == 1 && rows[0].0 == attributed_note).then_some(rows),
-    )
-    .await;
-    assert_eq!(
-        alice_rows[0].1,
-        provenance_values("backend for alice", super::ALICE_ID, super::ALICE_ID)
-    );
-
-    let bob_rows = wait_for_rows(
-        &bob,
-        query,
-        "bob cannot see alice-attributed backend row",
-        |rows| rows.is_empty().then_some(rows),
-    )
-    .await;
-    assert!(bob_rows.is_empty());
 
     backend.shutdown().await.expect("shutdown backend");
     alice.shutdown().await.expect("shutdown alice");
