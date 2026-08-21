@@ -914,7 +914,57 @@ fn convert_policy(
     path: &str,
     expr: &PolicyExpr,
 ) -> Result<Query, SchemaConversionError> {
-    convert_policy_with_native_select_inherits(schema, table_schema, table, path, expr, true)
+    convert_policy_with_native_select_inherits(
+        schema,
+        table_schema,
+        table,
+        path,
+        expr,
+        true,
+        &PolicyInheritanceExpansionPath::default(),
+    )
+}
+
+#[derive(Clone, Debug, Default)]
+struct PolicyInheritanceExpansionPath {
+    uses: BTreeMap<PolicyInheritanceExpansionKey, usize>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PolicyInheritanceExpansionKey {
+    operation: u8,
+    source_table: String,
+    via_column: String,
+}
+
+impl PolicyInheritanceExpansionPath {
+    fn descend(
+        &self,
+        operation: Operation,
+        source_table: &str,
+        via_column: &str,
+        max_depth: Option<usize>,
+    ) -> Option<Self> {
+        let key = PolicyInheritanceExpansionKey {
+            operation: match operation {
+                Operation::Select => 0,
+                Operation::Insert => 1,
+                Operation::Update => 2,
+                Operation::Delete => 3,
+            },
+            source_table: source_table.to_owned(),
+            via_column: via_column.to_owned(),
+        };
+        let used = self.uses.get(&key).copied().unwrap_or(0);
+        let limit = max_depth
+            .unwrap_or_else(|| crate::query::RecursionBound::default_max_depth().depth_steps());
+        if used >= limit {
+            return None;
+        }
+        let mut next = self.clone();
+        next.uses.insert(key, used + 1);
+        Some(next)
+    }
 }
 
 /// Convert a policy for a location where native SELECT inherits may or may not
@@ -928,6 +978,7 @@ fn convert_policy_with_native_select_inherits(
     path: &str,
     expr: &PolicyExpr,
     native_select_inherits: bool,
+    inheritance_path: &PolicyInheritanceExpansionPath,
 ) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::And(exprs) => {
@@ -946,6 +997,7 @@ fn convert_policy_with_native_select_inherits(
                     &format!("{path}.And[{index}]"),
                     expr,
                     native_select_inherits,
+                    inheritance_path,
                 )?;
                 query = conjoin_policy_queries(table.as_str(), query, clause);
             }
@@ -961,6 +1013,7 @@ fn convert_policy_with_native_select_inherits(
                     &format!("{path}.Or[{index}]"),
                     expr,
                     native_select_inherits,
+                    inheritance_path,
                 )?;
                 for branch in PolicyBranch::alternatives_from_query(branch) {
                     query = query.policy_branch(branch);
@@ -982,12 +1035,13 @@ fn convert_policy_with_native_select_inherits(
             via_column,
             *max_depth,
             native_select_inherits,
+            inheritance_path,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
             source_table,
             via_column,
-            max_depth: _,
+            max_depth,
         } => append_inherited_referencing_policy(
             schema,
             table,
@@ -996,6 +1050,8 @@ fn convert_policy_with_native_select_inherits(
             *operation,
             source_table,
             via_column,
+            *max_depth,
+            inheritance_path,
         ),
         PolicyExpr::Exists {
             table: exists_table,
@@ -1007,6 +1063,7 @@ fn convert_policy_with_native_select_inherits(
             Query::from(table.as_str()),
             exists_table,
             condition,
+            inheritance_path,
         ),
         PolicyExpr::ExistsRel { rel } => {
             append_exists_rel_policy_clause(table, path, Query::from(table.as_str()), rel)
@@ -1113,7 +1170,14 @@ fn append_inherited_referencing_policy(
     operation: Operation,
     source_table: &str,
     via_column: &str,
+    max_depth: Option<usize>,
+    inheritance_path: &PolicyInheritanceExpansionPath,
 ) -> Result<Query, SchemaConversionError> {
+    let Some(source_inheritance_path) =
+        inheritance_path.descend(operation, source_table, via_column, max_depth)
+    else {
+        return Ok(query.filter(Predicate::Any(Vec::new())));
+    };
     let source_table_name = TableName::new(source_table.to_owned());
     let source_schema = schema.get(&source_table_name).ok_or_else(|| {
         err(
@@ -1176,6 +1240,7 @@ fn append_inherited_referencing_policy(
                 &format!("{path}.InheritsReferencing[{source_table}]"),
                 source_policy,
                 false,
+                &source_inheritance_path,
             )?;
             append_inherited_referencing_policy_branches(
                 query,
@@ -1247,6 +1312,7 @@ fn append_exists_policy_clause(
     query: Query,
     exists_table: &str,
     condition: &PolicyExpr,
+    inheritance_path: &PolicyInheritanceExpansionPath,
 ) -> Result<Query, SchemaConversionError> {
     let exists_table_name = TableName::new(exists_table.to_owned());
     let exists_table_schema = schema.get(&exists_table_name).ok_or_else(|| {
@@ -1287,6 +1353,7 @@ fn append_exists_policy_clause(
             &format!("{path}.Exists"),
             condition,
             true,
+            inheritance_path,
         )?;
         return Ok(query.exists(witness));
     }
@@ -2341,6 +2408,7 @@ fn append_inherited_policy(
     via_column: &str,
     max_depth: Option<usize>,
     native_select_inherits: bool,
+    inheritance_path: &PolicyInheritanceExpansionPath,
 ) -> Result<Query, SchemaConversionError> {
     let column = table_schema
         .columns
@@ -2391,6 +2459,7 @@ fn append_inherited_policy(
             parent_table,
             via_column,
             parent_policy,
+            inheritance_path,
         );
     }
 
@@ -2414,6 +2483,7 @@ fn append_inherited_policy_expanded_fallback(
     parent_table: &TableName,
     via_column: &str,
     parent_policy: &PolicyExpr,
+    inheritance_path: &PolicyInheritanceExpansionPath,
 ) -> Result<Query, SchemaConversionError> {
     let parent_filter = convert_policy_predicate(
         parent_table,
@@ -2432,6 +2502,7 @@ fn append_inherited_policy_expanded_fallback(
                 &format!("{path}.Inherits[{parent_table}]"),
                 parent_policy,
                 false,
+                inheritance_path,
             )?;
             append_inherited_policy_branches(
                 table,

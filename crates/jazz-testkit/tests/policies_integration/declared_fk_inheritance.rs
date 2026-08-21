@@ -206,7 +206,6 @@ async fn rebac_declared_fk_inheritance_array_membership_grants_access_inner() {
 /// Verifies that cyclic declared reverse-FK inheritance fails closed instead
 /// of recursively granting access through the cycle.
 #[tokio::test]
-#[ignore = "recursive reverse-FK policy cycles currently overflow the Rust evaluator stack"]
 async fn rebac_declared_fk_inheritance_cycle_fails_closed() {
     tokio::task::LocalSet::new()
         .run_until(rebac_declared_fk_inheritance_cycle_fails_closed_inner())
