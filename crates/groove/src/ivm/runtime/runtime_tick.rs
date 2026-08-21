@@ -244,6 +244,30 @@ impl EvaluationWorkQueue {
         }
     }
 
+    fn storage_already_resident(&mut self, resident_nodes: &HashSet<NodeId>) {
+        let mut ready_nodes = Vec::new();
+        self.storage_dependents.retain(|_, dependents| {
+            dependents.retain(|node| {
+                if resident_nodes.contains(node) {
+                    ready_nodes.push(*node);
+                    false
+                } else {
+                    true
+                }
+            });
+            !dependents.is_empty()
+        });
+        for node in ready_nodes {
+            let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&node) else {
+                continue;
+            };
+            *remaining = remaining.saturating_sub(1);
+            if *remaining == 0 {
+                self.make_runnable(node);
+            }
+        }
+    }
+
     fn wait_for_storage(
         &mut self,
         node: NodeId,
@@ -653,12 +677,8 @@ impl<'a> EvaluationSession<'a> {
         roots: VecDeque<NodeId>,
         storage: OwnedStorage<'a>,
     ) -> Result<Self, IvmRuntimeError> {
-        let (relevant_nodes, work_queue) =
+        let (relevant_nodes, mut work_queue) =
             EvaluationWorkQueue::new(roots.iter().copied()).discover_hydration(&runtime.graph)?;
-        let mut storage_requests = StorageRequests::new();
-        for request in work_queue.requests().cloned().collect::<Vec<_>>() {
-            storage_requests.request(request, &storage, &runtime.schema);
-        }
         // Installed operator state is root-scoped. Recursive child scopes are
         // scratch state and are cleared before an evaluation is installed.
         // Probe by reachable node instead of scanning state owned by unrelated
@@ -709,7 +729,55 @@ impl<'a> EvaluationSession<'a> {
                     .cloned()
                     .map(|meta| (*node, meta))
             })
-            .collect();
+            .collect::<HashMap<_, _>>();
+        // Recursive hydration rebuilds internal arrangements from complete
+        // source snapshots, so a leaf memo alone cannot satisfy those inputs.
+        // Walk all recursive inputs together to keep classification linear in
+        // the reachable graph slice even when it contains sibling recursion.
+        let mut pending_recursive_inputs = VecDeque::new();
+        for node in &relevant_nodes {
+            let Some(graph_node) = runtime.graph.node(*node) else {
+                continue;
+            };
+            if matches!(graph_node.descriptor.operator, OpType::Recursive(_)) {
+                pending_recursive_inputs.extend(graph_node.descriptor.inputs.iter().copied());
+            }
+        }
+        let mut recursive_inputs = HashSet::<NodeId>::default();
+        while let Some(node) = pending_recursive_inputs.pop_front() {
+            if !recursive_inputs.insert(node) {
+                continue;
+            }
+            if let Some(graph_node) = runtime.graph.node(node) {
+                pending_recursive_inputs.extend(graph_node.descriptor.inputs.iter().copied());
+            }
+        }
+        let resident_source_nodes = node_meta
+            .iter()
+            .filter_map(|(node, meta)| {
+                if recursive_inputs.contains(node) {
+                    return None;
+                }
+                let signature = meta.input_signature.as_ref()?;
+                let key = EvalMemoKey {
+                    scope: ScopeId::root(),
+                    node: *node,
+                    input_signature_hash: signature.hash,
+                    tick_epoch: None,
+                    sub_tick: 0,
+                    context_digest: 0,
+                };
+                eval_memo
+                    .get(&key)
+                    .is_some_and(|entry| entry.input_watermark == meta.input_generation)
+                    .then_some(*node)
+            })
+            .collect::<HashSet<_>>();
+        work_queue.storage_already_resident(&resident_source_nodes);
+        let mut storage_requests = StorageRequests::new();
+        for request in work_queue.requests().cloned().collect::<Vec<_>>() {
+            storage_requests.request(request, &storage, &runtime.schema);
+        }
         Ok(Self {
             relevant_nodes,
             roots: roots.into_iter().collect(),
