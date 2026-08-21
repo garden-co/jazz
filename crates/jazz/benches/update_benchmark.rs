@@ -26,7 +26,7 @@ type CoreDb = Db<MemoryStorage>;
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 
 fn schema() -> JazzSchema {
-    let author = schema_fixture::session_column("author", "sub");
+    let author = schema_fixture::session_user_id_column("author");
     schema_fixture::compile(
         SchemaBuilder::new()
             .table(TableSchemaBuilder::new("folders").column("name", ColumnType::Text))

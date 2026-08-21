@@ -1990,19 +1990,9 @@ fn rel_value_to_policy_operand(
         RelValueRef::Literal(value) => Ok(LoweredRelValue::Operand(Operand::Literal(
             convert_policy_literal(table, path, value)?,
         ))),
-        RelValueRef::SessionRef(path_segments) => {
-            let operand = if path_segments.len() == 1 {
-                let claim = if path_segments[0] == "userId" {
-                    DIRECT_USER_ID_CLAIM
-                } else {
-                    path_segments[0].as_str()
-                };
-                Operand::Claim(claim.to_owned())
-            } else {
-                convert_session_path_operand(table, path, path_segments)?
-            };
-            Ok(LoweredRelValue::Operand(operand))
-        }
+        RelValueRef::SessionRef(path_segments) => Ok(LoweredRelValue::Operand(
+            convert_session_path_operand(table, path, path_segments)?,
+        )),
         RelValueRef::OuterColumn(ColumnRef { column, .. }) => {
             Ok(LoweredRelValue::OuterRow(column.clone()))
         }
@@ -3162,6 +3152,73 @@ mod tests {
     }
 
     #[test]
+    fn rejects_bare_sub_session_policy_reference() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("owner", ColumnType::Uuid)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Cmp {
+                        column: "owner".to_owned(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec!["sub".to_owned()]),
+                    })),
+            )
+            .build();
+
+        let error = convert_public_schema(&schema)
+            .expect_err("JWT sub is not a public policy-session field");
+        assert_eq!(error.path, "$.todos.policies.select.using");
+        assert!(error.message.contains("got session.sub"));
+    }
+
+    #[test]
+    fn relation_session_references_obey_the_public_policy_contract() {
+        let table = TableName::new("todos");
+        let path = "policies.select.using";
+
+        let Err(bare_sub) = rel_value_to_policy_operand(
+            &table,
+            path,
+            &RelValueRef::SessionRef(vec!["sub".to_owned()]),
+        ) else {
+            panic!("relation policies must not expose JWT sub");
+        };
+        assert_eq!(bare_sub.path, "$.todos.policies.select.using");
+        assert!(bare_sub.message.contains("got session.sub"));
+
+        let user_id = rel_value_to_policy_operand(
+            &table,
+            path,
+            &RelValueRef::SessionRef(vec!["userId".to_owned()]),
+        )
+        .expect("userId alias is supported");
+        assert!(matches!(
+            user_id,
+            LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_USER_ID_CLAIM
+        ));
+
+        for path_segments in [["user_id"], ["authMode"], ["auth_mode"]] {
+            rel_value_to_policy_operand(
+                &table,
+                path,
+                &RelValueRef::SessionRef(path_segments.into_iter().map(str::to_owned).collect()),
+            )
+            .expect("documented public session aliases are supported");
+        }
+
+        let claim = rel_value_to_policy_operand(
+            &table,
+            path,
+            &RelValueRef::SessionRef(vec!["claims".to_owned(), "role".to_owned()]),
+        )
+        .expect("one-level session claims are supported");
+        assert!(matches!(
+            claim,
+            LoweredRelValue::Operand(Operand::Claim(name)) if name == "role"
+        ));
+    }
+
+    #[test]
     fn converts_correlated_exists_policy_to_join() {
         let schema = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("chats").column("name", ColumnType::Text))
@@ -3832,7 +3889,7 @@ mod tests {
                         column: "identity_key".to_owned(),
                     },
                     op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::SessionRef(vec!["sub".to_owned()]),
+                    right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
                 },
             }),
             columns: vec![crate::tools::public_api::relation_ir::ProjectColumn {
@@ -4226,7 +4283,9 @@ mod tests {
                                                 column: "identity_key".to_owned(),
                                             },
                                             op: RelPredicateCmpOp::Eq,
-                                            right: RelValueRef::SessionRef(vec!["sub".to_owned()]),
+                                            right: RelValueRef::SessionRef(vec![
+                                                "user_id".to_owned(),
+                                            ]),
                                         },
                                     }),
                                     step: Box::new(PublicRelExpr::Project {
@@ -4344,7 +4403,7 @@ mod tests {
         let seed = reachable.seed.as_ref().unwrap();
         assert_eq!(seed.table, "teams");
         assert_eq!(seed.user_column.as_deref(), Some("identity_key"));
-        assert_eq!(seed.user_claim.as_deref(), Some("sub"));
+        assert_eq!(seed.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
         assert_eq!(seed.team_column, "id");
     }
 }

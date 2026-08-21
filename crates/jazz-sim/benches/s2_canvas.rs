@@ -1982,7 +1982,7 @@ fn schema() -> JazzSchema {
     let invite_policy = public_policy_expr::exists(public_policy_expr::table(INVITES).where_(
         public_policy_expr::rel::all_of([
             public_policy_expr::rel::eq_outer("canvas", "canvas"),
-            public_policy_expr::rel::eq_session("userID", "sub"),
+            public_policy_expr::rel::eq_session("userID", "user_id"),
         ]),
     ));
     compile_public_schema(

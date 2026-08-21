@@ -520,7 +520,7 @@ impl Rng {
 }
 
 fn schema() -> JazzSchema {
-    let owner = schema_fixture::session_column("owner", "sub");
+    let owner = schema_fixture::session_user_id_column("owner");
     schema_fixture::compile(
         SchemaBuilder::new().table(
             TableSchemaBuilder::new(TABLE)
