@@ -22,7 +22,8 @@ Open [v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) and enter:
 - **App ID**&hairsp;—&hairsp;Jazz app namespace to inspect
 - **Admin secret**&hairsp;—&hairsp;app admin credential
 - **Env**&hairsp;—&hairsp;logical environment such as `dev`, `staging`, or `prod`
-- **Branch**&hairsp;—&hairsp;logical branch, usually `main`
+- **Branch**&hairsp;—&hairsp;legacy connection namespace, usually `main` (this does not select a
+  branch view)
 
 After connecting, choose the published schema hash you want to inspect. The inspector stores the
 connection locally so you can reopen it without re-entering everything each time.
@@ -48,14 +49,14 @@ is useful when you want to confirm what policy bundle the server is enforcing.
 
 The Subscriptions tab shows active subscriptions from the inspected page runtime and active
 server-managed subscriptions from the connected sync server. You can inspect the table, propagation
-mode, branches, and compiled query JSON, then jump straight into the matching table view in Data
+mode, branch-view options, and compiled query JSON, then jump straight into the matching table view in Data
 Explorer.
 
 ### Schema switching
 
 If an app has multiple published schema hashes, the inspector lets you switch between them without
 reconnecting. This is useful when checking migrations, comparing stored shapes, or debugging data
-that still lives on older schema branches.
+that was authored under an older physical schema.
 
 ## Development overlay
 
