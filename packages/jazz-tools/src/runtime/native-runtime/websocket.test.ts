@@ -363,7 +363,9 @@ describe("websocket frame carrier", () => {
     expect(reader.u64()).toBe(FEATURE_SYNC_MESSAGE_PAYLOAD);
     expect(reader.option(() => "session")).toBeUndefined();
     const payload = reader.bytes();
-    expect(payload[0]).toBe(14);
+    // Protocol v11 removed the legacy branch-metadata variants that preceded
+    // ViewUpdate in the postcard enum.
+    expect(payload[0]).toBe(12);
   });
 });
 

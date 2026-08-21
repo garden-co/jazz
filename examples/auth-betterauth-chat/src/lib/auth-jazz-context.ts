@@ -20,7 +20,6 @@ function createAuthJazzContext() {
     driver: { type: "memory" },
     serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
     env: process.env.NODE_ENV === "production" ? "prod" : "dev",
-    userBranch: "main",
     backendSecret: process.env.BACKEND_SECRET!,
     tier: "global",
   });

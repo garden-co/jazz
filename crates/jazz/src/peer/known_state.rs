@@ -115,9 +115,11 @@ impl PeerState {
         BTreeSet::new()
     }
 
-    /// Configure whether accepted exclusive transactions should ship complete
-    /// payloads so the downstream can safely author later exclusive
-    /// transactions from refreshed state.
+    /// Configure a trusted writer relay to receive complete accepted exclusive
+    /// transaction payloads, so it can safely author later exclusive
+    /// transactions from refreshed state. Ordinary readers intentionally keep
+    /// view-scoped delivery; publication also ignores this preference for
+    /// identity-scoped client links.
     pub fn set_ship_complete_exclusive_payloads(&mut self, enabled: bool) {
         self.ship_complete_exclusive_payloads = enabled;
     }

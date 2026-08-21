@@ -33,24 +33,6 @@ fn physical_current_projection_target_for_enum_columns(
     format!("{base}_enum_fields_{suffix}")
 }
 
-/// A query-local branch-history target.  Like its current-row counterpart,
-/// this is an authored-descriptor compatibility boundary: branch overlays are
-/// unioned with an already-projected frozen base, so their enum registries
-/// must agree before the union is compiled.
-fn physical_history_projection_target_for_enum_columns(
-    schema_alias: SchemaVersionAlias,
-    logical_table: &str,
-    enum_columns: &BTreeSet<PhysicalColumnId>,
-) -> String {
-    let base = physical_history_projection_target(schema_alias, logical_table);
-    let suffix = enum_columns
-        .iter()
-        .map(|column| column.0.to_string())
-        .collect::<Vec<_>>()
-        .join("_");
-    format!("{base}_enum_fields_{suffix}")
-}
-
 #[derive(Clone, Copy)]
 pub(super) enum PhysicalCurrentClass {
     Global,

@@ -126,7 +126,6 @@ where
                 &current_cells,
                 author,
                 false,
-                None,
             );
         }
         let is_update = self
@@ -156,7 +155,6 @@ where
                     &previous_cells,
                     author,
                     false,
-                    None,
                 )? {
                     return Ok(false);
                 }
@@ -174,7 +172,6 @@ where
                 &effective_cells,
                 author,
                 false,
-                None,
             );
         }
         let Some(policy) = table.write_policies.insert_check.clone() else {
@@ -188,7 +185,6 @@ where
             &cells,
             author,
             true,
-            None,
         )
     }
 
@@ -528,10 +524,18 @@ where
 
     fn policy_previous_content_subject_row(
         &mut self,
-        policy_schema_version: SchemaVersionId,
+        _policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         version: &VersionRecord,
     ) -> Result<Option<CurrentRow>, Error> {
+        let subject_table = if self
+            .table_in_schema(version.table(), self.catalogue.current_write_schema.schema)
+            .is_ok()
+        {
+            version.table()
+        } else {
+            &table.name
+        };
         for parent in version.parents() {
             for parent_version in self.query_versions_for_tx(parent)? {
                 if parent_version.row_uuid() != version.row_uuid()
@@ -568,9 +572,12 @@ where
             }
         }
 
-        if let Some(current_version) =
-            self.query_local_layer_winner(&table.name, version.row_uuid(), VersionLayer::Content)?
-        {
+        if let Some(current_version) = self.query_local_layer_winner_in_branch(
+            subject_table,
+            version.branch_key(),
+            version.row_uuid(),
+            VersionLayer::Content,
+        )? {
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
@@ -578,12 +585,17 @@ where
             }
         }
 
-        if let Some(current) = self
-            .current_rows_for_schema(&table.name, policy_schema_version, DurabilityTier::Global)?
-            .into_iter()
-            .find(|row| row.row_uuid() == version.row_uuid())
-        {
-            return Ok(Some(current));
+        if let Some(current_version) = self.query_global_layer_winner_in_branch(
+            subject_table,
+            version.branch_key(),
+            version.row_uuid(),
+            VersionLayer::Content,
+        )? {
+            let (_policy_schema_version, projected_table, cells) =
+                self.policy_projection_for_version_row(&current_version)?;
+            if projected_table.name == table.name {
+                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+            }
         }
 
         Ok(None)

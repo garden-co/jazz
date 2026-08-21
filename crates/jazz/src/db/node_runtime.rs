@@ -594,10 +594,6 @@ where
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
                 pending_row_version_repairs: VecDeque::new(),
-                branch_views: BTreeMap::new(),
-                pending_branch_view_updates: BTreeMap::new(),
-                pending_branch_metadata_repairs: BTreeMap::new(),
-                branch_metadata_repair_cursor: None,
                 scope_view_cuts: BTreeMap::new(),
                 scope_receipts: BTreeMap::new(),
                 expected_scope_authority,
@@ -817,9 +813,6 @@ where
                 shape_registrations: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
-                pending_branch_metadata_repairs: BTreeMap::new(),
-                pending_session_branch_metadata: BTreeMap::new(),
-                branch_metadata_repair_cursor: None,
                 scope_purposes: BTreeMap::new(),
                 scope_aggregates: BTreeMap::new(),
                 authority_scope_hydrations: BTreeMap::new(),
@@ -1913,8 +1906,8 @@ where
                             (state_ref.snapshot.clone(), previous_source)
                         } else if remote_settled_tier.is_some() {
                             let previous = state_ref.snapshot.clone();
-                            if previous.root_count == 0
-                                && previous.edges.is_empty()
+                            if (previous.root_count == 0 && previous.edges.is_empty()
+                                || !read_view.is_default())
                                 && node
                                     .borrow()
                                     .has_settled_result_set(authoritative_reset_binding_view)

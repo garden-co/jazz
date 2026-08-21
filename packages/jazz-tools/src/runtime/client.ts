@@ -16,6 +16,80 @@ import {
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
+import { PostcardWriter } from "./native-runtime/native-codec.js";
+
+function encodeBranchColumnValue(value: Value): Uint8Array {
+  const writer = new PostcardWriter();
+  switch (value.type) {
+    case "Integer":
+      if (
+        !Number.isSafeInteger(value.value) ||
+        value.value < -0x80000000 ||
+        value.value > 0x7fffffff
+      ) {
+        throw new Error("branch Integer values must be signed 32-bit integers");
+      }
+      writer.enumUnit(14); // groove::Value::I32
+      writer.i64(value.value);
+      break;
+    case "BigInt": {
+      if (typeof value.value === "number" && !Number.isSafeInteger(value.value)) {
+        throw new Error("branch BigInt values supplied as numbers must be safe integers");
+      }
+      const integer = BigInt(value.value);
+      if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
+        throw new Error("branch BigInt values must be signed 64-bit integers");
+      }
+      writer.enumUnit(13); // groove::Value::I64
+      writer.i64(integer);
+      break;
+    }
+    case "Uuid": {
+      writer.enumUnit(8); // groove::Value::Uuid
+      const hex = value.value.replaceAll("-", "");
+      if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid branch UUID ${value.value}`);
+      writer.bytes(
+        Uint8Array.from({ length: 16 }, (_, index) =>
+          Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16),
+        ),
+      );
+      break;
+    }
+    case "Text":
+      writer.enumUnit(6); // groove::Value::String
+      writer.string(value.value);
+      break;
+    default:
+      throw new Error(
+        `branch columns currently require Integer, BigInt, Text, or Uuid values; got ${value.type}`,
+      );
+  }
+  return writer.finish();
+}
+
+type WireBranchSelector = { values: Record<string, number[]> };
+type WireBranchViewBase =
+  | { Current: WireBranchSelector }
+  | { Snapshot: { branch: WireBranchSelector; snapshot: unknown } };
+
+function encodeBranchSelector(value: BranchSelector): WireBranchSelector {
+  return {
+    values: Object.fromEntries(
+      Object.entries(value.values).map(([name, branchValue]) => [
+        name,
+        Array.from(encodeBranchColumnValue(branchValue)),
+      ]),
+    ),
+  };
+}
+
+function encodeBranchViewBase(base: BranchViewBase | undefined): WireBranchViewBase | undefined {
+  return base?.kind === "current"
+    ? { Current: encodeBranchSelector(base.branch) }
+    : base?.kind === "snapshot"
+      ? { Snapshot: { branch: encodeBranchSelector(base.branch), snapshot: base.snapshot } }
+      : undefined;
+}
 
 /**
  * Minimal request shape supported by backend request helpers.
@@ -210,11 +284,30 @@ export type QueryPropagation = "full" | "local-only";
  * Defaults to `"public"`.
  */
 export type QueryVisibility = "public" | "hidden_from_live_query_list";
+
+/** Named values selecting one exact branch-local row coordinate. */
+export interface BranchSelector {
+  values: Record<string, Value>;
+}
+
+/** A live or application-resolved frozen base underneath a branch head. */
+export type BranchViewBase =
+  | { kind: "current"; branch: BranchSelector }
+  | { kind: "snapshot"; branch: BranchSelector; snapshot: unknown };
+
+/** User-facing head-over-base branch view. */
+export interface BranchView {
+  head: BranchSelector;
+  base?: BranchViewBase;
+}
+
 export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
+  /** Admit exact-head history, falling back to an optional live or frozen base. */
+  branch?: BranchView;
 }
 
 type InternalQueryExecutionOptions = QueryExecutionOptions & {
@@ -227,6 +320,7 @@ export interface ResolvedQueryExecutionOptions {
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
   visibility: QueryVisibility;
+  branch?: BranchView;
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
@@ -284,13 +378,20 @@ export interface MutationErrorEvent {
 
 export interface InsertOptions extends TimestampOverrideOptions {
   id?: string;
+  branch?: BranchSelector;
 }
 
-export interface UpdateOptions extends TimestampOverrideOptions {}
+export interface UpdateOptions extends TimestampOverrideOptions {
+  branch?: BranchView;
+}
 
-export interface DeleteOptions extends TimestampOverrideOptions {}
+export interface DeleteOptions extends TimestampOverrideOptions {
+  branch?: BranchView;
+}
 
-export interface RestoreOptions extends TimestampOverrideOptions {}
+export interface RestoreOptions extends TimestampOverrideOptions {
+  branch?: BranchSelector;
+}
 
 /**
  * Query row result.
@@ -313,6 +414,7 @@ interface WriteContextPayload {
   updated_at?: number;
   batch_id?: string;
   target_branch_name?: string;
+  branch_view?: { head: WireBranchSelector; base?: WireBranchViewBase };
 }
 
 /**
@@ -354,6 +456,7 @@ export function resolveEffectiveQueryExecutionOptions(
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
+    branch: options?.branch,
   };
 }
 
@@ -380,6 +483,16 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
     transaction_batch_id?: string;
+    read_view?: {
+      source: {
+        BranchView: {
+          head: WireBranchSelector;
+          base?:
+            | { Current: WireBranchSelector }
+            | { Snapshot: { branch: WireBranchSelector; snapshot: unknown } };
+        };
+      };
+    };
   } = {};
   if ((options.propagation ?? "full") !== "full") {
     payload.propagation = options.propagation;
@@ -390,8 +503,24 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   if (options.openBatchId) {
     payload.transaction_batch_id = options.openBatchId;
   }
+  if (options.branch) {
+    const base = options.branch.base;
+    payload.read_view = {
+      source: {
+        BranchView: {
+          head: encodeBranchSelector(options.branch.head),
+          base: encodeBranchViewBase(base),
+        },
+      },
+    };
+  }
 
-  if (!payload.propagation && !payload.local_updates && !payload.transaction_batch_id) {
+  if (
+    !payload.propagation &&
+    !payload.local_updates &&
+    !payload.transaction_batch_id &&
+    !payload.read_view
+  ) {
     return undefined;
   }
 
@@ -690,11 +819,24 @@ export class JazzClient {
     attribution?: string,
     openBatchId?: OpenBatchId,
     updatedAt?: number,
+    branch?: BranchView,
   ): string | undefined {
-    if (!session && attribution === undefined && !openBatchId && updatedAt === undefined) {
+    if (
+      !session &&
+      attribution === undefined &&
+      !openBatchId &&
+      updatedAt === undefined &&
+      !branch
+    ) {
       return undefined;
     }
-    if (attribution === undefined && session && !openBatchId && updatedAt === undefined) {
+    if (
+      attribution === undefined &&
+      session &&
+      !openBatchId &&
+      updatedAt === undefined &&
+      !branch
+    ) {
       return JSON.stringify(session);
     }
 
@@ -710,6 +852,12 @@ export class JazzClient {
     }
     if (openBatchId) {
       payload.batch_id = openBatchId;
+    }
+    if (branch) {
+      payload.branch_view = {
+        head: encodeBranchSelector(branch.head),
+        base: encodeBranchViewBase(branch.base),
+      };
     }
     return JSON.stringify(payload);
   }
@@ -755,6 +903,7 @@ export class JazzClient {
       attribution,
       openBatchId,
       options?.updatedAt,
+      options?.branch ? { head: options.branch } : undefined,
     );
     const row = this.runtime.insert(table, values, writeContext, options?.id);
     return {
@@ -796,6 +945,7 @@ export class JazzClient {
       attribution,
       openBatchId,
       options?.updatedAt,
+      options?.branch ? { head: options.branch } : undefined,
     );
     const row = this.runtime.restore(table, objectId, values, writeContext);
     return {
@@ -811,7 +961,7 @@ export class JazzClient {
     table: string,
     objectId: string,
     values: InsertValues,
-    options?: UpdateOptions,
+    options?: TimestampOverrideOptions,
     session?: Session,
     attribution?: string,
   ): MutationResult<void> {
@@ -826,7 +976,7 @@ export class JazzClient {
     table: string,
     objectId: string,
     values: InsertValues,
-    options?: UpdateOptions,
+    options?: TimestampOverrideOptions,
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
@@ -887,6 +1037,7 @@ export class JazzClient {
       session,
       attribution,
       undefined,
+      options?.branch,
     );
     return new MutationResult(undefined, committedBatchId(result), this, "mergeable");
   }
@@ -902,6 +1053,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
+    branch?: BranchView,
   ): MutationReceipt {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -909,6 +1061,7 @@ export class JazzClient {
       attribution,
       openBatchId,
       updatedAt,
+      branch,
     );
     return this.runtime.update(table, objectId, updates, writeContext);
   }
@@ -923,7 +1076,15 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
   ): MutationResult<void> {
-    const result = this.deleteInternal(table, objectId, options?.updatedAt, session, attribution);
+    const result = this.deleteInternal(
+      table,
+      objectId,
+      options?.updatedAt,
+      session,
+      attribution,
+      undefined,
+      options?.branch,
+    );
     return new MutationResult(undefined, committedBatchId(result), this, "mergeable");
   }
 
@@ -1045,6 +1206,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
+    branch?: BranchView,
   ): MutationReceipt {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -1052,6 +1214,7 @@ export class JazzClient {
       attribution,
       openBatchId,
       updatedAt,
+      branch,
     );
     return this.runtime.delete(table, objectId, writeContext);
   }

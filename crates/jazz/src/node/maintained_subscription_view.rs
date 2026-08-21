@@ -8,8 +8,8 @@ use groove::records::{
 
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value,
-    owned_record_from_storage_values_with_descriptor, register_values_from_parts,
-    tx_ids_from_value, version_tx_id_from_aliases,
+    history_values_from_parts, nullable_value, owned_record_from_storage_values_with_descriptor,
+    register_values_from_parts, tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
@@ -20,7 +20,7 @@ use super::query_engine::{
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
-    ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
+    BranchKey, ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
     ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
 };
 use crate::schema::TableSchema;
@@ -34,7 +34,7 @@ type VersionDecodePlanCache = BTreeMap<(String, VersionLayer), VersionDecodePlan
 #[derive(Clone, Debug)]
 struct VersionDecodePlan {
     descriptor: RecordDescriptor,
-    content_projector: Option<RecordProjector>,
+    branch_idx: Option<usize>,
     row_idx: usize,
     tx_time_idx: usize,
     tx_node_idx: usize,
@@ -44,6 +44,8 @@ struct VersionDecodePlan {
     created_at_idx: usize,
     updated_by_idx: usize,
     updated_at_idx: usize,
+    user_indices: BTreeMap<String, usize>,
+    authored_columns_idx: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1193,13 +1195,40 @@ fn decode_typed_terminal_record(
                         })
                 })
                 .transpose()?;
-            let member = RealRowMemberEntry::current_content((
+            let branch_or_prefix = schema
+                .branch_or_prefix_field
+                .as_deref()
+                .map(|field| match record.get_idx(field_idx(record, field)?)? {
+                    Value::Uuid(value) => Ok(value.as_bytes().to_vec()),
+                    Value::Bytes(value) => Ok(value),
+                    Value::Nullable(Some(value)) => match *value {
+                        Value::Uuid(value) => Ok(value.as_bytes().to_vec()),
+                        Value::Bytes(value) => Ok(value),
+                        _ => Err(super::Error::InvalidStoredValue(
+                            "result branch discriminator must be UUID or bytes",
+                        )),
+                    },
+                    Value::Nullable(None) => Ok(Vec::new()),
+                    _ => Err(super::Error::InvalidStoredValue(
+                        "result branch discriminator must be UUID or bytes",
+                    )),
+                })
+                .transpose()?
+                // The empty/shared branch has a non-empty postcard encoding.
+                // Keep its historical `None` identity so ordinary result
+                // members and durable receipts do not churn merely because
+                // branch coordinates are now carried for non-shared rows.
+                .filter(|bytes| {
+                    !bytes.is_empty() && *bytes != BranchKey::default().canonical_bytes()
+                });
+            let mut member = RealRowMemberEntry::current_content((
                 table.name.clone().into(),
                 row_uuid,
                 TxId::new(tx_time, tx_node),
             ))
             .with_occurrence_id(occurrence_id)
             .with_settle_position(settle_position);
+            member.branch_or_prefix = branch_or_prefix;
             let member: ResultMemberEntry = match flat_join_digest {
                 Some(digest) => member.with_row_digest(digest),
                 None => member,
@@ -1434,24 +1463,48 @@ fn decode_typed_version_witness(
     let plan = decode_plan_cache
         .get(&cache_key)
         .expect("version decode plan was just inserted");
-    if layer == VersionLayer::Content {
-        let projector = plan
-            .content_projector
-            .as_ref()
-            .ok_or(super::Error::InvalidStoredValue(
-                "content witness decode plan missing projector",
-            ))?;
-        let projected = projector
-            .project(record)
-            .map_err(|_| super::Error::InvalidStoredValue("content witness projection failed"))?;
-        return Ok(VersionRow {
-            table: groove::Intern::new(table.name.clone()),
-            record: projected,
-        });
-    }
     let tx_time = TxTime(record_u64_idx(record, plan.tx_time_idx)?);
+    let branch_key = match plan.branch_idx {
+        Some(idx) => match record.get_idx(idx)? {
+            Value::Bytes(bytes) => BranchKey::from_canonical_bytes(&bytes).map_err(|_| {
+                super::Error::InvalidStoredValue("maintained witness branch key is invalid")
+            })?,
+            Value::Nullable(None) => BranchKey::default(),
+            Value::Nullable(Some(value)) => match *value {
+                Value::Bytes(bytes) => BranchKey::from_canonical_bytes(&bytes).map_err(|_| {
+                    super::Error::InvalidStoredValue("maintained witness branch key is invalid")
+                })?,
+                _ => return Err(super::Error::InvalidStoredValue("branch key must be bytes")),
+            },
+            _ => return Err(super::Error::InvalidStoredValue("branch key must be bytes")),
+        },
+        None => BranchKey::default(),
+    };
+    let mut cells = BTreeMap::new();
+    if layer == VersionLayer::Content {
+        for column in &table.columns {
+            if let Some(value) = nullable_value(record.get_idx(plan.user_indices[&column.name])?)? {
+                cells.insert(column.name.clone(), value);
+            }
+        }
+    }
+    let authored_columns = if layer == VersionLayer::Content {
+        nullable_value(record.get_idx(plan.authored_columns_idx)?)?
+            .map(|value| match value {
+                Value::Bytes(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
+                    super::Error::InvalidStoredValue("authored columns must be valid JSON")
+                }),
+                _ => Err(super::Error::InvalidStoredValue(
+                    "authored columns must be bytes",
+                )),
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let parts = VersionRowParts {
         table: table.name.clone(),
+        branch_key,
         row_uuid: RowUuid(record.get_uuid(plan.row_idx)?),
         tx_node_alias: NodeAlias(record_u64_idx(record, plan.tx_node_idx)?),
         schema_version_alias: crate::ids::SchemaVersionAlias(record_u64_idx(
@@ -1464,13 +1517,18 @@ fn decode_typed_version_witness(
         created_at: TxTime(record_u64_idx(record, plan.created_at_idx)?),
         updated_by: AuthorId(record.get_uuid(plan.updated_by_idx)?),
         updated_at: TxTime(record_u64_idx(record, plan.updated_at_idx)?),
-        cells: BTreeMap::new(),
-        authored_columns: None,
+        cells,
+        authored_columns,
         deletion,
     };
-    let values = register_values_from_parts(&parts)?;
+    let values = if layer == VersionLayer::Content {
+        history_values_from_parts(table, &parts)?
+    } else {
+        register_values_from_parts(&parts)?
+    };
     Ok(VersionRow {
         table: groove::Intern::new(parts.table),
+        branch_key: parts.branch_key,
         record: owned_record_from_storage_values_with_descriptor(plan.descriptor, values)?,
     })
 }
@@ -1486,19 +1544,29 @@ fn build_version_decode_plan(
     } else {
         table.history_storage_table().record_schema()
     };
-    let content_projector = if layer == VersionLayer::Content {
-        Some(build_content_witness_projector(
-            terminal_descriptor,
-            descriptor,
-            schema,
-            table,
-        )?)
+    let branch_idx = schema
+        .identity
+        .branch_or_prefix_field
+        .as_ref()
+        .map(|field| field_idx_in_descriptor(terminal_descriptor, field))
+        .transpose()?;
+    let user_indices = if layer == VersionLayer::Content {
+        schema
+            .user_fields
+            .iter()
+            .map(|(column, field)| {
+                Ok((
+                    column.clone(),
+                    field_idx_in_descriptor(terminal_descriptor, field)?,
+                ))
+            })
+            .collect::<Result<_, super::Error>>()?
     } else {
-        None
+        BTreeMap::new()
     };
     Ok(VersionDecodePlan {
         descriptor,
-        content_projector,
+        branch_idx,
         row_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.row_field)?,
         tx_time_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_time_field)?,
         tx_node_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_node_field)?,
@@ -1511,74 +1579,12 @@ fn build_version_decode_plan(
         created_at_idx: field_idx_in_descriptor(terminal_descriptor, &schema.created_at_field)?,
         updated_by_idx: field_idx_in_descriptor(terminal_descriptor, &schema.updated_by_field)?,
         updated_at_idx: field_idx_in_descriptor(terminal_descriptor, &schema.updated_at_field)?,
+        user_indices,
+        authored_columns_idx: field_idx_in_descriptor(
+            terminal_descriptor,
+            &schema.authored_columns_field,
+        )?,
     })
-}
-
-fn build_content_witness_projector(
-    terminal_descriptor: RecordDescriptor,
-    storage_descriptor: RecordDescriptor,
-    schema: &VersionWitnessSchema,
-    table: &TableSchema,
-) -> Result<RecordProjector, super::Error> {
-    let mut mapping = vec![
-        (
-            field_idx_in_descriptor(terminal_descriptor, &schema.identity.row_field)?,
-            0,
-        ),
-        (
-            field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_time_field)?,
-            1,
-        ),
-        (
-            field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_node_field)?,
-            2,
-        ),
-        (
-            field_idx_in_descriptor(terminal_descriptor, &schema.identity.schema_field)?,
-            3,
-        ),
-        (
-            field_idx_in_descriptor(terminal_descriptor, &schema.parents_field)?,
-            4,
-        ),
-        (
-            field_idx_in_descriptor(terminal_descriptor, &schema.created_by_field)?,
-            5,
-        ),
-        (
-            field_idx_in_descriptor(terminal_descriptor, &schema.created_at_field)?,
-            6,
-        ),
-        (
-            field_idx_in_descriptor(terminal_descriptor, &schema.updated_by_field)?,
-            7,
-        ),
-        (
-            field_idx_in_descriptor(terminal_descriptor, &schema.updated_at_field)?,
-            8,
-        ),
-    ];
-    for (idx, column) in table.columns.iter().enumerate() {
-        let source = schema
-            .user_fields
-            .get(&column.name)
-            .ok_or(super::Error::InvalidStoredValue(
-                "maintained witness schema missing user field",
-            ))
-            .and_then(|field| field_idx_in_descriptor(terminal_descriptor, field))?;
-        mapping.push((source, 9 + idx));
-    }
-    mapping.push((
-        field_idx_in_descriptor(terminal_descriptor, &schema.authored_columns_field)?,
-        9 + table.columns.len(),
-    ));
-    // Current-source tables bind enum registries to physical occurrences,
-    // while version carriers bind the same authored layout to history-table
-    // occurrences. The projector copies the encoded value only after the
-    // narrow rebound-layout check has proved every tag/payload layout equal.
-    RecordProjector::new_registry_rebound(terminal_descriptor, storage_descriptor, mapping).map_err(
-        |_| super::Error::InvalidStoredValue("content witness projector construction failed"),
-    )
 }
 
 fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, super::Error> {
@@ -2420,6 +2426,7 @@ mod tests {
             &table(),
             VersionRowParts {
                 table: "todos".to_owned(),
+                branch_key: BranchKey::default(),
                 row_uuid,
                 tx_node_alias: NodeAlias(10),
                 schema_version_alias: SchemaVersionAlias(0),
@@ -2443,6 +2450,7 @@ mod tests {
             &table(),
             VersionRowParts {
                 table: "todos".to_owned(),
+                branch_key: BranchKey::default(),
                 row_uuid,
                 tx_node_alias: NodeAlias(10),
                 schema_version_alias: SchemaVersionAlias(0),

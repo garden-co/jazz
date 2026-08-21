@@ -110,6 +110,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
     fn parts_for(table: &TableSchema, seed: u8, deletion: Option<DeletionEvent>) -> VersionRowParts {
         VersionRowParts {
             table: table.name.clone(),
+            branch_key: BranchKey::default(),
             row_uuid: RowUuid(uuid::Uuid::from_bytes([seed; 16])),
             tx_node_alias: NodeAlias(u64::from(seed) + 10),
             schema_version_alias: SchemaVersionAlias(u64::from(seed) + 20),
@@ -455,8 +456,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-                target_lineage: crate::tx::BranchLineage::Root,
-                branch_merge: None,
+                contribution_merge: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
             u64::MAX - SKEW_TOLERANCE_MS,
@@ -485,8 +485,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-                target_lineage: crate::tx::BranchLineage::Root,
-                branch_merge: None,
+                contribution_merge: None,
             },
             vec![version_record(
                 row,
@@ -539,8 +538,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-                target_lineage: crate::tx::BranchLineage::Root,
-                branch_merge: None,
+                contribution_merge: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
             u64::MAX - SKEW_TOLERANCE_MS,
@@ -568,8 +566,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-                target_lineage: crate::tx::BranchLineage::Root,
-                branch_merge: None,
+                contribution_merge: None,
             },
             vec![version_record(
                 row,

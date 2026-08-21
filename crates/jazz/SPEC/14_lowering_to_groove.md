@@ -21,9 +21,9 @@ Invariant digest:
 - `INV-LOWER-1`: Jazz schemas MUST be lowered into a `groove::schema::DatabaseSchema` before opening the node's `groove::db::Database`.
 - `INV-LOWER-2`: The physical content-history table for each `PhysicalTableId` MUST have composite primary key `(row_uuid, tx_time, tx_node_id)`.
 - `INV-LOWER-3`: Node-local aliases in `jazz_nodes.id` and `jazz_schema_versions.id` MUST NOT be wire identities; wire tx/schema references MUST use `NodeUuid` and `SchemaVersionId`.
-- `INV-LOWER-4`: Content versions MUST resolve through their schema's durable physical mapping while deletion-register versions resolve through the shared deletion-history relation by stable physical-table and branch lineage; a single immutable version row MUST NOT contain both user cells and `_deletion`.
+- `INV-LOWER-4`: Content versions MUST resolve through their schema's durable physical mapping while deletion-register versions resolve through the shared deletion-history relation by stable physical-table and canonical branch key; a single immutable version row MUST NOT contain both user cells and `_deletion`.
 - `INV-LOWER-5`: Combined current rows MUST be maintained from independently selected content and deletion winners and expose an explicit visibility state.
-- `INV-LOWER-6`: Local/non-global current-row maintenance MUST use bounded per-row currency selection for both content and deletion history; deletion access MUST be prefix-bounded by branch lineage and physical table id.
+- `INV-LOWER-6`: Local/non-global current-row maintenance MUST use bounded per-branch-local row currency selection for both content and deletion history; deletion access MUST be prefix-bounded by branch key and physical table id.
 - `INV-LOWER-7`: Global current-row reads MUST use the physical lineage's combined global-current table, not scan immutable history or anti-join a register source.
 - `INV-LOWER-8`: `jazz_global_changes` MUST be keyed by `(physical_table_id, row_uuid, layer, global_time)` and expose global-time and physical-table/global-time indexes.
 - `INV-LOWER-9`: Query lowering MUST begin from a resolved visible-current source and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
@@ -39,10 +39,10 @@ Invariant digest:
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time acceptance MAY continue to evaluate policy predicates directly in `node/policy.rs` until write-policy prepared-shape lowering lands.
 - `INV-LOWER-21`: One-shot reads, live subscriptions, sync views, and transaction-validation reads MUST consume the same lowered semantic query program; callback/reset/retry/propagation behavior MUST NOT select a second evaluator or become part of query shape identity. Runtime consumers request compiler evidence as app rows plus named terminal facts.
 - `INV-LOWER-22`: One-shot filtered current reads MUST select deterministic static access paths when sound: primary-key equality uses a primary-key scan, declared indexed-column equality uses an index probe, residual filters remain applied, and unindexed filters fall back to a loudly counted full scan.
-- `INV-LOWER-23`: Position-bounded historical cuts and branch-base reads MUST use the
+- `INV-LOWER-23`: Position-bounded historical cuts and frozen branch-view base reads MUST use the
   `by_table_global_time` bounded range path when sound, returning the same rows as the
   full-scan currentness oracle while touching only the requested global-time range.
-- `INV-LOWER-29`: The shared deletion-history relation MUST expose seekable `(branch_lineage, physical_table_id, row_uuid)` and table-prefix access paths. No logical-table read, rebuild, or branch operation may lower to an unbounded scan over unrelated table lineages.
+- `INV-LOWER-29`: The shared deletion-history relation MUST expose seekable `(physical_table_id, branch_key, row_uuid)` and table/branch-key-prefix access paths. No logical-table read, rebuild, or overlay operation may lower to an unbounded scan over unrelated table lineages or branch keys.
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the full-scan path and counters proving the selected path.
 - `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
 - `INV-LOWER-26`: A structured query MUST expose one authoritative terminal output relation. Groove MUST assemble nested paths into that terminal; a child change semantically replaces or patches its owning root output, and public carriers MUST NOT require a second relation-edge delta stream.
@@ -138,7 +138,7 @@ allocations cannot alias one another.
 
 _Further invariant._ `INV-LOWER-28` — enum compatibility is evaluated at the
 source boundary immediately after Global/Ahead currentness selection (or after
-the equivalent historical/branch winner materialization), so one-shot and
+the equivalent historical/branch-key winner materialization), so one-shot and
 maintained reads have the same row-membership semantics. A later incompatible
 winner retracts rather than exposing a stale compatible predecessor, and no
 downstream operator can turn it into a runtime failure.
@@ -146,7 +146,7 @@ downstream operator can turn it into a runtime failure.
 _Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content lowers per resolved
 `PhysicalTableId` with PK `(row_uuid, tx_time, tx_node_id)`, while deletion
 lowers to a universal sparse relation whose PK begins
-`(branch_lineage, physical_table_id, row_uuid)`; immutable rows never mix user
+`(physical_table_id, branch_key, row_uuid)`; immutable rows never mix user
 cells and `_deletion`.
 `INV-LOWER-18` — `Counter` is rejected on nullable/non-integer columns.
 `INV-LOWER-19` — lowered record-wrapper field indices match the groove
@@ -179,12 +179,12 @@ claim- or caller-supplied binding columns after policy augmentation.
 
 There is one intended lowered-query core. That core takes an explicit **base
 source expression graph** (for example visible current rows for a table/tier,
-historic cuts, snapshot refs, explicit data branches/prefixes, overlays,
-schema/lens projections, or branch merges) and a query algebra fragment
+historic cuts, snapshot-qualified branch sources, explicit prefixes,
+head/base overlays, schema/lens projections, or contribution merges) and a query algebra fragment
 (filters, joins, reachability,
 ordering/window operators that are in the maintained surface). The base source
 is not hidden inside the algebra: current rows, historical rows,
-schema-projected rows, branch reads, transaction overlays, and
+schema-projected rows, branch-view reads, transaction overlays, and
 snapshot refs compose as source expressions, then reuse the same algebra
 lowering where their source can be represented in groove.
 
@@ -252,7 +252,7 @@ The remaining relation IR operators require first-class row-set lowering rather
 than more facade rewrites:
 
 - `Union` should lower to a row-set `Union` with explicit source alternatives
-  and a result identity that either preserves branch/source discriminators or
+  and a result identity that either preserves branch-source discriminators or
   proves all alternatives are the same logical real-row domain before
   deduplication.
 - `Distinct` should lower after the relation input that creates duplicates,
@@ -285,8 +285,8 @@ above. Write-time admission enters
 `NodeState::write_policy_allows_version_record`, projects old and candidate data
 into the policy-pinned schema, selects the matching insert/update/delete clause,
 and supplies that row as an inline root source to the identity-aware
-authorization subplan. Branch writes use the same program over the branch read
-view. Plain child-insert `inherits(parent_col)` selects the parent's
+authorization subplan. Partition-relative writes use the same program over the
+effective head/base view. Plain child-insert `inherits(parent_col)` selects the parent's
 `update_using` clause; explicit `InheritsOperation::{Insert, Update, Delete}`
 selects the matching parent write clause. There is no direct predicate
 interpreter fallback (`INV-LOWER-20`).
@@ -374,7 +374,7 @@ predicate-output-set terminal facts for the shape+binding at
 the global-currency-changed probe) (`INV-LOWER-16`, ch. 3).
 
 Result membership facts are typed at the lowering boundary. Real-row membership
-must preserve enough identity to distinguish content, deletion, branch,
+must preserve enough identity to distinguish content, deletion, branch key,
 historic/snapshot, schema-projected, and batch-scoped membership. Synthetic
 aggregate/window rows emit member identity plus a `ResultPayload` fact carrying
 the custom encoded record bytes. Relation/path lowering emits non-lossy path
@@ -388,16 +388,16 @@ model or statistics:
 
 1. equality on a primary-key prefix → point/prefix scan spec;
 2. equality on a declared/derived boundary-arrangement key → arrangement probe;
-3. global-time-bounded reads (historical cuts, branch bases, reconnect
+3. global-time-bounded reads (historical cuts, frozen branch-view bases, reconnect
    enumeration) → range scan spec over the `by_table_global_time` arrangement;
 4. otherwise → full scan, loudly counted (full-scan counters are part of the
    operational surface, ch. 17).
 
 v1 consumers are implemented and tested: one-shot filtered reads;
-position-bounded historical and branch-cut reads, which take the
+position-bounded historical and frozen-base reads, which take the
 `by_table_global_time` bounded range path and must agree row-for-row with the
 full-scan currentness oracle while touching only the requested global-time
-range (`INV-LOWER-23`; this is what makes branch `at()` and historical reads
+range (`INV-LOWER-23`; this is what makes snapshot-qualified bases and historical reads
 bounded rather than gated); dry-run policy
 probes; and recursion seed hydration (`INV-LOWER-22`–`INV-LOWER-24`). The
 source resolver still fails loudly when a requested source cannot be represented
@@ -457,7 +457,7 @@ policy filtering, pagination, and live subscription maintenance.
 - ✅ **Policy lowering** (`INV-LOWER-20`). Read policy and write admission both
   lower through `node/query_engine`. Write admission supplies policy-pinned
   old/candidate rows as inline roots and evaluates them with the authenticated
-  identity over current or branch sources; the former direct interpreter has
+  identity over current or branch-view sources; the former direct interpreter has
   been removed.
 - 🔶 **Bytes primary keys.** The README lists bytes PKs as a "new" groove ask, but
   the implementation already uses `PrimaryKeyColumn::bytes` in several lowered

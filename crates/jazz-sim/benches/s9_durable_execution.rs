@@ -1038,7 +1038,7 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
         inbound: Rc::clone(&inbound),
     }));
     let (edge_dir, edge) = open_node(edge_uuid, schema);
-    WorkerHarness {
+    let mut worker = WorkerHarness {
         _dir: dir,
         db,
         _edge_dir: edge_dir,
@@ -1048,7 +1048,12 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
         outbound,
         inbound,
         _upstream: upstream,
-    }
+    };
+    worker.edge_peer.set_ship_complete_exclusive_payloads(true);
+    worker
+        .client_peer
+        .set_ship_complete_exclusive_payloads(true);
+    worker
 }
 
 fn accept_global(core: &mut NodeState<RocksDbStorage>, tx: jazz::tx::TxId, global_time: &mut u64) {

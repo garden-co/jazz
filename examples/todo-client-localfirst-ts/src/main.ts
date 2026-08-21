@@ -59,7 +59,6 @@ export async function startApp(
   const resolvedConfig: DbConfig = {
     appId,
     env: "dev",
-    userBranch: "main",
     auth: { localFirstSecret: secret },
     ...config,
   };

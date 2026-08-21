@@ -1,3 +1,8 @@
+use crate::tx::{
+    ContributionComponent, ContributionCoordinate, ContributionDot, ContributionMergeProvenance,
+    ContributionSubstitution,
+};
+
 #[test]
 fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
     let schema = schema();
@@ -42,6 +47,66 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
         )
         .unwrap();
     assert_eq!(next_tx.time, TxTime::from(11));
+}
+
+#[test]
+fn contribution_merge_provenance_survives_reopen() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let coordinate = ContributionCoordinate {
+        branch_key: BranchKey::default(),
+        table: "todos".to_owned(),
+        row_uuid: row(9),
+        layer: MergeAspect::Content,
+        component: ContributionComponent::Column("title".to_owned()),
+    };
+    let provenance = ContributionMergeProvenance::canonical(
+        BranchKey::default(),
+        BranchKey::default(),
+        vec![ContributionSubstitution {
+            target: coordinate.clone(),
+            sources: vec![ContributionDot {
+                tx_id,
+                coordinate,
+            }],
+        }],
+    )
+    .unwrap();
+    {
+        let mut core = open_node_at(&temp_dir, schema.clone());
+        core.ingest_commit_unit(
+            Transaction {
+                tx_id,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorId::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: Some(provenance.clone()),
+            },
+            vec![version_record(row(9), Vec::new(), title_cells("merged"), None)],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap();
+        assert_eq!(
+            core.transaction_record(tx_id).unwrap().contribution_merge,
+            Some(provenance.clone())
+        );
+    }
+
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_eq!(
+        reopened
+            .transaction_record(tx_id)
+            .unwrap()
+            .contribution_merge,
+        Some(provenance)
+    );
 }
 
 #[cfg(feature = "testing")]
@@ -131,7 +196,13 @@ fn opening_defers_malformed_current_row_to_read() {
         );
         let raw = node
             .database
-            .primary_key_get_raw(&table, &[Value::Uuid(row(0xff).0)])
+            .primary_key_get_raw(
+                &table,
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row(0xff).0),
+                ],
+            )
             .unwrap()
             .unwrap();
         let variant_tag = raw.variant_tag();
@@ -609,8 +680,7 @@ fn pending_replay_fixture_transaction(tx_id: TxId, made_by: AuthorId) -> Transac
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        target_lineage: crate::tx::BranchLineage::Root,
-        branch_merge: None,
+        contribution_merge: None,
     }
 }
 
@@ -1118,8 +1188,7 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-                target_lineage: crate::tx::BranchLineage::Root,
-                branch_merge: None,
+                contribution_merge: None,
             },
             vec![version_record(
                 row(2),

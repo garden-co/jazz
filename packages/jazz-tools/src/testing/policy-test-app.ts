@@ -159,7 +159,6 @@ export async function createPolicyTestApp(
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    userBranch: "main",
   });
 
   return new PolicyTestApp(expectFn, app, jazzContext, server);

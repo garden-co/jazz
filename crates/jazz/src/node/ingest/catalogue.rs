@@ -50,13 +50,6 @@ where
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
-            SyncMessage::BranchMetadata(metadata) => {
-                self.admit_branch_metadata(metadata)?;
-                self.drain_parked_commit_units()
-            }
-            SyncMessage::FetchBranchMetadata { .. } => Err(Error::UnsupportedSyncMessage(
-                "branch metadata repair must be served by peer state",
-            )),
             SyncMessage::SessionClaims { identity, claims } => {
                 if let Some(context) = ingest_context
                     && context.trust == CommitUnitTrust::TrustedBackend
@@ -728,6 +721,8 @@ where
                 .iter()
                 .find(|table| table.name == table_lens.target_table)
                 .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
+            let target_bindings = target_table.branch_by.iter().cloned().collect::<BTreeSet<_>>();
+            let mut branch_columns = source_table.branch_by.iter().cloned().collect::<BTreeSet<_>>();
             let mut columns = source_table
                 .columns
                 .iter()
@@ -759,6 +754,9 @@ where
                         )?;
                         column.name = to.clone();
                         columns.insert(to.clone(), column);
+                        if branch_columns.remove(from) {
+                            branch_columns.insert(to.clone());
+                        }
                     }
                     LensOp::CopyColumn { from, to } => {
                         if columns.contains_key(to) {
@@ -791,8 +789,20 @@ where
                                 "added column is absent from target",
                             ))?;
                         columns.insert(column.clone(), target_column);
+                        if target_bindings.contains(column)
+                            && columns[column].default.is_none()
+                        {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "added branch column requires a migration default",
+                            ));
+                        }
                     }
                     LensOp::DropColumn { column, .. } => {
+                        if branch_columns.contains(column) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "table branch columns cannot be removed",
+                            ));
+                        }
                         if columns.remove(column).is_none() {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "dropped column is absent from source",
@@ -800,6 +810,11 @@ where
                         }
                     }
                     LensOp::TransformColumn { column, transform } => {
+                        if branch_columns.contains(column) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "branch column type and migration default are immutable",
+                            ));
+                        }
                         validate_transform_column(columns.get(column), transform)?;
                         let source_column =
                             columns.get(column).ok_or(Error::InvalidCatalogueUpdate(
@@ -830,12 +845,28 @@ where
                     "renamed table requires an explicit RenameTable operation",
                 ));
             }
+            if !branch_columns.is_subset(&target_bindings) {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "table branch columns cannot be removed",
+                ));
+            }
             let target_columns = target_table
                 .columns
                 .iter()
                 .cloned()
                 .map(|column| (column.name.clone(), column))
                 .collect::<BTreeMap<_, _>>();
+            for branch_column in &branch_columns {
+                let Some(source_column) = columns.get(branch_column) else { continue; };
+                let Some(target_column) = target_columns.get(branch_column) else { continue; };
+                if source_column.column_type != target_column.column_type
+                    || source_column.default != target_column.default
+                {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "branch column type and migration default are immutable",
+                    ));
+                }
+            }
             if columns != target_columns {
                 return Err(Error::InvalidCatalogueUpdate(
                     "lens operations do not reproduce target columns",
@@ -957,34 +988,6 @@ where
             ));
         }
         Ok(())
-    }
-
-    /// Prepare physical branch storage only after bounded structural checks and
-    /// catalogue dependencies are known to be satisfiable. Missing catalogue
-    /// schemas are left for the ordinary parking path.
-    pub(super) fn prepare_branch_target_partitions_if_ready(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-    ) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
-        let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
-            return Ok(());
-        };
-        if !self.branches.branches.contains_key(&branch_id)
-            || !commit_unit_write_count_matches(tx, versions.len())
-            || versions.iter().any(|version| {
-                !self
-                    .catalogue
-                    .catalogue_schemas
-                    .contains_key(&version.schema_version())
-            })
-        {
-            return Ok(());
-        }
-        self.ensure_branch_target_partitions(branch_id, versions)
     }
 
 }

@@ -111,13 +111,13 @@ impl SchemaLineagePublicationId {
     }
 }
 
-/// Stable branch identity used to address snapshot-overlay branches.
+/// Stable identity for a schema family across catalogue projections.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
-pub struct BranchId(pub uuid::Uuid);
+pub struct SchemaFamilyId(pub uuid::Uuid);
 
-impl BranchId {
+impl SchemaFamilyId {
     /// Construct from UUID bytes in wire order.
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(uuid::Uuid::from_bytes(bytes))

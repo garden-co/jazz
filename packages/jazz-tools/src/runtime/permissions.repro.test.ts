@@ -162,7 +162,6 @@ async function createReproContext(defineCasePermissions: ReproPermissions): Prom
     permissions,
     driver: { type: "persistent", dataPath },
     env: "test",
-    userBranch: "main",
     tier: "edge",
   });
   onTestFinished(async () => {
@@ -205,7 +204,6 @@ async function createServerBackedReproContext(
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    userBranch: "main",
     tier,
   });
 
@@ -425,7 +423,6 @@ describe("runtime permission repros for recursive gather and qualified predicate
       permissions,
       driver: { type: "persistent", dataPath },
       env: "test",
-      userBranch: "main",
       tier: "edge",
     });
     onTestFinished(async () => {

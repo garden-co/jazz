@@ -23,16 +23,16 @@ Invariant digest:
 
 ### 15.1 Storage lineages are not shard ownership
 
-Jazz uses durable `PhysicalTableId` lineages for shared application storage and
-`jazz_branch_partitions` for `(PhysicalTableId, BranchId)` overlays (ch. 10 /
-ch. 11). These identities survive reopen and are distinct from shard placement;
-the former logical table/schema registry `jazz_partitions` has been removed.
+Jazz uses durable `PhysicalTableId` lineages and schema-declared canonical
+branch keys for application storage (ch. 10 / ch. 11). These identities
+survive reopen and are distinct from shard placement; a branch coordinate is
+logical history identity, not a placement assignment.
 
 Shard ownership needs a separate concept. A shard ownership key identifies where
 data is placed for authority and routing; it is not the same thing as an
 existing physical storage lineage. This chapter therefore uses **shard ownership
 partition** explicitly for placement and does not conflate it with physical or
-branch storage identity.
+branch-key storage identity.
 
 **Implementation status.** Shard ownership, shard cores, and cross-shard
 transactions are not implemented. The current core has one global settlement timeline and
@@ -81,7 +81,7 @@ They do not supersede the authority and completeness questions below.
 
 The whole design is open, and demand should be validated before committing to
 it. A possible **S10-shaped benchmark** is a multi-shard scale-out of the S1/S4
-workloads, using per-partition rate caps and cross-shard percentage as the dial.
+workloads, using per-branch-key rate caps and cross-shard percentage as the dial.
 The load-bearing unknowns are:
 
 - 🔶 **Placement model** (`INV-SHARD-7`, open) — ref-path-to-root vs explicit key
@@ -96,7 +96,7 @@ The load-bearing unknowns are:
   policy/ownership unless explicitly replaced.
 - 🔶 **Per-shard positions** (`INV-SHARD-11`, open) — how `at(position)` and
   `at_time(t)` resolve across shards (independent per-shard with documented skew
-  vs a cut protocol); how branch bases spanning shards work.
+  vs a cut protocol); how frozen branch-view bases spanning shards work.
 - 🔶 **Multi-shard result assembly** (`INV-SHARD-12`, `INV-SHARD-13`; open) — who
   assembles (edge / coordinator / scatter-gather), where joins/aggregation
   happen, and what completeness evidence composes per-shard result sets;

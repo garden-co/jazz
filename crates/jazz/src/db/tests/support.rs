@@ -558,18 +558,6 @@ pub(super) fn edge_subscribe_opts() -> ReadOpts {
     }
 }
 
-pub(super) fn branch_read_opts() -> ReadOpts {
-    ReadOpts {
-        read_view: ReadViewSpec {
-            source: ReadViewSourceSpec::Branch {
-                branch: uuid::Uuid::from_bytes([0x42; 16]),
-            },
-            ..ReadViewSpec::default()
-        },
-        ..ReadOpts::default()
-    }
-}
-
 pub(super) fn assert_unsupported_subscription_include_deleted(error: Error) {
     assert_eq!(error.code, ErrorCode::Query);
     assert!(
@@ -684,20 +672,6 @@ pub(super) fn compile_public_db_test_schema(source: &PublicSchema) -> JazzSchema
 
 pub(super) fn build_public_db_test_schema(builder: PublicSchemaBuilder) -> JazzSchema {
     compile_public_db_test_schema(&builder.build())
-}
-
-pub(super) fn build_public_db_test_schema_with_branch_policies(
-    mut builder: PublicSchemaBuilder,
-    branch_read_policy: Option<PublicPolicyExpr>,
-    branch_write_policy: Option<PublicPolicyExpr>,
-) -> JazzSchema {
-    if let Some(policy) = branch_read_policy {
-        builder = builder.branch_read_policy(policy);
-    }
-    if let Some(policy) = branch_write_policy {
-        builder = builder.branch_write_policy(policy);
-    }
-    build_public_db_test_schema(builder)
 }
 
 pub(super) fn public_session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {
@@ -1746,6 +1720,53 @@ impl CoreDb {
             tx_id,
             local_tier: DurabilityTier::Global,
         })
+    }
+
+    pub(super) fn insert_with_id_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<RocksDbStorage>, Error> {
+        let node = self.server.node();
+        let tx_id = node.borrow_mut().commit_mergeable(
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(self.author)
+                .branch(branch)
+                .cells(cells),
+        )?;
+        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        self.server.mark_subscriber_connections_dirty();
+        Ok(WriteHandle {
+            node: Rc::downgrade(&node),
+            row_uuid: row,
+            tx_id,
+            local_tier: DurabilityTier::Global,
+        })
+    }
+
+    pub(super) fn insert_same_row_in_branches(
+        &self,
+        table: &str,
+        row: RowUuid,
+        entries: impl IntoIterator<Item = (BranchSelector, RowCells)>,
+    ) -> Result<TxId, Error> {
+        let now_ms = self.next_now_ms();
+        let commits = entries
+            .into_iter()
+            .map(|(branch, cells)| {
+                MergeableCommit::new(table, row, now_ms)
+                    .made_by(self.author)
+                    .branch(branch)
+                    .cells(cells)
+            })
+            .collect();
+        let node = self.server.node();
+        let tx_id = node.borrow_mut().commit_mergeable_many(commits)?;
+        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        self.server.mark_subscriber_connections_dirty();
+        Ok(tx_id)
     }
 
     pub(super) fn insert_attributed(

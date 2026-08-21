@@ -17,14 +17,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use groove::schema::{ColumnSchema, ColumnType};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
-use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid};
+use crate::ids::{AuthorId, NodeUuid, RowUuid};
 use crate::node::query_engine::{CoverageScope, FieldRequirement, ProgramFactOutput};
 use crate::node::{MergeableCommit, NodeState};
 use crate::peer::PeerState;
 use crate::protocol::{
-    CurrentWriteSchema, MigrationLens, ReadViewSourceSpec, ReadViewSpec, RealRowMemberEntry,
-    RegisterShapeOptions, RelationEdgeEntry, ResultRowLayer, RowVersionRefEntry, SchemaVersion,
-    ShapeAst, Subscribe, SyncMessage, TableLens,
+    CurrentWriteSchema, MigrationLens, ReadViewSpec, RealRowMemberEntry, RegisterShapeOptions,
+    RelationEdgeEntry, ResultRowLayer, RowVersionRefEntry, SchemaVersion, ShapeAst, Subscribe,
+    SyncMessage, TableLens,
 };
 use crate::query::{
     Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, Query, claim, col, eq, gt, in_list,

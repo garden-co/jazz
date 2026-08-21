@@ -2,6 +2,100 @@
 
 use super::*;
 
+fn branch_column_reference_policy_schema() -> JazzSchema {
+    let policy = PublicPolicyExpr::Exists {
+        table: "branches".to_owned(),
+        condition: Box::new(PublicPolicyExpr::And(vec![
+            public_outer_eq("branch_key", "branch_id"),
+            public_session_eq("owner", &["user_id"]),
+        ])),
+    };
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("branches")
+                    .fk_column("branch_key", "branches")
+                    .column("name", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                            .with_delete(PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .fk_column("branch_id", "branches")
+                    .column("title", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(policy.clone())
+                            .with_insert(policy.clone())
+                            .with_update(Some(policy.clone()), policy.clone())
+                            .with_delete(policy),
+                    ),
+            ),
+    )
+}
+
+#[test]
+fn admitted_server_authorizes_branch_write_through_referenced_application_row() {
+    let schema = branch_column_reference_policy_schema();
+    let owner = AuthorId::from_bytes([0x76; 16]);
+    let outsider = AuthorId::from_bytes([0x77; 16]);
+    let branch = row(0x78);
+    let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
+    let server = open_core(0x75, AuthorId::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "branches",
+            branch,
+            BTreeMap::from([
+                ("branch_key".to_owned(), Value::Uuid(branch.0)),
+                ("name".to_owned(), Value::String("draft".to_owned())),
+                ("owner".to_owned(), Value::Uuid(owner.0)),
+            ]),
+        )
+        .unwrap();
+    let owner_client = open_db(0x76, owner, &schema);
+    let outsider_client = open_db(0x77, outsider, &schema);
+    let (owner_transport, owner_server_transport) = duplex();
+    let _owner_upstream = owner_client.connect_upstream(owner_transport);
+    let _owner_subscriber = server.accept_subscriber(owner_server_transport, owner);
+    let (outsider_transport, outsider_server_transport) = duplex();
+    let _outsider_upstream = outsider_client.connect_upstream(outsider_transport);
+    let _outsider_subscriber = server.accept_subscriber(outsider_server_transport, outsider);
+
+    let accepted = owner_client
+        .insert_with_id_in_branch(
+            "todos",
+            selector.clone(),
+            row(0x79),
+            BTreeMap::from([("title".to_owned(), Value::String("allowed".to_owned()))]),
+        )
+        .unwrap();
+    owner_client.tick().unwrap();
+    server.tick().unwrap();
+    owner_client.tick().unwrap();
+    assert_eq!(
+        block_on(accepted.wait(DurabilityTier::Global)).unwrap(),
+        accepted.mergeable_tx_id()
+    );
+
+    let denied = outsider_client
+        .insert_with_id_in_branch(
+            "todos",
+            selector,
+            row(0x7a),
+            BTreeMap::from([("title".to_owned(), Value::String("denied".to_owned()))]),
+        )
+        .unwrap();
+    assert_authority_rejects_staged_write(&outsider_client, &server, &denied);
+}
+
 #[test]
 fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();

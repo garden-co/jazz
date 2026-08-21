@@ -350,7 +350,6 @@ pub(super) fn physical_version_storage_tables(
     catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
     schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-    branch_partitions: &BTreeSet<(PhysicalTableId, BranchId)>,
 ) -> Result<Vec<GrooveTableSchema>, Error> {
     let mut lineages = BTreeMap::<
         PhysicalTableId,
@@ -932,17 +931,6 @@ pub(super) fn physical_version_storage_tables(
         for (tag, fields) in rejected_layouts_by_tag {
             let payload = variant_payload_fields_for_names(&rejected, &fields)?;
             rejected = rejected.with_variant_payload(tag, payload);
-        }
-        for (_, branch_id) in branch_partitions
-            .iter()
-            .filter(|(candidate, _)| *candidate == table_id)
-        {
-            let mut branch_history = physical.clone();
-            branch_history.name = physical_branch_history_table_name(table_id, *branch_id);
-            let mut branch_register = register.clone();
-            branch_register.name = physical_branch_register_table_name(table_id, *branch_id);
-            tables.push(branch_history);
-            tables.push(branch_register);
         }
         tables.push(physical);
         tables.push(register);

@@ -25,9 +25,7 @@ use crate::tools::public_schema::{
     TablePolicies as PublicTablePolicies, TableSchema as PublicTableSchema,
     TableSchemaBuilder as PublicTableSchemaBuilder, Value as PublicValue,
 };
-use crate::tx::{
-    BranchLineage, ContributionComponent, ContributionCoordinate, ContributionDot, MergeAspect,
-};
+use crate::tx::MergeAspect;
 use groove::schema::{ColumnSchema, ColumnType};
 use groove::storage::{
     BtreeSyncPolicy, ColumnFamilyName, Key, MemoryStorage, NativeBtreeStorage, OrderedKvStorage,
@@ -39,8 +37,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 include!("support.rs");
 include!("catalogue_lenses/mod.rs");
 include!("lens_projected_maintained.rs");
-include!("branching.rs");
 include!("time_travel.rs");
+include!("branch_views.rs");
 include!("queries.rs");
 include!("exclusive_transactions.rs");
 include!("mergeable_open_transactions.rs");

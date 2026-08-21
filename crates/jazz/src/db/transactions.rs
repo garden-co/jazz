@@ -124,6 +124,35 @@ where
             .map_err(Into::into)
     }
 
+    pub(super) fn stage_mergeable_insert_in_branch(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
+        let cells = self.apply_insert_defaults(table, cells)?;
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write_mergeable_in_schema_and_branch(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Vec::new(),
+                now_ms,
+                false,
+                branch,
+            )?;
+        Ok(())
+    }
+
     pub(super) fn stage_mergeable_update(
         &self,
         tx_id: OpenTransactionId,
@@ -138,6 +167,58 @@ where
             .borrow_mut()
             .tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
             .map_err(Into::into)
+    }
+
+    pub(super) fn stage_mergeable_update_in_branch_view(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        if patch.is_empty() {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "branch-view update requires at least one authored column",
+            ));
+        }
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
+        let head_cells = self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch(table, &head, row)?;
+        if head_cells.is_some() {
+            self.node
+                .node
+                .borrow_mut()
+                .tx_patch_mergeable_in_schema_and_branch(
+                    tx_id,
+                    self.schema_version_id,
+                    table,
+                    row,
+                    patch,
+                    now_ms,
+                    head,
+                )?;
+            return Ok(());
+        }
+        let Some(mut inherited) = self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+        else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("row is not visible in branch view: {}", row.0),
+            ));
+        };
+        inherited.extend(patch);
+        self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms)
     }
 
     pub(super) fn stage_mergeable_delete(
@@ -163,6 +244,46 @@ where
                 false,
             )
             .map_err(Into::into)
+    }
+
+    pub(super) fn stage_mergeable_delete_in_branch_view(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+            .is_none()
+        {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("row is not visible in branch view: {}", row.0),
+            ));
+        }
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write_mergeable_in_schema_and_branch(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                BTreeMap::new(),
+                Some(DeletionEvent::Deleted),
+                Vec::new(),
+                now_ms,
+                true,
+                head,
+            )?;
+        Ok(())
     }
 
     pub(super) fn stage_mergeable_restore(
@@ -205,6 +326,53 @@ where
             deletion_parents,
             now_ms,
             true,
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn stage_mergeable_restore_in_branch(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        let content_parents = node
+            .local_content_winner_tx_id_in_branch(table, &branch, row)?
+            .into_iter()
+            .collect();
+        let deletion_parents = node
+            .local_deletion_winner_tx_id_in_branch(table, &branch, row)?
+            .into_iter()
+            .collect();
+        node.tx_write_mergeable_in_schema_and_branch(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            content_parents,
+            now_ms,
+            true,
+            branch.clone(),
+        )?;
+        node.tx_write_mergeable_in_schema_and_branch(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            BTreeMap::new(),
+            Some(DeletionEvent::Restored),
+            deletion_parents,
+            now_ms,
+            true,
+            branch,
         )?;
         Ok(())
     }

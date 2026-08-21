@@ -13,8 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use groove::records::{OwnedRecord, Value};
 
 use crate::ids::{
-    AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId,
-    SchemaVersionId,
+    AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId, SchemaVersionId,
 };
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
@@ -26,19 +25,6 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
-    /// Durable routing metadata required before a branch-target commit unit or
-    /// branch-scoped view payload can be admitted. This is intentionally
-    /// separate from the ordinary transaction payload: it selects the target
-    /// partition, but never changes transaction semantics.
-    BranchMetadata(BranchMetadata),
-    /// Bounded repair request for branch routing metadata observed out of
-    /// order. Trusted peers may retain every branch; serving policy decides
-    /// whether a client is sent a requested record.
-    FetchBranchMetadata {
-        /// Exact branch routing records requested, bounded by the protocol
-        /// repair limit at decode and serving boundaries.
-        branches: Vec<BranchId>,
-    },
     /// Trusted backend assertion of process-local auth claims for a write subject.
     SessionClaims {
         /// Identity these claims describe.
@@ -400,21 +386,6 @@ pub struct CatalogueSnapshot {
     pub current_write_schema: CurrentWriteSchema,
 }
 
-/// Wire-stable durable description of one branch routing target.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct BranchMetadata {
-    /// Stable target lineage identifier.
-    pub branch_id: BranchId,
-    /// Session identity that created this immutable branch record.
-    pub created_by: AuthorId,
-    /// Optional parent lineage for a snapshot-base branch.
-    pub parent: Option<BranchId>,
-    /// Frozen base used by ordinary branch reads.
-    pub base: Option<Snapshot>,
-    /// `false` denotes the terminal discarded state.
-    pub open: bool,
-}
-
 impl SyncMessage {
     /// Optional wire capabilities required to serialize this semantic message.
     ///
@@ -531,6 +502,9 @@ pub struct PeerPayloadInventory {
 pub struct VersionRecord {
     table: groove::Intern<String>,
     schema_version: SchemaVersionId,
+    /// Exact branch coordinate of this version's branch-local row.
+    #[serde(default)]
+    branch_key: BranchKey,
     record: OwnedRecord,
     /// `None` denotes a legacy or lens-translated payload whose authored
     /// presence is unavailable; consumers must conservatively treat every
@@ -548,9 +522,20 @@ impl VersionRecord {
         Self {
             table: groove::Intern::new(table.into()),
             schema_version,
+            branch_key: BranchKey::default(),
             record,
             authored_columns: None,
         }
+    }
+
+    pub(crate) fn with_branch_key(mut self, branch_key: BranchKey) -> Self {
+        self.branch_key = branch_key;
+        self
+    }
+
+    /// Exact branch coordinate of this version.
+    pub fn branch_key(&self) -> &BranchKey {
+        &self.branch_key
     }
 
     pub(crate) fn with_authored_columns(
@@ -783,6 +768,7 @@ impl Ord for VersionRecord {
         self.table()
             .cmp(other.table())
             .then_with(|| self.schema_version.cmp(&other.schema_version))
+            .then_with(|| self.branch_key.cmp(&other.branch_key))
             .then_with(|| self.record.raw().cmp(other.record.raw()))
             .then_with(|| self.authored_columns.cmp(&other.authored_columns))
     }
@@ -868,12 +854,28 @@ fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static s
 }
 
 /// Transaction plus row-version payload and the upstream state observed with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum VersionBundleScope {
+    /// The bundle carries every write authored by the transaction.
+    CompleteTransaction,
+    /// The bundle carries only the writes admitted by one selected view.
+    ///
+    /// For this scope `Transaction::n_total_writes` is deliberately redacted to
+    /// the number of versions in this bundle. It is not the authored transaction
+    /// cardinality and MUST NOT establish complete-payload coverage.
+    #[default]
+    ViewScoped,
+}
+
+/// Transaction plus row-version payload and the upstream state observed with it.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct VersionBundle {
     /// Transaction payload for the versions.
     pub tx: Transaction,
     /// Row versions carried by the transaction.
     pub versions: Vec<VersionRecord>,
+    /// Whether the payload is complete or selected for one view.
+    pub scope: VersionBundleScope,
     /// Fate known when the bundle was shipped.
     pub fate: Fate,
     /// Global timestamp known when shipped.
@@ -889,6 +891,8 @@ pub struct VersionBundleRef<'a> {
     pub tx: &'a Transaction,
     /// Row versions carried by the transaction.
     pub versions: &'a [VersionRecord],
+    /// Whether the payload is complete or selected for one view.
+    pub scope: VersionBundleScope,
     /// Fate known when the bundle was shipped.
     pub fate: &'a Fate,
     /// Global timestamp known when shipped.
@@ -903,6 +907,7 @@ impl<'a> VersionBundleRef<'a> {
         VersionBundle {
             tx: self.tx.clone(),
             versions: self.versions.to_vec(),
+            scope: self.scope,
             fate: self.fate.clone(),
             global_time: self.global_time,
             durability: self.durability,
@@ -916,6 +921,7 @@ impl VersionBundle {
         VersionBundleRef {
             tx: &self.tx,
             versions: &self.versions,
+            scope: self.scope,
             fate: &self.fate,
             global_time: self.global_time,
             durability: self.durability,
@@ -983,6 +989,7 @@ impl VersionBundleRun {
                 let override_ = VersionBundleRunOverride {
                     body_index: index as u32,
                     tx: (bundle.tx != first.tx).then(|| bundle.tx.clone()),
+                    scope: (bundle.scope != first.scope).then_some(bundle.scope),
                     fate: (bundle.fate != first.fate).then(|| bundle.fate.clone()),
                     global_time: (bundle.global_time != first.global_time)
                         .then_some(bundle.global_time),
@@ -996,6 +1003,7 @@ impl VersionBundleRun {
             header: VersionBundleRunHeader {
                 table,
                 tx: first.tx.clone(),
+                scope: first.scope,
                 body_count: bodies.len() as u32,
                 fate: first.fate.clone(),
                 global_time: first.global_time,
@@ -1068,6 +1076,9 @@ impl VersionBundleRun {
                         .and_then(|override_| override_.tx.clone())
                         .unwrap_or_else(|| self.header.tx.clone()),
                     versions: body.versions.clone(),
+                    scope: override_
+                        .and_then(|override_| override_.scope)
+                        .unwrap_or(self.header.scope),
                     fate: override_
                         .and_then(|override_| override_.fate.clone())
                         .unwrap_or_else(|| self.header.fate.clone()),
@@ -1101,6 +1112,9 @@ impl VersionBundleRun {
                         .and_then(|override_| override_.tx.as_ref())
                         .unwrap_or(&self.header.tx),
                     versions: &body.versions,
+                    scope: override_
+                        .and_then(|override_| override_.scope)
+                        .unwrap_or(self.header.scope),
                     fate: override_
                         .and_then(|override_| override_.fate.as_ref())
                         .unwrap_or(&self.header.fate),
@@ -1123,6 +1137,8 @@ pub struct VersionBundleRunHeader {
     pub table: Option<groove::Intern<String>>,
     /// Default transaction payload for each body.
     pub tx: Transaction,
+    /// Default payload scope for each body.
+    pub scope: VersionBundleScope,
     /// Declared number of bodies; must match `VersionBundleRun::bodies`.
     pub body_count: u32,
     /// Default fate for each body.
@@ -1147,6 +1163,8 @@ pub struct VersionBundleRunOverride {
     pub body_index: u32,
     /// Transaction override for this body.
     pub tx: Option<Transaction>,
+    /// Payload-scope override for this body.
+    pub scope: Option<VersionBundleScope>,
     /// Fate override for this body.
     pub fate: Option<Fate>,
     /// Global timestamp override for this body. `Some(None)` overrides to absent.
@@ -1158,6 +1176,7 @@ pub struct VersionBundleRunOverride {
 impl VersionBundleRunOverride {
     fn has_overrides(&self) -> bool {
         self.tx.is_some()
+            || self.scope.is_some()
             || self.fate.is_some()
             || self.global_time.is_some()
             || self.durability.is_some()
@@ -1477,17 +1496,19 @@ fn default_propagate_upstream() -> bool {
 pub struct ReadViewSpec {
     /// Which branch/snapshot family this read observes.
     pub source: ReadViewSourceSpec,
-    /// Optional schema lens for the application-facing row shape.
-    pub schema: ReadViewSchemaSpec,
-    /// Local overlays made visible in front of the persisted source.
-    #[serde(default)]
-    pub overlays: Vec<ReadOverlaySpec>,
 }
 
 impl ReadViewSpec {
     /// Whether this is the current/default read view implemented by execution.
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    /// Select a live head branch, optionally composed over one live or frozen base.
+    pub fn branch_view(head: BranchSelector, base: Option<BranchViewBase>) -> Self {
+        Self {
+            source: ReadViewSourceSpec::BranchView { head, base },
+        }
     }
 }
 
@@ -1545,12 +1566,114 @@ impl ReadViewSpec {
 }
 
 impl ReadViewSourceSpec {
-    fn canonicalize(&mut self) {
-        if let Self::MergedBranches { branches } = self {
-            branches.sort();
-            branches.dedup();
+    fn canonicalize(&mut self) {}
+}
+
+/// Canonical named values for one schema-wide branch selector.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub struct BranchSelector {
+    /// Canonically encoded typed values keyed by branch-column name.
+    pub values: BTreeMap<String, BranchColumnValue>,
+}
+
+impl BranchSelector {
+    /// Construct a selector from named branch-column values.
+    pub fn new(values: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Self {
+        Self {
+            values: values
+                .into_iter()
+                .map(|(name, value)| (name.into(), BranchColumnValue::from(value)))
+                .collect(),
         }
     }
+}
+
+impl BranchViewBase {
+    /// Use the live current contents of a base branch.
+    pub fn current(branch: BranchSelector) -> Self {
+        Self::Current(branch)
+    }
+
+    /// Freeze a base branch at an application-resolved snapshot reference.
+    pub fn snapshot(branch: BranchSelector, snapshot: SnapshotRef) -> Self {
+        Self::Snapshot { branch, snapshot }
+    }
+}
+
+/// Canonical wire/storage encoding of one branch-column value.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct BranchColumnValue(pub Vec<u8>);
+
+impl From<Value> for BranchColumnValue {
+    fn from(value: Value) -> Self {
+        Self(postcard::to_allocvec(&value).expect("branch column values are encodable"))
+    }
+}
+
+impl BranchColumnValue {
+    /// Decode the value for validation and ordinary column projection.
+    pub fn decode(&self) -> Result<Value, postcard::Error> {
+        postcard::from_bytes(&self.0)
+    }
+}
+
+/// Exact, table-projected branch coordinate carried by every row version.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub struct BranchKey {
+    /// Values ordered by branch-column name.
+    pub values: Vec<(String, BranchColumnValue)>,
+}
+
+impl BranchKey {
+    /// Canonical bytes used as the physical branch-local row-key prefix.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("branch keys are encodable")
+    }
+
+    /// Decode a persisted exact branch key.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
+    }
+}
+
+/// Optional base composed underneath the live head of a branch view.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum BranchViewBase {
+    /// A base that continues to observe current writes.
+    Current(BranchSelector),
+    /// A base frozen at one resolved snapshot.
+    Snapshot {
+        /// Branch key read at the frozen cut.
+        branch: BranchSelector,
+        /// Historic frontier shared by every source in the view.
+        snapshot: SnapshotRef,
+    },
 }
 
 /// Wire source selected by a read view.
@@ -1570,66 +1693,17 @@ pub enum ReadViewSourceSpec {
     /// Current default branch/source.
     #[default]
     Current,
-    /// Current state of one named branch.
-    Branch {
-        /// Branch identifier to read from.
-        branch: uuid::Uuid,
-    },
-    /// Merge view of several named branches.
-    MergedBranches {
-        /// Branch identifiers participating in the merged read.
-        branches: Vec<uuid::Uuid>,
+    /// A live branch head, optionally composed over one live or frozen base.
+    BranchView {
+        /// Named values for the requested head coordinate.
+        head: BranchSelector,
+        /// Optional single fallback source.
+        base: Option<BranchViewBase>,
     },
     /// Snapshot ref resolved by the receiving node.
     Snapshot {
         /// Historic frontier to read.
         snapshot: SnapshotRef,
-    },
-}
-
-/// Wire schema/lens selected by a read view.
-#[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Deserialize,
-    serde::Serialize,
-)]
-pub enum ReadViewSchemaSpec {
-    /// Use the receiver's current read schema.
-    #[default]
-    Current,
-    /// Read rows through a concrete schema-version lens.
-    SchemaVersion {
-        /// Application schema version to project rows through.
-        schema_version: SchemaVersionId,
-    },
-}
-
-/// Local overlay selected by a read view.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub enum ReadOverlaySpec {
-    /// Direct, non-durable batch overlay.
-    DirectBatch {
-        /// Non-durable batch transaction.
-        batch: TxId,
-    },
-    /// Accepted transaction overlay.
-    AcceptedTransaction {
-        /// Accepted transaction.
-        tx: TxId,
-    },
-    /// Open exclusive transaction overlay.
-    OpenTransaction {
-        /// Open transaction.
-        tx: TxId,
     },
 }
 
@@ -1830,7 +1904,7 @@ pub enum ResultMemberEntry {
 }
 
 /// Real table row membership, including both the ordinary current-content
-/// compatibility identity and the extra dimensions needed by historic,
+/// compatibility identity and the extra branch columns needed by historic,
 /// branch/prefix, include-deleted, and schema-projected reads.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct RealRowMemberEntry {
@@ -1976,16 +2050,6 @@ pub enum ResultRowSource {
     /// Current default source.
     #[default]
     Current,
-    /// Current state of a named branch.
-    Branch {
-        /// Branch identifier.
-        branch: uuid::Uuid,
-    },
-    /// Merge view of several named branches.
-    MergedBranches {
-        /// Branch identifiers participating in the merged source.
-        branches: Vec<uuid::Uuid>,
-    },
     /// Historic snapshot ref.
     Snapshot {
         /// Snapshot frontier.
@@ -3036,6 +3100,39 @@ mod tests {
     }
 
     #[test]
+    fn branch_view_keys_isolate_siblings_and_live_from_frozen_bases() {
+        let selector = |byte| {
+            BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+        };
+        let key = |read_view| {
+            RegisterShapeOptions {
+                read_view,
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key()
+        };
+        let live =
+            ReadViewSpec::branch_view(selector(1), Some(BranchViewBase::Current(selector(2))));
+        let sibling =
+            ReadViewSpec::branch_view(selector(3), Some(BranchViewBase::Current(selector(2))));
+        let frozen = ReadViewSpec::branch_view(
+            selector(1),
+            Some(BranchViewBase::snapshot(
+                selector(2),
+                SnapshotRef {
+                    owner: NodeUuid::from_bytes([4; 16]),
+                    global_base: GlobalTime(5),
+                    local_base: TxTime(6),
+                    dots: Vec::new(),
+                },
+            )),
+        );
+
+        assert_ne!(key(live.clone()), key(sibling));
+        assert_ne!(key(live), key(frozen));
+    }
+
+    #[test]
     fn result_member_transport_preserves_typed_union_occurrence() {
         let root = ObjectId::from_uuid(uuid::Uuid::from_bytes([1; 16]));
         let joined = ObjectId::from_uuid(uuid::Uuid::from_bytes([2; 16]));
@@ -3139,31 +3236,5 @@ mod tests {
         };
 
         assert_ne!(lens.content_id(), changed.content_id());
-    }
-
-    #[test]
-    fn read_view_key_canonicalizes_merged_branch_order() {
-        let a = uuid::uuid!("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa");
-        let b = uuid::uuid!("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");
-        let forward = RegisterShapeOptions {
-            read_view: ReadViewSpec {
-                source: ReadViewSourceSpec::MergedBranches {
-                    branches: vec![a, b],
-                },
-                ..ReadViewSpec::default()
-            },
-            ..RegisterShapeOptions::default()
-        };
-        let reversed = RegisterShapeOptions {
-            read_view: ReadViewSpec {
-                source: ReadViewSourceSpec::MergedBranches {
-                    branches: vec![b, a, a],
-                },
-                ..ReadViewSpec::default()
-            },
-            ..RegisterShapeOptions::default()
-        };
-
-        assert_eq!(forward.read_view_key(), reversed.read_view_key());
     }
 }

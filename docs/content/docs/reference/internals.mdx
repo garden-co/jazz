@@ -340,7 +340,8 @@ Migrations in Jazz produce **lenses** — bidirectional transformations between 
 such as adding, removing, or renaming columns and tables.
 
 At query time, Jazz can use lens paths to read older stored data through the current schema. At
-write time, updates to older rows are written back into the current schema branch via copy-on-write.
+write time, it projects updates through the lens path while retaining the row's physical schema
+identity.
 
 ### Catalogue sync
 

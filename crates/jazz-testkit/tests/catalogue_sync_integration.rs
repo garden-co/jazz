@@ -1757,7 +1757,6 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[schema_v1(), schema_v2()],
         &[v1_to_v2_lens()],
     )
@@ -1968,7 +1967,6 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[schema_v1(), schema_v2(), v3_schema.clone()],
         &[v1_to_v2_lens(), v2_to_v3_lens()],
     )
@@ -2133,7 +2131,6 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema.clone(), v2_schema, v3_schema.clone()],
         &[rename_chain_v1_to_v2_lens(), rename_chain_v2_to_v3_lens()],
     )
@@ -2224,7 +2221,6 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema.clone(), v2_schema, v3_schema.clone()],
         &[rename_chain_v1_to_v2_lens(), rename_chain_v2_to_v3_lens()],
     )
@@ -2311,7 +2307,6 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema.clone(), v2_schema.clone()],
         &[table_rename_v1_to_v2_lens()],
     )
@@ -2394,7 +2389,6 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema.clone(), v2_schema.clone()],
         &[table_rename_v1_to_v2_lens()],
     )
@@ -2515,7 +2509,6 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         std::slice::from_ref(&v1_schema),
         &[],
     )
@@ -2560,7 +2553,6 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema.clone(), v2_schema.clone()],
         &[table_rename_v1_to_v2_lens()],
     )
@@ -2639,7 +2631,6 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema.clone(), v2_schema.clone()],
         &[table_rename_copy_on_write_v1_to_v2_lens()],
     )
@@ -2775,7 +2766,6 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema.clone(), v2_schema.clone()],
         &[table_rename_join_v1_to_v2_lens()],
     )
@@ -2888,7 +2878,6 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema.clone(), v2_schema.clone()],
         &[table_rename_join_v1_to_v2_lens()],
     )
@@ -2993,7 +2982,6 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[legacy_schema.clone(), current_schema.clone()],
         &[legacy_join_provenance_to_current_permissions_lens()],
     )
@@ -3187,7 +3175,6 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema.clone(), v2_schema.clone(), v3_schema.clone()],
         &[
             multi_hop_table_rename_v1_to_v2_lens(),
@@ -3339,7 +3326,6 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema.clone(), v2_schema, v3_schema.clone()],
         &[
             removed_readded_v1_to_v2_lens(),
@@ -3463,7 +3449,6 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[schema_v1(), schema_v2()],
         &[v1_to_v2_lens()],
     )
@@ -3564,7 +3549,6 @@ async fn keeps_authorization_through_v1_head_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         std::slice::from_ref(&v1_schema),
         &[],
     )
@@ -3618,7 +3602,6 @@ async fn keeps_authorization_through_v1_head_impl() {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         &[v1_schema, schema_v2()],
         &[v1_to_v2_lens()],
     )

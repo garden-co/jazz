@@ -66,7 +66,6 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                 server.server_state(),
                 server.app_id(),
                 "dev",
-                "main",
                 std::slice::from_ref(&schema),
                 &[],
             )

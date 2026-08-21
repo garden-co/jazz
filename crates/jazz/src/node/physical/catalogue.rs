@@ -493,25 +493,15 @@ pub(super) fn physical_register_table_name(table_id: PhysicalTableId) -> String 
 /// Fixed sparse deletion history shared by every physical content lineage.
 ///
 /// Unlike `physical_register_table_name`, this is not a per-lineage table;
-/// callers must pair it with the full `(BranchLineage, PhysicalTableId)` key.
+/// callers must pair it with the full `(BranchKey, PhysicalTableId)` key.
 pub(super) const SHARED_DELETION_HISTORY_TABLE: &str = "jazz_deletion_history";
 
-pub(super) fn shared_deletion_lineage_values(lineage: BranchLineage) -> (u8, uuid::Uuid) {
-    match lineage {
-        BranchLineage::Root => (0, uuid::Uuid::nil()),
-        BranchLineage::Branch(branch_id) => (1, branch_id.0),
-    }
-}
-
 pub(super) fn shared_deletion_history_primary_key(
-    lineage: BranchLineage,
     table_id: PhysicalTableId,
     version: &VersionRow,
 ) -> PrimaryKeyValue {
-    let (branch_kind, branch_id) = shared_deletion_lineage_values(lineage);
     PrimaryKeyValue::Composite(vec![
-        PrimaryKeyValue::U8(branch_kind),
-        PrimaryKeyValue::Uuid(branch_id),
+        PrimaryKeyValue::Bytes(version.branch_key().canonical_bytes()),
         PrimaryKeyValue::U64(table_id.0),
         PrimaryKeyValue::Uuid(version.row_uuid().0),
         PrimaryKeyValue::U64(version.tx_time().0),
@@ -537,39 +527,6 @@ pub(super) fn physical_register_ahead_current_table_name(table_id: PhysicalTable
 
 pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -> String {
     format!("jazz_physical_{}_rejected_versions", table_id.0)
-}
-
-pub(super) fn physical_branch_history_table_name(
-    table_id: PhysicalTableId,
-    branch_id: BranchId,
-) -> String {
-    format!(
-        "jazz_physical_{}_branch_{}_history",
-        table_id.0,
-        branch_id.0.simple()
-    )
-}
-
-pub(super) fn physical_branch_register_table_name(
-    table_id: PhysicalTableId,
-    branch_id: BranchId,
-) -> String {
-    format!(
-        "jazz_physical_{}_branch_{}_register",
-        table_id.0,
-        branch_id.0.simple()
-    )
-}
-
-pub(super) fn physical_branch_version_storage_table_name(
-    table_id: PhysicalTableId,
-    layer: VersionLayer,
-    branch_id: BranchId,
-) -> String {
-    match layer {
-        VersionLayer::Content => physical_branch_history_table_name(table_id, branch_id),
-        VersionLayer::Deletion => physical_branch_register_table_name(table_id, branch_id),
-    }
 }
 
 pub(super) fn physical_current_index_name(column_id: PhysicalColumnId) -> String {

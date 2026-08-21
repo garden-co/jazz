@@ -26,16 +26,17 @@ use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
 use groove::storage::{self, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use thiserror::Error;
 
-use self::query_engine::user_column_field;
+use self::query_engine::{QueryAuthorizationMode, user_column_field};
 use crate::ids::{
-    AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
-    RowUuid, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
+    AuthorId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId, RowUuid,
+    SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
 };
 use crate::protocol::{
-    BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ProgramFactEntry, ReadViewKey,
-    RealRowMemberEntry, ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication,
-    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
-    VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
+    BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp, MigrationLens,
+    ProgramFactEntry, ReadViewKey, RealRowMemberEntry, ResultMemberEntry, ResultRowEntry,
+    RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
+    SyncMessage, VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry,
+    expand_version_carriers,
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
@@ -45,9 +46,11 @@ use crate::schema::{
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tx::{
-    AbsentRead, BranchLineage, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate,
-    HistoryEntry, PredicateRead, RejectedTransaction, RejectedVersion, RejectionReason, RowRead,
-    Snapshot, Transaction, TransactionRecord, TxId, TxKind,
+    AbsentRead, ContributionComponent, ContributionCoordinate, ContributionDot,
+    ContributionMergeProvenance, ContributionSubstitution, ContributionSubstitutionIndex,
+    DeletionEvent, DurabilityTier, Fate, HistoryEntry, MergeAspect, PredicateRead,
+    RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot, Transaction,
+    TransactionRecord, TxId, TxKind,
 };
 
 fn hydrate_nested_scalar_enum_cases(
@@ -357,7 +360,6 @@ fn reconcile_nested_scalar_enum_cases(
     Ok(())
 }
 
-mod branches;
 mod catalogue_ingest;
 mod codec;
 mod currency;
@@ -383,7 +385,6 @@ pub(crate) use views::MaintainedViewBundleInputs;
 
 type ResultRowMembershipKey = crate::tools::OutputOccurrenceId;
 
-use branches::BranchRecord;
 use codec::*;
 use database_slot::DatabaseSlot;
 use open_tx::*;
@@ -403,7 +404,7 @@ pub struct NodeOpenReceipt {
     pub state_init: Duration,
     /// Total durable-state recovery time.
     pub recover_storage: Duration,
-    /// Alias, branch, clock, and physical-history recovery time.
+    /// Alias, schema-family, clock, and physical-history recovery time.
     pub recover_catalogue_state: Duration,
     /// Retained for receipt compatibility; startup no longer makes this sweep.
     pub validate_current_rows: Duration,
@@ -526,8 +527,6 @@ pub struct NodeState<S> {
     /// bootstrap snapshot boundary and therefore carries a completion record
     /// that must be refreshed with later trusted snapshots.
     catalogue_bootstrap_marker: bool,
-    /// In-memory branch records and branch-specific storage partitions.
-    branches: Branches,
     /// Local logical time and global-application progress counters.
     clock: Clock,
     /// Commit-unit and shape-registration payloads waiting for missing context.
@@ -553,7 +552,7 @@ pub struct NodeState<S> {
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
     /// Ahead-current overlay keys for rows whose non-global versions can affect local reads.
-    ahead_current_keys: BTreeSet<(String, VersionLayer, RowUuid, TxTime, NodeAlias)>,
+    ahead_current_keys: BTreeSet<(String, BranchKey, VersionLayer, RowUuid, TxTime, NodeAlias)>,
     /// Rows touched by the ahead-current overlay.
     ahead_current_rows: BTreeSet<(String, RowUuid)>,
     /// Latest ahead-current key per table/layer/row for local overlay reads.
@@ -637,17 +636,6 @@ pub(crate) enum CatalogueBootstrapState {
     Uninitialized,
     /// A durable genesis, mappings, and pointer have been installed.
     Ready,
-}
-
-/// Branch metadata and branch-partition layout known by the node.
-#[derive(Clone, Debug, Default)]
-struct Branches {
-    /// In-memory branch records indexed by branch ID.
-    branches: BTreeMap<BranchId, BranchRecord>,
-    /// Storage partitions materialized for physical-table/branch pairs.
-    branch_partitions: BTreeSet<(PhysicalTableId, BranchId)>,
-    /// Locally-authored metadata awaiting an upstream acknowledgement.
-    pending_metadata_uploads: BTreeSet<BranchId>,
 }
 
 /// Local transaction clock and settled-global application progress.
@@ -848,6 +836,7 @@ pub enum CommitUnitTrust {
 
 include!("state/lifecycle.rs");
 include!("state/commit.rs");
+include!("state/contribution_merge.rs");
 include!("state/durable.rs");
 include!("state/catalogue.rs");
 include!("state/read_payload.rs");
@@ -1062,20 +1051,30 @@ impl CurrentRow {
 
     /// Row id.
     pub fn row_uuid(&self) -> RowUuid {
+        let row_idx = self
+            .record
+            .descriptor()
+            .field_index("row_uuid")
+            .unwrap_or(CurrentRowRecord::FIELD_ROW_UUID_IDX);
         RowUuid(
             self.record
                 .borrowed()
-                .get_uuid(CurrentRowRecord::FIELD_ROW_UUID_IDX)
+                .get_uuid(row_idx)
                 .expect("valid current row_uuid"),
         )
     }
 
     /// Cell value by application-schema column position.
     pub fn cell_at(&self, column_position: usize) -> Option<Value> {
+        let user_cells = self
+            .record
+            .descriptor()
+            .field_index("row_uuid")
+            .map_or(0, |idx| idx + 1);
         match self
             .record
             .borrowed()
-            .get_idx(CurrentRowRecord::USER_CELLS + column_position)
+            .get_idx(user_cells + column_position)
             .expect("valid current user cell")
         {
             Value::Nullable(None) => None,
@@ -1222,12 +1221,17 @@ impl CurrentRow {
 
     #[cfg(test)]
     pub(crate) fn test_cells_by_descriptor(&self) -> BTreeMap<String, Value> {
+        let user_cells = self
+            .record
+            .descriptor()
+            .field_index("row_uuid")
+            .map_or(CurrentRowRecord::USER_CELLS, |idx| idx + 1);
         self.record
             .descriptor()
             .fields()
             .iter()
             .enumerate()
-            .skip(CurrentRowRecord::USER_CELLS)
+            .skip(user_cells)
             .filter_map(|(idx, field)| {
                 let name = field.name.as_ref()?.as_str();
                 let name = if name.starts_with("user_") {
@@ -1362,6 +1366,32 @@ pub struct QueryReadProfile {
     pub total: std::time::Duration,
 }
 
+/// One row selected for an atomic cross-branch contribution merge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContributionMergeRow {
+    /// Logical table containing the row.
+    pub table: String,
+    /// Global object identity shared by its branch-local branch-local rows.
+    pub row_uuid: RowUuid,
+}
+
+/// Explicit source and target views for a local contribution calculation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContributionMergeRequest {
+    /// Full named source branch selector.
+    pub source: BranchSelector,
+    /// Full named target branch selector.
+    pub target: BranchSelector,
+    /// Rows calculated and committed atomically.
+    pub rows: Vec<ContributionMergeRow>,
+    /// Author of the ordinary output transaction.
+    pub made_by: AuthorId,
+    /// Identity used by ordinary target write policy.
+    pub permission_subject: Option<AuthorId>,
+    /// Abstract wall clock at the calculating node.
+    pub now_ms: u64,
+}
+
 /// Builder for a local mergeable commit.
 #[derive(Clone)]
 pub struct MergeableCommit {
@@ -1369,6 +1399,8 @@ pub struct MergeableCommit {
     pub table: String,
     /// Target row.
     pub row_uuid: RowUuid,
+    /// Exact named branch coordinate for this row branch-local row.
+    pub branch: BranchSelector,
     /// Author making the commit.
     pub made_by: AuthorId,
     /// Identity used for write-policy evaluation.
@@ -1393,6 +1425,7 @@ impl MergeableCommit {
         Self {
             table: table.into(),
             row_uuid,
+            branch: BranchSelector::default(),
             made_by: AuthorId::SYSTEM,
             permission_subject: None,
             now_ms,
@@ -1402,6 +1435,12 @@ impl MergeableCommit {
             parents: Vec::new(),
             user_metadata_json: None,
         }
+    }
+
+    /// Target an exact branch-keyed row branch-local row.
+    pub fn branch(mut self, branch: BranchSelector) -> Self {
+        self.branch = branch;
+        self
     }
 
     /// Set the commit author.
@@ -1502,7 +1541,6 @@ struct CatalogueOpenState<S> {
     next_physical_table_id: u64,
     next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
-    branch_partitions: BTreeSet<(PhysicalTableId, BranchId)>,
     catalogue_bootstrap_marker: bool,
 }
 
@@ -1706,6 +1744,9 @@ pub enum Error {
     /// Mergeable commit shape is invalid.
     #[error("invalid mergeable commit: {0}")]
     InvalidMergeableCommit(&'static str),
+    /// Exact branch selector is missing, malformed, or inconsistent with row cells.
+    #[error("invalid branch key: {0}")]
+    InvalidBranchKey(String),
     /// An exclusive transaction no longer matches its fixed local snapshot.
     #[error("row visible parent changed since transaction write was staged")]
     TransactionConflict,
@@ -1762,19 +1803,6 @@ pub enum Error {
     /// Historical read must be evaluated by a history-complete server.
     #[error("historical read requires server evaluation")]
     HistoricalReadRequiresServer,
-    /// Branch id was not known locally.
-    #[error("branch not found: {0:?}")]
-    BranchNotFound(BranchId),
-    /// Branch is no longer open for writes.
-    #[error("branch is not open: {0:?}")]
-    BranchClosed(BranchId),
-    /// Branch-scoped exclusive transactions are not implemented in v1.
-    #[error("exclusive transactions on branches are unsupported in v1")]
-    UnsupportedBranchExclusive,
-    /// Local branch-merge calculation could not prove or encode the requested
-    /// ordinary target write.
-    #[error("branch merge calculation failed: {0}")]
-    BranchMergeCalculation(&'static str),
     /// The authenticated identity is not authorized for this operation.
     #[error("authorization denied")]
     AuthorizationDenied,

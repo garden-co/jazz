@@ -90,26 +90,21 @@ export async function createWasmRuntime(
   opts?: {
     appId?: string;
     env?: string;
-    userBranch?: string;
-    tier?: string;
-    useBinaryEncoding?: boolean;
+    peerId?: string;
   },
 ): Promise<TestRuntime> {
   const wasmModule = await loadWasmModule();
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
-  const userBranch = opts?.userBranch ?? "main";
+  const peerId = opts?.peerId ?? "default";
   const runtime = new NativeRuntimeAdapter(
     wasmModule.WasmDb,
     schema,
-    deterministicBytes(`${appId}:${env}:${userBranch}:node`),
-    deterministicBytes(`${appId}:${env}:${userBranch}:author`),
+    deterministicBytes(`${appId}:${env}:${peerId}:node`),
+    deterministicBytes(`${appId}:${env}:${peerId}:author`),
     1,
     true,
   );
-  void opts?.tier;
-  void opts?.useBinaryEncoding;
-
   onTestFinished(async () => {
     await freeRuntimeSafely(runtime);
   });

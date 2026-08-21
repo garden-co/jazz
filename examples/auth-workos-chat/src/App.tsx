@@ -108,7 +108,6 @@ function JazzApp() {
     (): DbConfig => ({
       appId,
       env: "dev" as const,
-      userBranch: "main" as const,
       serverUrl,
       jwtToken: workos.jwt,
     }),

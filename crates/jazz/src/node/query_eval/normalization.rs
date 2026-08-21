@@ -46,9 +46,7 @@ pub(super) fn current_query_output_request(
         CurrentQueryProgramOutput::AuthorizedRows => {
             BTreeSet::from([ProgramFactKey::AuthorizedRows])
         }
-        CurrentQueryProgramOutput::RelationSnapshot
-            if !query.array_subqueries.is_empty() || !query.reachable.is_empty() =>
-        {
+        CurrentQueryProgramOutput::RelationSnapshot if !query.array_subqueries.is_empty() => {
             BTreeSet::from([
                 ProgramFactKey::RelationEdges,
                 ProgramFactKey::PathCorrelationCoverage,
@@ -1078,7 +1076,7 @@ where
     let mut sources = BTreeSet::new();
     let mut paths = Vec::new();
     let root_source = root_source_id(root_table);
-    let root_schema = node.table_in_schema_or_branch_metadata(root_table, schema_version)?;
+    let root_schema = node.table_in_schema(root_table, schema_version)?;
     let explicit_root_segments = includes
         .iter()
         .filter_map(|include| include.path.split('.').next())
@@ -1103,8 +1101,7 @@ where
         let mut parent = root_source.clone();
         let mut segments = Vec::new();
         for (segment_index, segment) in include.path.split('.').enumerate() {
-            let current_table =
-                node.table_in_schema_or_branch_metadata(&current_table_name, schema_version)?;
+            let current_table = node.table_in_schema(&current_table_name, schema_version)?;
             let target_table = current_table
                 .references
                 .get(segment)

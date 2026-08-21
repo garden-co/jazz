@@ -955,20 +955,14 @@ mod tests {
     async fn dynamic_builder_starts_core_server_shell_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("dynamic-server-shell-rehydrate");
-        let branch_read_policy = jazz::tools::public_schema::PolicyExpr::eq_session(
-            "owner_id",
-            vec!["user_id".to_owned()],
-        );
-        let branch_write_policy = jazz::tools::public_schema::PolicyExpr::True;
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
                 jazz::tools::public_schema::TableSchema::builder("todos")
                     .column("id", jazz::tools::public_schema::ColumnType::Uuid)
                     .column("title", jazz::tools::public_schema::ColumnType::Text)
-                    .column("owner_id", jazz::tools::public_schema::ColumnType::Uuid),
+                    .column("workspace_id", jazz::tools::public_schema::ColumnType::Uuid)
+                    .branch_by("workspace_id"),
             )
-            .branch_read_policy(branch_read_policy.clone())
-            .branch_write_policy(branch_write_policy.clone())
             .build();
         let schema_hash = jazz::tools::public_schema::SchemaHash::compute(&schema);
 
@@ -1011,8 +1005,13 @@ mod tests {
             .known_schema(&rebuilt.state.catalogue_store, &schema_hash)
             .expect("read rehydrated schema")
             .expect("rehydrated schema is present");
-        assert_eq!(restored.branch_read_policy(), Some(&branch_read_policy));
-        assert_eq!(restored.branch_write_policy(), Some(&branch_write_policy));
+        let restored_todos = restored
+            .get(&jazz::tools::public_schema::TableName::new("todos"))
+            .expect("restored todos table");
+        assert_eq!(
+            restored_todos.branch_by,
+            vec![jazz::tools::public_schema::ColumnName::new("workspace_id")]
+        );
     }
 
     #[tokio::test]

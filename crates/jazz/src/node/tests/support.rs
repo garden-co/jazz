@@ -4,9 +4,6 @@ fn node(byte: u8) -> NodeUuid {
 fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])
 }
-fn branch(byte: u8) -> BranchId {
-    BranchId::from_bytes([byte; 16])
-}
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
         SyncMessage::ViewUpdate {
@@ -117,20 +114,6 @@ fn build_public_test_schema(builder: PublicSchemaBuilder) -> JazzSchema {
 
 fn empty_public_test_schema() -> JazzSchema {
     build_public_test_schema(PublicSchemaBuilder::new())
-}
-
-fn build_public_test_schema_with_branch_policies(
-    mut builder: PublicSchemaBuilder,
-    branch_read_policy: Option<PublicPolicyExpr>,
-    branch_write_policy: Option<PublicPolicyExpr>,
-) -> JazzSchema {
-    if let Some(policy) = branch_read_policy {
-        builder = builder.branch_read_policy(policy);
-    }
-    if let Some(policy) = branch_write_policy {
-        builder = builder.branch_write_policy(policy);
-    }
-    build_public_test_schema(builder)
 }
 
 fn public_all_policies() -> PublicTablePolicies {
@@ -615,16 +598,6 @@ fn open_reopen_refusing_node_with_schema(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = ReopenRefusingMemoryStorage::new(&refs);
     NodeState::new(node_uuid, schema, storage).unwrap()
-}
-
-fn open_history_complete_reopen_refusing_node_with_schema(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> NodeState<ReopenRefusingMemoryStorage> {
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = ReopenRefusingMemoryStorage::new(&refs);
-    NodeState::new_history_complete(node_uuid, schema, storage).unwrap()
 }
 
 fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
@@ -1308,7 +1281,6 @@ fn ingest_relay_version(
     assert_eq!(tx_id.time, made_at);
     node.ingest_relay_commit_unit(
         Transaction {
-            target_lineage: crate::tx::BranchLineage::Root,
             tx_id,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
@@ -1319,7 +1291,7 @@ fn ingest_relay_version(
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            branch_merge: None,
+            contribution_merge: None,
         },
         vec![version_record(
             row_uuid,

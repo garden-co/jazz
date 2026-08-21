@@ -21,7 +21,10 @@ where
         let Some(raw) = self.database.index_last_raw(
             "jazz_global_changes",
             "by_table_global_time",
-            &[Value::U64(table_id.0)],
+            &[
+                Value::U64(table_id.0),
+                Value::Bytes(BranchKey::default().canonical_bytes()),
+            ],
         )?
         else {
             return Ok(false);
@@ -88,7 +91,13 @@ where
             .ok()?;
         if let Some(raw) = self
             .database
-            .primary_key_get_raw(&deletion_current_table, &[Value::Uuid(row_uuid.0)])
+            .primary_key_get_raw(
+                &deletion_current_table,
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
             .ok()?
         {
             let record = raw.record();
@@ -113,7 +122,13 @@ where
             .ok()?;
         let raw = self
             .database
-            .primary_key_get_raw(&content_current_table, &[Value::Uuid(row_uuid.0)])
+            .primary_key_get_raw(
+                &content_current_table,
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
             .ok()??;
         let record = raw.record();
         let tx_time = TxTime(
@@ -135,7 +150,7 @@ where
         tx_id: TxId,
         versions: &[VersionRow],
     ) -> Result<Vec<VersionRow>, Error> {
-        let mut updates = BTreeMap::<(String, RowUuid, VersionLayer), VersionRow>::new();
+        let mut updates = BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), VersionRow>::new();
         let version_made_at = self
             .transaction_made_at(tx_id)?
             .ok_or(Error::MissingTransaction(tx_id))?;
@@ -145,9 +160,10 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "global version schema alias must exist",
                 ))?;
-            let previous_current = self.query_global_layer_winner_in_schema(
+            let previous_current = self.query_global_layer_winner_in_schema_and_branch(
                 authored_schema,
                 &version.table,
+                version.branch_key(),
                 version.row_uuid(),
                 version.layer(),
             )?;
@@ -170,6 +186,7 @@ where
                 updates.insert(
                     (
                         version.table().to_owned(),
+                        version.branch_key().clone(),
                         version.row_uuid(),
                         version.layer(),
                     ),

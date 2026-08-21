@@ -151,7 +151,6 @@ export default function Page(): React.JSX.Element {
     (): DbConfig => ({
       appId,
       env: "dev" as const,
-      userBranch: "main" as const,
       serverUrl,
       jwtToken: betterAuth.jwt ?? undefined,
       secret,

@@ -107,7 +107,6 @@ export function createBrokerFingerprint(config: DbConfig, primaryDbName: string)
     persistentDriverNamespace:
       driver.type === "persistent" ? (driver.dbName ?? primaryDbName) : primaryDbName,
     env: config.env ?? "dev",
-    userBranch: config.userBranch ?? "main",
     serverUrl: config.serverUrl ?? null,
     schemaHash: null,
     authClass: resolveBrokerAuthClass(config),

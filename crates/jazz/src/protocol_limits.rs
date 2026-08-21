@@ -52,9 +52,6 @@ pub const MAX_COMMIT_UNIT_VERSIONS: usize = 4096;
 /// Source: matches the first known-state repair tier; large reconnect holes
 /// should batch exact requests instead of creating unbounded semantic vectors.
 pub const MAX_FETCH_ROW_VERSIONS: usize = 1024;
-/// Maximum branch-routing records requested in one repair message.
-pub const MAX_FETCH_BRANCH_METADATA: usize = 1024;
-
 /// Maximum exact row-version refs in one slow known-state declaration.
 ///
 /// Source: same count tier as `FetchRowVersions`; larger local holdings should
@@ -86,18 +83,6 @@ pub fn validate_fetch_row_versions(requests: &[RowVersionRef]) -> Result<(), Str
             "row-version repair request count {} exceeds max {}",
             requests.len(),
             MAX_FETCH_ROW_VERSIONS
-        ));
-    }
-    Ok(())
-}
-
-/// Validate bounded branch-routing metadata repair requests.
-pub fn validate_fetch_branch_metadata(branches: &[crate::ids::BranchId]) -> Result<(), String> {
-    if branches.len() > MAX_FETCH_BRANCH_METADATA {
-        return Err(format!(
-            "branch metadata repair request count {} exceeds max {}",
-            branches.len(),
-            MAX_FETCH_BRANCH_METADATA
         ));
     }
     Ok(())

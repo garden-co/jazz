@@ -38,7 +38,11 @@ where
                 .current_row_from_aggregate_result_payload(query, member, payload)
                 .map(Some);
         }
-        if (query.flat_join.is_some() || member.as_row().is_none())
+        if (member
+            .as_real_row()
+            .is_some_and(|row| row.row_digest.is_some())
+            || query.flat_join.is_some()
+            || member.as_row().is_none())
             && let Some(payload) = result_payloads.get(member)
         {
             let Some(table_name) = member.table_name() else {
@@ -92,7 +96,10 @@ where
         let content_tx = self.current_record_sort_key(table_name, row_uuid, content_record)?;
         if let Some(deletion_raw) = self.database.primary_key_get_raw(
             &physical_register_global_current_table_name(table_id),
-            &[Value::Uuid(row_uuid.0)],
+            &[
+                Value::Bytes(BranchKey::default().canonical_bytes()),
+                Value::Uuid(row_uuid.0),
+            ],
         )? {
             let deletion_record = deletion_raw.record();
             let deletion_tx =
@@ -119,18 +126,35 @@ where
         let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Err(Error::MissingTransaction(tx_id));
         };
-        let Some(version) = self.query_version_by_alias(
+        let version = self.query_version_by_alias(
             table_name,
             row_uuid,
             VersionLayer::Content,
             tx_id.time,
             tx_node_alias,
-        )?
-        else {
-            if self.query_transaction(tx_id)?.is_some() {
-                return Ok(None);
+        )?;
+        let version = if let Some(version) = version {
+            version
+        } else {
+            // A row result member names the immutable witness by
+            // `(table,row,tx)` while branch identity travels on the bundled
+            // version itself. The legacy point lookup above addresses the
+            // shared/default branch; fall back to the transaction bundle so a
+            // branch-keyed witness can be materialized after selected delivery.
+            let versions = self.query_versions_for_tx(tx_id)?;
+            if let Some(version) = self.maintained_witness_for_result_member(
+                &versions,
+                self.catalogue.current_schema_version_id,
+                table_name,
+                row_uuid,
+            )? {
+                version.clone()
+            } else {
+                if self.query_transaction(tx_id)?.is_some() {
+                    return Ok(None);
+                }
+                return Err(Error::MissingTransaction(tx_id));
             }
-            return Err(Error::MissingTransaction(tx_id));
         };
         let mut row = self.current_row_from_materialized_version(&table, &version)?;
         if let Some(columns) = projection {
@@ -230,38 +254,20 @@ where
         row_uuid: RowUuid,
         version_ref: &RowVersionRefEntry,
     ) -> Result<VersionRow, Error> {
-        let version = if let Some(branch_id) = Self::relation_edge_branch_id(version_ref)? {
-            let stored_tx = self
-                .query_transaction(version_ref.tx)?
-                .ok_or(Error::MissingTransaction(version_ref.tx))?;
-            if stored_tx.tx.target_lineage != BranchLineage::Branch(branch_id) {
-                return Err(Error::InvalidStoredValue(
-                    "relation edge branch discriminator does not match its transaction",
-                ));
-            }
-            self.query_versions_for_tx(version_ref.tx)?
-                .into_iter()
-                .find(|version| {
-                    version.table() == canonical_table
-                        && version.row_uuid() == row_uuid
-                        && version.layer() == VersionLayer::Content
-                })
-                .ok_or(Error::MissingTransaction(version_ref.tx))?
-        } else {
-            let tx_node_alias = self
-                .node_aliases
-                .get(&version_ref.tx.node)
-                .copied()
-                .ok_or(Error::MissingTransaction(version_ref.tx))?;
-            self.query_version_by_alias(
+        let tx_node_alias = self
+            .node_aliases
+            .get(&version_ref.tx.node)
+            .copied()
+            .ok_or(Error::MissingTransaction(version_ref.tx))?;
+        let version = self
+            .query_version_by_alias(
                 canonical_table,
                 row_uuid,
                 VersionLayer::Content,
                 version_ref.tx.time,
                 tx_node_alias,
             )?
-            .ok_or(Error::MissingTransaction(version_ref.tx))?
-        };
+            .ok_or(Error::MissingTransaction(version_ref.tx))?;
         Ok(version)
     }
 
@@ -272,16 +278,6 @@ where
         version_ref: &RowVersionRefEntry,
         read_schema: SchemaVersionId,
     ) -> Result<VersionRow, Error> {
-        if let Some(branch_id) = Self::relation_edge_branch_id(version_ref)? {
-            let stored_tx = self
-                .query_transaction(version_ref.tx)?
-                .ok_or(Error::MissingTransaction(version_ref.tx))?;
-            if stored_tx.tx.target_lineage != BranchLineage::Branch(branch_id) {
-                return Err(Error::InvalidStoredValue(
-                    "relation edge branch discriminator does not match its transaction",
-                ));
-            }
-        }
         let candidates = self
             .query_versions_for_tx(version_ref.tx)?
             .into_iter()
@@ -314,16 +310,17 @@ where
         }
     }
 
+    #[allow(dead_code)]
     fn relation_edge_branch_id(
         version_ref: &RowVersionRefEntry,
-    ) -> Result<Option<BranchId>, Error> {
+    ) -> Result<Option<SchemaFamilyId>, Error> {
         let Some(bytes) = &version_ref.branch_or_prefix else {
             return Ok(None);
         };
         let branch: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
             Error::InvalidStoredValue("relation edge branch discriminator must be a UUID")
         })?;
-        Ok(Some(BranchId::from_bytes(branch)))
+        Ok(Some(SchemaFamilyId::from_bytes(branch)))
     }
 
     pub(super) fn materialize_historical_query_rows(
@@ -798,7 +795,7 @@ where
         )
     }
 
-    fn current_row_from_result_payload(
+    pub(super) fn current_row_from_result_payload(
         &mut self,
         table: &TableSchema,
         payload: &ResultMemberPayloadEntry,
@@ -868,6 +865,12 @@ where
             rows: root_rows,
             edges: Vec::new(),
         };
+        // Aggregate result records intentionally have no application row
+        // identity and cannot own relation edges. They are already fully
+        // materialized by the root terminal.
+        if shape.query().aggregate.is_some() {
+            return Ok(snapshot);
+        }
         let mut row_keys = snapshot
             .rows
             .iter()
@@ -1057,7 +1060,7 @@ where
 
     pub(super) fn materialize_relation_edge_target_row(
         &mut self,
-        read_view: &ReadViewSpec,
+        _read_view: &ReadViewSpec,
         read_schema: SchemaVersionId,
         target_table_name: &str,
         target_row: RowUuid,
@@ -1080,42 +1083,9 @@ where
                     "relation edge target version does not project into the read schema",
                 ));
         }
-        let ReadViewSourceSpec::Branch { branch } = read_view.source else {
-            return Err(Error::InvalidStoredValue(
-                "relation edge target version is missing",
-            ));
-        };
-        let target_node = self
-            .node_aliases
-            .iter()
-            .find_map(|(node, alias)| (*alias == target_tx_node).then_some(*node))
-            .ok_or(Error::InvalidStoredValue(
-                "relation edge target node alias is missing",
-            ))?;
-        let tx_id = TxId::new(target_tx_time, target_node);
-        let stored_tx = self
-            .query_transaction(tx_id)?
-            .ok_or(Error::MissingTransaction(tx_id))?;
-        if stored_tx.tx.target_lineage != BranchLineage::Branch(BranchId(branch)) {
-            return Err(Error::InvalidStoredValue(
-                "relation edge target branch does not match its transaction",
-            ));
-        }
-        let version = self
-            .query_versions_for_tx(tx_id)?
-            .into_iter()
-            .find(|version| {
-                version.table() == target_table_name
-                    && version.row_uuid() == target_row
-                    && version.layer() == VersionLayer::Content
-            })
-            .ok_or(Error::InvalidStoredValue(
-                "relation edge target branch version is missing",
-            ))?;
-        self.projected_current_row_from_materialized_version_in_read_schema(read_schema, &version)?
-            .ok_or(Error::InvalidStoredValue(
-                "relation edge target version does not project into the read schema",
-            ))
+        Err(Error::InvalidStoredValue(
+            "relation edge target version is missing",
+        ))
     }
 
     pub(super) fn relation_snapshot_no_order_windows(

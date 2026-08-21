@@ -8,11 +8,11 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use jazz_storage_rocksdb::RocksDbStorage;
 
 use super::*;
-use crate::ids::{AuthorId, BranchId, NodeUuid};
+use crate::ids::{AuthorId, NodeUuid};
 use crate::protocol::{
     AuthorizationScopePurpose, AuthorizationScopeReceipt, AuthorizationSupportScopeKey,
-    BindingViewKey, BranchMetadata, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration,
-    LensOp, PermissionAdviceAction, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    BindingViewKey, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp,
+    PermissionAdviceAction, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
     ResultMemberEntry, RowVersionRef, ShapeAst, SnapshotRef, Subscribe, SubscribeRejectReason,
     SubscribeServerFailureCode, TableLens,
 };

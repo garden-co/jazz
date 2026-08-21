@@ -15,7 +15,6 @@ import { app } from "./schema.js";
 // Mirrors tests/browser/test-constants.ts (inlined: that module reads process.env).
 const APP_ID = "00000000-0000-0000-0000-000000000099";
 const TEST_ENV = "dev";
-const TEST_BRANCH = "main";
 const TEST_PORT = 19879;
 const SERVER_URL = `http://127.0.0.1:${TEST_PORT}`;
 
@@ -57,7 +56,6 @@ function HostApp() {
   const config: DbConfig = {
     appId: APP_ID,
     env: TEST_ENV,
-    userBranch: TEST_BRANCH,
     serverUrl: SERVER_URL,
     secret,
     // devMode must be on at subscribe time for subscription traces to register.

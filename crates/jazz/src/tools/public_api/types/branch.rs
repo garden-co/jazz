@@ -102,32 +102,19 @@ impl SchemaHash {
                     hasher.update(&[0]);
                 }
             }
-        }
 
-        hash_branch_policy(
-            &mut hasher,
-            b"branch_read_policy",
-            schema.branch_read_policy(),
-        );
-        hash_branch_policy(
-            &mut hasher,
-            b"branch_write_policy",
-            schema.branch_write_policy(),
-        );
+            if !table_schema.branch_by.is_empty() {
+                hasher.update(b"branch_by\0");
+                hasher.update(
+                    &serde_json::to_vec(&table_schema.branch_by)
+                        .expect("branch bindings always serialize"),
+                );
+                hasher.update(&[0]);
+            }
+        }
 
         Self(*hasher.finalize().as_bytes())
     }
-}
-
-fn hash_branch_policy(hasher: &mut blake3::Hasher, field: &[u8], policy: Option<&PolicyExpr>) {
-    let Some(policy) = policy else {
-        return;
-    };
-    hasher.update(field);
-    hasher.update(&[0]);
-    let encoded = serde_json::to_vec(policy).expect("PolicyExpr always serializes");
-    hasher.update(&encoded);
-    hasher.update(&[0]);
 }
 
 impl std::fmt::Display for SchemaHash {

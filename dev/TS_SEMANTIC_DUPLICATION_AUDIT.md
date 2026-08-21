@@ -23,11 +23,13 @@ Not counted as semantic duplication: postcard/native-row byte packing, ArrayBuff
 
 ## Part 2: shortest path to native in-transaction reads
 
-### What `ReadViewSpec` can express today
+### Public and internal read-source models
 
-`ReadOpts` already carries `read_view: ReadViewSpec` as the semantic read view for one-shot reads (`crates/jazz/src/db.rs:5898`-`5911`). `ReadViewSpec` has a source, optional schema lens, and local overlays (`crates/jazz/src/protocol.rs:1253`-`1274`). Sources are `Current`, `Branch`, `MergedBranches`, and `Snapshot` (`crates/jazz/src/protocol.rs:1344`-`1376`). Overlays include `DirectBatch`, `AcceptedTransaction`, and `OpenTransaction` (`crates/jazz/src/protocol.rs:1402`-`1422`).
+`ReadOpts` carries `read_view: ReadViewSpec` as the semantic source for one-shot reads. The public
+spec contains only the persisted source (`Current`, `BranchView`, or `Snapshot`); it does not expose
+schema selection or pending-write overlays.
 
-Execution support is narrower. `ensure_supported_read_view` accepts `Current`, and accepts a branch read view only when schema is default and overlays are empty (`crates/jazz/src/db.rs:6103`-`6113`). The query lowering path has the same shape: `query_read_set_for_read_view` supports current and branch-without-overlays, and rejects merged branches, snapshots, and branch overlays/lenses (`crates/jazz/src/node/query_eval.rs:2093`-`2142`). The wasm boundary rejects any provided `read_view`/`readView` before parsing options (`crates/jazz-wasm/src/lib.rs:2226`-`2268`).
+Execution currently accepts current and branch-view sources. Snapshot execution remains narrower.
 
 There is already lower-level engine machinery for open transaction overlays. `tx_query_read_set` builds a read set with `SourceExpr::WithOverlays` and `OverlayRef::OpenTransaction(tx_id)` (`crates/jazz/src/node/query_eval.rs:1997`-`2048`). Source resolution accepts exactly an open transaction overlay on visible current/snapshot input (`crates/jazz/src/node/query_eval.rs:616`-`642`) and materializes it with `node.tx_current_rows(tx_id, table)` (`crates/jazz/src/node/query_eval.rs:850`-`864`). `NodeState::tx_query` evaluates a validated query inside an open exclusive transaction, records the predicate read, then applies core ordering/window finishing (`crates/jazz/src/node/query_eval.rs:7727`-`7760`).
 
@@ -43,9 +45,11 @@ So the shortest path is not just "pass `read_view` through wasm." Core has an op
 
 1. **Plumb an open transaction handle through wasm/napi.** Add a wasm transaction mode that opens a real core exclusive transaction immediately, keeps its `OpenBatchId`/public tx id accessible, and applies each transactional write into core staging as it occurs. File-level targets: `crates/jazz-wasm/src/lib.rs` transaction constructors and `WasmTx` methods; matching napi/native runtime types if a node path exists outside wasm.
 
-2. **Expose one-shot reads against that open transaction.** Add a wasm read method such as `allInTransaction(prepared, txHandle, opts)` or support a `read_view` with `OpenTransaction` only when it resolves to an open local tx. Internally call the existing core `tx_query` path for exclusive transactions rather than `Db::all` plus TS overlay. File-level targets: wasm read methods at `crates/jazz-wasm/src/lib.rs:1111`-`1124` and core `NodeState::tx_query` at `crates/jazz/src/node/query_eval.rs:7727`-`7760`.
+2. **Expose one-shot reads against that open transaction.** Add a wasm read method such as `allInTransaction(prepared, txHandle, opts)`. Internally call the existing core `tx_query` path for exclusive transactions rather than `Db::all` plus a TS overlay.
 
-3. **Make `ReadViewSpec` execution match the public model.** Longer-lived API shape should allow a read view like current source plus `overlays: [OpenTransaction { tx }]`. The query read-set resolver already has an overlay abstraction (`crates/jazz/src/node/query_eval.rs:616`-`642`), but public read-view execution currently rejects overlays (`crates/jazz/src/db.rs:6103`-`6113`; `crates/jazz/src/node/query_eval.rs:2115`-`2142`; wasm rejects at `crates/jazz-wasm/src/lib.rs:2258`-`2268`). This is mostly plumbing once open txs are stored in core rather than wasm-local vectors.
+3. **Keep transaction overlays internal.** The query read-set resolver already has an overlay
+   abstraction. Resolve the transaction handle into that internal source expression rather than adding
+   pending-write concepts to the public branch/snapshot read-source API.
 
 4. **Delete the TS overlay evaluator.** After the native read path exists, `NativeRuntimeAdapter.query()` can pass the transaction/read-view handle to core and remove `applyTransactionReadOverlay`, `rowMatchesQuery`, `sortRowsForQuery`, and the query-only TS comparison functions. The black-box contract should be "same query, same transaction, same rows/order as core."
 

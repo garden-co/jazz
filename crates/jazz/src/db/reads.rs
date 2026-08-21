@@ -270,43 +270,36 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let tier = effective_read_tier(&opts);
         let mut node = self.node.node.borrow_mut();
-        match &opts.read_view.source {
-            ReadViewSourceSpec::Current => {}
-            ReadViewSourceSpec::Branch { branch } if !opts.include_deleted => {
-                return match authorization_mode {
-                    QueryAuthorizationMode::TrustedServing => node
-                        .query_rows_on_branch_for_link(
-                            crate::ids::BranchId(*branch),
-                            &prepared.shape,
-                            &prepared.binding,
-                            author,
-                        )
-                        .map_err(Into::into),
-                    QueryAuthorizationMode::ClientLocal if tier < DurabilityTier::Edge => node
-                        .query_rows_on_branch_for_client(
-                            crate::ids::BranchId(*branch),
-                            &prepared.shape,
-                            &prepared.binding,
-                            author,
-                        )
-                        .map_err(Into::into),
-                    QueryAuthorizationMode::ClientLocal => node
-                        .query_rows_for_client_read_view(
-                            &prepared.shape,
-                            &prepared.binding,
-                            self.node
-                                .upstream_register_shape_options(
-                                    tier,
-                                    opts.read_view.clone(),
-                                    opts.propagation == Propagation::Full,
-                                )
-                                .tier,
-                            &opts.read_view,
-                        )
-                        .map_err(Into::into),
-                };
+        if !matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
+            ensure_supported_read_view(&opts)?;
+            if opts.include_deleted {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "branch views do not support include_deleted yet",
+                ));
             }
-            _ => ensure_default_read_view(&opts)?,
+            let snapshot = match authorization_mode {
+                QueryAuthorizationMode::TrustedServing => node
+                    .query_relation_snapshot_for_serving_in_read_view(
+                        &prepared.shape,
+                        &prepared.binding,
+                        tier,
+                        author,
+                        &opts.read_view,
+                    ),
+                QueryAuthorizationMode::ClientLocal => node.query_relation_snapshot_for_client(
+                    &prepared.shape,
+                    &prepared.binding,
+                    tier,
+                    author,
+                    &opts.read_view,
+                ),
+            }?;
+            return Ok(snapshot
+                .rows
+                .into_iter()
+                .take(snapshot.root_count)
+                .collect());
         }
         match (opts.include_deleted, authorization_mode) {
             (true, mode) => node.query_rows_including_deleted_in_authorization_mode(

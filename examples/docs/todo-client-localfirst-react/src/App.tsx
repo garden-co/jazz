@@ -16,7 +16,6 @@ function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   return {
     appId: readEnvAppId() ?? "todo-react-example",
     env: "dev",
-    userBranch: "main",
     ...overrides,
   };
 }

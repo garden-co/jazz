@@ -624,6 +624,53 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
   });
 
+  it("routes exact and head-over-base mutation targets to branch-aware bindings", () => {
+    const calls: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertWithIdEncodedInBranch: (...args: unknown[]) => {
+              calls.push(["insert", ...args]);
+              return fakeWrite();
+            },
+            updateEncodedInBranchView: (...args: unknown[]) => {
+              calls.push(["update", ...args]);
+              return fakeWrite();
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const head = { values: { workspace: [14, 14] } };
+    const base = { Current: { values: { workspace: [14, 2] } } };
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "branch" } },
+      JSON.stringify({ branch_view: { head } }),
+      "00000000-0000-0000-0000-000000000001",
+    );
+    runtime.update(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      { title: { type: "Text", value: "updated" } },
+      JSON.stringify({ branch_view: { head, base } }),
+    );
+
+    expect(calls[0]?.[0]).toBe("insert");
+    expect(calls[0]?.at(-1)).toEqual(head);
+    expect(calls[1]?.[0]).toBe("update");
+    expect(calls[1]?.slice(-2)).toEqual([head, base]);
+  });
+
   it("runs scheduled core ticks before post-wait edge reads", async () => {
     let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
     let ticked = false;
@@ -2149,7 +2196,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(attachedSubjects).toEqual(["client", "client"]);
   });
 
-  it("passes supported read tiers through and fails fast for unsupported read options", async () => {
+  it("passes supported read tiers and branch views through", async () => {
     const runtime = emptyNativeRuntime();
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual(
@@ -2173,7 +2220,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "local",
         JSON.stringify({ read_view: { source: "branch" } }),
       ),
-    ).rejects.toThrow("read_view");
+    ).resolves.toEqual([]);
     await expect(
       runtime.query(
         JSON.stringify({ table: "todos" }),
@@ -2181,7 +2228,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "local",
         JSON.stringify({ readView: { source: "branch" } }),
       ),
-    ).rejects.toThrow("read_view");
+    ).resolves.toEqual([]);
   });
 
   it("passes include_deleted query intent through native read options", async () => {
@@ -2618,7 +2665,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
   });
 
-  it("rejects non-default read_view subscription options", () => {
+  it("passes non-default read_view subscription options through", () => {
     const runtime = emptyNativeRuntime();
 
     expect(() =>
@@ -2628,7 +2675,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "edge",
         JSON.stringify({ read_view: { source: "branch" } }),
       ),
-    ).toThrow("read_view");
+    ).not.toThrow();
     expect(() =>
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
@@ -2636,7 +2683,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "edge",
         JSON.stringify({ readView: { source: "branch" } }),
       ),
-    ).toThrow("read_view");
+    ).not.toThrow();
   });
 
   it("accepts well-formed subscription sessions and rejects malformed sessions", () => {

@@ -19,9 +19,7 @@ use crate::db::{
 use crate::groove::records::{BorrowedRecord, OwnedRecord, Value as CoreValue};
 use crate::groove::storage::{BoxedStorage as CoreStorage, MemoryStorage as CoreMemoryStorage};
 use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-use crate::protocol::{
-    ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
-};
+use crate::protocol::ReadViewSpec as CoreReadViewSpec;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
 use crate::tools::OpenTransactionId;
 use crate::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
@@ -2303,9 +2301,11 @@ impl PublicQueryDecoder {
     fn core_subscription_row_to_public(
         &self,
         db: &Backend,
-        _query: &Query,
+        query: &Query,
         row: &CoreSubscriptionOutputRow,
     ) -> Result<Row> {
+        #[cfg(not(feature = "testing"))]
+        let _ = query;
         let (_, encoded) = row.row.encoded_record();
         let provenance = db
             .row_provenance(&row.row)
@@ -2323,7 +2323,7 @@ impl PublicQueryDecoder {
         #[cfg(feature = "testing")]
         let public = {
             let fields = self
-                .core_rows_to_query_results(db, _query, vec![row.row.clone()])
+                .core_rows_to_query_results(db, query, vec![row.row.clone()])
                 .ok()
                 .and_then(|mut results| results.pop())
                 .map(|result| result.fields)
@@ -2856,9 +2856,7 @@ impl JazzClient {
             self.db
                 .query_transaction_rows(query.clone(), opts, transaction_id, table, author)?
         } else {
-            let wait_for_coverage =
-                matches!(opts.read_view.source, CoreReadViewSourceSpec::Branch { .. })
-                    || matches!(opts.tier, CoreDurabilityTier::Global);
+            let wait_for_coverage = matches!(opts.tier, CoreDurabilityTier::Global);
             self.db
                 .query_rows(query.clone(), opts, table, wait_for_coverage)
                 .await?

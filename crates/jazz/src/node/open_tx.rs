@@ -387,6 +387,7 @@ where
             table: table.to_owned(),
             row_uuid,
             schema_version: write_schema_version,
+            branch: BranchSelector::default(),
             cells: PendingCells::Replace(cells),
             deletion,
             parents: parent.into_iter().collect(),
@@ -448,6 +449,34 @@ where
         now_ms: Option<u64>,
         refresh_parents_at_commit: bool,
     ) -> Result<(), Error> {
+        self.tx_write_mergeable_in_schema_and_branch(
+            tx_id,
+            write_schema_version,
+            table,
+            row_uuid,
+            cells,
+            deletion,
+            parents,
+            now_ms,
+            refresh_parents_at_commit,
+            BranchSelector::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tx_write_mergeable_in_schema_and_branch(
+        &mut self,
+        tx_id: OpenTransactionId,
+        write_schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        cells: BTreeMap<String, Value>,
+        deletion: Option<DeletionEvent>,
+        parents: Vec<TxId>,
+        now_ms: Option<u64>,
+        refresh_parents_at_commit: bool,
+        branch: BranchSelector,
+    ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -465,6 +494,7 @@ where
                 table: table.to_owned(),
                 row_uuid,
                 schema_version: write_schema_version,
+                branch,
                 cells: PendingCells::Replace(cells),
                 deletion,
                 parents,
@@ -502,6 +532,28 @@ where
         patch: BTreeMap<String, Value>,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.tx_patch_mergeable_in_schema_and_branch(
+            tx_id,
+            write_schema_version,
+            table,
+            row_uuid,
+            patch,
+            now_ms,
+            BranchSelector::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tx_patch_mergeable_in_schema_and_branch(
+        &mut self,
+        tx_id: OpenTransactionId,
+        write_schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        patch: BTreeMap<String, Value>,
+        now_ms: Option<u64>,
+        branch: BranchSelector,
+    ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -511,8 +563,16 @@ where
             ));
         }
         let mut staged_cells = self
-            .tx_read_in_schema(tx_id, write_schema_version, table, row_uuid)?
+            .visible_current_cells_in_branch(table, &branch, row_uuid)?
             .unwrap_or_default();
+        for write in self.open_tx(tx_id)?.writes.iter().filter(|write| {
+            write.table == table && write.row_uuid == row_uuid && write.branch == branch
+        }) {
+            match &write.cells {
+                PendingCells::Replace(cells) => staged_cells = cells.clone(),
+                PendingCells::Patch(patch) => staged_cells.extend(patch.clone()),
+            }
+        }
         staged_cells.extend(patch.clone());
         validate_mergeable_write_shape(staged_cells.is_empty(), false)?;
         let table_schema = self.table_in_schema(table, write_schema_version)?;
@@ -523,6 +583,7 @@ where
                 table: table.to_owned(),
                 row_uuid,
                 schema_version: write_schema_version,
+                branch,
                 cells: PendingCells::Patch(patch),
                 deletion: None,
                 parents: Vec::new(),
@@ -545,6 +606,7 @@ where
             if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
                 write.table == pending.table
                     && write.row_uuid == pending.row_uuid
+                    && write.branch == pending.branch
                     && write.deletion.is_none()
             }) {
                 let cells = match (&existing.cells, &pending.cells) {
@@ -570,6 +632,7 @@ where
         open_tx.writes.retain(|existing| {
             existing.table != pending.table
                 || existing.row_uuid != pending.row_uuid
+                || existing.branch != pending.branch
                 || match pending.deletion {
                     Some(DeletionEvent::Deleted) => false,
                     Some(DeletionEvent::Restored) => existing.deletion.is_none(),
@@ -665,8 +728,7 @@ where
             absent_read_set: Some(open_tx.absent_reads),
             predicate_read_set: Some(open_tx.predicate_reads),
             user_metadata_json: open_tx.user_metadata_json,
-            target_lineage: crate::tx::BranchLineage::Root,
-            branch_merge: None,
+            contribution_merge: None,
         };
         self.ingest_transaction_and_versions(
             tx.clone(),
@@ -768,9 +830,17 @@ where
             }
             let parents = if write.refresh_parents_at_commit {
                 if write.deletion.is_none() {
-                    self.local_content_winner_tx_id(&write.table, write.row_uuid)?
+                    self.local_content_winner_tx_id_in_branch(
+                        &write.table,
+                        &write.branch,
+                        write.row_uuid,
+                    )?
                 } else {
-                    self.local_deletion_winner_tx_id(&write.table, write.row_uuid)?
+                    self.local_deletion_winner_tx_id_in_branch(
+                        &write.table,
+                        &write.branch,
+                        write.row_uuid,
+                    )?
                 }
                 .into_iter()
                 .collect()
@@ -780,18 +850,13 @@ where
             let (cells, authored_columns) = match write.cells {
                 PendingCells::Replace(cells) => (cells, None),
                 PendingCells::Patch(patch) => {
-                    let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
                     let mut cells = BTreeMap::new();
-                    if let Some(existing) = self.local_current_row_in_schema(
+                    if let Some(existing) = self.visible_current_cells_in_branch(
                         &write.table,
+                        &write.branch,
                         write.row_uuid,
-                        write.schema_version,
                     )? {
-                        for column in &table_schema.columns {
-                            if let Some(value) = existing.cell(&table_schema, &column.name) {
-                                cells.insert(column.name.clone(), value);
-                            }
-                        }
+                        cells.extend(existing);
                     }
                     let authored_columns = patch.keys().cloned().collect();
                     cells.extend(patch);
@@ -803,6 +868,7 @@ where
                 write.row_uuid,
                 write.now_ms.unwrap_or_else(&mut next_now_ms),
             )
+            .branch(write.branch)
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
@@ -826,8 +892,7 @@ where
             "mergeable transaction requires at least one write",
         ))?;
         let made_at = self.mint_tx_time(first.1.now_ms);
-        let committed =
-            self.commit_mergeable_many_at_with_schema_versions(commits, made_at, None)?;
+        let committed = self.commit_mergeable_many_at_with_schema_versions(commits, made_at)?;
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
         Ok(committed)
@@ -1148,6 +1213,8 @@ pub(super) struct PendingWrite {
     pub(super) row_uuid: RowUuid,
     /// Schema version used to encode staged cells.
     pub(super) schema_version: SchemaVersionId,
+    /// Exact branch coordinate of this row branch-local row.
+    pub(super) branch: BranchSelector,
     /// Replacement cells or an update patch resolved when the transaction commits.
     cells: PendingCells,
     /// Deletion-register event, if any.

@@ -47,7 +47,6 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
         driver: config.driver,
         serverUrl: config.serverUrl,
         env: config.env,
-        userBranch: config.userBranch,
         jwtToken: config.jwtToken,
         cookieSession: config.cookieSession,
         adminSecret: config.adminSecret,

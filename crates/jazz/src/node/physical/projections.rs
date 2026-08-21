@@ -82,9 +82,10 @@ where
             logical_table,
             class,
         )?;
-        Ok(GraphBuilder::variant_source(
+        Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             physical_current_projection_target(alias, logical_table),
+            shared_branch_scan(None),
         ))
     }
 
@@ -102,9 +103,32 @@ where
             logical_table,
             class,
         )?;
-        Ok(GraphBuilder::variant_source(
+        Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             projection_target,
+            shared_branch_scan(None),
+        ))
+    }
+
+    pub(super) fn physical_current_branch_source_graph_with_projection_target(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        class: PhysicalCurrentClass,
+        projection_target: impl Into<String>,
+        branch_key: &BranchKey,
+    ) -> Result<GraphBuilder, Error> {
+        let binding = physical_current_binding(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            logical_table,
+            class,
+        )?;
+        Ok(GraphBuilder::variant_source_scan(
+            binding.storage_table,
+            projection_target,
+            branch_scan(branch_key, None),
         ))
     }
 
@@ -133,7 +157,7 @@ where
         Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             physical_current_projection_target(alias, logical_table),
-            scan,
+            shared_branch_scan(Some(scan)),
         ))
     }
 
@@ -155,7 +179,7 @@ where
         Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             projection_target,
-            scan,
+            shared_branch_scan(Some(scan)),
         ))
     }
 
@@ -216,29 +240,6 @@ where
         ))
     }
 
-    pub(super) fn physical_branch_history_source_graph_with_projection_target(
-        &self,
-        schema_version: SchemaVersionId,
-        logical_table: &str,
-        branch_id: BranchId,
-        projection_target: impl Into<String>,
-    ) -> Result<GraphBuilder, Error> {
-        // Keep the same schema/table validation as the ordinary branch
-        // history source; only the query-local projection target differs.
-        let _ = physical_history_binding(
-            &self.catalogue.catalogue_schemas,
-            &self.catalogue.schema_version_aliases,
-            &self.catalogue.physical_mappings,
-            schema_version,
-            logical_table,
-        )?;
-        let table_id = self.physical_table_id_for_schema(schema_version, logical_table)?;
-        Ok(GraphBuilder::variant_source(
-            physical_branch_history_table_name(table_id, branch_id),
-            projection_target,
-        ))
-    }
-
     pub(super) fn register_physical_history_variant_projections(&mut self) -> Result<(), Error> {
         let targets = self
             .catalogue
@@ -278,21 +279,7 @@ where
                         })
                 })
                 .collect::<Vec<_>>();
-            let storage_tables =
-                std::iter::once(physical_history_table_name(target_mapping.table_id))
-                    .chain(
-                        self.branches
-                            .branch_partitions
-                            .iter()
-                            .filter(|(table_id, _)| *table_id == target_mapping.table_id)
-                            .map(|(_, branch_id)| {
-                                physical_branch_history_table_name(
-                                    target_mapping.table_id,
-                                    *branch_id,
-                                )
-                            }),
-                    )
-                    .collect::<Vec<_>>();
+            let storage_tables = [physical_history_table_name(target_mapping.table_id)];
             for storage_table in storage_tables {
                 let output = widened_projection_descriptor(
                     &logical_output,
@@ -596,138 +583,6 @@ where
                             tag,
                         )?;
                     }
-                }
-            }
-        }
-        Ok(projection_target)
-    }
-
-    /// Register a branch-history counterpart to the query-local current
-    /// compatibility target.  A branch overlay is joined with a frozen base
-    /// already materialized in the reader schema, so this boundary belongs
-    /// before the overlay/base union rather than after it.
-    pub(super) fn ensure_physical_branch_history_projection_for_enum_columns(
-        &mut self,
-        target_schema: SchemaVersionId,
-        target_table_name: &str,
-        branch_id: BranchId,
-        required_fields: &BTreeSet<String>,
-    ) -> Result<String, Error> {
-        let target_alias = self
-            .catalogue
-            .schema_version_aliases
-            .get(&target_schema)
-            .copied()
-            .ok_or(Error::InvalidStoredValue(
-                "physical branch history projection target schema alias missing",
-            ))?;
-        let target_table = self.table_in_schema(target_table_name, target_schema)?;
-        let target_mapping = self
-            .catalogue
-            .physical_mappings
-            .get(&target_schema)
-            .and_then(|mapping| mapping.tables.get(target_table_name))
-            .cloned()
-            .ok_or(Error::InvalidStoredValue(
-                "target branch-history enum physical mapping missing",
-            ))?;
-        let required_enum_columns = target_table
-            .columns
-            .iter()
-            .filter(|column| required_fields.contains(&column.name))
-            .filter_map(|column| {
-                let column_id = target_mapping.columns.get(&column.name).copied()?;
-                let has_enum_boundary =
-                    physical_mapping_has_enum_boundary(&target_mapping, column_id)
-                    || value_type_has_enum_boundary(&column.column_type);
-                has_enum_boundary.then_some(column_id)
-            })
-            .collect::<BTreeSet<_>>();
-        let target_has_any_enum_boundary = target_table.columns.iter().any(|column| {
-            target_mapping
-                .columns
-                .get(&column.name)
-                .is_some_and(|column_id| {
-                    physical_mapping_has_enum_boundary(&target_mapping, *column_id)
-                })
-                || value_type_has_enum_boundary(&column.column_type)
-        });
-        if required_enum_columns.is_empty() && !target_has_any_enum_boundary {
-            return Ok(physical_history_projection_target(
-                target_alias,
-                target_table_name,
-            ));
-        }
-        let projection_target = physical_history_projection_target_for_enum_columns(
-            target_alias,
-            target_table_name,
-            &required_enum_columns,
-        );
-        let storage_table = physical_branch_history_table_name(target_mapping.table_id, branch_id);
-        // This target is the semantic reader boundary.  It must use the
-        // authored descriptor, not the widened durable history descriptor,
-        // otherwise its enum registry cannot union with the frozen base.
-        self.database.define_variant_projection(
-            &storage_table,
-            &projection_target,
-            authored_history_projection_descriptor(&target_table),
-        )?;
-        let sources = self
-            .catalogue
-            .physical_mappings
-            .iter()
-            .flat_map(|(schema_version, mapping)| {
-                mapping
-                    .tables
-                    .iter()
-                    .filter(|(_, table)| table.table_id == target_mapping.table_id)
-                    .map(|(logical_table, table)| {
-                        (*schema_version, logical_table.clone(), table.clone())
-                    })
-            })
-            .collect::<Vec<_>>();
-        for (source_schema, source_table_name, source_mapping) in sources {
-            let source_alias = self
-                .catalogue
-                .schema_version_aliases
-                .get(&source_schema)
-                .copied()
-                .ok_or(Error::InvalidStoredValue(
-                    "physical branch-history projection source schema alias missing",
-                ))?;
-            let cases = if source_mapping.variant_cases.is_empty() {
-                vec![(groove_variant_tag(source_alias)?, None)]
-            } else {
-                source_mapping
-                    .variant_cases
-                    .iter()
-                    .map(|case| (case.tag, Some(&case.fields)))
-                    .collect()
-            };
-            for (tag, present) in cases {
-                let fields = self.physical_history_projection_case_for_enum_columns(
-                    source_schema,
-                    &source_table_name,
-                    &source_mapping,
-                    target_schema,
-                    target_table_name,
-                    present,
-                    Some(&required_enum_columns),
-                )?;
-                if let Some(fields) = fields {
-                    self.database
-                        .register_variant_projection_case_omitting_unrepresentable_enums(
-                            &storage_table,
-                            &projection_target,
-                            tag,
-                            fields,
-                        )?;
-                } else {
-                    self.database.register_variant_ignore_case(
-                        &storage_table,
-                        &projection_target,
-                        tag,
-                    )?;
                 }
             }
         }
@@ -1091,7 +946,6 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
-            &self.branches.branch_partitions,
         )? {
             let existing = match self.database.table_schema(&desired.name) {
                 Ok(existing) => Some(existing.clone()),
@@ -1183,6 +1037,7 @@ where
         )
     }
 
+    #[allow(dead_code)]
     fn physical_history_projection_case_for_enum_columns(
         &mut self,
         source_schema: SchemaVersionId,
@@ -1512,5 +1367,31 @@ where
                 }),
         );
         Ok(Some(fields))
+    }
+}
+
+fn shared_branch_scan(scan: Option<groove::ivm::StaticScanSpec>) -> groove::ivm::StaticScanSpec {
+    branch_scan(&BranchKey::default(), scan)
+}
+
+fn branch_scan(
+    branch_key: &BranchKey,
+    scan: Option<groove::ivm::StaticScanSpec>,
+) -> groove::ivm::StaticScanSpec {
+    use groove::ivm::{LiteralValue, StaticScanSpec};
+
+    let branch = LiteralValue::from(Value::Bytes(branch_key.canonical_bytes()));
+    let prepend = |mut values: Vec<LiteralValue>| {
+        values.insert(0, branch.clone());
+        values
+    };
+    match scan {
+        None => StaticScanSpec::Prefix(vec![branch]),
+        Some(StaticScanSpec::Point(values)) => StaticScanSpec::Point(prepend(values)),
+        Some(StaticScanSpec::Prefix(values)) => StaticScanSpec::Prefix(prepend(values)),
+        Some(StaticScanSpec::Range { start, end }) => StaticScanSpec::Range {
+            start: prepend(start),
+            end: prepend(end),
+        },
     }
 }

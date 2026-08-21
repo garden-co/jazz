@@ -183,6 +183,7 @@ function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][numb
     name,
     columns: table.columns.map(wasmColumnToAst),
     indexedColumns: table.indexed_columns ? [...table.indexed_columns] : undefined,
+    branchBy: table.branchBy ? [...table.branchBy] : undefined,
     policies: table.policies as TablePolicies | undefined,
   };
 }

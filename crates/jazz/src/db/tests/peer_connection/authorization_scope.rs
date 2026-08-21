@@ -577,16 +577,6 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
         RegisterShapeOptions {
             tier: DurabilityTier::Global,
             read_view: ReadViewSpec {
-                source: ReadViewSourceSpec::Branch {
-                    branch: uuid::Uuid::from_bytes([0x53; 16]),
-                },
-                ..ReadViewSpec::default()
-            },
-            ..RegisterShapeOptions::default()
-        },
-        RegisterShapeOptions {
-            tier: DurabilityTier::Global,
-            read_view: ReadViewSpec {
                 source: ReadViewSourceSpec::Snapshot {
                     snapshot: SnapshotRef {
                         owner: NodeUuid::from_bytes([0x54; 16]),
@@ -639,16 +629,6 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
         ..RegisterShapeOptions::default()
     };
     let variants = [
-        RegisterShapeOptions {
-            tier: DurabilityTier::Global,
-            read_view: ReadViewSpec {
-                source: ReadViewSourceSpec::Branch {
-                    branch: uuid::Uuid::from_bytes([0x62; 16]),
-                },
-                ..ReadViewSpec::default()
-            },
-            ..RegisterShapeOptions::default()
-        },
         historical,
         RegisterShapeOptions {
             tier: DurabilityTier::Local,

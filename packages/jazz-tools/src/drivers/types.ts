@@ -190,6 +190,8 @@ export interface TableSchema {
   columns: ColumnDescriptor[];
   indexed_columns?: string[];
   policies?: TablePolicies;
+  /** Ordinary immutable columns that form this table's branch key. */
+  branchBy?: string[];
 }
 
 export type Schema = Record<string, TableSchema>;

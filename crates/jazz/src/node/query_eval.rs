@@ -59,7 +59,7 @@ use crate::query::{
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
-use crate::schema::{ColumnSchema, RuntimeSchema, branch_metadata_table_schema};
+use crate::schema::{ColumnSchema, RuntimeSchema};
 use crate::tools::{ObjectId, OutputOccurrenceId};
 
 mod materialization;
@@ -220,18 +220,6 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    fn table_in_schema_or_branch_metadata(
-        &self,
-        table: &str,
-        schema_version: SchemaVersionId,
-    ) -> Result<TableSchema, Error> {
-        if table == "jazz_branches" {
-            Ok(branch_metadata_table_schema())
-        } else {
-            self.table_in_schema(table, schema_version)
-        }
-    }
-
     pub(super) fn resolve_time_travel_position(
         &mut self,
         time: TxTime,
@@ -516,6 +504,7 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
         authorization_mode: QueryAuthorizationMode,
+        read_view: &ReadViewSpec,
     ) -> Result<QueryProgram, Error> {
         let input_shape = self.normalized_include_deleted_row_set_shape(shape, binding)?;
         let input = RowSetProgramInput {
@@ -533,7 +522,7 @@ where
         };
         let request = QueryProgramRequest {
             authorization_mode,
-            reads: current_query_read_set(
+            reads: query_read_set_for_read_view(
                 &input.shape,
                 shape.schema_version(),
                 self.read_policy_schema_for_table_name(
@@ -542,8 +531,11 @@ where
                     &input.shape,
                 ),
                 tier,
+                read_view,
                 None,
-            ),
+                shape.query().aggregate.is_some(),
+                &self.catalogue.schema,
+            )?,
             policy: self.query_program_policy_context(identity),
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
@@ -601,117 +593,6 @@ where
             output: current_query_output_request(output, lowered_shape.query()),
         };
         self.compile_query_program_request(request)
-    }
-
-    fn compile_branch_query_program_in_authorization_mode(
-        &mut self,
-        branch_id: BranchId,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorId,
-        output: CurrentQueryProgramOutput,
-        authorization_mode: QueryAuthorizationMode,
-    ) -> Result<QueryProgram, Error> {
-        let read_schema = self
-            .catalogue
-            .catalogue_schemas
-            .get(&shape.schema_version())
-            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
-        let lowered_shape =
-            inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
-        let binding = lowered_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&lowered_shape, &binding)?;
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
-                &lowered_shape,
-                &binding,
-                query_binding_source_shape_for_parts_if_needed(
-                    lowered_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, lowered_shape.params()),
-                ),
-                BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, lowered_shape.params()),
-            ),
-            shape: input_shape,
-        };
-        let request = QueryProgramRequest {
-            authorization_mode,
-            reads: branch_query_read_set(
-                &input.shape,
-                lowered_shape.schema_version(),
-                DurabilityTier::Local,
-                branch_id,
-            ),
-            policy: self.query_program_policy_context(identity),
-            input,
-            output: current_query_output_request(output, lowered_shape.query()),
-        };
-        self.compile_query_program_request(request)
-    }
-
-    pub(super) fn query_rows_on_branch_query_engine(
-        &mut self,
-        branch_id: BranchId,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_rows_on_branch_query_engine_in_authorization_mode(
-            branch_id,
-            shape,
-            binding,
-            identity,
-            QueryAuthorizationMode::TrustedServing,
-        )
-    }
-
-    pub(super) fn query_rows_on_branch_query_engine_for_client(
-        &mut self,
-        branch_id: BranchId,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_rows_on_branch_query_engine_in_authorization_mode(
-            branch_id,
-            shape,
-            binding,
-            identity,
-            QueryAuthorizationMode::ClientLocal,
-        )
-    }
-
-    fn query_rows_on_branch_query_engine_in_authorization_mode(
-        &mut self,
-        branch_id: BranchId,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorId,
-        authorization_mode: QueryAuthorizationMode,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let table = self.query_output_table(shape.query(), shape.schema_version())?;
-        let program = self.compile_branch_query_program_in_authorization_mode(
-            branch_id,
-            shape,
-            binding,
-            identity,
-            CurrentQueryProgramOutput::AppRows,
-            authorization_mode,
-        )?;
-        let deltas = self
-            .database
-            .query_graph(lowered_materialization_app_rows_graph(&program)?)
-            .map_err(Error::Groove)?;
-        let mut rows = if shape.query().aggregate.is_some() {
-            self.materialize_aggregate_query_rows(shape.query(), &table, deltas)
-        } else {
-            self.materialize_inline_current_query_rows(&table, deltas)
-        }?;
-        self.finish_engine_query_rows_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
-        if shape.query().array_subqueries.is_empty() {
-            self.apply_projection_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
-        }
-        Ok(rows)
     }
 
     fn current_query_program_request(
@@ -850,6 +731,11 @@ where
             )?,
             shape: input_shape,
         };
+        let query_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         Ok(QueryProgramRequest {
             authorization_mode,
             reads: query_read_set_for_read_view(
@@ -860,6 +746,7 @@ where
                 read_view,
                 settled_binding_view,
                 shape.query().aggregate.is_some(),
+                &query_schema.schema,
             )?,
             policy,
             input,
@@ -932,6 +819,7 @@ where
         )
     }
 
+    #[allow(dead_code)]
     pub(crate) fn query_rows_for_client_read_view(
         &mut self,
         shape: &ValidatedQuery,
@@ -1017,6 +905,7 @@ where
                 tier,
                 identity,
                 authorization_mode,
+                &ReadViewSpec::default(),
             )?;
             let query = shape.query();
             self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
@@ -1595,8 +1484,43 @@ where
                     })
             }));
         }
+        let result_payloads = matches!(rows, SettledBindingRows::ResultMembers)
+            .then(|| {
+                self.query
+                    .settled_program_facts
+                    .get(&binding_view)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|fact| {
+                        let ProgramFactEntry::ResultPayload(payload) = fact else {
+                            return None;
+                        };
+                        // Flat joins also retain tuple payloads, but their
+                        // canonical source versions still drive source
+                        // reconstruction (including schema-lens projection).
+                        // Only branch-qualified memberships represent a
+                        // public row that can differ from its supplier
+                        // version and therefore replace source materialization.
+                        payload.member.as_real_row()?.branch_or_prefix.as_ref()?;
+                        payload
+                            .member
+                            .as_row()
+                            .map(|(table, row, tx)| ((table.to_string(), row, tx), payload.clone()))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
         let mut rows = Vec::with_capacity(row_entries.len());
         for ((canonical_table, row_uuid, tx_id), relation_version) in row_entries {
+            if let Some(payload) = result_payloads.get(&(canonical_table.clone(), row_uuid, tx_id))
+            {
+                let output_table = self.table_in_schema(table, read_schema)?.clone();
+                let row = self.current_row_from_result_payload(&output_table, payload)?;
+                if row.table() == table {
+                    rows.push(row);
+                }
+                continue;
+            }
             let version = if let Some(version_ref) = relation_version {
                 self.resolve_relation_edge_version(&canonical_table, row_uuid, &version_ref)?
             } else {
@@ -1605,14 +1529,26 @@ where
                     .get(&tx_id.node)
                     .copied()
                     .ok_or(Error::MissingTransaction(tx_id))?;
-                self.query_version_by_alias(
+                let shared = self.query_version_by_alias(
                     &canonical_table,
                     row_uuid,
                     VersionLayer::Content,
                     tx_id.time,
                     tx_node_alias,
-                )?
-                .ok_or(Error::MissingTransaction(tx_id))?
+                )?;
+                if let Some(version) = shared {
+                    version
+                } else {
+                    let versions = self.query_versions_for_tx(tx_id)?;
+                    self.maintained_witness_for_result_member(
+                        &versions,
+                        read_schema,
+                        &canonical_table,
+                        row_uuid,
+                    )?
+                    .cloned()
+                    .ok_or(Error::MissingTransaction(tx_id))?
+                }
             };
             if let Some(row) = self.projected_current_row_from_materialized_version_in_read_schema(
                 read_schema,
@@ -1723,13 +1659,14 @@ where
         Ok(rows)
     }
 
-    fn query_rows_including_deleted_with_query_engine(
+    pub(super) fn query_rows_including_deleted_with_query_engine(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
         authorization_mode: QueryAuthorizationMode,
+        read_view: &ReadViewSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_schema = self
             .catalogue
@@ -1752,6 +1689,7 @@ where
             tier,
             identity,
             authorization_mode,
+            read_view,
         )?;
         let deltas = self
             .database
@@ -1764,6 +1702,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn current_rows_at(
         &mut self,
         table: &str,
@@ -1785,14 +1724,25 @@ where
             Ok(self.database.index_scan_raw(
                 "jazz_global_changes",
                 "by_table_global_time",
-                &[Value::U64(table_id.0)],
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                ],
             )?)
         } else {
             Ok(self.database.index_scan_range_raw(
                 "jazz_global_changes",
                 "by_table_global_time",
-                &[Value::U64(table_id.0), Value::U64(0)],
-                &[Value::U64(table_id.0), Value::U64(position.0 + 1)],
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::U64(0),
+                ],
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::U64(position.0 + 1),
+                ],
             )?)
         }
     }
@@ -1858,6 +1808,80 @@ where
         }
         sort_current_rows(&mut rows);
         Ok(rows)
+    }
+    #[allow(dead_code)]
+    fn historical_content_witness_at(
+        &mut self,
+        table: &str,
+        read_schema: SchemaVersionId,
+        row_uuid: RowUuid,
+        position: GlobalTime,
+    ) -> Result<Option<TxId>, Error> {
+        let mut content = None::<(TxTime, NodeAlias)>;
+        let mut latest_event = None::<(TxTime, NodeAlias, Option<DeletionEvent>)>;
+        let table_id = self.physical_table_id_for_schema(read_schema, table)?;
+        let raw_records = if position.0 == u64::MAX {
+            self.database.index_scan_raw(
+                "jazz_global_changes",
+                "by_table_global_time",
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                ],
+            )?
+        } else {
+            self.database.index_scan_range_raw(
+                "jazz_global_changes",
+                "by_table_global_time",
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::U64(0),
+                ],
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::U64(position.0 + 1),
+                ],
+            )?
+        };
+        for raw in raw_records {
+            let record = raw.record();
+            if RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?) != row_uuid {
+                continue;
+            }
+            let time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
+            let alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            if record.get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
+                == version_layer_string(VersionLayer::Content).as_bytes()
+                && content.is_none_or(|current| (time, alias) > current)
+            {
+                content = Some((time, alias));
+            }
+            let deletion = record
+                .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
+                .map(|value| deletion_event_from_value(Value::EnumTag(value)))
+                .transpose()?;
+            if latest_event.is_none_or(|(current_time, current_alias, _)| {
+                (time, alias) > (current_time, current_alias)
+            }) {
+                latest_event = Some((time, alias, deletion));
+            }
+        }
+        if latest_event.is_some_and(|(_, _, deletion)| deletion == Some(DeletionEvent::Deleted)) {
+            return Ok(None);
+        }
+        let Some((time, alias)) = content else {
+            return Ok(None);
+        };
+        let node = self
+            .node_aliases
+            .iter()
+            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+            .ok_or(Error::InvalidStoredValue(
+                "historical content witness node alias is missing",
+            ))?;
+        Ok(Some(TxId::new(time, node)))
     }
     fn query_relation_snapshot_in_authorization_mode(
         &mut self,
@@ -2198,60 +2222,6 @@ where
             read_view,
             QueryAuthorizationMode::ClientLocal,
         )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn query_relation_branch_discriminators_for_test(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-        read_view: &ReadViewSpec,
-    ) -> Result<Vec<(Option<uuid::Uuid>, Option<uuid::Uuid>)>, Error> {
-        let program = self.compile_current_query_program_for_read_view_in_authorization_mode(
-            shape,
-            binding,
-            tier,
-            identity,
-            CurrentQueryProgramOutput::RelationSnapshot,
-            read_view,
-            QueryAuthorizationMode::ClientLocal,
-        )?;
-        let snapshots = self
-            .database
-            .query_graphs(lowered_program_sinks(&program))
-            .map_err(Error::Groove)?;
-        let Some(edges) = snapshots.get("maintained.relation_edges") else {
-            return Ok(Vec::new());
-        };
-        let decode =
-            |record: &BorrowedRecord<'_>, field: &str| -> Result<Option<uuid::Uuid>, Error> {
-                let index = required_field_idx(&edges.descriptor, field)?;
-                match record.get_idx(index)? {
-                    Value::Uuid(value) => Ok(Some(value)),
-                    Value::Nullable(Some(value)) => match *value {
-                        Value::Uuid(value) => Ok(Some(value)),
-                        _ => Err(Error::InvalidStoredValue(
-                            "branch discriminator must be UUID",
-                        )),
-                    },
-                    Value::Nullable(None) => Ok(None),
-                    _ => Err(Error::InvalidStoredValue(
-                        "branch discriminator must be UUID",
-                    )),
-                }
-            };
-        edges
-            .iter()
-            .filter(|(_, weight)| *weight > 0)
-            .map(|(record, _)| {
-                Ok((
-                    decode(&record, "source_branch_or_prefix")?,
-                    decode(&record, "target_branch_or_prefix")?,
-                ))
-            })
-            .collect()
     }
 
     pub(crate) fn subscription_snapshot_in_authorization_mode(

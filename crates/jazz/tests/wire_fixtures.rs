@@ -5,9 +5,9 @@ use groove::records::{RecordDescriptor, Value, ValueType};
 use jazz::binding_codec::{
     RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
 };
-use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use jazz::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::protocol::{
-    BranchMetadata, CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
+    CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
     PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
     SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
@@ -173,24 +173,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
 
     vec![
         (
-            "branch_metadata_root_open",
-            "BranchMetadata",
-            SyncMessage::BranchMetadata(BranchMetadata {
-                branch_id: BranchId::from_bytes([0x42; 16]),
-                created_by: AuthorId::from_bytes([0x43; 16]),
-                parent: None,
-                base: None,
-                open: true,
-            }),
-        ),
-        (
-            "fetch_branch_metadata",
-            "FetchBranchMetadata",
-            SyncMessage::FetchBranchMetadata {
-                branches: vec![BranchId::from_bytes([0x42; 16])],
-            },
-        ),
-        (
             "session_claims_role_editor",
             "SessionClaims",
             SyncMessage::SessionClaims {
@@ -346,31 +328,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: Some("{\"fixture\":\"wire\"}".to_owned()),
-                    target_lineage: jazz::tx::BranchLineage::Root,
-                    branch_merge: None,
-                },
-                versions: Vec::new(),
-            },
-        ),
-        (
-            "commit_unit_branch_target_empty",
-            "CommitUnit",
-            SyncMessage::CommitUnit {
-                tx: Transaction {
-                    tx_id: TxId::new(TxTime(43), node),
-                    kind: TxKind::Mergeable,
-                    n_total_writes: 0,
-                    made_by: author,
-                    permission_subject: None,
-                    base_snapshot: None,
-                    row_read_set: None,
-                    absent_read_set: None,
-                    predicate_read_set: None,
-                    user_metadata_json: None,
-                    target_lineage: jazz::tx::BranchLineage::Branch(BranchId::from_bytes(
-                        [0x42; 16],
-                    )),
-                    branch_merge: None,
+                    contribution_merge: None,
                 },
                 versions: Vec::new(),
             },
@@ -499,8 +457,7 @@ fn mixed_version_carriers(
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    target_lineage: jazz::tx::BranchLineage::Root,
-                    branch_merge: None,
+                    contribution_merge: None,
                 },
                 versions: vec![
                     VersionRecord::from_cells(
@@ -517,6 +474,7 @@ fn mixed_version_carriers(
                     )
                     .expect("fixture row encodes"),
                 ],
+                scope: jazz::protocol::VersionBundleScope::CompleteTransaction,
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(100 + index)),
                 durability: DurabilityTier::Global,
@@ -559,7 +517,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v9",
+        fixture_set: "jazz-wire-message-frames-v11",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -583,7 +541,7 @@ fn wire_message_frame_fixtures_are_current() {
         actual, expected,
         "wire fixtures changed; review compatibility and run \
          `JAZZ_UPDATE_WIRE_FIXTURES=1 cargo test -p jazz --test wire_fixtures \
-         wire_message_frame_fixtures_are_current -- --ignored --exact` to accept"
+         wire_message_frame_fixtures_are_current -- --exact` to accept"
     );
 }
 

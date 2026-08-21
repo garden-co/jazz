@@ -62,7 +62,7 @@ function subjectFromConfig(config: DbConfig): string | null {
 }
 
 function persistentIdentitySeed(config: DbConfig, subject: string | null): string {
-  return `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:${subject ?? "anonymous"}`;
+  return `${config.appId}:${config.env ?? "dev"}:${subject ?? "anonymous"}`;
 }
 
 function initialSyncFlushEvery(config: DbConfig): number {
@@ -133,7 +133,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         driver: config.driver,
         serverUrl: config.serverUrl,
         env: config.env,
-        userBranch: config.userBranch,
         jwtToken: config.jwtToken,
         cookieSession: config.cookieSession,
         backendSecret: config.backendSecret,

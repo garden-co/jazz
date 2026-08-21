@@ -44,6 +44,117 @@ where
         self.commit_mergeable_many_at(commits, made_at)
     }
 
+    /// Commit the already-calculated output of the high-level contribution
+    /// merge helper as one ordinary mergeable transaction.
+    pub(crate) fn commit_calculated_merge_many(
+        &mut self,
+        commits: Vec<MergeableCommit>,
+        provenance: ContributionMergeProvenance,
+    ) -> Result<TxId, Error> {
+        self.require_catalogue_ready()?;
+        provenance.validate().map_err(Error::InvalidMergeableCommit)?;
+        if commits.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "calculated merge requires at least one write",
+            ));
+        }
+        for commit in &commits {
+            commit.validate()?;
+            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
+                return Err(Error::InvalidMergeableCommit(
+                    "calculated merge permission subjects must match",
+                ));
+            }
+        }
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let mut emitted = BTreeSet::new();
+        for commit in &commits {
+            let table = self.table_in_schema(&commit.table, schema_version)?;
+            let schema = &self
+                .catalogue
+                .catalogue_schemas
+                .get(&schema_version)
+                .ok_or(Error::InvalidStoredValue("current write schema missing"))?
+                .schema;
+            let (branch_key, _) = schema
+                .project_branch_selector(&table, &commit.branch)
+                .map_err(Error::InvalidBranchKey)?;
+            let layer = if commit.deletion.is_some() {
+                MergeAspect::Deletion
+            } else {
+                MergeAspect::Content
+            };
+            if layer == MergeAspect::Deletion {
+                emitted.insert(ContributionCoordinate {
+                    branch_key,
+                    table: commit.table.clone(),
+                    row_uuid: commit.row_uuid,
+                    layer,
+                    component: ContributionComponent::Register,
+                });
+            } else {
+                let authored = commit
+                    .authored_columns
+                    .clone()
+                    .unwrap_or_else(|| commit.cells.keys().cloned().collect());
+                for column in authored {
+                    let components = match table.merge_strategy(&column) {
+                        MergeStrategy::Lww => vec![ContributionComponent::Column(column)],
+                        MergeStrategy::Counter => {
+                            vec![ContributionComponent::Operation(column.into_bytes())]
+                        }
+                        MergeStrategy::GSet => match commit.cells.get(&column) {
+                            Some(Value::Array(elements)) => elements
+                                .iter()
+                                .map(|element| {
+                                    postcard::to_allocvec(&(column.as_str(), element)).map(
+                                        ContributionComponent::Operation,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|_| {
+                                    Error::InvalidMergeableCommit(
+                                        "g-set contribution operation must encode",
+                                    )
+                                })?,
+                            _ => {
+                                return Err(Error::InvalidMergeableCommit(
+                                    "g-set calculated merge value must be an array",
+                                ));
+                            }
+                        },
+                    };
+                    emitted.extend(components.into_iter().map(|component| ContributionCoordinate {
+                        branch_key: branch_key.clone(),
+                        table: commit.table.clone(),
+                        row_uuid: commit.row_uuid,
+                        layer,
+                        component,
+                    }));
+                }
+            }
+        }
+        if provenance
+            .substitutions
+            .iter()
+            .any(|substitution| !emitted.contains(&substitution.target))
+        {
+            return Err(Error::InvalidMergeableCommit(
+                "contribution substitution target was not emitted",
+            ));
+        }
+        self.merge_commit_parent_times(&commits)?;
+        let made_at = self.mint_tx_time(commits[0].now_ms);
+        self.commit_mergeable_many_at_with_schema_versions_and_provenance(
+            commits
+                .into_iter()
+                .map(|commit| (schema_version, commit))
+                .collect(),
+            made_at,
+            Some(provenance),
+        )
+    }
+
     /// Commit local mergeable writes under one admitted authored schema.
     pub(crate) fn commit_mergeable_many_in_schema(
         &mut self,
@@ -79,9 +190,8 @@ where
             commits
                 .into_iter()
                 .map(|commit| (schema_version, commit))
-                .collect(),
+            .collect(),
             made_at,
-            None,
         )
     }
 
@@ -109,29 +219,30 @@ where
         commits: Vec<MergeableCommit>,
         made_at: TxTime,
     ) -> Result<TxId, Error> {
-        self.commit_mergeable_many_at_with_branch_merge(commits, made_at, None)
-    }
-
-    pub(super) fn commit_mergeable_many_at_with_branch_merge(
-        &mut self,
-        commits: Vec<MergeableCommit>,
-        made_at: TxTime,
-        branch_merge: Option<BranchMergeProvenance>,
-    ) -> Result<TxId, Error> {
         self.require_catalogue_ready()?;
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let commits = commits
             .into_iter()
             .map(|commit| (write_schema_version, commit))
             .collect();
-        self.commit_mergeable_many_at_with_schema_versions(commits, made_at, branch_merge)
+        self.commit_mergeable_many_at_with_schema_versions(commits, made_at)
     }
 
     pub(super) fn commit_mergeable_many_at_with_schema_versions(
         &mut self,
         commits: Vec<(SchemaVersionId, MergeableCommit)>,
         made_at: TxTime,
-        branch_merge: Option<BranchMergeProvenance>,
+    ) -> Result<TxId, Error> {
+        self.commit_mergeable_many_at_with_schema_versions_and_provenance(
+            commits, made_at, None,
+        )
+    }
+
+    pub(super) fn commit_mergeable_many_at_with_schema_versions_and_provenance(
+        &mut self,
+        commits: Vec<(SchemaVersionId, MergeableCommit)>,
+        made_at: TxTime,
+        contribution_merge: Option<ContributionMergeProvenance>,
     ) -> Result<TxId, Error> {
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
@@ -150,8 +261,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            target_lineage: crate::tx::BranchLineage::Root,
-            branch_merge,
+            contribution_merge,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let mut batch = self.database.open_batch();
@@ -170,25 +280,62 @@ where
         for (write_schema_version, commit) in commits {
             let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
+            let schema = &self
+                .catalogue
+                .catalogue_schemas
+                .get(&write_schema_version)
+                .ok_or(Error::InvalidStoredValue("commit schema missing"))?
+                .schema;
+            let (branch_key, branch_cells) = schema
+                .project_branch_selector(&table_schema, &commit.branch)
+                .map_err(Error::InvalidBranchKey)?;
+            let table_id = self.physical_table_id_for_schema(
+                write_schema_version,
+                &table_schema.name,
+            )?;
+            for parent in &commit.parents {
+                let parent_versions = self.query_versions_for_tx(*parent)?;
+                let same_row = parent_versions.iter().filter(|version| {
+                    version.row_uuid() == commit.row_uuid
+                        && self.physical_table_id_for_version(version).ok() == Some(table_id)
+                });
+                if same_row.clone().next().is_some()
+                    && !same_row.into_iter().any(|version| version.branch_key() == &branch_key)
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "version parent belongs to a different branch-local row",
+                    ));
+                }
+            }
             let layer = VersionLayer::for_commit(&commit);
             let previous_current =
-                match self.query_local_layer_winner(&table_schema.name, commit.row_uuid, layer)? {
+                match self.query_local_layer_winner_in_branch(
+                    &table_schema.name,
+                    &branch_key,
+                    commit.row_uuid,
+                    layer,
+                )? {
                     Some(previous) => Some(previous),
-                    None => {
-                        self.query_global_layer_winner(&table_schema.name, commit.row_uuid, layer)?
-                    }
+                    None => self.query_global_layer_winner_in_branch(
+                        &table_schema.name,
+                        &branch_key,
+                        commit.row_uuid,
+                        layer,
+                    )?,
                 };
             let creator_source = if let Some(previous) = previous_current.as_ref() {
                 Some(previous.clone())
             } else if layer == VersionLayer::Deletion {
-                match self.query_local_layer_winner(
+                match self.query_local_layer_winner_in_branch(
                     &table_schema.name,
+                    &branch_key,
                     commit.row_uuid,
                     VersionLayer::Content,
                 )? {
                     Some(previous) => Some(previous),
-                    None => self.query_global_layer_winner(
+                    None => self.query_global_layer_winner_in_branch(
                         &table_schema.name,
+                        &branch_key,
                         commit.row_uuid,
                         VersionLayer::Content,
                     )?,
@@ -206,7 +353,17 @@ where
             } else {
                 commit.parents
             };
-            let cells = commit.cells;
+            let mut cells = commit.cells;
+            for (column, value) in branch_cells {
+                if let Some(authored) = cells.get(&column)
+                    && authored != &value
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "branch column does not match exact branch key",
+                    ));
+                }
+                cells.insert(column, value);
+            }
             let authored_columns = Some(
                 commit
                     .authored_columns
@@ -217,6 +374,7 @@ where
                 &table_schema,
                 VersionRowParts {
                     table: commit.table,
+                    branch_key,
                     row_uuid: commit.row_uuid,
                     tx_node_alias,
                     schema_version_alias,
@@ -248,7 +406,7 @@ where
             let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             batch.insert_raw(
                 history_table.as_ref(),
-                self.version_storage_primary_key(&stored, BranchLineage::Root)?,
+                self.version_storage_primary_key(&stored)?,
                 groove_record,
             );
             self.update_merge_heads_for_content_version(&mut batch, &stored)?;
@@ -330,6 +488,117 @@ where
             }))
     }
 
+    /// Read one exact branch-local row for mutation preparation.
+    pub fn visible_current_cells_in_branch(
+        &mut self,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        let schema = &self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue("current write schema missing"))?
+            .schema;
+        let (branch_key, _) = schema
+            .project_branch_selector(&table_schema, branch)
+            .map_err(Error::InvalidBranchKey)?;
+        let deletion = match self.query_local_layer_winner_in_branch(
+            table,
+            &branch_key,
+            row_uuid,
+            VersionLayer::Deletion,
+        )? {
+            Some(version) => Some(version),
+            None => self.query_global_layer_winner_in_branch(
+                table,
+                &branch_key,
+                row_uuid,
+                VersionLayer::Deletion,
+            )?,
+        };
+        if deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
+            return Ok(None);
+        }
+        let content = match self.query_local_layer_winner_in_branch(
+            table,
+            &branch_key,
+            row_uuid,
+            VersionLayer::Content,
+        )? {
+            Some(version) => Some(version),
+            None => self.query_global_layer_winner_in_branch(
+                table,
+                &branch_key,
+                row_uuid,
+                VersionLayer::Content,
+            )?,
+        };
+        let Some(content) = content
+        else {
+            return Ok(None);
+        };
+        self.materialized_cells_for_version(&table_schema, &content)
+            .map(Some)
+    }
+
+    /// Return the exact local content parent for a branch-local row.
+    pub fn local_content_winner_tx_id_in_branch(
+        &mut self,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        self.local_layer_winner_tx_id_in_branch_selector(
+            table,
+            branch,
+            row_uuid,
+            VersionLayer::Content,
+        )
+    }
+
+    /// Return the exact local deletion parent for a branch-local row.
+    pub fn local_deletion_winner_tx_id_in_branch(
+        &mut self,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        self.local_layer_winner_tx_id_in_branch_selector(
+            table,
+            branch,
+            row_uuid,
+            VersionLayer::Deletion,
+        )
+    }
+
+    fn local_layer_winner_tx_id_in_branch_selector(
+        &mut self,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<TxId>, Error> {
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        let schema = &self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue("current write schema missing"))?
+            .schema;
+        let (branch_key, _) = schema
+            .project_branch_selector(&table_schema, branch)
+            .map_err(Error::InvalidBranchKey)?;
+        self.query_local_layer_winner_in_branch(table, &branch_key, row_uuid, layer)?
+            .as_ref()
+            .map(|version| self.version_tx_id(version))
+            .transpose()
+    }
+
     /// Return current rows at the requested durability tier.
     pub fn current_rows(
         &mut self,
@@ -408,6 +677,10 @@ where
                 .map(|raw| {
                     let record = raw.record();
                     Ok((
+                        BranchKey::from_canonical_bytes(
+                            record.get_bytes(GlobalCurrentRowRecord::FIELD_BRANCH_KEY_IDX)?,
+                        )
+                        .map_err(|_| Error::InvalidStoredValue("invalid ahead-current branch key"))?,
                         SchemaVersionAlias(
                             record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?,
                         ),
@@ -417,13 +690,14 @@ where
                     ))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            for (alias, row_uuid, tx_time, tx_node_alias) in content_rows {
+            for (branch_key, alias, row_uuid, tx_time, tx_node_alias) in content_rows {
                 #[cfg(feature = "testing")]
                 if let Some(receipt) = &mut receipt {
                     receipt.ahead_current_entries += 1;
                 }
                 self.insert_ahead_current_key(
                     self.logical_table_for_physical_alias(table_id, alias)?,
+                    branch_key,
                     VersionLayer::Content,
                     row_uuid,
                     tx_time,
@@ -437,6 +711,12 @@ where
                 .map(|raw| {
                     let record = raw.record();
                     Ok((
+                        BranchKey::from_canonical_bytes(
+                            record.get_bytes(
+                                RegisterGlobalCurrentRowRecord::FIELD_BRANCH_KEY_IDX,
+                            )?,
+                        )
+                        .map_err(|_| Error::InvalidStoredValue("invalid ahead-current branch key"))?,
                         SchemaVersionAlias(
                             record.get_u64(
                                 RegisterGlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX,
@@ -452,13 +732,14 @@ where
                     ))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            for (alias, row_uuid, tx_time, tx_node_alias) in deletion_rows {
+            for (branch_key, alias, row_uuid, tx_time, tx_node_alias) in deletion_rows {
                 #[cfg(feature = "testing")]
                 if let Some(receipt) = &mut receipt {
                     receipt.ahead_current_entries += 1;
                 }
                 self.insert_ahead_current_key(
                     self.logical_table_for_physical_alias(table_id, alias)?,
+                    branch_key,
                     VersionLayer::Deletion,
                     row_uuid,
                     tx_time,
@@ -472,13 +753,14 @@ where
     fn insert_ahead_current_key(
         &mut self,
         table: String,
+        branch_key: BranchKey,
         layer: VersionLayer,
         row_uuid: RowUuid,
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) {
         self.ahead_current_keys
-            .insert((table.clone(), layer, row_uuid, tx_time, tx_node_alias));
+            .insert((table.clone(), branch_key, layer, row_uuid, tx_time, tx_node_alias));
         self.ahead_current_rows.insert((table.clone(), row_uuid));
         self.ahead_current_latest
             .entry((table, layer, row_uuid))
@@ -493,6 +775,7 @@ where
     fn remove_ahead_current_key(
         &mut self,
         table: &str,
+        branch_key: &BranchKey,
         layer: VersionLayer,
         row_uuid: RowUuid,
         tx_time: TxTime,
@@ -501,6 +784,7 @@ where
         let table_key = table.to_owned();
         self.ahead_current_keys.remove(&(
             table_key.clone(),
+            branch_key.clone(),
             layer,
             row_uuid,
             tx_time,
@@ -508,18 +792,15 @@ where
         ));
         let latest_key = (table_key.clone(), layer, row_uuid);
         if self.ahead_current_latest.get(&latest_key) == Some(&(tx_time, tx_node_alias)) {
-            let start = (table_key.clone(), layer, row_uuid, TxTime(0), NodeAlias(0));
-            let end = (
-                table_key.clone(),
-                layer,
-                row_uuid,
-                TxTime(u64::MAX),
-                NodeAlias(u64::MAX),
-            );
-            if let Some((_, _, _, next_time, next_alias)) = self
+            if let Some((_, _, _, _, next_time, next_alias)) = self
                 .ahead_current_keys
-                .range(start..=end)
-                .next_back()
+                .iter()
+                .filter(|(candidate_table, _, candidate_layer, candidate_row, _, _)| {
+                    candidate_table == &table_key
+                        && *candidate_layer == layer
+                        && *candidate_row == row_uuid
+                })
+                .max_by_key(|(_, _, _, _, time, alias)| (*time, *alias))
                 .cloned()
             {
                 self.ahead_current_latest

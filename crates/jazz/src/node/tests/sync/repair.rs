@@ -506,8 +506,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        target_lineage: crate::tx::BranchLineage::Root,
-        branch_merge: None,
+        contribution_merge: None,
     };
     let task_row = row(0x98);
     let old_inline_task = VersionRecord::from_cells(
@@ -533,6 +532,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: vec![VersionBundle {
+            scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: transaction,
             versions: vec![old_inline_task],
             fate: Fate::Accepted,

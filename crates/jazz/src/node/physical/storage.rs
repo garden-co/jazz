@@ -31,11 +31,9 @@ where
     pub(super) fn version_storage_primary_key(
         &self,
         version: &VersionRow,
-        lineage: BranchLineage,
     ) -> Result<PrimaryKeyValue, Error> {
         if version.layer() == VersionLayer::Deletion {
             return Ok(shared_deletion_history_primary_key(
-                lineage,
                 self.physical_table_id_for_version(version)?,
                 version,
             ));
@@ -46,14 +44,11 @@ where
     pub(super) fn version_storage_primary_key_values(
         &self,
         version: &VersionRow,
-        lineage: BranchLineage,
     ) -> Result<Vec<Value>, Error> {
         if version.layer() == VersionLayer::Deletion {
             let table_id = self.physical_table_id_for_version(version)?;
-            let (branch_kind, branch_id) = shared_deletion_lineage_values(lineage);
             return Ok(vec![
-                Value::U8(branch_kind),
-                Value::Uuid(branch_id),
+                Value::Bytes(version.branch_key().canonical_bytes()),
                 Value::U64(table_id.0),
                 Value::Uuid(version.row_uuid().0),
                 Value::U64(version.tx_time().0),
@@ -61,6 +56,7 @@ where
             ]);
         }
         Ok(vec![
+            Value::Bytes(version.branch_key().canonical_bytes()),
             Value::Uuid(version.row_uuid().0),
             Value::U64(version.tx_time().0),
             Value::U64(version.tx_node_alias().0),
@@ -244,7 +240,7 @@ where
                 "stored row schema version alias missing while preparing storage write",
             ))?;
         if version.layer() == VersionLayer::Deletion {
-            return self.shared_deletion_history_write_binding(version, BranchLineage::Root);
+            return self.shared_deletion_history_write_binding(version);
         }
 
         let binding = physical_history_binding(
@@ -441,7 +437,6 @@ where
     pub(super) fn shared_deletion_history_write_binding(
         &mut self,
         version: &VersionRow,
-        lineage: BranchLineage,
     ) -> Result<(groove::Intern<String>, groove::records::VariantRecord), Error> {
         debug_assert_eq!(version.layer(), VersionLayer::Deletion);
         let schema_version = self
@@ -450,13 +445,8 @@ where
                 "stored register schema version alias missing while preparing shared deletion write",
             ))?;
         let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
-        let (branch_kind, branch_id) = shared_deletion_lineage_values(lineage);
-        let mut values = vec![
-            Value::U8(branch_kind),
-            Value::Uuid(branch_id),
-            Value::U64(table_id.0),
-        ];
-        values.extend(version.record.to_values()?);
+        let mut values = version.record.to_values()?;
+        values.insert(1, Value::U64(table_id.0));
         let descriptor = self
             .database
             .table_schema(SHARED_DELETION_HISTORY_TABLE)?
@@ -494,29 +484,4 @@ where
         ))
     }
 
-    pub(super) fn branch_version_storage_write_binding(
-        &mut self,
-        version: &VersionRow,
-        branch_id: BranchId,
-    ) -> Result<(groove::Intern<String>, groove::records::VariantRecord), Error> {
-        if version.layer() == VersionLayer::Deletion {
-            return self
-                .shared_deletion_history_write_binding(version, BranchLineage::Branch(branch_id));
-        }
-        let schema_version = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "branch row schema version alias missing",
-            ))?;
-        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
-        let (_, record) = self.version_storage_write_binding(version)?;
-        Ok((
-            groove::Intern::new(physical_branch_version_storage_table_name(
-                table_id,
-                version.layer(),
-                branch_id,
-            )),
-            record,
-        ))
-    }
 }

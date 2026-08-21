@@ -194,7 +194,6 @@ async fn publish_schema(server: &JazzServer, schema: &jazz::tools::Schema) {
         server.server_state(),
         server.app_id(),
         "dev",
-        "main",
         std::slice::from_ref(schema),
         &[],
     )
@@ -673,7 +672,6 @@ async fn inherited_update_policy_allows_update_through_parent() {
                 server.server_state(),
                 server.app_id(),
                 "dev",
-                "main",
                 std::slice::from_ref(&schema),
                 &[],
             )
@@ -785,7 +783,6 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                 server.server_state(),
                 server.app_id(),
                 "dev",
-                "main",
                 std::slice::from_ref(&schema),
                 &[],
             )
@@ -882,7 +879,6 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                 server.server_state(),
                 server.app_id(),
                 "dev",
-                "main",
                 std::slice::from_ref(&schema),
                 &[],
             )

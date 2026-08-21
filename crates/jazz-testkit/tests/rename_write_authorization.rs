@@ -308,7 +308,6 @@ async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
                 server.server_state(),
                 server.app_id(),
                 "dev",
-                "main",
                 std::slice::from_ref(&v1),
                 &[],
             )
@@ -326,7 +325,6 @@ async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
                 server.server_state(),
                 server.app_id(),
                 "dev",
-                "main",
                 &[v1.clone(), v2.clone()],
                 &[client_rename_lens()],
             )

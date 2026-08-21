@@ -5,12 +5,13 @@
 //! [`crate::node::open_tx`], and [`crate::protocol`]. Merge and currency rules
 //! are grounded in `jazz/README.md`.
 
-use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid};
+use crate::ids::{AuthorId, NodeUuid, RowUuid};
+use crate::protocol::BranchKey;
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalTime, TxTime};
 use groove::records::{OwnedRecord, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Immutable transaction payload before upstream fate state are learned.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -39,67 +40,34 @@ pub struct Transaction {
     pub predicate_read_set: Option<Vec<PredicateRead>>,
     /// Optional application metadata attached at commit time.
     pub user_metadata_json: Option<String>,
-    /// Operational lineage where this transaction's row versions are stored.
-    pub target_lineage: BranchLineage,
-    /// Non-causal provenance for a locally calculated branch merge.
-    ///
-    /// Receivers persist and forward this metadata but do not use it for
-    /// transaction admission, parent prerequisites, fate, or row merging.
-    pub branch_merge: Option<BranchMergeProvenance>,
+    /// Non-causal field-grained provenance for a calculated branch-view merge.
+    #[serde(default)]
+    pub contribution_merge: Option<ContributionMergeProvenance>,
 }
 
-/// Canonical operational history lineage for transaction routing and local
-/// branch-merge contribution calculation.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum BranchLineage {
-    /// The ordinary non-branch database history.
-    Root,
-    /// A snapshot-base branch overlay.
-    Branch(BranchId),
-}
-
-impl From<BranchId> for BranchLineage {
-    fn from(branch_id: BranchId) -> Self {
-        Self::Branch(branch_id)
-    }
-}
-
-/// Non-causal source evidence attached to an ordinary calculated merge write.
+/// Non-causal evidence attached to an ordinary calculated merge transaction.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct BranchMergeProvenance {
-    /// Source lineage read by the local calculator.
-    pub source_lineage: BranchLineage,
-    /// Maximal source cut already represented by the calculator's target view.
-    pub from_frontier: Vec<TxId>,
-    /// Maximal source cut incorporated by this calculated transaction.
-    pub through_frontier: Vec<TxId>,
-    /// Field-grained derived-output substitutions validated by future local
-    /// calculators before they use this metadata for contribution subtraction.
+pub struct ContributionMergeProvenance {
+    /// Exact source branch coordinate read by the calculator.
+    pub source: BranchKey,
+    /// Exact target branch coordinate written by the calculator.
+    pub target: BranchKey,
+    /// Field-grained substitutions emitted by this transaction.
     pub substitutions: Vec<ContributionSubstitution>,
 }
 
-impl BranchMergeProvenance {
-    /// Construct canonical locally minted provenance. Source-frontier
-    /// maximality is established by the history calculator before this
-    /// structural canonicalization step.
+impl ContributionMergeProvenance {
+    /// Canonicalize and validate locally calculated provenance.
     pub fn canonical(
-        source_lineage: BranchLineage,
-        mut from_frontier: Vec<TxId>,
-        mut through_frontier: Vec<TxId>,
+        source: BranchKey,
+        target: BranchKey,
         mut substitutions: Vec<ContributionSubstitution>,
     ) -> Result<Self, &'static str> {
-        from_frontier.sort();
-        from_frontier.dedup();
-        through_frontier.sort();
-        through_frontier.dedup();
         for substitution in &mut substitutions {
             substitution.sources.sort();
             substitution.sources.dedup();
             if substitution.sources.is_empty() {
-                return Err("branch merge substitution requires a source dot");
+                return Err("contribution substitution requires a source dot");
             }
         }
         substitutions.sort_by(|left, right| left.target.cmp(&right.target));
@@ -107,65 +75,154 @@ impl BranchMergeProvenance {
             .windows(2)
             .any(|pair| pair[0].target == pair[1].target)
         {
-            return Err("branch merge substitution targets must be unique");
+            return Err("contribution substitution targets must be unique");
         }
         Ok(Self {
-            source_lineage,
-            from_frontier,
-            through_frontier,
+            source,
+            target,
             substitutions,
         })
     }
+
+    /// Reject non-canonical or incomplete provenance received from a helper.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let canonical = Self::canonical(
+            self.source.clone(),
+            self.target.clone(),
+            self.substitutions.clone(),
+        )?;
+        if &canonical != self {
+            return Err("contribution merge provenance must be canonical");
+        }
+        Ok(())
+    }
 }
 
-/// One derived target field and the exact source contribution dots it encodes.
+/// One derived target field and the exact native contribution dots it represents.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct ContributionSubstitution {
-    /// Field or operation emitted by the ordinary target transaction.
+    /// Field or register emitted by the target transaction.
     pub target: ContributionCoordinate,
-    /// Canonically sorted and de-duplicated source dots represented by `target`.
+    /// Canonically sorted source dots represented by the target field.
     pub sources: Vec<ContributionDot>,
 }
 
-/// Stable field-grained coordinate in a transaction lineage.
+/// Stable field-grained coordinate within one branch-keyed row branch-local row.
 #[derive(
     Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
 pub struct ContributionCoordinate {
-    /// Logical table in the calculator's exact schema view.
+    /// Exact branch key containing the field.
+    pub branch_key: BranchKey,
+    /// Logical table name.
     pub table: String,
-    /// Logical row identity.
+    /// Global object identity.
     pub row_uuid: RowUuid,
-    /// Independent content or deletion history layer.
+    /// Independent content or deletion layer.
     pub layer: MergeAspect,
-    /// Column, register, or strategy-operation identity within that layer.
+    /// Column, operation, or register identity.
     pub component: ContributionComponent,
 }
 
-/// Field or operation identity within one row history layer.
+/// Field or strategy-operation identity within one row layer.
 #[derive(
     Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
 pub enum ContributionComponent {
-    /// An ordinary named content column.
+    /// Ordinary named content column.
     Column(String),
-    /// A strategy-defined stable operation identifier.
+    /// Strategy-defined stable operation identity.
     Operation(Vec<u8>),
-    /// The deletion/restore register.
+    /// Deletion/restore register.
     Register,
 }
 
-/// Stable native contribution identity used by the local merge calculator.
+/// Stable identity of one native contribution.
 #[derive(
     Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
 pub struct ContributionDot {
-    /// Lineage in which the native contribution originated.
-    pub lineage: BranchLineage,
     /// Transaction that introduced the native contribution.
     pub tx_id: TxId,
-    /// Exact field or operation introduced by that transaction.
+    /// Exact branch-keyed field or register introduced by the transaction.
     pub coordinate: ContributionCoordinate,
+}
+
+/// Index of non-causal substitutions used to compare contribution histories.
+///
+/// The index deliberately contains no branch lifecycle or merge cursor. It is
+/// reconstructed from ordinary visible transaction metadata for each local
+/// calculation.
+#[derive(Clone, Debug, Default)]
+pub struct ContributionSubstitutionIndex {
+    substitutions: BTreeMap<ContributionDot, Vec<ContributionDot>>,
+}
+
+impl ContributionSubstitutionIndex {
+    /// Add the substitutions introduced by one calculated merge transaction.
+    pub fn observe(
+        &mut self,
+        tx_id: TxId,
+        provenance: &ContributionMergeProvenance,
+    ) -> Result<(), &'static str> {
+        for substitution in &provenance.substitutions {
+            let target = ContributionDot {
+                tx_id,
+                coordinate: substitution.target.clone(),
+            };
+            if self
+                .substitutions
+                .insert(target, substitution.sources.clone())
+                .is_some()
+            {
+                return Err("contribution substitution target observed twice");
+            }
+        }
+        Ok(())
+    }
+
+    /// Recursively replace derived dots with their native contribution roots.
+    pub fn expand(
+        &self,
+        dots: impl IntoIterator<Item = ContributionDot>,
+    ) -> Result<BTreeSet<ContributionDot>, &'static str> {
+        fn visit(
+            index: &ContributionSubstitutionIndex,
+            dot: ContributionDot,
+            visiting: &mut BTreeSet<ContributionDot>,
+            expanded: &mut BTreeSet<ContributionDot>,
+        ) -> Result<(), &'static str> {
+            let Some(sources) = index.substitutions.get(&dot) else {
+                expanded.insert(dot);
+                return Ok(());
+            };
+            if !visiting.insert(dot.clone()) {
+                return Err("contribution substitution cycle");
+            }
+            for source in sources {
+                visit(index, source.clone(), visiting, expanded)?;
+            }
+            visiting.remove(&dot);
+            Ok(())
+        }
+
+        let mut expanded = BTreeSet::new();
+        for dot in dots {
+            visit(self, dot, &mut BTreeSet::new(), &mut expanded)?;
+        }
+        Ok(expanded)
+    }
+
+    /// Return source roots not already represented by target history.
+    pub fn novel(
+        &self,
+        source: impl IntoIterator<Item = ContributionDot>,
+        target: impl IntoIterator<Item = ContributionDot>,
+    ) -> Result<BTreeSet<ContributionDot>, &'static str> {
+        let source = self.expand(source)?;
+        let target = self.expand(target)?;
+        Ok(source.difference(&target).cloned().collect())
+    }
 }
 
 /// Deletion register event carried by a row version.
@@ -289,10 +346,8 @@ pub struct TransactionRecord {
     pub durability: DurabilityTier,
     /// Optional application metadata attached at commit time.
     pub user_metadata_json: Option<String>,
-    /// Operational lineage where this transaction's row versions are stored.
-    pub target_lineage: BranchLineage,
-    /// Non-causal provenance for a locally calculated branch merge.
-    pub branch_merge: Option<BranchMergeProvenance>,
+    /// Non-causal field-grained provenance for a calculated branch-view merge.
+    pub contribution_merge: Option<ContributionMergeProvenance>,
 }
 
 /// Stored edit-history entry for a row.
@@ -363,18 +418,13 @@ impl HistoryEntry {
         self.transaction.durability
     }
 
-    /// Operational lineage containing this transaction's row versions.
-    pub fn target_lineage(&self) -> BranchLineage {
-        self.transaction.target_lineage
-    }
-
     /// Direct parent transaction ids for this version.
     pub fn parents(&self) -> Vec<TxId> {
-        let field = if self.is_register_record() {
-            RegisterRowRecord::FIELD_PARENTS_IDX
-        } else {
-            HistoryRowRecord::FIELD_PARENTS_IDX
-        };
+        let field = self
+            .version
+            .descriptor()
+            .field_index("parents")
+            .expect("history record has parents");
         tx_ids_from_value(
             self.version
                 .borrowed()
@@ -389,9 +439,14 @@ impl HistoryEntry {
         if self.is_register_record() {
             return None;
         }
+        let user_cells = self
+            .version
+            .descriptor()
+            .field_index("updated_at")
+            .map_or(HistoryRowRecord::USER_CELLS, |idx| idx + 1);
         self.version
             .borrowed()
-            .get_idx(HistoryRowRecord::USER_CELLS + column_position)
+            .get_idx(user_cells + column_position)
             .expect("valid history cell")
             .nullable_value()
             .expect("valid nullable history cell")
@@ -411,10 +466,15 @@ impl HistoryEntry {
         if !self.is_register_record() {
             return None;
         }
+        let field = self
+            .version
+            .descriptor()
+            .field_index("_deletion")
+            .expect("register history has deletion field");
         deletion_from_value(
             self.version
                 .borrowed()
-                .get_idx(RegisterRowRecord::FIELD__DELETION_IDX)
+                .get_idx(field)
                 .expect("valid history deletion"),
         )
         .expect("valid history deletion")
@@ -872,63 +932,90 @@ fn rejection_reason_from_rejected_record(
 }
 
 #[cfg(test)]
-mod branch_merge_provenance_tests {
+mod contribution_tests {
     use super::*;
 
-    fn tx(byte: u8) -> TxId {
-        TxId::new(TxTime(byte.into()), NodeUuid::from_bytes([byte; 16]))
+    fn tx(time: u64) -> TxId {
+        TxId::new(TxTime(time), NodeUuid::from_bytes([time as u8; 16]))
     }
 
-    fn coordinate(column: &str) -> ContributionCoordinate {
+    fn coordinate(branch: &str) -> ContributionCoordinate {
         ContributionCoordinate {
+            branch_key: BranchKey::default(),
             table: "todos".to_owned(),
-            row_uuid: RowUuid::from_bytes([1; 16]),
+            row_uuid: RowUuid::from_bytes([7; 16]),
             layer: MergeAspect::Content,
-            component: ContributionComponent::Column(column.to_owned()),
+            component: ContributionComponent::Column(format!("{branch}:title")),
         }
     }
 
-    #[test]
-    fn canonical_branch_merge_provenance_sorts_and_deduplicates() {
-        let target = coordinate("title");
-        let dot = ContributionDot {
-            lineage: BranchLineage::Root,
-            tx_id: tx(1),
-            coordinate: target.clone(),
-        };
-        let provenance = BranchMergeProvenance::canonical(
-            BranchLineage::Root,
-            vec![tx(2), tx(1), tx(2)],
-            vec![tx(2), tx(1)],
+    fn provenance(target: &str, source: ContributionDot) -> ContributionMergeProvenance {
+        ContributionMergeProvenance::canonical(
+            BranchKey::default(),
+            BranchKey::default(),
             vec![ContributionSubstitution {
-                target,
-                sources: vec![dot.clone(), dot],
+                target: coordinate(target),
+                sources: vec![source],
             }],
         )
-        .unwrap();
-        assert_eq!(provenance.from_frontier, vec![tx(1), tx(2)]);
-        assert_eq!(provenance.substitutions[0].sources.len(), 1);
+        .unwrap()
     }
 
     #[test]
-    fn canonical_branch_merge_provenance_rejects_duplicate_targets() {
-        let target = coordinate("title");
-        let substitution = ContributionSubstitution {
-            target: target.clone(),
-            sources: vec![ContributionDot {
-                lineage: BranchLineage::Root,
-                tx_id: tx(1),
-                coordinate: target,
-            }],
+    fn contribution_dot_closure_prevents_a_b_c_a_echo() {
+        let root = ContributionDot {
+            tx_id: tx(1),
+            coordinate: coordinate("a"),
         };
-        assert!(
-            BranchMergeProvenance::canonical(
-                BranchLineage::Root,
-                Vec::new(),
-                vec![tx(1)],
-                vec![substitution.clone(), substitution],
+        let b_tx = tx(2);
+        let c_tx = tx(3);
+        let mut index = ContributionSubstitutionIndex::default();
+        index.observe(b_tx, &provenance("b", root.clone())).unwrap();
+        index
+            .observe(
+                c_tx,
+                &provenance(
+                    "c",
+                    ContributionDot {
+                        tx_id: b_tx,
+                        coordinate: coordinate("b"),
+                    },
+                ),
             )
-            .is_err()
+            .unwrap();
+
+        let novel = index
+            .novel(
+                [ContributionDot {
+                    tx_id: c_tx,
+                    coordinate: coordinate("c"),
+                }],
+                [root],
+            )
+            .unwrap();
+        assert!(novel.is_empty());
+    }
+
+    #[test]
+    fn contribution_dot_closure_rejects_cycles() {
+        let first = ContributionDot {
+            tx_id: tx(1),
+            coordinate: coordinate("a"),
+        };
+        let second = ContributionDot {
+            tx_id: tx(2),
+            coordinate: coordinate("b"),
+        };
+        let mut index = ContributionSubstitutionIndex::default();
+        index
+            .observe(tx(1), &provenance("a", second.clone()))
+            .unwrap();
+        index
+            .observe(tx(2), &provenance("b", first.clone()))
+            .unwrap();
+        assert_eq!(
+            index.expand([first]),
+            Err("contribution substitution cycle")
         );
     }
 }

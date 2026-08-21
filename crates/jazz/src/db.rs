@@ -47,15 +47,14 @@ pub use crate::protocol::PermissionAdvice;
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
 use crate::protocol::{
-    AuthorizationScopeReceipt, BindingViewKey, CoverageKey, CurrentWriteSchema, LensOp,
-    MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId, ReadViewKey,
-    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
+    AuthorizationScopeReceipt, BindingViewKey, BranchSelector, BranchViewBase, CoverageKey,
+    CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
+    ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
     SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
     SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
-    MAX_FETCH_BRANCH_METADATA, validate_fetch_branch_metadata, validate_fetch_row_versions,
-    validate_known_state_declaration, validate_shape_ast_size,
+    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
 };
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
@@ -325,11 +324,6 @@ struct StagedInboundMessage {
 
 struct PendingAuthorityViewUpdate {
     parts: ViewUpdateParts,
-    authority_receipt_eligible: bool,
-}
-
-struct PendingBranchViewUpdate {
-    message: SyncMessage,
     authority_receipt_eligible: bool,
 }
 
@@ -923,6 +917,14 @@ impl Default for ReadOpts {
     }
 }
 
+impl ReadOpts {
+    /// Evaluate the query as a live head branch composed over an optional base.
+    pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
+        self.read_view = ReadViewSpec::branch_view(head, base);
+        self
+    }
+}
+
 /// Own-write overlay policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum LocalUpdates {
@@ -1145,16 +1147,16 @@ fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
 }
 
 fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
-    match &opts.read_view.source {
-        ReadViewSourceSpec::Current => Ok(()),
-        ReadViewSourceSpec::Branch { .. }
-            if opts.read_view.schema == Default::default()
-                && opts.read_view.overlays.is_empty() =>
-        {
-            Ok(())
-        }
-        _ => ensure_default_read_view(opts),
+    if matches!(
+        opts.read_view.source,
+        ReadViewSourceSpec::Current | ReadViewSourceSpec::BranchView { .. }
+    ) {
+        return Ok(());
     }
+    Err(Error::new(
+        ErrorCode::Query,
+        "this read_view combination is not supported yet",
+    ))
 }
 
 fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {
@@ -1407,6 +1409,18 @@ where
         self.insert_with_id_at_ms_option(table, row, cells, None)
     }
 
+    /// Stage an insert in one exact branch-local row.
+    fn insert_with_id_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_insert_in_branch(self.tx_id(), table, branch, row, cells, None)
+    }
+
     /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
     fn insert_with_id_at_ms(
         &self,
@@ -1421,6 +1435,26 @@ where
     /// Stage an update; omitted fields keep the transaction-local value.
     fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
         self.update_at_ms_option(table, row, patch, None)
+    }
+
+    /// Stage an update through a head-over-base branch view.
+    fn update_in_branch_view(
+        &self,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<(), Error> {
+        self.db().stage_mergeable_update_in_branch_view(
+            self.tx_id(),
+            table,
+            head,
+            base,
+            row,
+            patch,
+            None,
+        )
     }
 
     /// Stage an update with an explicit millisecond provenance time.
@@ -1439,6 +1473,18 @@ where
         self.delete_at_ms_option(table, row, None)
     }
 
+    /// Stage a deletion through a head-over-base branch view.
+    fn delete_in_branch_view(
+        &self,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_delete_in_branch_view(self.tx_id(), table, head, base, row, None)
+    }
+
     /// Stage a soft delete with explicit millisecond provenance time.
     fn delete_at_ms(&self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
         self.delete_at_ms_option(table, row, Some(now_ms))
@@ -1447,6 +1493,63 @@ where
     /// Stage a restore, applying defaults for omitted columns.
     fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
         self.restore_at_ms_option(table, row, cells, None)
+    }
+
+    /// Stage a restore in one exact branch-local row.
+    fn restore_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_restore_in_branch(self.tx_id(), table, branch, row, cells, None)
+    }
+
+    /// Stage an atomic move of one object branch-local row between exact branch
+    /// keys. The destination receives an explicit content write and restore,
+    /// while the source receives an explicit deletion in the same transaction.
+    fn move_between_branches(
+        &self,
+        table: &str,
+        source: BranchSelector,
+        target: BranchSelector,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        if source == target {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "branch move requires distinct source and target selectors",
+            ));
+        }
+        let mut cells = self
+            .db()
+            .node
+            .node
+            .borrow_mut()
+            .visible_current_cells_in_branch(table, &source, row)?
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::NotObserved,
+                    format!("source branch-local row is not visible: {}", row.0),
+                )
+            })?;
+        let table_schema = self
+            .db()
+            .schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))?;
+        let (_, target_cells) = self
+            .db()
+            .schema
+            .project_branch_selector(table_schema, &target)
+            .map_err(|message| Error::new(ErrorCode::Schema, message))?;
+        cells.extend(target_cells);
+        self.restore_in_branch(table, target, row, cells)?;
+        self.delete_in_branch_view(table, source, None, row)
     }
 
     /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.

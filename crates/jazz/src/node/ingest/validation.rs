@@ -11,7 +11,7 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_time, durability, true,
+            tx, versions, fate, global_time, durability, true, false,
         )
     }
 
@@ -24,7 +24,20 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_time, durability, false,
+            tx, versions, fate, global_time, durability, false, true,
+        )
+    }
+
+    pub(super) fn ingest_view_scoped_transaction_with_current_indexes(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+    ) -> Result<(), Error> {
+        self.ingest_transaction_and_versions_with_current_indexes(
+            tx, versions, fate, global_time, durability, true, true,
         )
     }
 
@@ -36,6 +49,7 @@ where
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         update_current_indexes: bool,
+        view_scoped_cardinality: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
         let publication_scope = self.database.begin_durable_publication_scope()?;
@@ -49,6 +63,8 @@ where
                 global_time,
                 durability,
                 update_current_indexes,
+                view_scoped_cardinality,
+                None,
             )?;
             self.database.commit_batch(batch)?;
             let mut staged_global_times = Vec::new();
@@ -87,14 +103,30 @@ where
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         update_current_indexes: bool,
+        view_scoped_cardinality: bool,
+        staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<(), Error> {
         self.merge_tx_time(tx.tx_id.time);
-        let update_current_indexes =
-            update_current_indexes && tx.target_lineage == crate::tx::BranchLineage::Root;
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
-        let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
-        let tx_values =
-            transaction_values(tx_node_alias, &tx, fate.clone(), global_time, durability);
+        let stored_tx = self.query_transaction(tx.tx_id)?;
+        let tx_already_known = stored_tx.is_some();
+        let preserve_authoritative_cardinality = view_scoped_cardinality
+            && stored_tx
+                .as_ref()
+                .is_some_and(|stored| !stored.view_scoped_cardinality);
+        let storage_tx = if preserve_authoritative_cardinality {
+            &stored_tx.as_ref().expect("checked above").tx
+        } else {
+            &tx
+        };
+        let tx_values = transaction_values_with_cardinality_scope(
+            tx_node_alias,
+            storage_tx,
+            fate.clone(),
+            global_time,
+            durability,
+            view_scoped_cardinality && !preserve_authoritative_cardinality,
+        );
         if tx_already_known {
             batch.update("jazz_transactions", tx_values);
         } else {
@@ -119,7 +151,7 @@ where
             Vec::new()
         };
         let mut pending_global_updates =
-            BTreeMap::<(String, RowUuid, VersionLayer), VersionRow>::new();
+            BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), VersionRow>::new();
         let mut content_versions = Vec::new();
         let mut stored_versions = Vec::new();
         for version in versions {
@@ -136,9 +168,30 @@ where
                 (author_schema != self.catalogue.current_schema_version_id)
                     .then_some(author_schema),
             )?;
+            let table_id = self.physical_table_id_for_schema(author_schema, &table_schema.name)?;
+            for parent in stored.parents() {
+                let parent_versions = self.query_versions_for_tx(parent)?;
+                let same_row = parent_versions.iter().filter(|candidate| {
+                    candidate.row_uuid() == stored.row_uuid()
+                        && self.physical_table_id_for_version(candidate).ok() == Some(table_id)
+                });
+                if same_row.clone().next().is_some()
+                    && !same_row
+                        .into_iter()
+                        .any(|candidate| candidate.branch_key() == stored.branch_key())
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "version parent belongs to a different branch-local row",
+                    ));
+                }
+            }
             let layer = VersionLayer::for_record(&version);
-            let previous_current =
-                self.query_local_layer_winner(&table_schema.name, version.row_uuid(), layer)?;
+            let previous_current = self.query_local_layer_winner_in_branch(
+                &table_schema.name,
+                stored.branch_key(),
+                version.row_uuid(),
+                layer,
+            )?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 let previous_tx_id = self.version_tx_id(previous)?;
                 let previous_made_at = if previous_tx_id == tx.tx_id {
@@ -166,6 +219,7 @@ where
                     let previous_global_current = self.query_global_layer_winner_in_batch(
                         batch,
                         &table_schema.name,
+                        stored.branch_key(),
                         stored.row_uuid(),
                         stored.layer(),
                     )?;
@@ -187,24 +241,24 @@ where
                     );
                     if new_is_global_current {
                         pending_global_updates.insert(
-                            (stored.table().to_owned(), stored.row_uuid(), stored.layer()),
+                            (
+                                stored.table().to_owned(),
+                                stored.branch_key().clone(),
+                                stored.row_uuid(),
+                                stored.layer(),
+                            ),
                             stored.clone(),
                         );
                     }
                 }
             }
-            let (history_table, groove_record) = match tx.target_lineage {
-                crate::tx::BranchLineage::Root => self.version_storage_write_binding(&stored)?,
-                crate::tx::BranchLineage::Branch(branch_id) => {
-                    self.branch_version_storage_write_binding(&stored, branch_id)?
-                }
-            };
-            let storage_key = self.version_storage_primary_key(&stored, tx.target_lineage)?;
+            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+            let storage_key = self.version_storage_primary_key(&stored)?;
             if tx_already_known {
                 let existing = self.database.primary_key_get_raw_in_batch(
                     batch,
                     history_table.as_ref(),
-                    &self.version_storage_primary_key_values(&stored, tx.target_lineage)?,
+                    &self.version_storage_primary_key_values(&stored)?,
                 )?;
                 if let Some(existing) = existing {
                     if existing.record().raw() != groove_record.record().raw() {
@@ -222,8 +276,12 @@ where
             }
         }
         if update_current_indexes && !matches!(fate, Fate::Rejected(_)) {
-            for stored in &content_versions {
-                self.update_merge_heads_for_content_version_in_batch(batch, stored)?;
+            if let Some(staged) = staged_content_versions {
+                staged.extend(content_versions.iter().cloned());
+            } else {
+                for stored in &content_versions {
+                    self.update_merge_heads_for_content_version_in_batch(batch, stored)?;
+                }
             }
         }
         if update_current_indexes && matches!(fate, Fate::Accepted) {
@@ -327,6 +385,50 @@ where
                     version.table()
                 ));
             }
+            if let Some(reason) = Self::malformed_authored_branch_key_reason(
+                &schema.schema,
+                table,
+                version,
+            ) {
+                return Some(reason);
+            }
+        }
+        None
+    }
+
+    fn malformed_authored_branch_key_reason(
+        schema: &JazzSchema,
+        table: &TableSchema,
+        version: &VersionRecord,
+    ) -> Option<String> {
+        let branch_cells = match schema.validate_authored_branch_key(table, version.branch_key()) {
+            Ok(cells) => cells,
+            Err(reason) => {
+                return Some(format!(
+                    "row version for table '{}' has an invalid branch key: {reason}",
+                    version.table()
+                ));
+            }
+        };
+        if version.deletion().is_none() {
+            for (column, branch_value) in branch_cells {
+                let Some(position) = table
+                    .columns
+                    .iter()
+                    .position(|candidate| candidate.name == column)
+                else {
+                    return Some(format!(
+                        "row version for table '{}' binds a missing branch column '{column}'",
+                        version.table()
+                    ));
+                };
+                if version.cell_at(position) != Some(branch_value) {
+                    return Some(format!(
+                        "row version for table '{}' has branch key content that disagrees with column '{column}'",
+                        version.table()
+                    ));
+                }
+            }
         }
         None
     }
@@ -358,6 +460,11 @@ where
             if version.record().descriptor() != &table.wire_record_descriptor() {
                 return Err(Error::MalformedViewUpdate(
                     "row version does not carry the complete descriptor of its authored schema",
+                ));
+            }
+            if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some() {
+                return Err(Error::MalformedViewUpdate(
+                    "row version does not carry a valid authored branch key",
                 ));
             }
         }

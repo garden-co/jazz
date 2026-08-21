@@ -49,14 +49,25 @@ export declare class NapiDb {
   subscribeRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  insertWithIdEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): Write
+  insertWithIdEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
   insertWithIdEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  updateEncodedInBranch(table: string, rowId: Uint8Array, patch: Uint8Array, branch: JsonValue): Write
+  updateEncodedInBranchView(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): Write
+  updateEncodedInBranchViewForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base: JsonValue | undefined | null, author: Uint8Array): Write
   updateEncodedForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
   upsertEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   delete(table: string, rowId: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  deleteInBranch(table: string, rowId: Uint8Array, branch: JsonValue): Write
+  deleteInBranchView(table: string, rowId: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): Write
+  deleteInBranchViewForIdentity(table: string, rowId: Uint8Array, head: JsonValue, base: JsonValue | undefined | null, author: Uint8Array): Write
   deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  restoreInBranch(table: string, rowId: Uint8Array, branch: JsonValue): Write
+  restoreEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): Write
+  restoreEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
   restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   tick(): void
   setNonDurableClient(): void
@@ -98,10 +109,14 @@ export declare class Transport {
 
 export declare class Tx {
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
+  insertWithIdEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): void
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): void
+  updateEncodedInBranchView(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): void
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
   delete(table: string, rowId: Uint8Array, updatedAtMs?: number | undefined | null): void
+  deleteInBranchView(table: string, rowId: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): void
   restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
+  restoreEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): void
   commit(): Write
   rollback(): void
 }

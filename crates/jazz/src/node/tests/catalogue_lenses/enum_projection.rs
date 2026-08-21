@@ -1009,7 +1009,7 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
     // paths that materialize projected rows before lowering.
     //
     // Actors: an evolved writer publishes `closed`; an old reader queries the
-    // same physical row through history, a branch overlay, and deleted-row
+    // same physical row through history, a schema projection, and deleted-row
     // inspection.
     //
     // ```text
@@ -1069,21 +1069,6 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
             AuthorId::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
-        .unwrap()
-        .is_empty());
-
-    let branch_id = branch(0x7b);
-    core.create_root_branch(branch_id).unwrap();
-    core.commit_mergeable_on_branch(
-        branch_id,
-        MergeableCommit::new("items", row(0x7c), 3).cells(BTreeMap::from([
-            ("title".to_owned(), v("later branch case")),
-            ("status".to_owned(), Value::EnumTag(1)),
-        ])),
-    )
-    .unwrap();
-    assert!(core
-        .query_rows_on_branch(branch_id, &old_shape, &old_binding)
         .unwrap()
         .is_empty());
 }

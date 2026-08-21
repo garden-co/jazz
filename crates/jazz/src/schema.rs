@@ -20,6 +20,7 @@ use groove::schema::{
 use groove::storage::StorageLayout;
 
 use crate::ids::SchemaVersionId;
+use crate::protocol::{BranchColumnValue, BranchKey, BranchSelector};
 use crate::query::Query;
 #[cfg(test)]
 use crate::query::{claim, col, eq};
@@ -104,6 +105,13 @@ impl JazzSchema {
     pub(crate) fn into_runtime(self) -> RuntimeSchema {
         self.runtime
     }
+
+    /// Construct a compiled schema for internal engine tests whose tables
+    /// already declare their branch columns.
+    #[cfg(test)]
+    pub(crate) fn new_with_branch_columns(tables: impl IntoIterator<Item = TableSchema>) -> Self {
+        Self::from_runtime(PublicSchema::new(), RuntimeSchema::new(tables))
+    }
 }
 
 impl Deref for JazzSchema {
@@ -120,19 +128,11 @@ impl Deref for JazzSchema {
 pub struct RuntimeSchema {
     /// Application tables in the schema.
     pub tables: Vec<TableSchema>,
-    /// Read policy for branch metadata rows. `None` means branch metadata is
-    /// public for reads.
-    pub branch_read_policy: Option<Query>,
-    /// Write policy for branch metadata rows. `None` means branch metadata is
-    /// public for writes.
-    pub branch_write_policy: Option<Query>,
 }
 
 impl PartialEq for RuntimeSchema {
     fn eq(&self, other: &Self) -> bool {
         self.tables == other.tables
-            && self.branch_read_policy == other.branch_read_policy
-            && self.branch_write_policy == other.branch_write_policy
     }
 }
 
@@ -142,15 +142,279 @@ impl RuntimeSchema {
     pub(crate) fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
         Self {
             tables: tables.into_iter().collect(),
-            branch_read_policy: None,
-            branch_write_policy: None,
         }
         .validated()
     }
 
+    /// Project a named selector onto one table and validate its exact branch key.
+    pub fn project_branch_selector(
+        &self,
+        table: &TableSchema,
+        selector: &BranchSelector,
+    ) -> Result<(BranchKey, BTreeMap<String, Value>), String> {
+        if selector.values.len() != table.branch_by.len() {
+            return Err(format!(
+                "branch selector for {} must provide exactly {} values",
+                table.name,
+                table.branch_by.len()
+            ));
+        }
+        let mut values = Vec::with_capacity(table.branch_by.len());
+        let mut cells = BTreeMap::new();
+        for column_name in &table.branch_by {
+            let column = table
+                .columns
+                .iter()
+                .find(|column| &column.name == column_name)
+                .ok_or_else(|| {
+                    format!("unknown branch column {column_name:?} on {}", table.name)
+                })?;
+            let encoded = selector
+                .values
+                .get(column_name)
+                .ok_or_else(|| format!("missing branch column {column_name}"))?;
+            let value = encoded
+                .decode()
+                .map_err(|_| format!("invalid branch column {column_name} encoding"))?;
+            if BranchColumnValue::from(value.clone()) != *encoded {
+                return Err(format!(
+                    "non-canonical branch column {column_name} encoding"
+                ));
+            }
+            RecordDescriptor::new([("value", column.column_type.clone())])
+                .create(std::slice::from_ref(&value))
+                .map_err(|_| format!("invalid branch column {column_name} value"))?;
+            values.push((column_name.clone(), encoded.clone()));
+            cells.insert(column_name.clone(), value);
+        }
+        values.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok((BranchKey { values }, cells))
+    }
+
+    /// Validate a schema-wide view selector, then project it onto one table's subset.
+    pub fn project_branch_view_selector(
+        &self,
+        table: &TableSchema,
+        selector: &BranchSelector,
+    ) -> Result<(BranchKey, BTreeMap<String, Value>), String> {
+        let schema_branch_columns = self
+            .tables
+            .iter()
+            .flat_map(|table| table.branch_by.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if selector.values.keys().cloned().collect::<BTreeSet<_>>() != schema_branch_columns {
+            return Err(
+                "branch view selector must provide every schema branch column exactly once"
+                    .to_owned(),
+            );
+        }
+        let projected = BranchSelector {
+            values: table
+                .branch_by
+                .iter()
+                .map(|column| (column.clone(), selector.values[column].clone()))
+                .collect(),
+        };
+        self.project_branch_selector(table, &projected)
+    }
+
+    /// Compare a stored key with a selector in this schema, interpreting
+    /// branch columns absent from older monotone schemas at their defaults.
+    pub(crate) fn branch_key_matches(
+        &self,
+        table: &TableSchema,
+        stored: &BranchKey,
+        selected: &BranchKey,
+    ) -> bool {
+        table.branch_by.iter().all(|column_name| {
+            let column = table
+                .columns
+                .iter()
+                .find(|column| column.name == *column_name)
+                .expect("validated branch column");
+            let selected = selected
+                .values
+                .iter()
+                .find(|(name, _)| name == column_name)
+                .map(|(_, value)| value);
+            let stored = stored
+                .values
+                .iter()
+                .find(|(name, _)| name == column_name)
+                .map(|(_, value)| value)
+                .cloned()
+                .or_else(|| column.default.clone().map(BranchColumnValue::from));
+            selected == stored.as_ref()
+        }) && stored
+            .values
+            .iter()
+            .all(|(name, _)| table.branch_by.contains(name))
+    }
+
+    /// Expand an older table-local key with immutable defaults from the
+    /// current monotone branch-column declaration.
+    pub(crate) fn normalize_branch_key(
+        &self,
+        table: &TableSchema,
+        stored: &BranchKey,
+    ) -> Result<BranchKey, String> {
+        if stored
+            .values
+            .iter()
+            .any(|(name, _)| !table.branch_by.contains(name))
+        {
+            return Err(format!(
+                "stored branch key has an unknown column on {}",
+                table.name
+            ));
+        }
+        let mut values = table
+            .branch_by
+            .iter()
+            .map(|column_name| {
+                let column = table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == *column_name)
+                    .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
+                let value = stored
+                    .values
+                    .iter()
+                    .find(|(name, _)| name == column_name)
+                    .map(|(_, value)| value.clone())
+                    .or_else(|| column.default.clone().map(BranchColumnValue::from))
+                    .ok_or_else(|| {
+                        format!(
+                            "older branch key is missing {column_name} without a migration default"
+                        )
+                    })?;
+                Ok((column_name.clone(), value))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        values.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(BranchKey { values })
+    }
+
+    /// Validate an authored table-local branch key without applying migration
+    /// defaults. Wire versions must carry the exact key declared by their own
+    /// schema: accepting a short or non-canonical spelling here would let a
+    /// peer change the physical branch coordinate independently of row cells.
+    pub(crate) fn validate_authored_branch_key(
+        &self,
+        table: &TableSchema,
+        key: &BranchKey,
+    ) -> Result<BTreeMap<String, Value>, String> {
+        let mut bindings = table.branch_by.iter().collect::<Vec<_>>();
+        bindings.sort();
+        if key.values.len() != bindings.len() {
+            return Err(format!(
+                "branch key for {} must contain exactly {} values",
+                table.name,
+                bindings.len()
+            ));
+        }
+
+        let mut cells = BTreeMap::new();
+        for (column_name, (actual_name, encoded)) in bindings.into_iter().zip(&key.values) {
+            if actual_name != column_name {
+                return Err(format!(
+                    "branch key for {} is not in canonical column order",
+                    table.name
+                ));
+            }
+            let column = table
+                .columns
+                .iter()
+                .find(|column| column.name == *column_name)
+                .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
+            let value = encoded
+                .decode()
+                .map_err(|_| format!("invalid branch column {column_name} encoding"))?;
+            if BranchColumnValue::from(value.clone()) != *encoded {
+                return Err(format!(
+                    "non-canonical branch column {column_name} encoding"
+                ));
+            }
+            RecordDescriptor::new([("value", column.column_type.clone())])
+                .create(std::slice::from_ref(&value))
+                .map_err(|_| format!("invalid branch column {column_name} value"))?;
+            cells.insert(column_name.clone(), value);
+        }
+        Ok(cells)
+    }
+
+    /// Reconstruct the table-local named selector for an exact stored key.
+    pub(crate) fn branch_selector_for_key(
+        &self,
+        table: &TableSchema,
+        key: &BranchKey,
+    ) -> Result<BranchSelector, String> {
+        let mut values = BTreeMap::new();
+        for column_name in &table.branch_by {
+            let column = table
+                .columns
+                .iter()
+                .find(|column| column.name == *column_name)
+                .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
+            let value = key
+                .values
+                .iter()
+                .find(|(name, _)| name == column_name)
+                .map(|(_, value)| value.clone())
+                .or_else(|| column.default.clone().map(BranchColumnValue::from))
+                .ok_or_else(|| {
+                    format!("branch key is missing {column_name} without a migration default")
+                })?;
+            values.insert(column_name.clone(), value);
+        }
+        Ok(BranchSelector { values })
+    }
+
     #[cfg(test)]
     fn validated(self) -> Self {
+        let mut branch_column_types = BTreeMap::new();
         for table in &self.tables {
+            let mut bound_columns = BTreeSet::new();
+            for column_name in &table.branch_by {
+                let column = table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == *column_name)
+                    .unwrap_or_else(|| {
+                        panic!("unknown branch column {}.{column_name}", table.name)
+                    });
+                assert!(
+                    bound_columns.insert(column_name),
+                    "duplicate table branch column"
+                );
+                assert!(
+                    !matches!(column.column_type, GrooveColumnType::Nullable(_)),
+                    "branch columns must be non-nullable"
+                );
+                assert!(
+                    matches!(
+                        column.column_type,
+                        GrooveColumnType::String
+                            | GrooveColumnType::Uuid
+                            | GrooveColumnType::U8
+                            | GrooveColumnType::U16
+                            | GrooveColumnType::U32
+                            | GrooveColumnType::U64
+                            | GrooveColumnType::I32
+                            | GrooveColumnType::I64
+                            | GrooveColumnType::EnumTag(_)
+                    ),
+                    "branch columns require string, UUID, stable enum, or fixed-width integer values"
+                );
+                if let Some(existing) =
+                    branch_column_types.insert(column_name.clone(), column.column_type.clone())
+                {
+                    assert_eq!(
+                        existing, column.column_type,
+                        "same-named branch columns must have the same type"
+                    );
+                }
+            }
             for (column_name, strategy) in &table.merge_strategies {
                 let column = table
                     .columns
@@ -198,24 +462,6 @@ impl RuntimeSchema {
                     .unwrap_or_else(|_| panic!("valid {label} write policy shape"));
             }
         }
-        if let Some(policy) = &self.branch_read_policy {
-            assert_eq!(
-                policy.table, "jazz_branches",
-                "branch read policy table must be jazz_branches"
-            );
-            policy
-                .validate_runtime(&self)
-                .expect("valid branch read policy shape");
-        }
-        if let Some(policy) = &self.branch_write_policy {
-            assert_eq!(
-                policy.table, "jazz_branches",
-                "branch write policy table must be jazz_branches"
-            );
-            policy
-                .validate_runtime(&self)
-                .expect("valid branch write policy shape");
-        }
         self
     }
 
@@ -261,8 +507,6 @@ impl RuntimeSchema {
             schema_versions_table(),
             catalogue_table(),
             catalogue_pointer_table(),
-            branch_partitions_table(),
-            branches_table(),
             transactions_table(),
             rejected_transactions_table(),
             pending_edges_table(),
@@ -280,8 +524,6 @@ impl RuntimeSchema {
             schema_versions_table(),
             catalogue_table(),
             catalogue_pointer_table(),
-            branch_partitions_table(),
-            branches_table(),
         ]
     }
 
@@ -347,19 +589,6 @@ impl RuntimeSchema {
                 ]),
             ))
     }
-}
-
-pub(crate) fn branch_metadata_table_schema() -> TableSchema {
-    TableSchema::new(
-        "jazz_branches",
-        [
-            ColumnSchema::new("branch_id", GrooveColumnType::Uuid),
-            ColumnSchema::new("created_by", GrooveColumnType::Uuid),
-            ColumnSchema::new("parent", GrooveColumnType::Uuid.nullable()),
-            ColumnSchema::new("base_global", GrooveColumnType::U64.nullable()),
-            ColumnSchema::new("state", GrooveColumnType::String),
-        ],
-    )
 }
 
 /// Per-column strategy used when upstream nodes merge concurrent content heads.
@@ -513,6 +742,9 @@ pub struct TableSchema {
     pub name: String,
     /// User columns.
     pub columns: Vec<ColumnSchema>,
+    /// Ordinary columns that form this table's exact branch key.
+    #[serde(default)]
+    pub branch_by: Vec<String>,
     /// Jazz-level reference metadata by source column name.
     pub references: BTreeMap<String, String>,
     /// Read policy used when serving views.
@@ -537,12 +769,19 @@ impl TableSchema {
         Self {
             name: name.into(),
             columns: columns.into_iter().map(Into::into).collect(),
+            branch_by: Vec::new(),
             references: BTreeMap::new(),
             read_policy: None,
             write_policies: WritePolicies::default(),
             indexed_columns: BTreeSet::new(),
             merge_strategies: BTreeMap::new(),
         }
+    }
+
+    /// Add an ordinary application column to this table's branch key.
+    pub fn with_branch_column(mut self, column: impl Into<String>) -> Self {
+        self.branch_by.push(column.into());
+        self
     }
 
     /// Mark a user column as referencing another Jazz table.
@@ -628,6 +867,7 @@ impl TableSchema {
 
     fn history_storage_table_named(&self, name: String) -> GrooveTableSchema {
         let mut columns = vec![
+            column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
@@ -653,13 +893,14 @@ impl TableSchema {
 
         GrooveTableSchema::new(name, columns)
             .with_primary_key(PrimaryKey::composite([
+                PrimaryKeyColumn::bytes("branch_key"),
                 PrimaryKeyColumn::uuid("row_uuid"),
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
                 PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
             ]))
             .with_index(GrooveIndexSchema::new(
                 "by_tx",
-                ["tx_time", "tx_node_id", "row_uuid"],
+                ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
             ))
     }
 
@@ -672,6 +913,7 @@ impl TableSchema {
         GrooveTableSchema::new(
             name,
             [
+                column("branch_key", GrooveColumnType::Bytes),
                 column("row_uuid", GrooveColumnType::Uuid),
                 column("tx_time", GrooveColumnType::U64),
                 column("tx_node_id", GrooveColumnType::U64),
@@ -685,13 +927,14 @@ impl TableSchema {
             ],
         )
         .with_primary_key(PrimaryKey::composite([
+            PrimaryKeyColumn::bytes("branch_key"),
             PrimaryKeyColumn::uuid("row_uuid"),
             PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
             PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
         ]))
         .with_index(GrooveIndexSchema::new(
             "by_tx",
-            ["tx_time", "tx_node_id", "row_uuid"],
+            ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
         ))
     }
 
@@ -699,6 +942,7 @@ impl TableSchema {
     pub fn global_current_storage_tables(&self) -> Vec<GrooveTableSchema> {
         let indexed_columns = self.global_current_indexed_columns();
         let mut content_columns = vec![
+            column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
@@ -729,11 +973,14 @@ impl TableSchema {
             format!("jazz_{}_global_current", self.name),
             content_columns,
         )
-        .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("row_uuid")]));
+        .with_primary_key(PrimaryKey::composite([
+            PrimaryKeyColumn::bytes("branch_key"),
+            PrimaryKeyColumn::uuid("row_uuid"),
+        ]));
         for indexed in &indexed_columns {
             content_table = content_table.with_index(GrooveIndexSchema::new(
                 global_current_index_name(indexed),
-                [format!("user_{indexed}")],
+                ["branch_key".to_owned(), format!("user_{indexed}")],
             ));
         }
         vec![
@@ -741,6 +988,7 @@ impl TableSchema {
             GrooveTableSchema::new(
                 format!("jazz_{}_register_global_current", self.name),
                 [
+                    column("branch_key", GrooveColumnType::Bytes),
                     column("row_uuid", GrooveColumnType::Uuid),
                     column("tx_time", GrooveColumnType::U64),
                     column("tx_node_id", GrooveColumnType::U64),
@@ -754,13 +1002,17 @@ impl TableSchema {
                     column("_deletion", deletion_column()),
                 ],
             )
-            .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("row_uuid")])),
+            .with_primary_key(PrimaryKey::composite([
+                PrimaryKeyColumn::bytes("branch_key"),
+                PrimaryKeyColumn::uuid("row_uuid"),
+            ])),
         ]
     }
 
     /// Return per-layer ahead-of-global candidate tables.
     pub fn ahead_current_storage_tables(&self) -> Vec<GrooveTableSchema> {
         let mut content_columns = vec![
+            column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
@@ -785,17 +1037,19 @@ impl TableSchema {
         vec![
             GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
                 .with_primary_key(PrimaryKey::composite([
+                    PrimaryKeyColumn::bytes("branch_key"),
                     PrimaryKeyColumn::uuid("row_uuid"),
                     PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
                     PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
                 ]))
                 .with_index(GrooveIndexSchema::new(
                     "by_tx",
-                    ["tx_time", "tx_node_id", "row_uuid"],
+                    ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
                 )),
             GrooveTableSchema::new(
                 format!("jazz_{}_register_ahead_current", self.name),
                 [
+                    column("branch_key", GrooveColumnType::Bytes),
                     column("row_uuid", GrooveColumnType::Uuid),
                     column("tx_time", GrooveColumnType::U64),
                     column("tx_node_id", GrooveColumnType::U64),
@@ -810,13 +1064,14 @@ impl TableSchema {
                 ],
             )
             .with_primary_key(PrimaryKey::composite([
+                PrimaryKeyColumn::bytes("branch_key"),
                 PrimaryKeyColumn::uuid("row_uuid"),
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
                 PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
             ]))
             .with_index(GrooveIndexSchema::new(
                 "by_tx",
-                ["tx_time", "tx_node_id", "row_uuid"],
+                ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
             )),
         ]
     }
@@ -917,43 +1172,12 @@ fn catalogue_pointer_table() -> GrooveTableSchema {
     .with_primary_key(PrimaryKey::new("revision", IntegerKeyType::U64).user_supplied())
 }
 
-fn branch_partitions_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_branch_partitions",
-        [
-            column("physical_table_id", GrooveColumnType::U64),
-            column("branch_id", GrooveColumnType::Uuid),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
-        PrimaryKeyColumn::uuid("branch_id"),
-    ]))
-}
-
-fn branches_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_branches",
-        [
-            column("branch_id", GrooveColumnType::Uuid),
-            column("created_by", GrooveColumnType::Uuid),
-            column("parent", GrooveColumnType::Uuid.nullable()),
-            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
-            column(
-                "state",
-                storage_enum("jazz_branch_state", &["open", "merged", "discarded"]),
-            ),
-            column("metadata_pending", GrooveColumnType::Bool),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("branch_id")]))
-}
-
 fn global_changes_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_global_changes",
         [
             column("physical_table_id", GrooveColumnType::U64),
+            column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("layer", GrooveColumnType::Bytes),
             column("global_time", GrooveColumnType::U64),
@@ -964,32 +1188,43 @@ fn global_changes_table() -> GrooveTableSchema {
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::bytes("branch_key"),
         PrimaryKeyColumn::uuid("row_uuid"),
         PrimaryKeyColumn::bytes("layer"),
         PrimaryKeyColumn::integer("global_time", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new(
         "by_global_time",
-        ["global_time", "physical_table_id", "row_uuid", "layer"],
+        [
+            "global_time",
+            "physical_table_id",
+            "branch_key",
+            "row_uuid",
+            "layer",
+        ],
     ))
     .with_index(GrooveIndexSchema::new(
         "by_table_global_time",
-        ["physical_table_id", "global_time", "row_uuid", "layer"],
+        [
+            "physical_table_id",
+            "branch_key",
+            "global_time",
+            "row_uuid",
+            "layer",
+        ],
     ))
 }
 
 /// Immutable sparse deletion/restore history for every physical table lineage.
 ///
 /// This is intentionally a fixed system table rather than a schema-variant
-/// table: deletion payload has no user cells. `branch_kind` distinguishes root
-/// from a branch whose UUID happens to equal the root sentinel; callers must
-/// therefore always provide both fields when seeking the table.
+/// table: deletion payload has no user cells. Branch-key routing is added by
+/// the physical branch-local row layer rather than transaction metadata.
 pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_deletion_history",
         [
-            column("branch_kind", GrooveColumnType::U8),
-            column("branch_id", GrooveColumnType::Uuid),
+            column("branch_key", GrooveColumnType::Bytes),
             column("physical_table_id", GrooveColumnType::U64),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
@@ -1004,8 +1239,7 @@ pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
         ],
     )
     .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("branch_kind", IntegerKeyType::U8),
-        PrimaryKeyColumn::uuid("branch_id"),
+        PrimaryKeyColumn::bytes("branch_key"),
         PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("row_uuid"),
         PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
@@ -1016,8 +1250,7 @@ pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
         [
             "tx_time",
             "tx_node_id",
-            "branch_kind",
-            "branch_id",
+            "branch_key",
             "physical_table_id",
             "row_uuid",
         ],
@@ -1029,12 +1262,14 @@ fn merge_heads_table() -> GrooveTableSchema {
         MERGE_HEADS_TABLE,
         [
             column("physical_table_id", GrooveColumnType::U64),
+            column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("heads", GrooveColumnType::Bytes),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::bytes("branch_key"),
         PrimaryKeyColumn::uuid("row_uuid"),
     ]))
 }
@@ -1147,8 +1382,7 @@ fn transactions_table() -> GrooveTableSchema {
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),
             column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
-            column("target_lineage", GrooveColumnType::Bytes),
-            column("branch_merge", GrooveColumnType::Bytes.nullable()),
+            column("contribution_merge", GrooveColumnType::Bytes.nullable()),
             column("permission_subject", GrooveColumnType::Uuid.nullable()),
             column("merge_strategy", GrooveColumnType::String.nullable()),
             // upstream-decided: written only by fate/state application.
@@ -1174,7 +1408,7 @@ fn transactions_table() -> GrooveTableSchema {
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_str(&mut bytes, "jazz-schema-v0");
+    put_str(&mut bytes, "jazz-schema-v2-branch-columns");
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     put_u64(&mut bytes, tables.len() as u64);
@@ -1190,6 +1424,12 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
         for (column, target) in &table.references {
             put_str(&mut bytes, column);
             put_str(&mut bytes, target);
+        }
+        let mut branch_by = table.branch_by.iter().collect::<Vec<_>>();
+        branch_by.sort();
+        put_u64(&mut bytes, branch_by.len() as u64);
+        for column in branch_by {
+            put_str(&mut bytes, column);
         }
     }
     bytes
@@ -1314,6 +1554,46 @@ mod tests {
     use groove::schema::ColumnType;
 
     #[test]
+    fn string_branch_columns_are_accepted() {
+        let _ = JazzSchema::new_with_branch_columns([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("branch", ColumnType::String)],
+        )
+        .with_branch_column("branch")]);
+    }
+
+    #[test]
+    fn added_branch_column_reads_older_keys_at_its_default() {
+        let schema = JazzSchema::new_with_branch_columns([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("workspace_id", ColumnType::Uuid)
+                .with_default(Value::Uuid(uuid::Uuid::nil()))],
+        )
+        .with_branch_column("workspace_id")]);
+        let table = &schema.tables[0];
+        let default = schema
+            .project_branch_selector(
+                table,
+                &BranchSelector::new([("workspace_id", Value::Uuid(uuid::Uuid::nil()))]),
+            )
+            .unwrap()
+            .0;
+        let other = schema
+            .project_branch_selector(
+                table,
+                &BranchSelector::new([(
+                    "workspace_id",
+                    Value::Uuid(uuid::Uuid::from_bytes([0x32; 16])),
+                )]),
+            )
+            .unwrap()
+            .0;
+
+        assert!(schema.branch_key_matches(table, &BranchKey::default(), &default));
+        assert!(!schema.branch_key_matches(table, &BranchKey::default(), &other));
+    }
+
+    #[test]
     fn logical_history_descriptor_has_composite_primary_key() {
         let schema = RuntimeSchema::new([TableSchema::new(
             "todos",
@@ -1328,10 +1608,11 @@ mod tests {
         let table = schema.tables[0].history_storage_table();
         let primary_key = table.primary_key.as_ref().unwrap();
 
-        assert_eq!(primary_key.columns.len(), 3);
-        assert_eq!(primary_key.columns[0].column, "row_uuid");
-        assert_eq!(primary_key.columns[1].column, "tx_time");
-        assert_eq!(primary_key.columns[2].column, "tx_node_id");
+        assert_eq!(primary_key.columns.len(), 4);
+        assert_eq!(primary_key.columns[0].column, "branch_key");
+        assert_eq!(primary_key.columns[1].column, "row_uuid");
+        assert_eq!(primary_key.columns[2].column, "tx_time");
+        assert_eq!(primary_key.columns[3].column, "tx_node_id");
         assert!(
             table
                 .columns
@@ -1455,7 +1736,13 @@ mod tests {
                 .iter()
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
-            vec!["physical_table_id", "row_uuid", "layer", "global_time"]
+            vec![
+                "physical_table_id",
+                "branch_key",
+                "row_uuid",
+                "layer",
+                "global_time"
+            ]
         );
 
         let index = table
@@ -1465,7 +1752,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             index.columns,
-            vec!["global_time", "physical_table_id", "row_uuid", "layer"]
+            vec![
+                "global_time",
+                "physical_table_id",
+                "branch_key",
+                "row_uuid",
+                "layer"
+            ]
         );
         let table_index = table
             .indices
@@ -1474,7 +1767,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             table_index.columns,
-            vec!["physical_table_id", "global_time", "row_uuid", "layer"]
+            vec![
+                "physical_table_id",
+                "branch_key",
+                "global_time",
+                "row_uuid",
+                "layer"
+            ]
         );
     }
 
@@ -1496,8 +1795,7 @@ mod tests {
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "branch_kind",
-                "branch_id",
+                "branch_key",
                 "physical_table_id",
                 "row_uuid",
                 "tx_time",
@@ -1514,8 +1812,7 @@ mod tests {
             vec![
                 "tx_time",
                 "tx_node_id",
-                "branch_kind",
-                "branch_id",
+                "branch_key",
                 "physical_table_id",
                 "row_uuid",
             ]
@@ -1589,7 +1886,7 @@ mod tests {
                 .iter()
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
-            vec!["row_uuid"]
+            vec!["branch_key", "row_uuid"]
         );
         assert_eq!(
             register_global_current
@@ -1600,7 +1897,7 @@ mod tests {
                 .iter()
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
-            vec!["row_uuid"]
+            vec!["branch_key", "row_uuid"]
         );
     }
 

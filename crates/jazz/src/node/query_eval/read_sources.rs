@@ -6,14 +6,10 @@
 //! rows.
 
 use super::*;
+use crate::node::query_engine::BranchViewSourceBase;
 pub(super) struct CurrentQuerySourceResolver<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
-    /// A maintained trusted subscription must remain connected when its first
-    /// branch write materializes a sparse partition.  It receives an empty
-    /// process-local source at compile time; the durable partition is still
-    /// published only by the first write.
-    pub(super) prepare_branch_subscription_sources: bool,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     /// Query-local enum boundary targets, keyed by logical source.  Defining
@@ -45,18 +41,26 @@ where
         let Some(source) = self.read_view.sources.get(&request.source) else {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
-        let (projection, graph_tier, history_position, snapshot, open_tx_overlay, branch_data) =
+        let (projection, graph_tier, history_position, snapshot, open_tx_overlay, branch_view) =
             match source {
                 SourceExpr::VisibleCurrent {
                     projection,
                     data: DataSource::Current,
                     tier,
                 } => (projection, Some(*tier), None, None, None, None),
-                SourceExpr::VisibleCurrent {
+                SourceExpr::BranchView {
                     projection,
-                    data: DataSource::Branch(branch_id),
+                    head,
+                    base,
                     tier,
-                } => (projection, Some(*tier), None, None, None, Some(*branch_id)),
+                } => (
+                    projection,
+                    Some(*tier),
+                    None,
+                    None,
+                    None,
+                    Some((head, base.as_ref())),
+                ),
                 SourceExpr::HistoryCut {
                     projection,
                     data: DataSource::Current,
@@ -71,6 +75,7 @@ where
                     projection,
                     binding_view,
                     rows,
+                    requires_result_payload,
                 } => {
                     if request.visibility != RowVisibility::Visible {
                         return Err(source_resolution_error(request, SourceGap::Coverage));
@@ -124,6 +129,7 @@ where
                                     metadata,
                                 },
                                 routing_fields: BTreeSet::new(),
+                                requires_result_payload: *requires_result_payload,
                                 content_version: None,
                                 deletion_register: None,
                             });
@@ -190,7 +196,7 @@ where
         }
         let table = self
             .node
-            .table_in_schema_or_branch_metadata(&request.source.table, self.read_view.read_schema)
+            .table_in_schema(&request.source.table, self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         // Policy-proof dependencies are raw evidence for the outer policy.
         // Re-applying their own read policy recursively both changes the
@@ -223,29 +229,477 @@ where
                     metadata: BTreeMap::new(),
                 },
                 routing_fields: BTreeSet::new(),
+                requires_result_payload: false,
                 content_version: None,
                 deletion_register: None,
             });
         }
-        let (graph, descriptor, metadata, routing_fields) = if table.name == "jazz_branches"
-            && history_position.is_none()
-            && snapshot.is_none()
-            && open_tx_overlay.is_none()
+        let (graph, descriptor, metadata, routing_fields) = if let Some((head, base)) = branch_view
         {
+            if request.visibility == RowVisibility::IncludeDeleted && base.is_none() {
+                let tier = graph_tier.expect("branch view has a current tier");
+                let head_keys = self
+                    .node
+                    .equivalent_stored_branch_keys(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        head,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let content =
+                    self.projected_branch_content_source_graph(request, &table, tier, &head_keys)?;
+                let deletions =
+                    self.projected_branch_deletion_source_graph(request, tier, &head_keys)?;
+                let base = include_deleted_branch_graph(&table, head, content, deletions)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let graph = match &authorization {
+                    SourceAuthorizationRequest::System => base,
+                    SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
+                    }
+                    | SourceAuthorizationRequest::PolicyProof {
+                        permission_subject,
+                        plan,
+                    } => {
+                        let policy_request = self
+                            .node
+                            .table_read_policy_authorization_request_for_include_deleted(
+                                self.read_view.policy_schema,
+                                &table.name,
+                                *permission_subject,
+                                tier,
+                                plan.binding_source_shape.clone(),
+                                plan.binding_user_params.clone(),
+                                plan.binding_claim_params.clone(),
+                            );
+                        let mut output_fields = current_row_fields(&table);
+                        output_fields.push("__jazz_deleted".to_owned());
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                base,
+                                &output_fields,
+                            )
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
+                            .graph
+                    }
+                };
+                return Ok(ResolvedSource {
+                    table_schema: table.clone(),
+                    graph,
+                    row_shape: SourceRowShape {
+                        source: request.source.clone(),
+                        descriptor: include_deleted_current_row_descriptor(&table),
+                        row_uuid_field: "row_uuid".to_owned(),
+                        metadata: BTreeMap::new(),
+                    },
+                    routing_fields: BTreeSet::new(),
+                    requires_result_payload: false,
+                    content_version: None,
+                    deletion_register: None,
+                });
+            }
             if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(
+                return Err(source_resolution_error(request, SourceGap::Coverage));
+            }
+            if base.is_none_or(|base| matches!(base, BranchViewSourceBase::Current(_))) {
+                let branch_witness_field =
+                    (!table.branch_by.is_empty()).then_some("supplying_branch_key");
+                let head_keys = self
+                    .node
+                    .equivalent_stored_branch_keys(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        head,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let head_content = self.projected_branch_content_source_graph(
                     request,
-                    SourceGap::SchemaProjection,
-                ));
+                    &table,
+                    graph_tier.expect("branch view has a current tier"),
+                    &head_keys,
+                )?;
+                let head_deletions = self.projected_branch_deletion_source_graph(
+                    request,
+                    graph_tier.expect("branch view has a current tier"),
+                    &head_keys,
+                )?;
+                let (content, deletions) = match base {
+                    Some(BranchViewSourceBase::Current(base)) if base != head => {
+                        let base_keys = self
+                            .node
+                            .equivalent_stored_branch_keys(
+                                &request.source.table,
+                                self.read_view.read_schema,
+                                base,
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        let base_content = self.projected_branch_content_source_graph(
+                            request,
+                            &table,
+                            graph_tier.expect("branch view has a current tier"),
+                            &base_keys,
+                        )?;
+                        let base_deletions = self.projected_branch_deletion_source_graph(
+                            request,
+                            graph_tier.expect("branch view has a current tier"),
+                            &base_keys,
+                        )?;
+                        (
+                            GraphBuilder::union([
+                                head_content.clone(),
+                                GraphBuilder::anti_join(
+                                    base_content,
+                                    head_content,
+                                    ["row_uuid"],
+                                    ["row_uuid"],
+                                ),
+                            ]),
+                            GraphBuilder::union([
+                                head_deletions.clone(),
+                                GraphBuilder::anti_join(
+                                    base_deletions,
+                                    head_deletions,
+                                    ["row_uuid"],
+                                    ["row_uuid"],
+                                ),
+                            ]),
+                        )
+                    }
+                    _ => (head_content, head_deletions),
+                };
+                let content_version = request
+                    .requirements
+                    .metadata
+                    .iter()
+                    .any(|requirement| {
+                        matches!(
+                            requirement,
+                            SourceMetadataRequirement::VersionPayloads
+                                | SourceMetadataRequirement::VersionWitnesses
+                                | SourceMetadataRequirement::Provenance(_)
+                        )
+                    })
+                    .then(|| ContentVersionSource {
+                        graph: content.clone().project_fields(
+                            maintained_view_history_storage_field_names(&table)
+                                .into_iter()
+                                .map(ProjectField::named)
+                                .chain(std::iter::once(ProjectField::renamed(
+                                    "branch_key",
+                                    "supplying_branch_key",
+                                ))),
+                        ),
+                        row_uuid_field: "row_uuid".to_owned(),
+                    });
+                let deletion_register = request
+                    .requirements
+                    .metadata
+                    .contains(&SourceMetadataRequirement::DeletionMarkers)
+                    .then(|| DeletionRegisterSource {
+                        graph: deletions.clone().project_fields(
+                            register_storage_field_names()
+                                .into_iter()
+                                .map(ProjectField::named)
+                                .chain(std::iter::once(ProjectField::renamed(
+                                    "branch_key",
+                                    "supplying_branch_key",
+                                ))),
+                        ),
+                        row_uuid_field: "row_uuid".to_owned(),
+                    });
+                let deleted = deletions
+                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                    .project(["row_uuid"]);
+                let selected_base =
+                    GraphBuilder::anti_join(content, deleted, ["row_uuid"], ["row_uuid"])
+                        .project_fields(branch_view_storage_source_fields(&table, head).map_err(
+                            |_| source_resolution_error(request, SourceGap::SchemaProjection),
+                        )?);
+                let (graph, descriptor, metadata, routing_fields) = resolved_current_source_graph(
+                    self.node,
+                    &table,
+                    graph_tier.expect("branch view has a current tier"),
+                    &request.requirements,
+                    &authorization,
+                    self.read_view.policy_schema,
+                    Some(&self.read_view),
+                    branch_witness_field,
+                    Some(selected_base),
+                )
+                .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
+                return Ok(ResolvedSource {
+                    table_schema: table.clone(),
+                    graph,
+                    row_shape: SourceRowShape {
+                        source: request.source.clone(),
+                        descriptor,
+                        row_uuid_field: "row_uuid".to_owned(),
+                        metadata,
+                    },
+                    routing_fields,
+                    requires_result_payload: true,
+                    content_version,
+                    deletion_register,
+                });
+            }
+            if matches!(base, Some(BranchViewSourceBase::Snapshot(_, _))) {
+                let branch_witness_field =
+                    (!table.branch_by.is_empty()).then_some("supplying_branch_key");
+                let tier = graph_tier.expect("branch view has a current tier");
+                let frozen_base_key = match base {
+                    Some(BranchViewSourceBase::Snapshot(key, _)) => key,
+                    _ => unreachable!("guarded frozen branch base"),
+                };
+                let head_keys = self
+                    .node
+                    .equivalent_stored_branch_keys(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        head,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let head_content =
+                    self.projected_branch_content_source_graph(request, &table, tier, &head_keys)?;
+                let head_deletions =
+                    self.projected_branch_deletion_source_graph(request, tier, &head_keys)?;
+                let head_content_presence = head_content.clone().project(["row_uuid"]);
+                let head_deletion_presence = head_deletions.clone().project(["row_uuid"]);
+                let deleted = head_deletions
+                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                    .project(["row_uuid"]);
+                let selected_head = GraphBuilder::anti_join(
+                    head_content.clone(),
+                    deleted,
+                    ["row_uuid"],
+                    ["row_uuid"],
+                )
+                .project_fields(
+                    branch_view_storage_source_fields(&table, head).map_err(|_| {
+                        source_resolution_error(request, SourceGap::SchemaProjection)
+                    })?,
+                );
+                let system_authorization = SourceAuthorizationRequest::System;
+                let (live_head, _, metadata, routing_fields) = resolved_current_source_graph(
+                    self.node,
+                    &table,
+                    tier,
+                    &request.requirements,
+                    &system_authorization,
+                    self.read_view.policy_schema,
+                    Some(&self.read_view),
+                    branch_witness_field,
+                    Some(selected_head),
+                )
+                .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
+                let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
+                    &table,
+                    &metadata,
+                    branch_witness_field.is_some(),
+                );
+                // Capture the full opening view once. Anti-joining it against
+                // live head presence leaves only inherited frozen rows; all
+                // subsequent head changes remain maintained table inputs.
+                let opening_rows = self
+                    .node
+                    .branch_view_rows_for_schema(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        tier,
+                        head,
+                        base,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let schema_version_alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let (opening, opening_descriptor, opening_metadata) =
+                    inline_current_graph_with_source_metadata_and_branch_witness(
+                        &table,
+                        opening_rows,
+                        schema_version_alias,
+                        "frozen-branch-base",
+                        &request.requirements,
+                        branch_witness_field.map(|field| (field, frozen_base_key)),
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                if descriptor != opening_descriptor || metadata != opening_metadata {
+                    return Err(source_resolution_error(
+                        request,
+                        SourceGap::SchemaProjection,
+                    ));
+                }
+                let inherited = GraphBuilder::anti_join(
+                    opening,
+                    head_content_presence,
+                    ["row_uuid"],
+                    ["row_uuid"],
+                );
+                let inherited = GraphBuilder::anti_join(
+                    inherited,
+                    head_deletion_presence,
+                    ["row_uuid"],
+                    ["row_uuid"],
+                );
+                let unfiltered = GraphBuilder::union([live_head, inherited]);
+                let graph = match &authorization {
+                    SourceAuthorizationRequest::System => unfiltered,
+                    SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
+                    }
+                    | SourceAuthorizationRequest::PolicyProof {
+                        permission_subject,
+                        plan,
+                    } => {
+                        let policy_request = self.node.table_read_policy_authorization_request(
+                            self.read_view.policy_schema,
+                            &table.name,
+                            *permission_subject,
+                            ParamBindingMode::InlineAllReachableSeeds,
+                            tier,
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
+                        );
+                        let policy_request = policy_request.map(|mut request| {
+                            request.reads.primary = policy_read_view_projected_through(
+                                &request.reads.primary,
+                                self.read_view,
+                            );
+                            request
+                        });
+                        let mut output_fields = current_row_fields(&table);
+                        output_fields.extend(branch_witness_field.map(str::to_owned));
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                unfiltered,
+                                &output_fields,
+                            )
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
+                            .graph
+                    }
+                };
+                return Ok(ResolvedSource {
+                    table_schema: table.clone(),
+                    graph,
+                    row_shape: SourceRowShape {
+                        source: request.source.clone(),
+                        descriptor,
+                        row_uuid_field: "row_uuid".to_owned(),
+                        metadata,
+                    },
+                    routing_fields,
+                    requires_result_payload: true,
+                    content_version: request
+                        .requirements
+                        .metadata
+                        .iter()
+                        .any(|requirement| {
+                            matches!(
+                                requirement,
+                                SourceMetadataRequirement::VersionPayloads
+                                    | SourceMetadataRequirement::VersionWitnesses
+                                    | SourceMetadataRequirement::Provenance(_)
+                            )
+                        })
+                        .then(|| ContentVersionSource {
+                            graph: head_content.project_fields(
+                                maintained_view_history_storage_field_names(&table)
+                                    .into_iter()
+                                    .map(ProjectField::named)
+                                    .chain(std::iter::once(ProjectField::renamed(
+                                        "branch_key",
+                                        "supplying_branch_key",
+                                    ))),
+                            ),
+                            row_uuid_field: "row_uuid".to_owned(),
+                        }),
+                    deletion_register: None,
+                });
             }
             let rows = self
                 .node
-                .branch_metadata_current_rows()
+                .branch_view_rows_for_schema(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                    graph_tier.expect("branch view has a current tier"),
+                    head,
+                    base,
+                )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let base = inline_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let descriptor = current_row_descriptor(&table);
-            (base, descriptor, BTreeMap::new(), BTreeSet::new())
+            let (base_graph, descriptor, metadata) = if request.requirements.metadata.is_empty() {
+                (
+                    inline_current_graph(&table, rows)
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?,
+                    current_row_descriptor(&table),
+                    BTreeMap::new(),
+                )
+            } else {
+                let schema_version_alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                inline_current_graph_with_source_metadata(
+                    &table,
+                    rows,
+                    schema_version_alias,
+                    "branch-view",
+                    &request.requirements,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+            };
+            let graph = match &authorization {
+                SourceAuthorizationRequest::System => base_graph,
+                SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                }
+                | SourceAuthorizationRequest::PolicyProof {
+                    permission_subject,
+                    plan,
+                } => {
+                    if plan.protected_source.table != table.name
+                        || plan.role != PolicyDecisionRole::Read
+                        || plan.protected_row_field != "row_uuid"
+                    {
+                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                    }
+                    let policy_request = self.node.table_read_policy_authorization_request(
+                        self.read_view.policy_schema,
+                        &table.name,
+                        *permission_subject,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                        graph_tier.expect("branch view has a current tier"),
+                        plan.binding_source_shape.clone(),
+                        plan.binding_user_params.clone(),
+                        plan.binding_claim_params.clone(),
+                    );
+                    let policy_request = policy_request.map(|mut request| {
+                        request.reads.primary = policy_read_view_projected_through(
+                            &request.reads.primary,
+                            self.read_view,
+                        );
+                        request
+                    });
+                    self.node
+                        .policy_filtered_current_source_graph_via_query_engine(
+                            policy_request,
+                            base_graph,
+                            &current_row_fields(&table),
+                        )
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                        .graph
+                }
+            };
+            (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(position) = history_position {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
@@ -350,67 +804,6 @@ where
                 BTreeMap::new(),
                 BTreeSet::new(),
             )
-        } else if let Some(branch_id) = branch_data {
-            if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::SchemaProjection,
-                ));
-            }
-            let branch = self
-                .node
-                .branches
-                .branches
-                .get(&branch_id)
-                .cloned()
-                .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-            let source = self.branch_current_source_graph(
-                request,
-                &table,
-                &branch,
-                branch_id,
-                graph_tier.expect("branch-current source has a tier"),
-            )?;
-            let base = source.graph;
-            let descriptor = source.descriptor;
-            let metadata = source.metadata;
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base,
-                SourceAuthorizationRequest::PolicyFiltered {
-                    permission_subject,
-                    plan,
-                }
-                | SourceAuthorizationRequest::PolicyProof {
-                    permission_subject,
-                    plan,
-                } => {
-                    if plan.protected_source.table != table.name
-                        || plan.role != PolicyDecisionRole::Read
-                        || plan.protected_row_field != "row_uuid"
-                    {
-                        return Err(source_resolution_error(request, SourceGap::Coverage));
-                    }
-                    let policy_request = self.node.branch_table_read_policy_authorization_request(
-                        branch_id,
-                        &table,
-                        *permission_subject,
-                        plan.binding_source_shape.clone(),
-                        plan.binding_user_params.clone(),
-                        plan.binding_claim_params.clone(),
-                    );
-                    let output_fields = descriptor_field_names(&descriptor)
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                    self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
-                            policy_request,
-                            base,
-                            &output_fields,
-                        )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
-                }
-            };
-            (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(tx_id) = open_tx_overlay {
             let include_deleted = request.visibility == RowVisibility::IncludeDeleted;
             let rows = self
@@ -461,6 +854,8 @@ where
                     &request.requirements,
                     &authorization,
                     self.read_view.policy_schema,
+                    None,
+                    None,
                     Some(source.graph),
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
@@ -633,6 +1028,8 @@ where
                 &request.requirements,
                 &authorization,
                 self.read_view.policy_schema,
+                None,
+                None,
                 selected_base,
             )
             .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
@@ -643,7 +1040,6 @@ where
             graph_tier,
             history_position,
             open_tx_overlay,
-            branch_data,
         )?;
         let content_version = self.content_version_source_for_request(
             request,
@@ -651,7 +1047,6 @@ where
             graph_tier,
             history_position,
             open_tx_overlay,
-            branch_data,
         )?;
         Ok(ResolvedSource {
             table_schema: table,
@@ -663,6 +1058,7 @@ where
                 metadata,
             },
             routing_fields,
+            requires_result_payload: false,
             content_version,
             deletion_register,
         })
@@ -767,7 +1163,6 @@ where
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalTime>,
         open_tx_overlay: Option<OpenTransactionId>,
-        branch_data: Option<BranchId>,
     ) -> Result<Option<DeletionRegisterSource>, SourceResolutionError> {
         if !request
             .requirements
@@ -782,16 +1177,8 @@ where
         if request.visibility != RowVisibility::Visible
             || history_position.is_some()
             || open_tx_overlay.is_some()
-            || table.name == "jazz_branches"
         {
             return Err(source_resolution_error(request, SourceGap::Coverage));
-        }
-        if let Some(branch_id) = branch_data {
-            return Ok(Some(DeletionRegisterSource {
-                graph: self
-                    .branch_overlay_deletion_current_graph(request, table, branch_id, tier)?,
-                row_uuid_field: "row_uuid".to_owned(),
-            }));
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(DeletionRegisterSource {
@@ -819,7 +1206,6 @@ where
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalTime>,
         open_tx_overlay: Option<OpenTransactionId>,
-        branch_data: Option<BranchId>,
     ) -> Result<Option<ContentVersionSource>, SourceResolutionError> {
         if !request
             .requirements
@@ -834,17 +1220,8 @@ where
         if request.visibility != RowVisibility::Visible
             || history_position.is_some()
             || open_tx_overlay.is_some()
-            || table.name == "jazz_branches"
         {
             return Err(source_resolution_error(request, SourceGap::Coverage));
-        }
-        if branch_data.is_some() {
-            // The branch-current membership graph already carries the exact
-            // selected content witness (including its branch discriminator).
-            // Let the generic witness lowering consume that graph directly:
-            // a separate root-current sidecar would be both stale at the
-            // frozen base and capable of crossing branch identities.
-            return Ok(None);
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(ContentVersionSource {
@@ -889,259 +1266,6 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))
     }
 
-    /// Build the maintained input for one v1 branch-current source.
-    ///
-    /// The frozen root base is intentionally inline: no later root write may
-    /// move a branch's base.  The branch overlay, in contrast, stays wired to
-    /// its durable history and sparse deletion register so add/replace/delete/
-    /// restore events flow through the existing IVM subscription.  An overlay
-    /// content winner or a currently-deleted overlay row masks the frozen base;
-    /// a restored deletion without overlay content exposes that base again.
-    pub(crate) fn branch_current_source_graph(
-        &mut self,
-        request: &SourceRequest,
-        table: &TableSchema,
-        branch: &BranchRecord,
-        branch_id: BranchId,
-        tier: DurabilityTier,
-    ) -> Result<CurrentSourceGraph, SourceResolutionError> {
-        let base_rows = self
-            .node
-            .branch_base_rows_for_schema(&request.source.table, branch, self.read_view.read_schema)
-            .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?;
-        let base_rows = base_rows
-            .into_iter()
-            .map(|row| {
-                let tx_id = if let Some((time, alias)) = row.projected_tx_alias() {
-                    let node = self
-                        .node
-                        .node_aliases
-                        .iter()
-                        .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
-                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-                    TxId::new(time, node)
-                } else {
-                    let base = branch
-                        .base
-                        .as_ref()
-                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-                    self.node
-                        .snapshot_content_witness(&request.source.table, row.row_uuid(), base)
-                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?
-                };
-                let alias = self
-                    .node
-                    .node_aliases
-                    .get(&tx_id.node)
-                    .copied()
-                    .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-                Ok((row, tx_id.time, alias, None))
-            })
-            .collect::<Result<Vec<_>, SourceResolutionError>>()?;
-        let schema_version_alias = self
-            .node
-            .ensure_schema_version_alias(self.read_view.read_schema)
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-        let (frozen_base, descriptor, metadata) = inline_branch_current_graph(
-            table,
-            base_rows,
-            schema_version_alias,
-            &request.requirements,
-        )
-        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-
-        let table_id = self
-            .node
-            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        if !self
-            .node
-            .branches
-            .branch_partitions
-            .contains(&(table_id, branch_id))
-            && self.prepare_branch_subscription_sources
-        {
-            self.node
-                .prepare_branch_subscription_source_partition(
-                    &request.source.table,
-                    self.read_view.read_schema,
-                    branch_id,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?;
-        }
-        // Metadata-only readers intentionally do not receive an empty source
-        // table: exposing only the frozen base until their first authorized
-        // witness avoids turning sparse partition existence into metadata.
-        if self
-            .node
-            .database
-            .table_schema(&physical_branch_history_table_name(table_id, branch_id))
-            .is_err()
-        {
-            return Ok(CurrentSourceGraph {
-                graph: frozen_base,
-                descriptor,
-                metadata,
-            });
-        }
-        let history_fields = maintained_view_history_storage_field_names(table);
-        let required_fields = self.current_projection_required_fields(request, table);
-        let projection_target = self
-            .node
-            .ensure_physical_branch_history_projection_for_enum_columns(
-                self.read_view.read_schema,
-                &request.source.table,
-                branch_id,
-                &required_fields,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let overlay_content = GraphBuilder::arg_max_by(
-            tier_visible_branch_history_graph(
-                self.node
-                    .physical_branch_history_source_graph_with_projection_target(
-                        self.read_view.read_schema,
-                        &request.source.table,
-                        branch_id,
-                        projection_target,
-                    )
-                    .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?,
-                history_fields,
-                tier,
-            ),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        );
-        let overlay_deletion_winner =
-            self.branch_overlay_deletion_current_graph_for_table(table_id, branch_id, tier);
-        let deleted_overlay_rows = overlay_deletion_winner
-            .clone()
-            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-            .project(["row_uuid"]);
-        let overlay_visible = GraphBuilder::anti_join(
-            overlay_content.clone(),
-            deleted_overlay_rows.clone(),
-            ["row_uuid"],
-            ["row_uuid"],
-        );
-        let overlay_masks_base = GraphBuilder::union([
-            overlay_content.clone().project(["row_uuid"]),
-            deleted_overlay_rows,
-        ]);
-        let frozen_base =
-            GraphBuilder::anti_join(frozen_base, overlay_masks_base, ["row_uuid"], ["row_uuid"]);
-
-        // The durable content carrier uses storage names; normalize it to the
-        // same descriptor as the frozen-base records before their union.
-        let mut normalized = vec![ProjectField::named("row_uuid")];
-        normalized.extend(
-            table
-                .columns
-                .iter()
-                .map(|column| ProjectField::named(user_column_field(&column.name))),
-        );
-        normalized.extend([
-            ProjectField::renamed("created_by", "$createdBy"),
-            ProjectField::renamed("created_at", "$createdAt"),
-            ProjectField::renamed("updated_by", "$updatedBy"),
-            ProjectField::renamed("updated_at", "$updatedAt"),
-            ProjectField::named("tx_time"),
-            ProjectField::named("tx_node_id"),
-        ]);
-        if metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses) {
-            normalized.extend([
-                ProjectField::literal("table", Value::String(table.name.clone())),
-                ProjectField::literal("layer", Value::String("content".to_owned())),
-                ProjectField::named("schema_version"),
-                ProjectField::named("parents"),
-                ProjectField::renamed("created_by", "created_by"),
-                ProjectField::renamed("created_at", "created_at"),
-                ProjectField::renamed("updated_by", "updated_by"),
-                ProjectField::renamed("updated_at", "updated_at"),
-                ProjectField::named("authored_columns"),
-                ProjectField::literal(
-                    "branch_id",
-                    Value::Nullable(Some(Box::new(Value::Uuid(branch_id.0)))),
-                ),
-            ]);
-        }
-        if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
-            normalized.push(ProjectField::literal(
-                "coverage",
-                Value::String("branch-current".to_owned()),
-            ));
-        }
-        if metadata.contains_key(&SourceMetadataRequirement::SettlePosition) {
-            normalized.push(ProjectField::null_typed(
-                "settle_position",
-                ValueType::Nullable(Box::new(ValueType::U64)),
-            ));
-        }
-        // Keep this assertion close to the union: a metadata expansion must
-        // update both branches together instead of silently stripping a
-        // witness from live overlay rows.
-        debug_assert_eq!(
-            descriptor
-                .fields()
-                .iter()
-                .map(|field| field.name.as_deref())
-                .collect::<Vec<_>>(),
-            normalized
-                .iter()
-                .map(|field| Some(field.output_name.as_str()))
-                .collect::<Vec<_>>(),
-        );
-        let overlay_visible = overlay_visible.project_fields(normalized);
-        Ok(CurrentSourceGraph {
-            graph: GraphBuilder::union([frozen_base, overlay_visible]),
-            descriptor,
-            metadata,
-        })
-    }
-
-    pub(crate) fn branch_overlay_deletion_current_graph(
-        &mut self,
-        request: &SourceRequest,
-        table: &TableSchema,
-        branch_id: BranchId,
-        tier: DurabilityTier,
-    ) -> Result<GraphBuilder, SourceResolutionError> {
-        let table_id = self
-            .node
-            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let _ = table;
-        Ok(self.branch_overlay_deletion_current_graph_for_table(table_id, branch_id, tier))
-    }
-
-    pub(crate) fn branch_overlay_deletion_current_graph_for_table(
-        &self,
-        table_id: PhysicalTableId,
-        branch_id: BranchId,
-        tier: DurabilityTier,
-    ) -> GraphBuilder {
-        GraphBuilder::arg_max_by(
-            tier_visible_branch_history_graph(
-                GraphBuilder::table(SHARED_DELETION_HISTORY_TABLE).filter(
-                    PredicateExpr::And(vec![
-                        PredicateExpr::eq("branch_kind", Value::U8(1)),
-                        PredicateExpr::eq("branch_id", Value::Uuid(branch_id.0)),
-                        PredicateExpr::eq("physical_table_id", Value::U64(table_id.0)),
-                    ])
-                    .canonicalize(),
-                ),
-                register_storage_field_names(),
-                tier,
-            ),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        )
-        .project_fields(
-            register_storage_fields_for_query_engine("")
-                .into_iter()
-                .chain([ProjectField::literal("branch_id", Value::Uuid(branch_id.0))]),
-        )
-    }
-
     pub(crate) fn projected_maintained_visible_current_source_graph(
         &mut self,
         request: &SourceRequest,
@@ -1160,6 +1284,115 @@ where
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })
+    }
+
+    /// Build the maintained content-winner relation for one logical branch
+    /// key. `stored_keys` includes historical short spellings produced before
+    /// monotone branch-column additions; they compete as one branch-local row.
+    pub(crate) fn projected_branch_content_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        tier: DurabilityTier,
+        stored_keys: &BTreeSet<BranchKey>,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let required_fields = self.current_projection_required_fields(request, table);
+        let (projection_target, physical_fields) = self
+            .node
+            .ensure_physical_current_winner_projection(
+                self.read_view.read_schema,
+                &request.source.table,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let post_winner_fields = self
+            .node
+            .physical_current_post_winner_projection_fields(
+                self.read_view.read_schema,
+                &request.source.table,
+                &required_fields,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let branch_sources = |class, target: String| {
+            stored_keys
+                .iter()
+                .map(|branch_key| {
+                    self.node
+                        .physical_current_branch_source_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            class,
+                            target.clone(),
+                            branch_key,
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(GraphBuilder::union)
+        };
+        let global = branch_sources(PhysicalCurrentClass::Global, projection_target.clone())?
+            .project(physical_fields.clone());
+        let content = if tier == DurabilityTier::Global {
+            global
+        } else {
+            let ahead = branch_sources(PhysicalCurrentClass::Ahead, projection_target)?;
+            let ahead = if tier == DurabilityTier::Edge {
+                edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
+            } else {
+                ahead.project(physical_fields.clone())
+            };
+            GraphBuilder::arg_max_by(
+                GraphBuilder::union([global, ahead]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            )
+            .project(physical_fields)
+        };
+        Ok(content.project_fields(post_winner_fields))
+    }
+
+    /// Build the maintained deletion-register winner relation for one logical
+    /// branch key, normalizing historical short key spellings before winner
+    /// selection.
+    pub(crate) fn projected_branch_deletion_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        tier: DurabilityTier,
+        stored_keys: &BTreeSet<BranchKey>,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let table_id = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let fields = std::iter::once("branch_key".to_owned())
+            .chain(register_storage_field_names())
+            .collect::<Vec<_>>();
+        let branch_sources = |table_name: String| {
+            GraphBuilder::union(stored_keys.iter().map(|branch_key| {
+                GraphBuilder::table_scan(
+                    table_name.clone(),
+                    groove::ivm::StaticScanSpec::Prefix(vec![groove::ivm::LiteralValue::from(
+                        Value::Bytes(branch_key.canonical_bytes()),
+                    )]),
+                )
+            }))
+        };
+        let global = branch_sources(physical_register_global_current_table_name(table_id))
+            .project(fields.clone());
+        if tier == DurabilityTier::Global {
+            return Ok(global);
+        }
+        let ahead = branch_sources(physical_register_ahead_current_table_name(table_id));
+        let ahead = if tier == DurabilityTier::Edge {
+            edge_visible_ahead_current_source_graph(ahead, fields.clone())
+        } else {
+            ahead.project(fields.clone())
+        };
+        Ok(GraphBuilder::arg_max_by(
+            GraphBuilder::union([global, ahead]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+        .project(fields))
     }
 
     pub(crate) fn projected_content_current_source_graph(
@@ -1466,52 +1699,6 @@ pub(super) fn edge_visible_ahead_current_source_graph(
     )
 }
 
-/// Select branch overlay history by the same fate/durability contract as a
-/// root current read before choosing the row winner. Branch partitions retain
-/// raw history after rejection, so winner selection over the unfiltered table
-/// would expose pending rows at Edge/Global and let a rejected latest version
-/// continue masking an earlier accepted winner.
-fn tier_visible_branch_history_graph(
-    source: GraphBuilder,
-    fields: Vec<String>,
-    tier: DurabilityTier,
-) -> GraphBuilder {
-    let eligible = match tier {
-        DurabilityTier::None | DurabilityTier::Local => PredicateExpr::Or(vec![
-            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Pending as u8)),
-            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-        ])
-        .canonicalize(),
-        DurabilityTier::Edge => PredicateExpr::And(vec![
-            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-            PredicateExpr::Or(vec![
-                PredicateExpr::eq("durability", Value::EnumTag(2)),
-                PredicateExpr::eq("durability", Value::EnumTag(3)),
-            ])
-            .canonicalize(),
-        ])
-        .canonicalize(),
-        DurabilityTier::Global => PredicateExpr::And(vec![
-            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-            PredicateExpr::eq("durability", Value::EnumTag(3)),
-        ])
-        .canonicalize(),
-    };
-    GraphBuilder::join(
-        source.project(fields.clone()),
-        GraphBuilder::table("jazz_transactions")
-            .filter(eligible)
-            .project(["time", "node_id"]),
-        ["tx_time", "tx_node_id"],
-        ["time", "node_id"],
-    )
-    .project_fields(
-        fields
-            .into_iter()
-            .map(|field| ProjectField::renamed(left_field(&field), field)),
-    )
-}
-
 fn content_version_current_source_graph(
     table: &TableSchema,
     tier: DurabilityTier,
@@ -1789,6 +1976,31 @@ fn policy_proof_cycle_from_capability(message: &str) -> Option<(String, usize)> 
     Some((table.to_owned(), depth))
 }
 
+fn policy_read_view_projected_through(
+    policy_view: &ReadView<RequestedSourceStage>,
+    enclosing_view: &ReadView<RequestedSourceStage>,
+) -> ReadView<RequestedSourceStage> {
+    let mut projected = enclosing_view.clone();
+    // The outer normalized query and the independently normalized policy proof
+    // may use different aliases for one logical table. Keep every policy alias,
+    // but give it the enclosing view's exact current/live/frozen source.
+    for policy_source in policy_view.sources.keys() {
+        if projected.sources.contains_key(policy_source) {
+            continue;
+        }
+        if let Some(source) = enclosing_view
+            .sources
+            .iter()
+            .find_map(|(source_id, source)| {
+                (source_id.table == policy_source.table).then(|| source.clone())
+            })
+        {
+            projected.sources.insert(policy_source.clone(), source);
+        }
+    }
+    projected
+}
+
 pub(super) fn capability_trace_enabled() -> bool {
     std::env::var_os("JAZZ_CAPABILITY_TRACE").is_some()
         || std::env::var_os("JAZZ_CAPABILITY_TRACE_FILE").is_some()
@@ -1857,6 +2069,8 @@ fn resolved_current_source_graph<S>(
     requirements: &SourceRequirements,
     authorization: &SourceAuthorizationRequest,
     policy_schema: SchemaVersionId,
+    policy_read_view: Option<&ReadView<RequestedSourceStage>>,
+    branch_witness_field: Option<&str>,
     selected_base: Option<GraphBuilder>,
 ) -> Result<
     (
@@ -1898,13 +2112,16 @@ where
             ProjectField::renamed("$updatedBy", "updated_by"),
             ProjectField::renamed("$updatedAt", "updated_at"),
         ]);
+        if let Some(branch_witness_field) = branch_witness_field {
+            fields.push(ProjectField::named(branch_witness_field));
+        }
         metadata.insert(
             SourceMetadataRequirement::VersionWitnesses,
             SourceMetadataFields::VersionWitnesses {
                 schema_version_field: "schema_version".to_owned(),
                 tx_time_field: "tx_time".to_owned(),
                 tx_node_field: "tx_node_id".to_owned(),
-                branch_or_prefix_field: None,
+                branch_or_prefix_field: branch_witness_field.map(str::to_owned),
             },
         );
     }
@@ -1947,15 +2164,23 @@ where
         }
     }
 
-    let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
+    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
+        table,
+        &metadata,
+        branch_witness_field.is_some(),
+    );
     let (base, routing_fields) = match authorization {
         SourceAuthorizationRequest::System => {
             let graph = if let Some(selected_base) = selected_base.clone() {
-                selected_base.project_fields(storage_to_canonical_current_source_fields(
+                let mut selected_fields = storage_to_canonical_current_source_fields(
                     table,
                     needs_version_witnesses,
                     needs_settle_position,
-                ))
+                );
+                if let Some(branch_witness_field) = branch_witness_field {
+                    selected_fields.push(ProjectField::named(branch_witness_field));
+                }
+                selected_base.project_fields(selected_fields)
             } else if needs_version_witnesses {
                 node.maintained_view_content_current_with_version(table, tier)?
                     .project_fields(storage_to_canonical_current_source_fields(
@@ -2003,11 +2228,21 @@ where
                 binding_user_params.clone(),
                 binding_claim_params,
             );
-            let output_fields = global_current_storage_fields(
+            let policy_request = policy_request.map(|mut request| {
+                if let Some(read_view) = policy_read_view {
+                    request.reads.primary =
+                        policy_read_view_projected_through(&request.reads.primary, read_view);
+                }
+                request
+            });
+            let mut output_fields = global_current_storage_fields(
                 table,
                 needs_version_witnesses,
                 needs_settle_position,
             );
+            if let Some(branch_witness_field) = branch_witness_field {
+                output_fields.push(branch_witness_field.to_owned());
+            }
             let base = match selected_base {
                 Some(selected_base) => selected_base,
                 None => node.maintained_view_content_current_with_version(table, tier)?,
@@ -2022,6 +2257,9 @@ where
                 needs_version_witnesses,
                 needs_settle_position,
             );
+            if let Some(branch_witness_field) = branch_witness_field {
+                canonical_fields.push(ProjectField::named(branch_witness_field));
+            }
             canonical_fields.extend(
                 storage_graph
                     .route_fields
@@ -2120,11 +2358,80 @@ fn storage_to_canonical_current_source_fields(
     fields
 }
 
+fn branch_view_storage_source_fields(
+    table: &TableSchema,
+    head: &BranchKey,
+) -> Result<Vec<ProjectField>, Error> {
+    let head_values = head.values.iter().cloned().collect::<BTreeMap<_, _>>();
+    let mut fields = vec![
+        ProjectField::renamed("branch_key", "supplying_branch_key"),
+        ProjectField::named("row_uuid"),
+        ProjectField::named("schema_version"),
+        ProjectField::named("parents"),
+        ProjectField::named("authored_columns"),
+    ];
+    for column in &table.columns {
+        if table.branch_by.contains(&column.name) {
+            let value = head_values
+                .get(&column.name)
+                .ok_or(Error::InvalidBranchKey(
+                    "head branch key missing projected table column".to_owned(),
+                ))?
+                .decode()
+                .map_err(|_| {
+                    Error::InvalidBranchKey("invalid head branch value encoding".to_owned())
+                })?;
+            fields.push(ProjectField::literal(
+                user_column_field(&column.name),
+                value,
+            ));
+        } else {
+            fields.push(ProjectField::named(user_column_field(&column.name)));
+        }
+    }
+    fields.extend([
+        ProjectField::named("created_by"),
+        ProjectField::named("created_at"),
+        ProjectField::named("updated_by"),
+        ProjectField::named("updated_at"),
+        ProjectField::named("tx_time"),
+        ProjectField::named("tx_node_id"),
+        ProjectField::named("global_time"),
+    ]);
+    Ok(fields)
+}
+
 pub(super) fn current_row_descriptor_with_hidden_source_fields(
     table: &TableSchema,
     metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 ) -> RecordDescriptor {
-    let mut fields = current_row_descriptor_fields(table);
+    current_row_descriptor_with_hidden_source_fields_for_branch(table, metadata, false)
+}
+
+fn current_row_descriptor_with_hidden_source_fields_for_branch(
+    table: &TableSchema,
+    metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    branch_columns_nonnullable: bool,
+) -> RecordDescriptor {
+    let mut fields = std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
+        .chain(table.columns.iter().map(|column| {
+            let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
+            {
+                column.column_type.clone()
+            } else {
+                ValueType::Nullable(Box::new(column.column_type.clone()))
+            };
+            (user_column_field(&column.name), value_type)
+        }))
+        .chain([
+            ("$createdBy".to_owned(), ValueType::Uuid),
+            ("$createdAt".to_owned(), ValueType::U64),
+            ("$updatedBy".to_owned(), ValueType::Uuid),
+            ("$updatedAt".to_owned(), ValueType::U64),
+            ("tx_time".to_owned(), ValueType::U64),
+            ("tx_node_id".to_owned(), ValueType::U64),
+        ])
+        .collect::<Vec<_>>();
     if metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses) {
         fields.extend([
             ("table".to_owned(), ValueType::String),
@@ -2137,25 +2444,27 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
                     ValueType::Uuid,
                 ]))),
             ),
-            ("created_by".to_owned(), ValueType::Uuid),
-            ("created_at".to_owned(), ValueType::U64),
-            ("updated_by".to_owned(), ValueType::Uuid),
-            ("updated_at".to_owned(), ValueType::U64),
             (
                 "authored_columns".to_owned(),
                 ValueType::Nullable(Box::new(ValueType::Bytes)),
             ),
+            ("created_by".to_owned(), ValueType::Uuid),
+            ("created_at".to_owned(), ValueType::U64),
+            ("updated_by".to_owned(), ValueType::Uuid),
+            ("updated_at".to_owned(), ValueType::U64),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
             branch_or_prefix_field: Some(field),
             ..
         }) = metadata.get(&SourceMetadataRequirement::VersionWitnesses)
         {
-            fields.push((
-                field.clone(),
-                ValueType::Nullable(Box::new(ValueType::Uuid)),
-            ));
+            fields.push((field.clone(), ValueType::Bytes));
         }
+    }
+    if branch_columns_nonnullable
+        && !metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses)
+    {
+        fields.push(("supplying_branch_key".to_owned(), ValueType::Bytes));
     }
     if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
         fields.push(("coverage".to_owned(), ValueType::String));
@@ -2167,25 +2476,6 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
         ));
     }
     RecordDescriptor::new(fields)
-}
-
-fn current_row_descriptor_fields(table: &TableSchema) -> Vec<(String, ValueType)> {
-    std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
-        .chain(table.columns.iter().map(|column| {
-            (
-                user_column_field(&column.name),
-                ValueType::Nullable(Box::new(column.column_type.clone())),
-            )
-        }))
-        .chain([
-            ("$createdBy".to_owned(), ValueType::Uuid),
-            ("$createdAt".to_owned(), ValueType::U64),
-            ("$updatedBy".to_owned(), ValueType::Uuid),
-            ("$updatedAt".to_owned(), ValueType::U64),
-            ("tx_time".to_owned(), ValueType::U64),
-            ("tx_node_id".to_owned(), ValueType::U64),
-        ])
-        .collect()
 }
 
 impl<S> NodeState<S>
@@ -2500,6 +2790,31 @@ fn inline_current_graph_with_source_metadata(
     ),
     Error,
 > {
+    inline_current_graph_with_source_metadata_and_branch_witness(
+        table,
+        rows,
+        schema_version_alias,
+        coverage,
+        requirements,
+        None,
+    )
+}
+
+fn inline_current_graph_with_source_metadata_and_branch_witness(
+    table: &TableSchema,
+    rows: Vec<CurrentRow>,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+    branch_witness: Option<(&str, &BranchKey)>,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    ),
+    Error,
+> {
     let mut metadata = BTreeMap::new();
     if requirements
         .metadata
@@ -2511,7 +2826,7 @@ fn inline_current_graph_with_source_metadata(
                 schema_version_field: "schema_version".to_owned(),
                 tx_time_field: "tx_time".to_owned(),
                 tx_node_field: "tx_node_id".to_owned(),
-                branch_or_prefix_field: None,
+                branch_or_prefix_field: branch_witness.map(|(field, _)| field.to_owned()),
             },
         );
     }
@@ -2548,7 +2863,11 @@ fn inline_current_graph_with_source_metadata(
         }
     }
 
-    let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
+    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
+        table,
+        &metadata,
+        branch_witness.is_some(),
+    );
     let records = rows
         .iter()
         .map(|row| {
@@ -2558,6 +2877,7 @@ fn inline_current_graph_with_source_metadata(
                 row,
                 schema_version_alias,
                 coverage,
+                branch_witness,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2574,11 +2894,19 @@ fn inline_current_record_with_source_metadata(
     row: &CurrentRow,
     schema_version_alias: SchemaVersionAlias,
     coverage: &str,
+    branch_witness: Option<(&str, &BranchKey)>,
 ) -> Result<Vec<u8>, Error> {
     let mut values = Vec::new();
     values.push(Value::Uuid(row.row_uuid().0));
     for column in &table.columns {
-        values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
+        let value = row.cell(table, &column.name);
+        if branch_witness.is_some() && table.branch_by.contains(&column.name) {
+            values.push(value.ok_or(Error::InvalidStoredValue(
+                "frozen branch row is missing a branch column value",
+            ))?);
+        } else {
+            values.push(Value::Nullable(value.map(Box::new)));
+        }
     }
     let provenance = row.provenance()?.unwrap_or(RowProvenance {
         created_by: AuthorId::SYSTEM,
@@ -2602,12 +2930,15 @@ fn inline_current_record_with_source_metadata(
             Value::String("content".to_owned()),
             Value::U64(schema_version_alias.0),
             Value::Array(Vec::new()),
+            Value::Nullable(None),
             Value::Uuid(provenance.created_by.0),
             Value::U64(provenance.created_at.0),
             Value::Uuid(provenance.updated_by.0),
             Value::U64(provenance.updated_at.0),
-            Value::Nullable(None),
         ]);
+    }
+    if let Some((_, branch_key)) = branch_witness {
+        values.push(Value::Bytes(branch_key.canonical_bytes()));
     }
     if descriptor.field_index("coverage").is_some() {
         values.push(Value::String(coverage.to_owned()));
@@ -2650,141 +2981,6 @@ fn inline_include_deleted_current_graph(
         records.push(descriptor.create(&values)?);
     }
     Ok(GraphBuilder::inline_records(descriptor, records))
-}
-
-fn inline_branch_current_graph(
-    table: &TableSchema,
-    rows: Vec<(CurrentRow, TxTime, NodeAlias, Option<BranchId>)>,
-    schema_version_alias: SchemaVersionAlias,
-    requirements: &SourceRequirements,
-) -> Result<
-    (
-        GraphBuilder,
-        RecordDescriptor,
-        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
-    ),
-    Error,
-> {
-    let mut metadata = BTreeMap::new();
-    if requirements
-        .metadata
-        .contains(&SourceMetadataRequirement::VersionWitnesses)
-    {
-        metadata.insert(
-            SourceMetadataRequirement::VersionWitnesses,
-            SourceMetadataFields::VersionWitnesses {
-                schema_version_field: "schema_version".to_owned(),
-                tx_time_field: "tx_time".to_owned(),
-                tx_node_field: "tx_node_id".to_owned(),
-                branch_or_prefix_field: Some("branch_id".to_owned()),
-            },
-        );
-    }
-    if requirements
-        .metadata
-        .contains(&SourceMetadataRequirement::Coverage)
-    {
-        metadata.insert(
-            SourceMetadataRequirement::Coverage,
-            SourceMetadataFields::Coverage {
-                coverage_field: "coverage".to_owned(),
-            },
-        );
-    }
-    if requirements
-        .metadata
-        .contains(&SourceMetadataRequirement::SettlePosition)
-    {
-        metadata.insert(
-            SourceMetadataRequirement::SettlePosition,
-            SourceMetadataFields::SettlePosition {
-                settle_position_field: "settle_position".to_owned(),
-            },
-        );
-    }
-    for requirement in &requirements.metadata {
-        if let SourceMetadataRequirement::Provenance(field) = requirement {
-            metadata.insert(
-                SourceMetadataRequirement::Provenance(*field),
-                SourceMetadataFields::Provenance {
-                    field: source_provenance_field(*field).to_owned(),
-                },
-            );
-        }
-    }
-    let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
-    let records = rows
-        .iter()
-        .map(|(row, tx_time, tx_node, branch)| {
-            inline_branch_current_record(
-                table,
-                &descriptor,
-                row,
-                schema_version_alias,
-                (*tx_time, *tx_node),
-                *branch,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((
-        GraphBuilder::inline_records(descriptor.clone(), records),
-        descriptor,
-        metadata,
-    ))
-}
-
-pub(super) fn inline_branch_current_record(
-    table: &TableSchema,
-    descriptor: &RecordDescriptor,
-    row: &CurrentRow,
-    schema_version_alias: SchemaVersionAlias,
-    witness: (TxTime, NodeAlias),
-    branch_id: Option<BranchId>,
-) -> Result<Vec<u8>, Error> {
-    let mut values = Vec::new();
-    values.push(Value::Uuid(row.row_uuid().0));
-    for column in &table.columns {
-        values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
-    }
-    let provenance = row.provenance()?.unwrap_or(RowProvenance {
-        created_by: AuthorId::SYSTEM,
-        created_at: TxTime(0),
-        updated_by: AuthorId::SYSTEM,
-        updated_at: TxTime(0),
-    });
-    values.extend([
-        Value::Uuid(provenance.created_by.0),
-        Value::U64(provenance.created_at.0),
-        Value::Uuid(provenance.updated_by.0),
-        Value::U64(provenance.updated_at.0),
-    ]);
-    let (tx_time, tx_node_alias) = witness;
-    values.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
-    if descriptor.field_index("table").is_some() {
-        values.extend([
-            Value::String(table.name.clone()),
-            Value::String("content".to_owned()),
-            Value::U64(schema_version_alias.0),
-            Value::Array(Vec::new()),
-            Value::Uuid(provenance.created_by.0),
-            Value::U64(provenance.created_at.0),
-            Value::Uuid(provenance.updated_by.0),
-            Value::U64(provenance.updated_at.0),
-            Value::Nullable(None),
-        ]);
-        if descriptor.field_index("branch_id").is_some() {
-            values.push(Value::Nullable(
-                branch_id.map(|branch| Box::new(Value::Uuid(branch.0))),
-            ));
-        }
-    }
-    if descriptor.field_index("coverage").is_some() {
-        values.push(Value::String("branch-current".to_owned()));
-    }
-    if descriptor.field_index("settle_position").is_some() {
-        values.push(Value::Nullable(None));
-    }
-    Ok(descriptor.create(&values)?)
 }
 
 #[cfg(test)]
@@ -2917,6 +3113,56 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
             ])
             .chain([("__jazz_deleted".to_owned(), ValueType::Bool)]),
     )
+}
+
+fn include_deleted_branch_graph(
+    table: &TableSchema,
+    head: &BranchKey,
+    content: GraphBuilder,
+    deletions: GraphBuilder,
+) -> Result<GraphBuilder, Error> {
+    let content = content
+        .project_fields(branch_view_storage_source_fields(table, head)?)
+        .project_fields(storage_to_canonical_current_source_fields(
+            table, false, false,
+        ));
+    let deleted_winners = deletions
+        .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+        .project_fields([
+            ProjectField::named("row_uuid"),
+            ProjectField::named("tx_time"),
+            ProjectField::named("tx_node_id"),
+            ProjectField::renamed("updated_by", "$updatedBy"),
+            ProjectField::renamed("updated_at", "$updatedAt"),
+        ]);
+    let undeleted = GraphBuilder::anti_join(
+        content.clone(),
+        deleted_winners.clone(),
+        ["row_uuid"],
+        ["row_uuid"],
+    )
+    .project_fields(
+        current_row_fields(table)
+            .into_iter()
+            .map(ProjectField::named)
+            .chain([ProjectField::literal("__jazz_deleted", Value::Bool(false))]),
+    );
+    let deleted = GraphBuilder::join(content, deleted_winners, ["row_uuid"], ["row_uuid"])
+        .project_fields(
+            current_row_fields(table)
+                .into_iter()
+                .map(|field| {
+                    let source = match field.as_str() {
+                        "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
+                            right_field(&field)
+                        }
+                        _ => left_field(&field),
+                    };
+                    ProjectField::renamed(source, field)
+                })
+                .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
+        );
+    Ok(GraphBuilder::union([undeleted, deleted]))
 }
 
 fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {

@@ -119,6 +119,17 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         /// Local, edge, or global source currency.
         tier: DurabilityTier,
     },
+    /// Effective branch-keyed rows from a live head and optional live/frozen base.
+    BranchView {
+        /// Schema/storage/lens projection used by this source.
+        projection: SchemaProjection<R>,
+        /// Exact table-projected live head key.
+        head: BranchKey,
+        /// Optional exact fallback source.
+        base: Option<BranchViewSourceBase>,
+        /// Local, edge, or global source currency for live inputs.
+        tier: DurabilityTier,
+    },
     /// Historical global cut.
     HistoryCut {
         /// Schema/storage/lens projection used by this source.
@@ -149,6 +160,10 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         /// Partition result members from admitted tuple sources so a
         /// self-join cannot feed the same table-wide union into both sides.
         rows: SettledBindingRows,
+        /// The settled rows are view-relative renderings whose public values
+        /// must travel in result payloads rather than being reconstructed
+        /// from the immutable supplier version.
+        requires_result_payload: bool,
     },
     /// Overlay local/branch/transactional writes on top of another source.
     WithOverlays {
@@ -180,7 +195,9 @@ impl<R: SourceResolution> SourceExpr<R> {
     /// current-source expression after transparent projection/overlay nodes.
     pub(crate) fn current_tier(&self) -> Option<DurabilityTier> {
         match self {
-            SourceExpr::VisibleCurrent { tier, .. } => Some(*tier),
+            SourceExpr::VisibleCurrent { tier, .. } | SourceExpr::BranchView { tier, .. } => {
+                Some(*tier)
+            }
             SourceExpr::WithOverlays { input, .. } | SourceExpr::LensProject { input, .. } => {
                 input.current_tier()
             }
@@ -197,6 +214,15 @@ impl<R: SourceResolution> SourceExpr<R> {
             SourceExpr::SettledBindingView { .. } => None,
         }
     }
+}
+
+/// Resolved base of one table source in a branch view.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum BranchViewSourceBase {
+    /// Base remains connected to current storage.
+    Current(BranchKey),
+    /// Base is frozen at one application-resolved snapshot.
+    Snapshot(BranchKey, SnapshotRef),
 }
 
 /// Data branch/prefix selected for a source expression.
@@ -235,7 +261,7 @@ pub(crate) enum SchemaFamilySelection {
     /// Current/default branch for the runtime.
     Current,
     /// Explicit schema-family branch.
-    SchemaFamilyBranch(BranchId),
+    ExplicitSchemaFamily(SchemaFamilyId),
 }
 
 /// Stored schema partitions to read before projecting into `read_schema`.
@@ -284,7 +310,7 @@ impl SourceResolution for RequestedSourceStage {
     type Storage = StorageSchemaSelection;
     type Lens = LensSelection;
     type Overlay = OverlayRef;
-    type DataBranch = BranchId;
+    type DataBranch = BranchKey;
     type MergedSources = ();
 }
 
@@ -293,11 +319,11 @@ impl SourceResolution for RequestedSourceStage {
 pub(crate) struct ResolvedSourceStage;
 
 impl SourceResolution for ResolvedSourceStage {
-    type SchemaFamily = BranchId;
+    type SchemaFamily = SchemaFamilyId;
     type Storage = Vec<ResolvedPartitionLens>;
     type Lens = ();
     type Overlay = ResolvedOverlay;
-    type DataBranch = BranchId;
+    type DataBranch = BranchKey;
     type MergedSources = Vec<u8>;
 }
 

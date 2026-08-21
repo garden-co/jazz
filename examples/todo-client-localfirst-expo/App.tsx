@@ -14,7 +14,6 @@ function buildConfig(secret: string): DbConfig {
     appId: process.env.EXPO_PUBLIC_JAZZ_APP_ID!,
     serverUrl: process.env.EXPO_PUBLIC_JAZZ_SERVER_URL!,
     env: "dev",
-    userBranch: "main",
     secret,
   };
 }

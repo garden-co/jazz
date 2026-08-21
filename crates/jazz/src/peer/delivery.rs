@@ -5,6 +5,7 @@
 //! protocol message details emitted from it.
 
 use super::*;
+#[cfg(debug_assertions)]
 use crate::ids::RowUuid;
 #[cfg(debug_assertions)]
 use crate::tools::OutputOccurrenceId;
@@ -180,7 +181,7 @@ pub(super) fn duplicate_physical_row_result_set(
 }
 
 pub(super) fn bundle_contains_complete_tx_payload(bundle: &VersionBundle) -> bool {
-    usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len())
+    bundle.scope == crate::protocol::VersionBundleScope::CompleteTransaction
 }
 
 pub(super) fn view_update_singleton_bundles(

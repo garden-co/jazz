@@ -193,6 +193,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 reset_result_set: false,
                 version_carriers: Vec::new(),
                 version_bundles: vec![VersionBundle {
+                    scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                     tx,
                     versions,
                     fate: Fate::Accepted,
@@ -241,11 +242,12 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        target_lineage: crate::tx::BranchLineage::Root,
-        branch_merge: None,
+        contribution_merge: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
+    let mut redacted_tx = tx.clone();
+    redacted_tx.n_total_writes = 1;
 
     reader
         .apply_view_updates_in_batch(vec![
@@ -256,7 +258,8 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 reset_result_set: true,
                 version_carriers: Vec::new(),
                 version_bundles: vec![VersionBundle {
-                    tx: tx.clone(),
+                    scope: crate::protocol::VersionBundleScope::ViewScoped,
+                    tx: redacted_tx.clone(),
                     versions: vec![first],
                     fate: Fate::Accepted,
                     global_time: Some(GlobalTime(1)),
@@ -282,7 +285,8 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 reset_result_set: true,
                 version_carriers: Vec::new(),
                 version_bundles: vec![VersionBundle {
-                    tx,
+                    scope: crate::protocol::VersionBundleScope::ViewScoped,
+                    tx: redacted_tx,
                     versions: vec![second],
                     fate: Fate::Accepted,
                     global_time: Some(GlobalTime(1)),
@@ -316,9 +320,9 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
             .iter()
             .any(|version| version.table() == "todos" && version.row_uuid() == row(2))
     );
-    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
-    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
-    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 0);
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 0);
+    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 2);
 }
 
 // This stays internal because it directly exercises the protocol receiver's
@@ -381,6 +385,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: vec![VersionBundle {
+            scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: tx.clone(),
             versions: vec![version],
             fate,
@@ -509,8 +514,7 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        target_lineage: crate::tx::BranchLineage::Root,
-        branch_merge: None,
+        contribution_merge: None,
     };
     let updates = [
         (row(1), version_record(row(1), Vec::new(), title_cells("one"), None)),
@@ -555,8 +559,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        target_lineage: crate::tx::BranchLineage::Root,
-        branch_merge: None,
+        contribution_merge: None,
     };
     reader
         .apply_view_update(partial_exclusive_view_update(
@@ -597,6 +600,8 @@ fn partial_exclusive_view_update(
     version: VersionRecord,
 ) -> ViewUpdateParts {
     let tx_id = tx.tx_id;
+    let mut tx = tx;
+    tx.n_total_writes = 1;
     ViewUpdateParts {
         subscription,
         settled_through: GlobalTime(1),
@@ -604,6 +609,7 @@ fn partial_exclusive_view_update(
         reset_result_set: false,
         version_carriers: Vec::new(),
         version_bundles: vec![VersionBundle {
+            scope: crate::protocol::VersionBundleScope::ViewScoped,
             tx,
             versions: vec![version],
             fate: Fate::Accepted,
@@ -694,6 +700,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
             version_carriers: Vec::new(),
             version_bundles: vec![
                 VersionBundle {
+                    scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                     tx: new,
                     versions: new_versions,
                     fate: Fate::Accepted,
@@ -701,6 +708,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
                     durability: new_durability,
                 },
                 VersionBundle {
+                    scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                     tx: old,
                     versions: old_versions,
                     fate: Fate::Accepted,
@@ -750,11 +758,12 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        target_lineage: crate::tx::BranchLineage::Root,
-        branch_merge: None,
+        contribution_merge: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
+    let mut redacted_tx = tx.clone();
+    redacted_tx.n_total_writes = 1;
 
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
@@ -763,7 +772,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             reset_result_set: false,
             version_carriers: Vec::new(),
             version_bundles: vec![VersionBundle {
-                tx: tx.clone(),
+                scope: crate::protocol::VersionBundleScope::ViewScoped,
+                tx: redacted_tx.clone(),
                 versions: vec![first],
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(1)),
@@ -798,7 +808,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             reset_result_set: false,
             version_carriers: Vec::new(),
             version_bundles: vec![VersionBundle {
-                tx,
+                scope: crate::protocol::VersionBundleScope::ViewScoped,
+                tx: redacted_tx,
                 versions: vec![second],
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(1)),
@@ -816,4 +827,82 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         reader.current_rows("todos", DurabilityTier::Local).unwrap(),
         vec![(row(1), title_cells("one")), (row(2), title_cells("two")),]
     );
+}
+
+// This is internal because the durable redacted-cardinality marker is protocol
+// receiver state; public clients can observe only the resulting rows.
+#[test]
+fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
+    let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let tx = Transaction {
+        tx_id,
+        kind: TxKind::Mergeable,
+        n_total_writes: 2,
+        made_by: AuthorId::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        contribution_merge: None,
+    };
+    let first = version_record(row(1), Vec::new(), title_cells("one"), None);
+    let second = version_record(row(2), Vec::new(), title_cells("two"), None);
+    let mut redacted_tx = tx.clone();
+    redacted_tx.n_total_writes = 1;
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalTime(1),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            version_bundles: vec![VersionBundle {
+                scope: crate::protocol::VersionBundleScope::ViewScoped,
+                tx: redacted_tx,
+                versions: vec![first.clone()],
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(1)),
+                durability: DurabilityTier::Global,
+            }],
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: vec![("todos".to_owned().into(), row(1), tx_id).into()],
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    assert!(reader.query_transaction(tx_id).unwrap().unwrap().view_scoped_cardinality);
+
+    drop(reader);
+    let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+    assert!(reader.query_transaction(tx_id).unwrap().unwrap().view_scoped_cardinality);
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalTime(1),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            version_bundles: vec![VersionBundle {
+                scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+                tx,
+                versions: vec![first, second],
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(1)),
+                durability: DurabilityTier::Global,
+            }],
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+    assert_eq!(stored.tx.n_total_writes, 2);
+    assert!(!stored.view_scoped_cardinality);
 }

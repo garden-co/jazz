@@ -49,7 +49,6 @@ function AppInner() {
   const config: DbConfig & { asyncSubscriptionsOnly: boolean } = {
     appId,
     env: import.meta.env.DEV ? "dev" : "prod",
-    userBranch: "main",
     devMode: import.meta.env.DEV,
     secret,
     serverUrl,

@@ -333,25 +333,6 @@ fn mergeable_commit_rejects_unadmitted_authored_schema() {
 }
 
 #[test]
-fn branch_commit_rejects_unadmitted_authored_schema_without_persistence() {
-    let (_dir, mut writer) = open_node_with_schema(node(0x69), schema());
-    let branch_id = branch(0x69);
-    writer.create_root_branch(branch_id).unwrap();
-    let unknown = SchemaVersionId(uuid::Uuid::from_bytes([0x69; 16]));
-    assert!(matches!(
-        writer.commit_mergeable_on_branch_in_schema(
-            branch_id,
-            unknown,
-            MergeableCommit::new("todos", row(0x6a), 10).cells(title_cells("forged")),
-        ),
-        Err(Error::InvalidMergeableCommit(
-            "authored schema version is not admitted"
-        ))
-    ));
-    assert!(writer.query_all_versions().unwrap().is_empty());
-}
-
-#[test]
 fn trusted_catalogue_snapshot_rebuilds_transitions_but_preserves_identical_prefixes() {
     // A trusted snapshot is a complete authoritative prefix, not a delta. Once
     // its activation commits, reopening must retain enough canonical lineage
@@ -494,7 +475,7 @@ fn write_active_lineage_record(node: &mut NodeState<RocksDbStorage>, staged: &St
     );
 }
 
-fn duplicate_target_lineage(
+fn duplicate_schema_destination_lineage(
     base: &JazzSchema,
     original: &StagedSchemaLineage,
     catalogue_seq: u64,
@@ -699,7 +680,7 @@ fn reopen_rejects_duplicate_active_catalogue_targets() {
         .next()
         .unwrap()
         .clone();
-    let duplicate = duplicate_target_lineage(&base, &original, 2);
+    let duplicate = duplicate_schema_destination_lineage(&base, &original, 2);
     write_active_lineage_record(&mut receiver, &duplicate);
     drop(receiver);
 
@@ -724,7 +705,7 @@ fn reopen_rejects_inactive_catalogue_target_already_active() {
         .next()
         .unwrap()
         .clone();
-    let duplicate = duplicate_target_lineage(&base, &original, 2);
+    let duplicate = duplicate_schema_destination_lineage(&base, &original, 2);
     write_catalogue_record(
         &mut receiver,
         b"schema_lineage_staged",
@@ -755,7 +736,7 @@ fn reopen_rejects_duplicate_inactive_catalogue_targets() {
         .unwrap()
         .clone();
     first.catalogue_seq = 1;
-    let duplicate = duplicate_target_lineage(&base, &first, 2);
+    let duplicate = duplicate_schema_destination_lineage(&base, &first, 2);
     delete_catalogue_record(
         &mut receiver,
         b"schema_lineage_active",
@@ -1409,39 +1390,7 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
     }
 }
 
-/// Branch metadata depends on a real catalogue and must not create durable
-/// branch state while an edge has no trusted authority lineage.
-///
-/// ```text
-/// alice branch create ──► edge(Uninitialized) ──reject──► no branch metadata
-/// ```
-#[test]
-fn dynamic_edge_bootstrap_rejects_branch_creation_without_residue() {
-    let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
-    let cfs = empty_schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x96), storage)
-        .expect("open explicit uninitialized edge");
-
-    assert!(matches!(
-        edge.create_branch(BranchId(uuid::Uuid::from_bytes([0x96; 16]))),
-        Err(Error::CatalogueUninitialized)
-    ));
-    assert!(matches!(
-        edge.create_root_branch(BranchId(uuid::Uuid::from_bytes([0x97; 16]))),
-        Err(Error::CatalogueUninitialized)
-    ));
-    assert!(
-        edge.database
-            .primary_key_scan_raw("jazz_branches", &[])
-            .expect("scan rejected branch creates")
-            .is_empty(),
-        "uninitialized edge must not persist branch metadata"
-    );
-}
-
+/// Build the trusted catalogue snapshot shared by bootstrap and recovery tests.
 fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
     let base = schema();
     let evolved = SchemaVersion::new(catalogue_evolved_schema());

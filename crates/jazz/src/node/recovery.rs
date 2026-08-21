@@ -1,9 +1,9 @@
 //! Startup recovery and durable-state rehydration for a node. This module owns
-//! rebuilding aliases, schema/lens catalogues, branch metadata, pending edges,
+//! rebuilding aliases, schema/lens catalogues, pending edges,
 //! rejected payloads, and peer/subscription state from groove storage; normal
 //! ingestion lives in [`super::ingest`], storage record layouts in
-//! [`super::codec`], and branch mutation APIs in [`super::branches`]. It is the
-//! node layer's bridge from persisted groove tables back to in-memory state.
+//! [`super::codec`]. It is the node layer's bridge from persisted groove tables
+//! back to in-memory state.
 
 use super::*;
 
@@ -187,21 +187,6 @@ where
             let uuid = NodeUuid(record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)?);
             self.node_aliases.insert(uuid, NodeAlias(alias));
         }
-        let branch_records = self
-            .database
-            .primary_key_scan_raw("jazz_branches", &[])?
-            .into_iter()
-            .map(|raw| raw.raw().to_vec())
-            .collect::<Vec<_>>();
-        let branch_catalogue_schema = self.catalogue.schema.lower_catalogue_meta_to_groove();
-        let branch_descriptor = branch_catalogue_schema
-            .table("jazz_branches")
-            .ok_or(Error::InvalidStoredValue("branches table must exist"))?
-            .record_schema();
-        for raw in branch_records {
-            self.recover_branch_record(BorrowedRecord::new(&raw, &branch_descriptor))?;
-        }
-
         let alias_to_node = self
             .node_aliases
             .iter()

@@ -27,7 +27,6 @@ function buildOverlayDbConfig(config: DbConfig): DbConfig {
     appId: config.appId,
     serverUrl: config.serverUrl,
     env: config.env,
-    userBranch: config.userBranch,
     ...identityCredential,
     ...(config.adminSecret ? { adminSecret: config.adminSecret } : {}),
     // `persistent` selects BrowserConnectionManager so this client joins the

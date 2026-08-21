@@ -505,6 +505,6 @@ result changes back to the correct parent output.
 - 🔶 **Correlated subquery maintenance.** Replace one-graph-per-outer-row array
   subqueries with shared prepared/correlation maintenance that remains bounded
   by affected parent and child keys.
-- 🔶 **Branch-aware deletion witnesses.** Branch overlays need deletion-register
-  terminal facts so branch-scoped views can publish delete/restore changes
-  without full refresh.
+- 🔶 **Partition-aware deletion witnesses.** Overlay views need
+  branch-key-qualified deletion-register terminal facts so head/base views can
+  publish delete/restore changes without full refresh.

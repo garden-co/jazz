@@ -61,6 +61,10 @@ use jazz::groove::storage::{
     ReopenableStorage as CoreReopenableStorage,
 };
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use jazz::protocol::{
+    BranchSelector as CoreBranchSelector, BranchViewBase as CoreBranchViewBase,
+    ReadViewSpec as CoreReadViewSpec,
+};
 use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
 };
@@ -617,6 +621,26 @@ impl Tx {
         }
     }
 
+    #[napi(js_name = "insertWithIdEncodedInBranch")]
+    pub fn insert_with_id_encoded_in_branch(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<()> {
+        if !matches!(self.kind, NapiTxKind::Mergeable) {
+            return Err(napi::Error::from_reason(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        with_napi_mergeable_tx!(self, |tx| tx
+            .insert_with_id_in_branch(&table, branch, row_id, cells))
+    }
+
     #[napi(js_name = "updateEncoded")]
     pub fn update_encoded(
         &mut self,
@@ -637,6 +661,28 @@ impl Tx {
                 with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, patch))
             }
         }
+    }
+
+    #[napi(js_name = "updateEncodedInBranchView")]
+    pub fn update_encoded_in_branch_view(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        head: JsonValue,
+        base: Option<JsonValue>,
+    ) -> napi::Result<()> {
+        if !matches!(self.kind, NapiTxKind::Mergeable) {
+            return Err(napi::Error::from_reason(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let head = core_branch_selector_from_json(head)?;
+        let base = core_branch_base_from_json(base)?;
+        with_napi_mergeable_tx!(self, |tx| tx
+            .update_in_branch_view(&table, head, base, row_id, patch))
     }
 
     #[napi(js_name = "upsertEncoded")]
@@ -682,6 +728,26 @@ impl Tx {
         }
     }
 
+    #[napi(js_name = "deleteInBranchView")]
+    pub fn delete_in_branch_view(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        head: JsonValue,
+        base: Option<JsonValue>,
+    ) -> napi::Result<()> {
+        if !matches!(self.kind, NapiTxKind::Mergeable) {
+            return Err(napi::Error::from_reason(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let head = core_branch_selector_from_json(head)?;
+        let base = core_branch_base_from_json(base)?;
+        with_napi_mergeable_tx!(self, |tx| tx
+            .delete_in_branch_view(&table, head, base, row_id))
+    }
+
     #[napi(js_name = "restoreEncoded")]
     pub fn restore_encoded(
         &mut self,
@@ -702,6 +768,26 @@ impl Tx {
                 with_napi_exclusive_tx!(self, |tx| tx.restore(&table, row_id, cells))
             }
         }
+    }
+
+    #[napi(js_name = "restoreEncodedInBranch")]
+    pub fn restore_encoded_in_branch(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<()> {
+        if !matches!(self.kind, NapiTxKind::Mergeable) {
+            return Err(napi::Error::from_reason(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        with_napi_mergeable_tx!(self, |tx| tx
+            .restore_in_branch(&table, branch, row_id, cells))
     }
 
     #[napi]
@@ -1462,6 +1548,66 @@ impl NapiDb {
         }
     }
 
+    #[napi(js_name = "insertWithIdEncodedInBranch")]
+    pub fn insert_with_id_encoded_in_branch(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.insert_with_id_in_branch(&table, branch, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.insert_with_id_in_branch(&table, branch, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "insertWithIdEncodedInBranchForIdentity")]
+    pub fn insert_with_id_encoded_in_branch_for_identity(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        branch: JsonValue,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.insert_with_id_in_branch_for_identity(author, &table, branch, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.insert_with_id_in_branch_for_identity(author, &table, branch, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
     #[napi(js_name = "insertWithIdEncodedForIdentity")]
     pub fn insert_with_id_encoded_for_identity(
         &self,
@@ -1534,6 +1680,99 @@ impl NapiDb {
                     None => db.update(&table, row_id, patch),
                 }
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "updateEncodedInBranch")]
+    pub fn update_encoded_in_branch(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.update_in_branch(&table, branch, row_id, patch)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.update_in_branch(&table, branch, row_id, patch)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "updateEncodedInBranchView")]
+    pub fn update_encoded_in_branch_view(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        head: JsonValue,
+        base: Option<JsonValue>,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let head = core_branch_selector_from_json(head)?;
+        let base = core_branch_base_from_json(base)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.update_in_branch_view(&table, head, base, row_id, patch)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.update_in_branch_view(&table, head, base, row_id, patch)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "updateEncodedInBranchViewForIdentity")]
+    pub fn update_encoded_in_branch_view_for_identity(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        head: JsonValue,
+        base: Option<JsonValue>,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let head = core_branch_selector_from_json(head)?;
+        let base = core_branch_base_from_json(base)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.update_in_branch_view_for_identity(author, &table, head, base, row_id, patch)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.update_in_branch_view_for_identity(author, &table, head, base, row_id, patch)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -1688,6 +1927,93 @@ impl NapiDb {
         }
     }
 
+    #[napi(js_name = "deleteInBranch")]
+    pub fn delete_in_branch(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.delete_in_branch(&table, branch, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.delete_in_branch(&table, branch, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "deleteInBranchView")]
+    pub fn delete_in_branch_view(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        head: JsonValue,
+        base: Option<JsonValue>,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let head = core_branch_selector_from_json(head)?;
+        let base = core_branch_base_from_json(base)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.delete_in_branch_view(&table, head, base, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.delete_in_branch_view(&table, head, base, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "deleteInBranchViewForIdentity")]
+    pub fn delete_in_branch_view_for_identity(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        head: JsonValue,
+        base: Option<JsonValue>,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let head = core_branch_selector_from_json(head)?;
+        let base = core_branch_base_from_json(base)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.delete_in_branch_view_for_identity(author, &table, head, base, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.delete_in_branch_view_for_identity(author, &table, head, base, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
     #[napi(js_name = "deleteForIdentity")]
     pub fn delete_for_identity(
         &self,
@@ -1754,6 +2080,93 @@ impl NapiDb {
                     None => db.restore(&table, row_id, cells),
                 }
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "restoreInBranch")]
+    pub fn restore_in_branch(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.restore_in_branch(&table, branch, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.restore_in_branch(&table, branch, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "restoreEncodedInBranch")]
+    pub fn restore_encoded_in_branch(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.restore_with_cells_in_branch(&table, branch, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.restore_with_cells_in_branch(&table, branch, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "restoreEncodedInBranchForIdentity")]
+    pub fn restore_encoded_in_branch_for_identity(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        branch: JsonValue,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.restore_with_cells_in_branch_as_identity(author, &table, branch, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.restore_with_cells_in_branch_as_identity(author, &table, branch, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -2375,17 +2788,33 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
     if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
-    if value
+    if let Some(read_view) = value
         .get("read_view")
         .or_else(|| value.get("readView"))
         .filter(|read_view| !read_view.is_null())
-        .is_some()
     {
-        return Err(napi::Error::from_reason(
-            "non-default read_view is not supported yet",
-        ));
+        opts.read_view = serde_json::from_value::<CoreReadViewSpec>(read_view.clone())
+            .map_err(|error| napi::Error::from_reason(format!("invalid read_view: {error}")))?;
     }
     Ok(opts)
+}
+
+fn core_branch_selector_from_json(value: JsonValue) -> napi::Result<CoreBranchSelector> {
+    serde_json::from_value(value)
+        .map_err(|error| napi::Error::from_reason(format!("invalid branch selector: {error}")))
+}
+
+fn core_branch_base_from_json(
+    value: Option<JsonValue>,
+) -> napi::Result<Option<CoreBranchViewBase>> {
+    value
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value(value).map_err(|error| {
+                napi::Error::from_reason(format!("invalid branch view base: {error}"))
+            })
+        })
+        .transpose()
 }
 
 fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
@@ -3059,6 +3488,7 @@ mod tests {
     use jazz::groove::records::{RecordDescriptor, ValueType};
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+    use jazz::protocol::ReadViewSpec as CoreReadViewSpec;
     use jazz::tools::OpenTransactionId as CoreOpenBatchId;
     use jazz::tools::{
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
@@ -3255,6 +3685,23 @@ mod tests {
             core_read_opts_from_json(Some(json!({ "propagate": false }))).expect("parse read opts");
 
         assert_eq!(opts.propagation, CorePropagation::Full);
+    }
+
+    #[test]
+    fn core_read_opts_accept_branch_view() {
+        let expected = CoreReadViewSpec::branch_view(
+            jazz::protocol::BranchSelector::new([(
+                "branch",
+                CoreValue::Uuid(uuid::Uuid::from_bytes([0x42; 16])),
+            )]),
+            None,
+        );
+        let opts = core_read_opts_from_json(Some(json!({
+            "read_view": serde_json::to_value(&expected).unwrap()
+        })))
+        .expect("parse branch read view");
+
+        assert_eq!(opts.read_view, expected);
     }
 
     #[test]

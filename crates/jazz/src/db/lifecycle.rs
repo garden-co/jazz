@@ -364,55 +364,6 @@ where
             .set_initial_sync_flush_cadence(cadence.writes())?)
     }
 
-    /// Create a snapshot-base branch immediately in local durable storage.
-    ///
-    /// Branch creation is local-first: no serving node round trip is required.
-    /// The authenticated database identity is recorded as the immutable creator.
-    pub fn create_branch(&self) -> Result<crate::ids::BranchId, Error> {
-        let branch = crate::ids::BranchId(uuid::Uuid::now_v7());
-        self.create_branch_with_id(branch)?;
-        Ok(branch)
-    }
-
-    /// Create a local snapshot-base branch with a caller-supplied stable id.
-    pub fn create_branch_with_id(&self, branch: crate::ids::BranchId) -> Result<(), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .create_branch_as(branch, self.identity.author)?;
-        Ok(())
-    }
-
-    /// Insert a row into a locally-created branch and queue it for ordinary sync.
-    pub fn insert_on_branch(
-        &self,
-        branch: crate::ids::BranchId,
-        table: &str,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        let row = self.row_id_source.borrow_mut().next_row_id();
-        let cells = self.apply_insert_defaults(table, cells)?;
-        let tx_id = self
-            .node
-            .node
-            .borrow_mut()
-            .commit_mergeable_on_branch_in_schema(
-                branch,
-                self.schema_version_id,
-                MergeableCommit::new(table, row, self.next_now_ms())
-                    .made_by(self.identity.author)
-                    .cells(cells),
-            )?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
-    }
-
     /// Seed a settled mergeable row for server bootstrap/import flows.
     ///
     /// This bypasses the client pending-upload path and immediately finalizes
@@ -442,40 +393,6 @@ where
         Ok(tx_id)
     }
 
-    /// Seed a branch-local mergeable row for history-complete server bootstrap
-    /// or import flows.
-    ///
-    /// The resulting row is evaluated through the ordinary branch read-view
-    /// lowering path; this does not provide an application-facing branch write
-    /// facade.
-    pub fn seed_branch_mergeable_for_bootstrap(
-        &self,
-        branch: crate::ids::BranchId,
-        table: &str,
-        row: RowUuid,
-        made_by: AuthorId,
-        cells: RowCells,
-    ) -> Result<TxId, Error> {
-        let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.node.borrow_mut();
-        if node.branch_record(branch).is_none() {
-            node.create_branch(branch)?;
-        }
-        let tx_id = node.commit_mergeable_on_branch_in_schema(
-            branch,
-            self.schema_version_id,
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(made_by)
-                .cells(cells),
-        )?;
-        node.finalize_local_mergeable_commit(tx_id)?;
-        drop(node);
-        self.refresh_subscriptions()?;
-        self.node.mark_subscriber_connections_dirty();
-        Ok(tx_id)
-    }
-
-    #[cfg(feature = "testing")]
     /// Test/bench-only authority finalization for a locally committed mergeable
     /// transaction.
     ///
@@ -822,9 +739,7 @@ where
 }
 
 fn schema_policy_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool {
-    left.branch_read_policy == right.branch_read_policy
-        && left.branch_write_policy == right.branch_write_policy
-        && left.tables.len() == right.tables.len()
+    left.tables.len() == right.tables.len()
         && left.tables.iter().all(|left_table| {
             right.tables.iter().any(|right_table| {
                 left_table.name == right_table.name

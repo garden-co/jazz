@@ -27,7 +27,6 @@ function getDb(): Promise<Db> {
   dbPromise = createDb({
     appId: APP_ID,
     env: "dev",
-    userBranch: "main",
     auth: { localFirstSecret: generateAuthSecret() },
     runtimeSources: {
       wasmModule: jazzWasmModule,

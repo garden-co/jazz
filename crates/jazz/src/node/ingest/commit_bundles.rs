@@ -47,7 +47,6 @@ where
         {
             return self.reject_malformed_commit(tx, reason);
         }
-        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         let clock_before_ingest = self.clock.clone();
         // One incoming authority unit can durably stage its source before a
         // derived merge is discovered. Keep their subscription publication
@@ -118,11 +117,6 @@ where
         {
             return self.reject_malformed_commit(tx, reason);
         }
-        if commit_unit_limit_violation(&versions).is_none()
-            && commit_unit_write_count_matches(&tx, versions.len())
-        {
-            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
-        }
         let mut updates =
             self.ingest_edge_authority_mergeable_commit_unit_once(tx, versions, now_ms, None)?;
         updates.extend(self.drain_parked_commit_units()?);
@@ -147,11 +141,6 @@ where
             && let Some(reason) = self.malformed_authored_version_reason(&versions)
         {
             return self.reject_malformed_commit(tx, reason);
-        }
-        if commit_unit_limit_violation(&versions).is_none()
-            && commit_unit_write_count_matches(&tx, versions.len())
-        {
-            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         }
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
@@ -222,9 +211,7 @@ where
             Some(global_time),
             Some(DurabilityTier::Global),
         )?;
-        if stored.tx.target_lineage == crate::tx::BranchLineage::Root {
-            self.create_merge_versions_for(&records)?;
-        }
+        self.create_merge_versions_for(&records)?;
         Ok(())
     }
 
@@ -272,9 +259,7 @@ where
             Some(global_time),
             Some(DurabilityTier::Global),
         )?;
-        if tx.target_lineage == crate::tx::BranchLineage::Root {
-            self.create_merge_versions_for(&versions)?;
-        }
+        self.create_merge_versions_for(&versions)?;
         Ok(Fate::Accepted)
     }
 
@@ -352,17 +337,6 @@ where
                 }]);
             }
         }
-        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
-            &tx,
-            &versions,
-            now_ms,
-            CommitUnitParkMode {
-                ingress_role: ParkedIngressRole::EdgeAccepted,
-                ..CommitUnitParkMode::default()
-            },
-        )? {
-            return Ok(Vec::new());
-        }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
@@ -425,12 +399,7 @@ where
         let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
-        let merge_rows = if root_target {
-            self.merge_rows_for_versions(&versions)?
-        } else {
-            Vec::new()
-        };
+        let merge_rows = self.merge_rows_for_versions(&versions)?;
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -439,9 +408,7 @@ where
             durability,
         )?;
         debug_assert_eq!(self.clock.committed_global_time, global_time);
-        if root_target {
-            self.create_merge_versions_for_rows(merge_rows)?;
-        }
+        self.create_merge_versions_for_rows(merge_rows)?;
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
@@ -468,7 +435,6 @@ where
         if self.malformed_authored_version_reason(&versions).is_some() {
             return Err(Error::UnsupportedCommitUnit("malformed relay commit unit"));
         }
-        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         self.ingest_relay_commit_unit_once(tx, versions)?;
         self.drain_parked_relay_commit_units()?;
         Ok(())
@@ -507,14 +473,6 @@ where
             ingress_role: ParkedIngressRole::Relay,
             ..CommitUnitParkMode::default()
         };
-        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
-            &tx,
-            &versions,
-            u64::MAX - SKEW_TOLERANCE_MS,
-            relay_mode,
-        )? {
-            return Ok(());
-        }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
@@ -605,17 +563,6 @@ where
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
-        }
-        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
-            &tx,
-            &versions,
-            now_ms,
-            CommitUnitParkMode {
-                ingest_context,
-                ..CommitUnitParkMode::default()
-            },
-        )? {
-            return Ok(Vec::new());
         }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
@@ -711,12 +658,7 @@ where
         let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
-        let merge_rows = if root_target {
-            self.merge_rows_for_versions(&versions)?
-        } else {
-            Vec::new()
-        };
+        let merge_rows = self.merge_rows_for_versions(&versions)?;
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -725,9 +667,7 @@ where
             durability,
         )?;
         debug_assert_eq!(self.clock.committed_global_time, global_time);
-        if root_target {
-            self.create_merge_versions_for_rows(merge_rows)?;
-        }
+        self.create_merge_versions_for_rows(merge_rows)?;
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
@@ -799,17 +739,6 @@ where
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
-        }
-        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
-            &tx,
-            &versions,
-            now_ms,
-            CommitUnitParkMode {
-                ingest_context,
-                ingress_role: ParkedIngressRole::EdgeAuthority,
-            },
-        )? {
-            return Ok(Vec::new());
         }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
@@ -916,7 +845,10 @@ where
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
             existing_versions.sort();
-            if !known_transaction_payload_matches(&existing.tx, &tx) {
+            if !(known_transaction_payload_matches(&existing.tx, &tx)
+                || existing.view_scoped_cardinality
+                    && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
+            {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             let mut version_bundles = Vec::new();
@@ -931,7 +863,7 @@ where
                     None => version_bundles.push(version),
                 }
             }
-            if version_bundles.is_empty() {
+            if version_bundles.is_empty() && !existing.view_scoped_cardinality {
                 self.apply_fate_update(tx.tx_id, fate, global_time, Some(durability))?;
                 return Ok(());
             }
@@ -955,6 +887,7 @@ where
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         staged_global_times: &mut Vec<GlobalTime>,
+        staged_content_versions: &mut Vec<VersionRow>,
     ) -> Result<(), Error> {
         debug_assert!(
             global_time.is_none() || durability == DurabilityTier::Global,
@@ -978,6 +911,8 @@ where
             global_time,
             durability,
             true,
+            false,
+            Some(staged_content_versions),
         )?;
         self.finalize_staged_transaction_ingest(
             batch,
@@ -1025,7 +960,7 @@ where
                 continue;
             }
             let mut unique_versions = BTreeMap::<
-                (String, RowUuid, crate::ids::SchemaVersionId, bool),
+                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
                 &VersionRecord,
             >::new();
             let mut duplicate_conflict = false;
@@ -1033,6 +968,7 @@ where
                 for version in bundle.versions {
                     let key = (
                         version.table().to_owned(),
+                        version.branch_key().clone(),
                         version.row_uuid(),
                         version.schema_version(),
                         version.deletion().is_some(),
@@ -1097,11 +1033,13 @@ where
             .map(|bundle| bundle.versions.len())
             .sum::<usize>();
         batch.reserve(eligible.len() + version_count.saturating_mul(2));
-        let mut current_updates =
-            BTreeMap::<(String, RowUuid, VersionLayer), (VersionRow, GlobalTime)>::new();
+        let mut current_updates = BTreeMap::<
+            (String, BranchKey, RowUuid, VersionLayer),
+            (VersionRow, GlobalTime),
+        >::new();
         let mut content_versions = Vec::new();
-        #[cfg(test)]
-        let mut content_rows = BTreeSet::<(String, RowUuid)>::new();
+        let mut content_rows =
+            BTreeSet::<(PhysicalTableId, String, BranchKey, RowUuid)>::new();
         let mut applied_global_times = Vec::with_capacity(eligible.len());
 
         for tx_bundles in eligible {
@@ -1122,7 +1060,7 @@ where
             );
 
             let mut unique_versions = BTreeMap::<
-                (String, RowUuid, crate::ids::SchemaVersionId, bool),
+                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
                 &VersionRecord,
             >::new();
             for bundle in &tx_bundles {
@@ -1130,6 +1068,7 @@ where
                     unique_versions
                         .entry((
                             version.table().to_owned(),
+                            version.branch_key().clone(),
                             version.row_uuid(),
                             version.schema_version(),
                             version.deletion().is_some(),
@@ -1155,16 +1094,25 @@ where
                 let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
-                    self.version_storage_primary_key(&stored, BranchLineage::Root)?,
+                    self.version_storage_primary_key(&stored)?,
                     groove_record,
                 );
                 if stored.layer() == VersionLayer::Content {
                     content_versions.push(stored.clone());
-                    #[cfg(test)]
-                    content_rows.insert((stored.table().to_owned(), stored.row_uuid()));
+                    content_rows.insert((
+                        self.physical_table_id_for_version(&stored)?,
+                        stored.table().to_owned(),
+                        stored.branch_key().clone(),
+                        stored.row_uuid(),
+                    ));
                 }
 
-                let key = (stored.table().to_owned(), stored.row_uuid(), stored.layer());
+                let key = (
+                    stored.table().to_owned(),
+                    stored.branch_key().clone(),
+                    stored.row_uuid(),
+                    stored.layer(),
+                );
                 let existing_winner = current_updates.get(&key).map(|(previous, _)| {
                     (
                         previous,
@@ -1190,13 +1138,20 @@ where
             .map(|(stored, global_time)| (stored.clone(), *global_time))
             .collect::<Vec<_>>();
         self.database.commit_batch(batch)?;
+        self.rebuild_merge_heads_after_history_commit(&content_rows)?;
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
             self.persist_storage_consistency_marker_through(tx_time)?;
         }
         #[cfg(test)]
         {
             if std::env::var_os("JAZZ_SKIP_BULK_INGEST_ASSERTS").is_none() {
-                self.assert_merge_head_rows_match_history_for_test(&content_rows)?;
+                for (_, table, branch_key, row_uuid) in &content_rows {
+                    self.assert_merge_heads_match_history_in_branch_for_test(
+                        table,
+                        branch_key,
+                        *row_uuid,
+                    )?;
+                }
                 self.assert_global_current_updates_match_history_for_test(
                     &current_update_versions,
                 )?;
@@ -1210,5 +1165,4 @@ where
         }
         Ok(loaded_tx_ids)
     }
-
 }

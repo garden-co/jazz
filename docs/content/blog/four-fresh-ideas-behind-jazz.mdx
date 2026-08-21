@@ -131,10 +131,9 @@ coordinated freeze across your whole product. We call that idea "fluid migration
 
 Jazz gets there by combining two ideas.
 
-First, we make use of our native per-row branching and introduce schema version as an additional
-branch dimension. A row with a stable identity can then coexist in different schema branches at
-once. Updating the schema creates a new isolated branch where rows have the new shape, instead of
-forcing a single in-place mutation of all data.
+First, each row retains the physical schema identity under which it was written. Updating the schema
+does not force an in-place rewrite of old data; clients can continue to exchange rows authored under
+different schema versions.
 
 Second, we take inspiration from the smart folks at Ink & Switch, who thought deeply about exactly
 this problem in their Cambria paper. Their key idea is to treat migrations not as one-time
@@ -144,7 +143,7 @@ format _and_ new data being readable in the old format.
 
 This is exactly how migrations work in Jazz. You define them in our TypeScript migration DSL as
 two-way mappings between old and new columns. Jazz can then read data in any target schema by
-reading from _all_ schema branches and mapping data from those with different native schemas.
+reading compatible physical schemas and mapping data from those with different native shapes.
 
 This idea also extends beyond simple old/new pairs. By chaining mappings, you can build whole
 graphs of mutually compatible schema versions. Jazz handles that automatically, so clients simply

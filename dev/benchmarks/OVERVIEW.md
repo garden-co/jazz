@@ -38,24 +38,21 @@ result.
 | `cold_subscription`         | global update and local current-row materialization over increasing history depth | history depth, pending local state, current-row hydration |
 | `validation`                | multi-client exclusive ingest against an independent simplified model             | clients, rows, contention, OCC, and predicate sets        |
 | `sync`                      | mixed commits over UI → worker → edge → core with periodic view updates           | commit mix, topology, view cadence, known-state reuse     |
-| `merge_back_cost`           | branch creation, mergeable writes, merge-back, and current-row count              | branch write count; not a complete offline-sync scenario  |
 | `relation_include_delivery` | one-row relation/include delivery over a 1k–20k accumulated-view ladder           | incremental delivery work versus retained view size       |
 
 The smoke gate retains these receipts and their deltas. The
 `relation_include_delivery` ladder is the quantitative `INV-INC-1` gate added by
-#1166; it holds the change fixed and enforces a `1.025x` allocation/byte ratio.
-#1192 corrects its reporting to use independent per-metric medians without
-retuning that threshold.
+#1166; it holds the change fixed and enforces a `1.03x` allocation/byte ratio.
+#1192 corrects its reporting to use independent per-metric medians. The
+branch-key storage receipt retunes only the narrow ratio threshold as documented
+in `INV_INC_1_RECEIPT.md`.
 
 ### `jazz-sim` scenarios
 
-S1–S7 and S9 cover SaaS, canvas, permissions, order processing, durable
-streams, text traces, migrations, and durable execution. They are retained by
-the smoke workflow.
-
-**S8 still does not exist.** The specification reserves it for
-branch/merge/offline edits. `merge_back_cost` and the declarative R8 fixture
-cover pieces of that story, not the complete lifecycle.
+S1–S9 cover SaaS, canvas, permissions, order processing, durable streams, text
+traces, migrations, branch views, and durable execution. They are retained by
+the smoke workflow. S8 currently measures the local branch-view mechanism;
+transport reconnect/conflict/payload-reuse phases remain to be added.
 
 ### Groove
 
@@ -149,21 +146,22 @@ Ranked by their ability to change an engineering decision:
 3. **S4 fixed-delta/varying-view gate.** S4 already separates settlement and
    propagation; add a deterministic structural bound proving propagation stays
    proportional to the affected delta.
-4. **S8 branch/merge/offline lifecycle.** Cover accumulated offline edits,
-   reconnect, merge-back, conflicts, and payload reuse end to end.
+4. **S8 branch views.** The local mechanism harness now covers sparse overlays,
+   live/frozen bases, indexed reads, cross-key transactions, and contribution
+   merges; extend it with reconnect, conflicts, and payload reuse end to end.
 5. **S5–S7 promised dimensions.** Add remote resume and evicted-prefix coverage
    for S5, full-history memory for S6, and native-versus-lens plus migration-wave
    costs for S7.
 
 ## Source of acceptance targets
 
-| property                                   | current evidence                                                                 | next enforcement                                                                               |
-| ------------------------------------------ | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `INV-INC-1` bounded incremental delivery   | retained 1k–20k ladder and `1.025x` gate                                         | land #1192 and extend only when a new maintained mechanism needs its own shape-specific canary |
-| PERF-4 known-state payload dedup           | retained exact-coverage sweep with bytes, bundles, reads, and correctness digest | profile the coverage-invariant serving work only if a user-facing cost justifies it            |
-| PERF-5 maintained converges to rehydrate   | exact-result, cost, bytes, reads, and retained-state scale receipt               | optimize the O(view) metrics-footprint refresh if its measured latency warrants it             |
-| PERF-7/8 current reads are O(current rows) | R3 persisted receipts, current-row and checkpoint benches                        | retained filtered/indexed-read slope where selection is held fixed                             |
-| S4 post-acceptance propagation is O(delta) | separate settlement/propagation phases                                           | fixed-delta/varying-view structural gate                                                       |
+| property                                   | current evidence                                                                 | next enforcement                                                                    |
+| ------------------------------------------ | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `INV-INC-1` bounded incremental delivery   | retained 1k–20k ladder and `1.03x` gate                                          | extend only when a new maintained mechanism needs its own shape-specific canary     |
+| PERF-4 known-state payload dedup           | retained exact-coverage sweep with bytes, bundles, reads, and correctness digest | profile the coverage-invariant serving work only if a user-facing cost justifies it |
+| PERF-5 maintained converges to rehydrate   | exact-result, cost, bytes, reads, and retained-state scale receipt               | optimize the O(view) metrics-footprint refresh if its measured latency warrants it  |
+| PERF-7/8 current reads are O(current rows) | R3 persisted receipts, current-row and checkpoint benches                        | retained filtered/indexed-read slope where selection is held fixed                  |
+| S4 post-acceptance propagation is O(delta) | separate settlement/propagation phases                                           | fixed-delta/varying-view structural gate                                            |
 
 Targets should come from specification properties and measured deterministic
 spread, not from an arbitrary percentage around today’s laptop timing.
@@ -176,7 +174,7 @@ spread, not from an arbitrary percentage around today’s laptop timing.
 2. Extract focused policy/selective-hydration receipts from #1170 rather than
    merging one omnibus benchmark investigation.
 3. Add the S4 structural gate.
-4. Build S8, then fill the remaining S5–S7 dimensions.
+4. Extend S8 through transport, then fill the remaining S5–S7 dimensions.
 
 Add retention alongside each lane. A broad receipt-unification project is no
 longer a prerequisite for useful performance work.

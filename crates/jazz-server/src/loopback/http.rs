@@ -854,9 +854,7 @@ mod tests {
     fn admin_publish_schema_stores_draft_without_runtime_activation_and_keeps_raw_get_response() {
         let mut headers = HashMap::new();
         headers.insert("x-jazz-admin-secret".to_owned(), "secret".to_owned());
-        let mut schema = canonical_test_schema("todos", "title");
-        schema["branch_read_policy"] = json!({ "type": "True" });
-        schema["branch_write_policy"] = json!({ "type": "False" });
+        let schema = canonical_test_schema("todos", "title");
         let body = json!({ "schema": schema });
         let local_schema_id = compile_canonical_admin_schema(&body["schema"])
             .expect("test schema converts")

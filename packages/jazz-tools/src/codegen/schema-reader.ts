@@ -292,6 +292,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
     tables[table.name] = {
       columns,
       ...(table.indexedColumns ? { indexed_columns: [...table.indexedColumns] } : {}),
+      ...(table.branchBy ? { branchBy: [...table.branchBy] } : {}),
       policies: table.policies ? clonePolicies(table.policies) : undefined,
     };
   }

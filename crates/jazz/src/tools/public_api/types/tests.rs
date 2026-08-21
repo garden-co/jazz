@@ -416,23 +416,6 @@ fn schema_hash_ignores_policies() {
 }
 
 #[test]
-fn schema_hash_changes_when_branch_policy_changes() {
-    let without_branch_policy = SchemaBuilder::new()
-        .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
-        .build();
-    let with_branch_policy = SchemaBuilder::new()
-        .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
-        .branch_read_policy(PolicyExpr::True)
-        .build();
-
-    assert_ne!(
-        SchemaHash::compute(&without_branch_policy),
-        SchemaHash::compute(&with_branch_policy),
-        "branch policies are part of a schema's durable identity"
-    );
-}
-
-#[test]
 fn schema_hash_matches_v9_default_index_fixture() {
     let schema = SchemaBuilder::new()
         .table(

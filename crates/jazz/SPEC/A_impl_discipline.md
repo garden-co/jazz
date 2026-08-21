@@ -106,7 +106,7 @@ first. **Harness action caps are assertions too:** a cap on restarts,
 rehydrates, parking, or drain work defines how much of that hazard class a seed
 exercises. Initializing a counter _at_ its cap silently disables coverage and is
 a test bug, not a valid simplification. Recovery rebuilds node state (aliases,
-catalogue/branch metadata, HLC/global-seq, pending edges, rejected headers) from
+catalogue/branch-column mappings, HLC/global-seq, pending edges, rejected headers) from
 storage, never from transport/session state (`INV-DISC-10`).
 
 **Implementation status (verified).**

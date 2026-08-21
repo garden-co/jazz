@@ -23,12 +23,14 @@ use groove::records::{RecordDescriptor, Value};
 use groove::schema::ColumnType;
 
 use super::OpenTransactionId;
-use crate::ids::{AuthorId, BranchId, RowUuid, SchemaVersionId};
-use crate::protocol::{BindingViewKey, RegisterShapeOptions};
+#[cfg(test)]
+use crate::ids::RowUuid;
+use crate::ids::{AuthorId, SchemaFamilyId, SchemaVersionId};
+use crate::protocol::{BindingViewKey, BranchKey, RegisterShapeOptions, SnapshotRef};
 use crate::query::{BindingId, Query, RecursionBound, RelationQuery, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::GlobalTime;
-use crate::tx::{DurabilityTier, Snapshot, TxId, TxKind};
+use crate::tx::{DurabilityTier, Snapshot, TxId};
 
 mod fields;
 mod input;

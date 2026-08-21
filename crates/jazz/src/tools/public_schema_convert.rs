@@ -62,20 +62,9 @@ pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, Schem
         .collect::<Result<Vec<_>, _>>()?;
     coerce_typed_literals(schema, &mut converted);
     validate_converted_schema(&converted)?;
-    let branch_read_policy =
-        convert_optional_branch_policy(schema, "branch_read_policy", schema.branch_read_policy())?;
-    let branch_write_policy = convert_optional_branch_policy(
-        schema,
-        "branch_write_policy",
-        schema.branch_write_policy(),
-    )?;
     Ok(JazzSchema::from_runtime(
         schema.clone(),
-        RuntimeSchema {
-            tables: converted,
-            branch_read_policy,
-            branch_write_policy,
-        },
+        RuntimeSchema { tables: converted },
     ))
 }
 
@@ -86,33 +75,66 @@ pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     convert_public_schema(&schema).map_err(|error| format!("compile public schema: {error}"))
 }
 
-fn convert_optional_branch_policy(
-    schema: &Schema,
-    path: &str,
-    expr: Option<&PolicyExpr>,
-) -> Result<Option<Query>, SchemaConversionError> {
-    let Some(expr) = expr else {
-        return Ok(None);
-    };
-    let branch_name = TableName::from("jazz_branches");
-    let branch_schema = TableSchema::builder("jazz_branches")
-        .column("branch_id", ColumnType::Uuid)
-        .column("created_by", ColumnType::Uuid)
-        .nullable_column("parent", ColumnType::Uuid)
-        .nullable_column("base_global", ColumnType::Timestamp)
-        .column("state", ColumnType::Text)
-        .build();
-    let mut schema = schema.clone();
-    schema.insert(branch_name, branch_schema.clone());
-    convert_policy(&schema, &branch_schema, &branch_name, path, expr).map(Some)
-}
-
 fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
     let schema = RuntimeSchema {
         tables: tables.to_vec(),
-        branch_read_policy: None,
-        branch_write_policy: None,
     };
+    let mut branch_column_types = BTreeMap::<String, GrooveColumnType>::new();
+    for table in tables {
+        let mut bound = std::collections::BTreeSet::new();
+        for branch_column in &table.branch_by {
+            let column = table
+                .columns
+                .iter()
+                .find(|column| column.name == *branch_column)
+                .ok_or_else(|| {
+                    err(
+                        format!("$.{}.branchBy", table.name),
+                        format!("unknown branch column {branch_column:?}"),
+                    )
+                })?;
+            if !bound.insert(branch_column) {
+                return Err(err(
+                    format!("$.{}.branchBy", table.name),
+                    format!("branch column {branch_column:?} is listed more than once"),
+                ));
+            }
+            if matches!(column.column_type, GrooveColumnType::Nullable(_)) {
+                return Err(err(
+                    format!("$.{}.branchBy", table.name),
+                    format!("branch column {branch_column:?} must be non-null"),
+                ));
+            }
+            if !matches!(
+                column.column_type,
+                GrooveColumnType::String
+                    | GrooveColumnType::Uuid
+                    | GrooveColumnType::U8
+                    | GrooveColumnType::U16
+                    | GrooveColumnType::U32
+                    | GrooveColumnType::U64
+                    | GrooveColumnType::I32
+                    | GrooveColumnType::I64
+                    | GrooveColumnType::EnumTag(_)
+            ) {
+                return Err(err(
+                    format!("$.{}.branchBy", table.name),
+                    "branch columns require string, UUID, stable enum, or fixed-width integer values",
+                ));
+            }
+            if let Some(existing) =
+                branch_column_types.insert(branch_column.clone(), column.column_type.clone())
+                && existing != column.column_type
+            {
+                return Err(err(
+                    format!("$.{}.branchBy", table.name),
+                    format!(
+                        "branch column {branch_column:?} must have the same type in every table"
+                    ),
+                ));
+            }
+        }
+    }
     for table in tables {
         if let Some(policy) = &table.read_policy {
             policy.validate_runtime(&schema).map_err(|error| {
@@ -502,6 +524,11 @@ fn convert_table(
     }
 
     let mut converted = CoreTableSchema::new(name.as_str(), columns);
+    converted.branch_by = table
+        .branch_by
+        .iter()
+        .map(|column| column.as_str().to_owned())
+        .collect();
     converted.references = references;
     converted.indexed_columns = table
         .indexed_columns
@@ -2472,6 +2499,91 @@ mod tests {
     use std::path::PathBuf;
     use uuid::Uuid;
 
+    #[test]
+    fn compiles_branch_columns_with_the_same_name_and_type_across_tables() {
+        let todos = TableSchemaBuilder::new("todos")
+            .column("workspace_id", ColumnType::Uuid)
+            .branch_by("workspace_id")
+            .build();
+        let notes = TableSchemaBuilder::new("notes")
+            .column("workspace_id", ColumnType::Uuid)
+            .branch_by("workspace_id")
+            .build();
+        let schema = Schema::from([
+            (TableName::new("todos"), todos),
+            (TableName::new("notes"), notes),
+        ]);
+
+        let converted = convert_public_schema(&schema).expect("branch columns compile");
+        assert_eq!(
+            converted
+                .tables
+                .iter()
+                .map(|table| table.branch_by.len())
+                .sum::<usize>(),
+            2
+        );
+    }
+
+    #[test]
+    fn rejects_same_named_branch_columns_with_different_types() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("workspace_id", ColumnType::Uuid)
+                    .branch_by("workspace_id"),
+            )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("workspace_id", ColumnType::Integer)
+                    .branch_by("workspace_id"),
+            )
+            .build();
+
+        let error = convert_public_schema(&schema).expect_err("conflicting types must fail");
+        assert!(error.to_string().contains("same type in every table"));
+    }
+
+    #[test]
+    fn rejects_missing_and_non_key_encodable_branch_columns() {
+        let missing_column = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("todos").branch_by("workspace_id"))
+            .build();
+        assert!(
+            convert_public_schema(&missing_column)
+                .expect_err("missing column must fail")
+                .to_string()
+                .contains("unknown branch column")
+        );
+
+        let boolean_column = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("workspace_id", ColumnType::Boolean)
+                    .branch_by("workspace_id"),
+            )
+            .build();
+        assert!(
+            convert_public_schema(&boolean_column)
+                .expect_err("boolean branch column must fail")
+                .to_string()
+                .contains("fixed-width integer values")
+        );
+    }
+
+    #[test]
+    fn accepts_string_branch_columns() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch", ColumnType::Text)
+                    .branch_by("branch"),
+            )
+            .build();
+
+        convert_public_schema(&schema).expect("string branch column must compile");
+    }
+
     fn policy_graph_perf_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf")
@@ -2499,28 +2611,6 @@ mod tests {
         assert_eq!(converted, recompiled);
         assert_eq!(converted.version_id(), recompiled.version_id());
         assert_eq!(&source, converted.public_schema());
-    }
-
-    #[test]
-    fn compiles_branch_policy_source() {
-        let source = SchemaBuilder::new()
-            .branch_read_policy(PolicyExpr::Cmp {
-                column: "created_by".to_owned(),
-                op: CmpOp::Eq,
-                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
-            })
-            .build();
-
-        let compiled = convert_public_schema(&source).expect("compile branch policy source");
-        assert_eq!(
-            compiled
-                .branch_read_policy
-                .as_ref()
-                .expect("branch policy is installed")
-                .table,
-            "jazz_branches"
-        );
-        assert_eq!(compiled.public_schema(), &source);
     }
 
     #[test]

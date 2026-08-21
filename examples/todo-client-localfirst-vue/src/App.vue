@@ -40,7 +40,6 @@ function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   return {
     appId,
     env: "dev",
-    userBranch: "main",
     secret,
     ...(serverUrl ? { serverUrl } : {}),
     ...overrides,

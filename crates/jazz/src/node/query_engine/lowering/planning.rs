@@ -902,6 +902,12 @@ fn supported_current_storage_projection(
             data: DataSource::Current | DataSource::Branch(_),
             tier: _,
         }
+        | SourceExpr::BranchView {
+            projection,
+            head: _,
+            base: _,
+            tier: _,
+        }
         | SourceExpr::HistoryCut {
             projection,
             data: DataSource::Current,
@@ -916,6 +922,7 @@ fn supported_current_storage_projection(
             projection,
             binding_view: _,
             rows: _,
+            requires_result_payload: _,
         } => Some(projection),
         SourceExpr::WithOverlays { input, overlays } => {
             if overlays

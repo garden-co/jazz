@@ -252,8 +252,7 @@ fn originating_causality_rejection_retains_child_payload() {
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            target_lineage: crate::tx::BranchLineage::Root,
-            branch_merge: None,
+            contribution_merge: None,
         },
         vec![version_record(row, Vec::new(), title_cells("parent"), None)],
         u64::MAX - SKEW_TOLERANCE_MS,
@@ -549,6 +548,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             reset_result_set: true,
             version_carriers: Vec::new(),
             version_bundles: vec![VersionBundle {
+                scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                 tx: Transaction {
                     tx_id: bad_tx,
                     kind: TxKind::Mergeable,
@@ -560,8 +560,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    target_lineage: crate::tx::BranchLineage::Root,
-                    branch_merge: None,
+                    contribution_merge: None,
                 },
                 versions: Vec::new(),
                 fate: Fate::Accepted,

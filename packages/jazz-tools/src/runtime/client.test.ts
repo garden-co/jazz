@@ -291,6 +291,114 @@ describe("JazzClient schema access", () => {
 });
 
 describe("JazzClient transaction query plumbing", () => {
+  it("encodes exact and head-over-base branch mutation targets", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const head = { values: { workspace: { type: "Integer", value: 7 } as const } };
+    const base = { values: { workspace: { type: "Integer", value: 1 } as const } };
+
+    client.insert("todos", {}, { branch: head });
+    client.update(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      {},
+      {
+        branch: { head, base: { kind: "current", branch: base } },
+      },
+    );
+
+    expect(JSON.parse(runtime.insert.mock.calls[0][2] as string)).toMatchObject({
+      branch_view: { head: { values: { workspace: [14, 14] } } },
+    });
+    expect(JSON.parse(runtime.update.mock.calls[0][3] as string)).toMatchObject({
+      branch_view: {
+        head: { values: { workspace: [14, 14] } },
+        base: { Current: { values: { workspace: [14, 2] } } },
+      },
+    });
+  });
+
+  it("encodes ergonomic branch selectors into the native read view", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    await client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+      branch: {
+        head: { values: { workspace: { type: "Integer", value: 7 } } },
+        base: {
+          kind: "current",
+          branch: {
+            values: {
+              workspace: { type: "Integer", value: 1 },
+              tenant: { type: "Uuid", value: "42424242-4242-4242-4242-424242424242" },
+            },
+          },
+        },
+      },
+    });
+
+    const optionsJson = runtime.query.mock.calls[0][3];
+    expect(JSON.parse(optionsJson as string)).toMatchObject({
+      read_view: {
+        source: {
+          BranchView: {
+            head: { values: { workspace: [14, 14] } },
+            base: {
+              Current: {
+                values: {
+                  workspace: [14, 2],
+                  tenant: [8, 16, ...Array(16).fill(0x42)],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("canonically encodes string branch values", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    await client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+      branch: {
+        head: { values: { branch: { type: "Text", value: "draft" } } },
+      },
+    });
+
+    const optionsJson = runtime.query.mock.calls[0][3];
+    expect(JSON.parse(optionsJson as string)).toMatchObject({
+      read_view: {
+        source: {
+          BranchView: {
+            head: { values: { branch: [6, 5, 100, 114, 97, 102, 116] } },
+          },
+        },
+      },
+    });
+  });
+
+  it.each([
+    { type: "Integer", value: 0x80000000 },
+    { type: "Integer", value: 1.5 },
+    { type: "BigInt", value: Number.MAX_SAFE_INTEGER + 1 },
+    { type: "BigInt", value: 1n << 63n },
+  ] as const)("rejects invalid branch column value $type:$value", async (value) => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    await expect(
+      client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+        branch: { head: { values: { workspace: value } } },
+      }),
+    ).rejects.toThrow(/branch (Integer|BigInt) values/);
+    expect(runtime.query).not.toHaveBeenCalled();
+  });
+
   it("supports raw reads scoped to the open transaction", async () => {
     const runtime = makeFakeRuntime();
     runtime.query.mockResolvedValue([{ id: "todo-transaction-query", values: [] }]);

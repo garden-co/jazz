@@ -27,6 +27,7 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
   constructor(
     public readonly columns: TColumns,
     public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
+    public readonly branchColumns?: readonly Extract<keyof TColumns, string>[],
   ) {}
 
   indexOnly<
@@ -42,7 +43,34 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
       }
     }
 
-    return new DefinedTable(this.columns, normalizedColumns);
+    return new DefinedTable(this.columns, normalizedColumns, this.branchColumns);
+  }
+
+  branchBy<const TBranchColumn extends Extract<keyof TColumns, string>>(
+    column: TBranchColumn,
+  ): DefinedTable<TColumns>;
+  branchBy<
+    const TBranchColumns extends readonly [
+      Extract<keyof TColumns, string>,
+      ...Extract<keyof TColumns, string>[],
+    ],
+  >(columns: TBranchColumns): DefinedTable<TColumns>;
+  branchBy(
+    columns:
+      | Extract<keyof TColumns, string>
+      | readonly [Extract<keyof TColumns, string>, ...Extract<keyof TColumns, string>[]],
+  ): DefinedTable<TColumns> {
+    const normalizedColumns = (Array.isArray(columns) ? [...columns] : [columns]) as Extract<
+      keyof TColumns,
+      string
+    >[];
+    for (const column of normalizedColumns) {
+      if (!(column in this.columns)) {
+        throw new Error(`table.branchBy(...) references unknown column "${column}".`);
+      }
+    }
+
+    return new DefinedTable(this.columns, this.indexedColumns, normalizedColumns);
   }
 }
 
@@ -1229,6 +1257,26 @@ function tableIndexedColumns(
   return undefined;
 }
 
+function tableBranchColumns(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+): string[] | undefined {
+  if (definition instanceof DefinedTable) {
+    return definition.branchColumns ? [...definition.branchColumns] : undefined;
+  }
+
+  if (typeof definition === "object" && definition !== null) {
+    const maybeDefinedTable = definition as {
+      __jazzTableDefinition?: unknown;
+      branchColumns?: readonly string[];
+    };
+    if (maybeDefinedTable.__jazzTableDefinition === true) {
+      return maybeDefinedTable.branchColumns ? [...maybeDefinedTable.branchColumns] : undefined;
+    }
+  }
+
+  return undefined;
+}
+
 function definitionToColumns(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): Column[] {
@@ -1262,10 +1310,12 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
   return {
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => {
       const indexedColumns = tableIndexedColumns(tableDefinition);
+      const branchColumns = tableBranchColumns(tableDefinition);
       return {
         name: tableName,
         columns: definitionToColumns(tableDefinition),
         ...(indexedColumns ? { indexedColumns } : {}),
+        ...(branchColumns ? { branchBy: branchColumns } : {}),
       };
     }),
   };

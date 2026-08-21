@@ -334,7 +334,10 @@ where
             let stored = self
                 .query_transaction(tx_id)?
                 .ok_or(Error::MissingTransaction(tx_id))?;
-            out.push(self.version_bundle_for_maintained_view_versions_with_tx(&stored, &versions)?);
+            out.push(self.version_bundle_for_maintained_view_versions_with_tx(
+                &stored,
+                &versions,
+            )?);
         }
         Ok(out)
     }

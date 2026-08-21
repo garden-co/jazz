@@ -13,8 +13,8 @@ use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
     ContributingMembersEntry, KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry,
-    RealRowMemberEntry, ResultMemberEntry, ResultRowSource, RowVersionRef, VersionBundle,
-    VersionBundleRef, VersionCarrier, VersionRecord, build_version_carriers_from_singletons,
+    RealRowMemberEntry, ResultMemberEntry, RowVersionRef, VersionBundle, VersionBundleRef,
+    VersionCarrier, VersionRecord, build_version_carriers_from_singletons,
 };
 
 fn maintained_view_tx_versions_contain_winner(
@@ -49,12 +49,20 @@ fn merge_receiver_version_bundle_ref(
         bundles.insert(bundle.tx.tx_id, bundle.to_owned_bundle());
         return Ok(());
     };
-    if existing.tx != *bundle.tx
+    let mut existing_tx_identity = existing.tx.clone();
+    existing_tx_identity.n_total_writes = 0;
+    let mut incoming_tx_identity = bundle.tx.clone();
+    incoming_tx_identity.n_total_writes = 0;
+    if existing_tx_identity != incoming_tx_identity
         || existing.fate != *bundle.fate
         || existing.global_time != bundle.global_time
         || existing.durability != bundle.durability
     {
         return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
+    }
+    if bundle.scope == crate::protocol::VersionBundleScope::CompleteTransaction {
+        existing.tx = bundle.tx.clone();
+        existing.scope = bundle.scope;
     }
     let mut seen = existing
         .versions
@@ -73,6 +81,13 @@ fn merge_receiver_version_bundle_ref(
         }
     }
     existing.versions = seen.into_values().collect();
+    if existing.scope == crate::protocol::VersionBundleScope::ViewScoped {
+        existing.tx.n_total_writes = existing
+            .versions
+            .len()
+            .try_into()
+            .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+    }
     Ok(())
 }
 
@@ -92,9 +107,12 @@ fn version_bundle_refs_for_carriers<'a>(
     Ok(refs)
 }
 
-fn version_bundle_record_key(version: &VersionRecord) -> (String, RowUuid, SchemaVersionId, bool) {
+fn version_bundle_record_key(
+    version: &VersionRecord,
+) -> (String, BranchKey, RowUuid, SchemaVersionId, bool) {
     (
         version.table().to_owned(),
+        version.branch_key().clone(),
         version.row_uuid(),
         version.schema_version(),
         version.deletion().is_some(),
@@ -385,19 +403,12 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "flat tuple source witness schema version alias must exist",
                 ))?;
-            let stored_tx = self
-                .query_transaction(tx)?
-                .ok_or(Error::MissingTransaction(tx))?;
             let mut contributor = RealRowMemberEntry::current_content((
                 canonical.table.clone(),
                 canonical.row_uuid(),
                 tx,
             ));
             contributor.schema_version = Some(schema_version);
-            if let BranchLineage::Branch(branch) = stored_tx.tx.target_lineage {
-                contributor.branch_or_prefix = Some(branch.to_bytes());
-                contributor.source = ResultRowSource::Branch { branch: branch.0 };
-            }
             let fact = ProgramFactEntry::ContributingMembers(ContributingMembersEntry {
                 result: result.clone(),
                 contributor: contributor.into(),
@@ -596,6 +607,18 @@ where
                 let stored_tx = self
                     .query_transaction_memo(*tx_id, &mut context)?
                     .ok_or(Error::MissingTransaction(*tx_id))?;
+                // A trusted writer link that explicitly requests complete
+                // exclusive payloads must receive the whole cross-table
+                // transaction, not one permanently redacted fragment per
+                // table subscription. Identity-scoped links remain bounded
+                // by their maintained policy witnesses even when the peer
+                // preference is enabled.
+                if complete_exclusive_payloads
+                    && stored_tx.tx.kind == TxKind::Exclusive
+                    && usize::try_from(stored_tx.tx.n_total_writes).ok() != Some(tx_versions.len())
+                {
+                    *tx_versions = self.query_versions_for_tx(*tx_id)?;
+                }
                 let filtered_tx_versions = tx_versions
                     .iter()
                     .filter(|version| {
@@ -715,6 +738,12 @@ where
                 version.deletion().is_some()
                     || wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
             });
+            bundle.tx.n_total_writes = bundle
+                .versions
+                .len()
+                .try_into()
+                .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+            bundle.scope = crate::protocol::VersionBundleScope::ViewScoped;
         }
         let version_carriers = build_version_carriers_from_singletons(version_bundles)
             .map_err(|_| Error::InvalidStoredValue("failed to build version-bundle run"))?;
@@ -806,6 +835,7 @@ where
         let mut receiver_batch = self.database.open_batch();
         let mut receiver_batch_tx_ids = BTreeSet::new();
         let mut receiver_batch_global_times = Vec::new();
+        let mut receiver_batch_content_versions = Vec::new();
         let mut receiver_batch_bundle_count = 0u64;
         for bundle in receiver_candidates.values() {
             let staged = self.stage_view_bundle(
@@ -813,11 +843,16 @@ where
                 bundle,
                 &mut receiver_batch_tx_ids,
                 &mut receiver_batch_global_times,
+                &mut receiver_batch_content_versions,
             )?;
             if staged {
                 receiver_batch_bundle_count += 1;
             }
         }
+        self.write_merge_heads_for_bulk_content_versions(
+            &mut receiver_batch,
+            &receiver_batch_content_versions,
+        )?;
         if !receiver_batch.is_empty() {
             self.sync_metrics.receiver_bulk_ingest_commits += 1;
             self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
@@ -843,29 +878,6 @@ where
         }
         if self.initial_sync_flush_active && self.query.initial_hydration_binding_views.is_empty() {
             self.finish_initial_sync_flush_cadence()?;
-        }
-        Ok(())
-    }
-
-    /// Materialize sparse branch storage before a trusted receiver batch can
-    /// stage its branch-target versions. The branch metadata gate runs before
-    /// this path, so a receiver only provisions a partition for content it is
-    /// already allowed to name. Keeping this before the batch is essential:
-    /// the physical history table must be durable before a ViewUpdate can make
-    /// its version witness public to a maintained subscription.
-    pub(crate) fn prepare_view_update_branch_partitions(
-        &mut self,
-        updates: &[ViewUpdateParts],
-    ) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
-        for update in updates {
-            for bundle in
-                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
-            {
-                self.prepare_branch_target_partitions_if_ready(&bundle.tx, bundle.versions)?;
-            }
         }
         Ok(())
     }
@@ -1237,9 +1249,56 @@ where
             bundle.global_time,
             bundle.durability,
         )?;
+        if usize::try_from(bundle.tx.n_total_writes).ok() != Some(bundle.versions.len()) {
+            return Err(Error::MalformedViewUpdate(
+                "version bundle count does not match its declared scope payload",
+            ));
+        }
+        if let Some(stored) = self.query_transaction(bundle.tx.tx_id)? {
+            let mut stored_identity = stored.tx;
+            stored_identity.n_total_writes = 0;
+            let mut incoming_identity = bundle.tx.clone();
+            incoming_identity.n_total_writes = 0;
+            if stored_identity != incoming_identity {
+                return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
+            }
+        }
         if bundle.tx.kind != TxKind::Exclusive {
+            if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
+                return self.ingest_view_scoped_transaction_with_current_indexes(
+                    bundle.tx,
+                    bundle.versions,
+                    bundle.fate,
+                    bundle.global_time,
+                    bundle.durability,
+                );
+            }
             return self.ingest_known_transaction(
                 bundle.tx,
+                bundle.versions,
+                bundle.fate,
+                bundle.global_time,
+                bundle.durability,
+            );
+        }
+        if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
+            let tx_id = bundle.tx.tx_id;
+            let mut known_keys = if self.query_transaction(tx_id)?.is_some() {
+                self.query_versions_for_tx(tx_id)?
+                    .iter()
+                    .map(|stored| Ok(view_version_key(&self.version_record_from_row(stored)?)))
+                    .collect::<Result<BTreeSet<_>, Error>>()?
+            } else {
+                BTreeSet::new()
+            };
+            known_keys.extend(bundle.versions.iter().map(view_version_key));
+            let mut redacted_tx = bundle.tx;
+            redacted_tx.n_total_writes = known_keys
+                .len()
+                .try_into()
+                .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+            return self.ingest_transaction_fragment_without_current_indexes(
+                redacted_tx,
                 bundle.versions,
                 bundle.fate,
                 bundle.global_time,
@@ -1319,11 +1378,20 @@ where
         bundle: &VersionBundle,
         staged_tx_ids: &mut BTreeSet<TxId>,
         staged_global_times: &mut Vec<GlobalTime>,
+        staged_content_versions: &mut Vec<VersionRow>,
     ) -> Result<bool, Error> {
         validate_received_view_bundle_global_time_durability(
             bundle.global_time,
             bundle.durability,
         )?;
+        if usize::try_from(bundle.tx.n_total_writes).ok() != Some(bundle.versions.len()) {
+            return Err(Error::MalformedViewUpdate(
+                "version bundle count does not match its declared scope payload",
+            ));
+        }
+        if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
+            return Ok(false);
+        }
         if bundle.tx.kind == TxKind::Exclusive {
             let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
                 Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
@@ -1346,6 +1414,7 @@ where
             bundle.global_time,
             bundle.durability,
             staged_global_times,
+            staged_content_versions,
         )?;
         Ok(true)
     }
@@ -1419,14 +1488,24 @@ where
             permission_subject,
             base_snapshot,
             user_metadata_json,
-            target_lineage,
-            branch_merge,
+            contribution_merge,
             ..
         } = stored_tx.tx.clone();
+        let scope = if usize::try_from(n_total_writes).ok() == Some(tx_versions.len()) {
+            crate::protocol::VersionBundleScope::CompleteTransaction
+        } else {
+            crate::protocol::VersionBundleScope::ViewScoped
+        };
         let tx_payload = Transaction {
             tx_id,
             kind,
-            n_total_writes,
+            n_total_writes: match scope {
+                crate::protocol::VersionBundleScope::CompleteTransaction => n_total_writes,
+                crate::protocol::VersionBundleScope::ViewScoped => tx_versions
+                    .len()
+                    .try_into()
+                    .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?,
+            },
             made_by,
             permission_subject,
             base_snapshot,
@@ -1434,8 +1513,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            target_lineage,
-            branch_merge,
+            contribution_merge,
         };
         let mut versions = Vec::with_capacity(tx_versions.len());
         for version in tx_versions {
@@ -1450,6 +1528,7 @@ where
         Ok(VersionBundle {
             tx: tx_payload,
             versions,
+            scope,
             fate: stored_tx.fate.clone(),
             global_time: stored_tx.global_time,
             durability: stored_tx.durability,
@@ -1595,9 +1674,10 @@ where
     }
 }
 
-fn view_version_key(version: &VersionRecord) -> (String, RowUuid, VersionLayer) {
+fn view_version_key(version: &VersionRecord) -> (String, BranchKey, RowUuid, VersionLayer) {
     (
         version.table().to_owned(),
+        version.branch_key().clone(),
         version.row_uuid(),
         VersionLayer::for_record(version),
     )
