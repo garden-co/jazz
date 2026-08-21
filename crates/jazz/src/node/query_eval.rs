@@ -1475,6 +1475,28 @@ where
         Some(tables)
     }
 
+    pub(crate) fn joined_read_policy_currency_changed_after(
+        &mut self,
+        table: &str,
+        position: GlobalSeq,
+    ) -> Result<bool, Error> {
+        let Some(policy) = self.table(table)?.read_policy.clone() else {
+            return Ok(false);
+        };
+        let mut tables = BTreeSet::new();
+        collect_policy_dependency_tables(&policy, &mut tables);
+        if tables.is_empty() {
+            return Ok(false);
+        }
+        tables.insert(policy.table);
+        for table in tables {
+            if self.global_currency_changed_after(&table, position)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn transaction_row_keys_for_query(
         &self,
         shape: &ValidatedQuery,
@@ -2960,6 +2982,50 @@ fn collect_join_read_tables(join: &crate::query::JoinVia, tables: &mut BTreeSet<
     }
     for nested_join in &join.nested_joins {
         collect_join_read_tables(nested_join, tables);
+    }
+}
+
+fn collect_policy_dependency_tables(query: &JazzQuery, tables: &mut BTreeSet<String>) {
+    for join in &query.joins {
+        collect_join_read_tables(join, tables);
+    }
+    collect_reachable_read_tables(&query.reachable, tables);
+    collect_exists_read_tables(&query.exists, tables);
+    for branch in &query.policy_branches {
+        collect_policy_branch_read_tables(branch, tables);
+    }
+}
+
+fn collect_policy_branch_read_tables(
+    branch: &crate::query::PolicyBranch,
+    tables: &mut BTreeSet<String>,
+) {
+    for join in &branch.joins {
+        collect_join_read_tables(join, tables);
+    }
+    collect_reachable_read_tables(&branch.reachable, tables);
+    collect_exists_read_tables(&branch.exists, tables);
+}
+
+fn collect_reachable_read_tables(
+    reachable: &[crate::query::ReachableVia],
+    tables: &mut BTreeSet<String>,
+) {
+    for reachable in reachable {
+        tables.insert(reachable.access_table.clone());
+        tables.insert(reachable.edge_table.clone());
+        if let Some(seed) = &reachable.seed {
+            tables.insert(seed.table.clone());
+        }
+    }
+}
+
+fn collect_exists_read_tables(exists: &[crate::query::ExistsVia], tables: &mut BTreeSet<String>) {
+    for exists in exists {
+        tables.insert(exists.table.clone());
+        for branch in &exists.alternatives {
+            collect_policy_branch_read_tables(branch, tables);
+        }
     }
 }
 

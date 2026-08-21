@@ -1916,7 +1916,6 @@ async fn inherited_referencing_scalar_paths_grant_visibility_and_compose_with_or
 /// Verifies that reverse inheritance invalidates active subscriptions when
 /// referencing rows are created, deleted, or retargeted.
 #[tokio::test]
-#[ignore = "deleting the last reverse-inheritance reference does not emit the required target-row removal delta"]
 async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_and_retarget() {
     tokio::task::LocalSet::new().run_until(inherited_referencing_scalar_subscription_updates_follow_create_delete_and_retarget_inner()).await;
 }

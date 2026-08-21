@@ -49,6 +49,105 @@ fn db_sync_surface_round_trips_subscription_to_client() {
 }
 
 #[test]
+fn reverse_inherited_policy_subscription_removes_target_after_reference_delete() {
+    let reader = AuthorId::from_bytes([0xa1; 16]);
+    let other = AuthorId::from_bytes([0xb2; 16]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("files")
+                    .column("owner_id", PublicColumnType::Text)
+                    .column("name", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::Or(vec![
+                                public_session_eq("owner_id", &["user_id"]),
+                                PublicPolicyExpr::InheritsReferencing {
+                                    operation: PublicOperation::Select,
+                                    source_table: "todos".to_owned(),
+                                    via_column: "image".to_owned(),
+                                    max_depth: None,
+                                },
+                            ]))
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                            .with_delete(PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("owner_id", PublicColumnType::Text)
+                    .column("title", PublicColumnType::Text)
+                    .nullable_fk_column("image", "files")
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(public_session_eq("owner_id", &["user_id"]))
+                            .with_insert(public_session_eq("owner_id", &["user_id"]))
+                            .with_update(
+                                Some(public_session_eq("owner_id", &["user_id"])),
+                                PublicPolicyExpr::True,
+                            )
+                            .with_delete(public_session_eq("owner_id", &["user_id"])),
+                    ),
+            ),
+    );
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, reader, &schema);
+    let file = seed(
+        &server,
+        "files",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("file".to_owned())),
+            ("owner_id".to_owned(), Value::String(other.0.to_string())),
+        ]),
+    );
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, reader);
+    let query = Query::from("files");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let _opened = block_on(subscription.next_raw()).unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let initial = block_on(subscription.next_raw()).unwrap();
+    assert!(opened_rows(initial).is_empty());
+    assert!(subscription.try_next_event().is_none());
+
+    let todo = client
+        .insert(
+            "todos",
+            BTreeMap::from([
+                (
+                    "image".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::Uuid(file.0)))),
+                ),
+                ("owner_id".to_owned(), Value::String(reader.0.to_string())),
+                ("title".to_owned(), Value::String("todo".to_owned())),
+            ]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let (added, _, _) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), [file]);
+
+    client.delete("todos", todo.row_uuid()).unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let (_, _, removed) = delta_rows(
+        subscription
+            .try_next_event()
+            .expect("deleting the last visible reference should revoke the target row"),
+    );
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].row_uuid, file);
+}
+
+#[test]
 fn large_logical_snapshot_crosses_byte_peer_transport_and_settles() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0x71; 16]);

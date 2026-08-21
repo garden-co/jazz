@@ -449,6 +449,13 @@ impl PeerState {
         )?;
         let drain_elapsed = trace_start.elapsed();
         let drain_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
+        let current_global_watermark = node.applied_global_watermark();
+        let previous_global_watermark = self
+            .subscriptions
+            .get(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .map(|maintained| maintained.observed_global_watermark)
+            .filter(|previous| *previous < current_global_watermark);
         let ResultTransitions {
             authoritative_membership_changed: _,
             authoritative_member_adds: _,
@@ -473,7 +480,28 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
+        let joined_policy_dependency_changed = previous_global_watermark
+            .map(|position| {
+                node.joined_read_policy_currency_changed_after(&shape.query().table, position)
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if let Some(maintained) = self
+            .subscriptions
+            .get_mut(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_mut())
+        {
+            maintained.observed_global_watermark = current_global_watermark;
+        }
+        let silent_policy_dependency_advance = joined_policy_dependency_changed
+            && observed_result_delta_batches == 0
+            && result_member_adds.is_empty()
+            && result_member_removes.is_empty()
+            && terminal_operations.is_empty()
+            && program_fact_adds.is_empty()
+            && program_fact_removes.is_empty();
         if requires_authoritative_membership_reconcile
+            || silent_policy_dependency_advance
             || (observed_result_delta_batches > 0
                 && result_member_adds.is_empty()
                 && result_member_removes.is_empty()
@@ -1063,6 +1091,7 @@ impl PeerState {
             maintained,
             terminal_schemas,
             tables,
+            observed_global_watermark: node.applied_global_watermark(),
         };
         let state = self.subscriptions.entry(subscription).or_default();
         state.maintained_subscription_view = Some(maintained_subscription);

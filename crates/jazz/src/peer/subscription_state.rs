@@ -152,6 +152,7 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
     pub(super) tables: BTreeMap<String, TableSchema>,
+    pub(super) observed_global_watermark: super::super::time::GlobalSeq,
 }
 
 pub(super) struct MaintainedRehydrateRequest<'a> {
