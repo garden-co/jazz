@@ -300,20 +300,20 @@ where
     pub(crate) fn transaction_ids_ahead_of_settled_through_for_author(
         &mut self,
         author: AuthorId,
-        settled_through: Option<GlobalSeq>,
+        settled_through: Option<GlobalTime>,
     ) -> Result<Vec<TxId>, Error> {
         let mut tx_ids = self.pending_transaction_ids_for_author(author)?;
-        let first_global_seq = match settled_through {
-            Some(GlobalSeq(u64::MAX)) => return Ok(tx_ids),
-            Some(GlobalSeq(position)) => position + 1,
+        let first_global_time = match settled_through {
+            Some(GlobalTime(u64::MAX)) => return Ok(tx_ids),
+            Some(GlobalTime(position)) => position + 1,
             None => 0,
         };
-        let first_key = Value::Nullable(Some(Box::new(Value::U64(first_global_seq))));
+        let first_key = Value::Nullable(Some(Box::new(Value::U64(first_global_time))));
         let last_key = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
-        let mut sequenced = if first_global_seq < u64::MAX {
+        let mut sequenced = if first_global_time < u64::MAX {
             self.database.index_scan_range_raw(
                 "jazz_transactions",
-                "by_global_seq",
+                "by_global_time",
                 std::slice::from_ref(&first_key),
                 std::slice::from_ref(&last_key),
             )?
@@ -322,7 +322,7 @@ where
         };
         sequenced.extend(self.database.index_scan_raw(
             "jazz_transactions",
-            "by_global_seq",
+            "by_global_time",
             std::slice::from_ref(&last_key),
         )?);
 

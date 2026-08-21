@@ -1028,7 +1028,7 @@ where
 
 fn unsettled_transaction_row_keys_for_query<S>(
     node: &Rc<RefCell<NodeState<S>>>,
-    cache: &mut BTreeMap<(AuthorId, Option<GlobalSeq>), BTreeSet<(String, RowUuid)>>,
+    cache: &mut BTreeMap<(AuthorId, Option<GlobalTime>), BTreeSet<(String, RowUuid)>>,
     shape: &ValidatedQuery,
     binding: &Binding,
     author: AuthorId,
