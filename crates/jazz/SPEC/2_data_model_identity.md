@@ -184,7 +184,7 @@ from those tables on recovery.
   `(row_uuid, tx_time, tx_node_id)`, plus a per-lineage combined derived current
   row per exact branch key. The database has exactly one
   `jazz_deletion_history`, keyed by `(physical_table_id, branch_key,
-  row_uuid, tx_time, tx_node_id)` and with a seek/index prefix
+row_uuid, tx_time, tx_node_id)` and with a seek/index prefix
   `(physical_table_id, branch_key, row_uuid)`. The
   deletion record's `schema_version` is retained provenance, not a storage
   partition. Content rows use `schema_version` as a Groove descriptor

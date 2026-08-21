@@ -90,9 +90,7 @@ fn admin_schema_api_publishes_lists_and_gets_schema_json() {
                         "nullable": false
                     }]
                 }
-            },
-            "branch_read_policy": { "type": "True" },
-            "branch_write_policy": { "type": "False" }
+            }
         },
         "permissions": null
     })
@@ -298,9 +296,7 @@ fn admin_schema_api_persists_catalogue_to_schema_store_file() {
                         "nullable": false
                     }]
                 }
-            },
-            "branch_read_policy": { "type": "True" },
-            "branch_write_policy": { "type": "False" }
+            }
         }
     })
     .to_string();
@@ -346,14 +342,6 @@ fn admin_schema_api_persists_catalogue_to_schema_store_file() {
     );
     assert_eq!(fetched.status, 200);
     assert!(fetched.json()["schema"]["tables"]["notes"].is_object());
-    assert_eq!(
-        fetched.json()["schema"]["branch_read_policy"],
-        json!({ "type": "True" })
-    );
-    assert_eq!(
-        fetched.json()["schema"]["branch_write_policy"],
-        json!({ "type": "False" })
-    );
     assert!(fetched.json().get("localSchemaId").is_none());
 
     let store_json: Value =
