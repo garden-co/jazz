@@ -496,21 +496,24 @@ where
                 let column_id = target_mapping.columns.get(&column.name).copied()?;
                 let has_enum_boundary =
                     physical_mapping_has_enum_boundary(&target_mapping, column_id)
-                    || matches!(
-                        column.column_type,
-                        records::ValueType::EnumTag(_) | records::ValueType::Enum(_)
-                    );
+                    || value_type_has_enum_boundary(&column.column_type);
                 has_enum_boundary.then_some(column_id)
             })
             .collect::<BTreeSet<_>>();
-        // The durable projection is already complete for ordinary scalar
-        // columns and is refreshed whenever a compatible schema variant is
-        // admitted.  Only real enum boundaries need a query-local target so
-        // an unselected, unrepresentable enum can omit its row rather than
-        // fail the whole source.  In particular, an empty nested-enum
-        // registry is bookkeeping for every physical column, not evidence of
-        // an enum boundary.
-        if required_enum_columns.is_empty() {
+        let target_has_any_enum_boundary = target_table.columns.iter().any(|column| {
+            target_mapping
+                .columns
+                .get(&column.name)
+                .is_some_and(|column_id| {
+                    physical_mapping_has_enum_boundary(&target_mapping, *column_id)
+                })
+                || value_type_has_enum_boundary(&column.column_type)
+        });
+        // A schema with no enum boundary can use its durable target directly.
+        // For an enum-bearing table, an empty requirement set is itself a
+        // query-local compatibility boundary: unrequested enum cells must be
+        // typed-null before an old reader decodes the row.
+        if required_enum_columns.is_empty() && !target_has_any_enum_boundary {
             return Ok(physical_current_projection_target(
                 target_alias,
                 target_table_name,
@@ -636,14 +639,20 @@ where
                 let column_id = target_mapping.columns.get(&column.name).copied()?;
                 let has_enum_boundary =
                     physical_mapping_has_enum_boundary(&target_mapping, column_id)
-                    || matches!(
-                        column.column_type,
-                        records::ValueType::EnumTag(_) | records::ValueType::Enum(_)
-                    );
+                    || value_type_has_enum_boundary(&column.column_type);
                 has_enum_boundary.then_some(column_id)
             })
             .collect::<BTreeSet<_>>();
-        if required_enum_columns.is_empty() {
+        let target_has_any_enum_boundary = target_table.columns.iter().any(|column| {
+            target_mapping
+                .columns
+                .get(&column.name)
+                .is_some_and(|column_id| {
+                    physical_mapping_has_enum_boundary(&target_mapping, *column_id)
+                })
+                || value_type_has_enum_boundary(&column.column_type)
+        });
+        if required_enum_columns.is_empty() && !target_has_any_enum_boundary {
             return Ok(physical_history_projection_target(
                 target_alias,
                 target_table_name,
