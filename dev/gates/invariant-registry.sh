@@ -161,6 +161,11 @@ citation_matches_test_source() {
     read -r -a modules <<< "$citation_parts"
     crate=${modules[0]}
     leaf=${modules[${#modules[@]} - 1]}
+    case $crate in
+        jazz) [[ $source_path == crates/jazz/* ]] || return 1 ;;
+        groove) [[ $source_path == crates/groove/* ]] || return 1 ;;
+        jazz_tools) [[ $source_path == crates/jazz-testkit/* ]] || return 1 ;;
+    esac
     if [[ $crate != jazz && $crate != groove && $crate != jazz_tools ]]; then
         [[ $source_path == "crates/"*"/tests/$crate.rs" ]] && return 0
         return 1
@@ -168,9 +173,6 @@ citation_matches_test_source() {
     source_path=${source_path%.rs}
     source_path=${source_path//\//::}
     source_path="::${source_path}::"
-    if [[ $citation == jazz::tools::server::routes::* && $source_path == *'::jazz-server::src::server::routes::'* ]]; then
-        return 0
-    fi
     for ((i = 1; i < ${#modules[@]} - 1; i++)); do
         # `harness` is the registry's stable logical mount for node test helpers;
         # physical test files remain free to move beneath `node/tests/`.
