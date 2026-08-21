@@ -5,20 +5,23 @@ use std::task::{Context, Poll};
 use futures::executor::block_on;
 use futures::task::noop_waker;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts};
-use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::row;
-use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::RocksDbStorage;
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)])
-            .with_read_policy(Policy::public())
-            .with_write_policy(Policy::public()),
-    ])
+    let source = SchemaBuilder::new()
+        .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+        .build();
+    JazzSchema::new(&source).expect("deferred-persistence public schema compiles")
+}
+
+fn empty_schema() -> JazzSchema {
+    JazzSchema::new(&SchemaBuilder::new().build()).expect("empty public schema compiles")
 }
 
 #[test]
@@ -29,7 +32,7 @@ fn rocksdb_writes_are_resident_before_the_sync_call_returns() {
     let directory = tempfile::tempdir().expect("temporary RocksDB directory");
     let storage = RocksDbStorage::open(directory.path(), &family_refs).expect("open RocksDB");
     let owner = block_on(Db::open_history_complete(DbConfig::new(
-        JazzSchema::new([]),
+        empty_schema(),
         storage,
         DbIdentity {
             node: NodeUuid::from_bytes([0x52; 16]),
