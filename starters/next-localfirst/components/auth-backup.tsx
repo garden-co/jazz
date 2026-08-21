@@ -23,7 +23,11 @@ export function AuthBackup({
   const auth = useLocalFirstAuth();
 
   function navigate() {
-    if (redirectAfterRestore) location.assign(redirectAfterRestore);
+    if (redirectAfterRestore) {
+      location.assign(redirectAfterRestore);
+    } else {
+      location.reload();
+    }
   }
   const [phrase, setPhrase] = useState<string | null>(null);
   const [restoreInput, setRestoreInput] = useState("");

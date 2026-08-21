@@ -1,4 +1,4 @@
-import { CleanedWhere } from "better-auth/adapters";
+import type { Where } from "better-auth/adapters";
 import { describe, expect, it } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import {
@@ -8,6 +8,10 @@ import {
   paginateList,
   sortListByField,
 } from "./utils.js";
+
+// Better Auth normalizes adapter filters before they reach this adapter.
+// Keep fixtures at that boundary so every default is explicit.
+type NormalizedWhere = Required<Where>;
 
 describe("isQuerySupported", () => {
   const tableSchema = {
@@ -67,10 +71,10 @@ describe("isQuerySupported", () => {
   } satisfies WasmSchema[string];
 
   it("supports row id comparisons and supported primitive operators", () => {
-    const where: CleanedWhere[] = [
-      { field: "id", operator: "eq", value: "row-1", connector: "AND" },
-      { field: "age", operator: "gte", value: 18, connector: "AND" },
-      { field: "active", operator: "eq", value: true, connector: "AND" },
+    const where: NormalizedWhere[] = [
+      { field: "id", operator: "eq", value: "row-1", connector: "AND", mode: "sensitive" },
+      { field: "age", operator: "gte", value: 18, connector: "AND", mode: "sensitive" },
+      { field: "active", operator: "eq", value: true, connector: "AND", mode: "sensitive" },
     ];
 
     expect(isQuerySupported(tableSchema, where)).toBe(true);
@@ -84,6 +88,7 @@ describe("isQuerySupported", () => {
           operator: "in",
           value: ["row-1", "row-2"],
           connector: "AND",
+          mode: "sensitive",
         },
       ]),
     ).toBe(true);
@@ -95,6 +100,7 @@ describe("isQuerySupported", () => {
           operator: "in",
           value: ["row-1"],
           connector: "AND",
+          mode: "sensitive",
         },
       ]),
     ).toBe(true);
@@ -106,6 +112,7 @@ describe("isQuerySupported", () => {
           operator: "in",
           value: ["row-1"],
           connector: "AND",
+          mode: "sensitive",
         },
       ]),
     ).toBe(true);
@@ -117,20 +124,21 @@ describe("isQuerySupported", () => {
           operator: "in",
           value: ["a@b.c"],
           connector: "AND",
+          mode: "sensitive",
         },
       ]),
     ).toBe(true);
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "age", operator: "in", value: [18, 21], connector: "AND" },
+        { field: "age", operator: "in", value: [18, 21], connector: "AND", mode: "sensitive" },
       ]),
     ).toBe(true);
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "active", operator: "in", value: [true], connector: "AND" },
-      ] as unknown as CleanedWhere[]),
+        { field: "active", operator: "in", value: [true], connector: "AND", mode: "sensitive" },
+      ] as unknown as NormalizedWhere[]),
     ).toBe(true);
 
     expect(
@@ -140,27 +148,28 @@ describe("isQuerySupported", () => {
           operator: "in",
           value: [new Date("2026-01-01T00:00:00.000Z")],
           connector: "AND",
+          mode: "sensitive",
         },
-      ] as unknown as CleanedWhere[]),
+      ] as unknown as NormalizedWhere[]),
     ).toBe(true);
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "bytes", operator: "in", value: [[1, 2, 3]], connector: "AND" },
-      ] as unknown as CleanedWhere[]),
+        { field: "bytes", operator: "in", value: [[1, 2, 3]], connector: "AND", mode: "sensitive" },
+      ] as unknown as NormalizedWhere[]),
     ).toBe(true);
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "tags", operator: "in", value: [["a"]], connector: "AND" },
-      ] as unknown as CleanedWhere[]),
+        { field: "tags", operator: "in", value: [["a"]], connector: "AND", mode: "sensitive" },
+      ] as unknown as NormalizedWhere[]),
     ).toBe(true);
   });
 
   it("allows null only on nullable columns", () => {
     expect(
       isQuerySupported(tableSchema, [
-        { field: "last_seen_at", operator: "eq", value: null, connector: "AND" },
+        { field: "last_seen_at", operator: "eq", value: null, connector: "AND", mode: "sensitive" },
       ]),
     ).toBe(true);
 
@@ -171,6 +180,7 @@ describe("isQuerySupported", () => {
           operator: "eq",
           value: null,
           connector: "AND",
+          mode: "sensitive",
         },
       ]),
     ).toBe(false);
@@ -179,13 +189,13 @@ describe("isQuerySupported", () => {
   it("rejects ne null on reference and id fields", () => {
     expect(
       isQuerySupported(tableSchema, [
-        { field: "owner_id", operator: "ne", value: null, connector: "AND" },
+        { field: "owner_id", operator: "ne", value: null, connector: "AND", mode: "sensitive" },
       ]),
     ).toBe(false);
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "id", operator: "ne", value: null, connector: "AND" },
+        { field: "id", operator: "ne", value: null, connector: "AND", mode: "sensitive" },
       ]),
     ).toBe(false);
   });
@@ -198,6 +208,7 @@ describe("isQuerySupported", () => {
           operator: "ne",
           value: new Date("2026-01-01T00:00:00.000Z"),
           connector: "AND",
+          mode: "sensitive",
         },
       ]),
     ).toBe(true);
@@ -206,14 +217,14 @@ describe("isQuerySupported", () => {
   it("rejects OR connectors and unsupported operators", () => {
     expect(
       isQuerySupported(tableSchema, [
-        { field: "age", operator: "gte", value: 18, connector: "AND" },
-        { field: "active", operator: "eq", value: true, connector: "OR" },
+        { field: "age", operator: "gte", value: 18, connector: "AND", mode: "sensitive" },
+        { field: "active", operator: "eq", value: true, connector: "OR", mode: "sensitive" },
       ]),
     ).toBe(false);
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "id", operator: "contains", value: "row", connector: "AND" },
+        { field: "id", operator: "contains", value: "row", connector: "AND", mode: "sensitive" },
       ]),
     ).toBe(false);
   });
@@ -221,7 +232,7 @@ describe("isQuerySupported", () => {
   it("rejects unsupported column types", () => {
     expect(
       isQuerySupported(tableSchema, [
-        { field: "uuidCol", operator: "eq", value: "row-1", connector: "AND" },
+        { field: "uuidCol", operator: "eq", value: "row-1", connector: "AND", mode: "sensitive" },
       ]),
     ).toBe(false);
   });
@@ -271,8 +282,8 @@ describe("filterListByWhere", () => {
 
   describe("equality operators", () => {
     it("should filter with eq operator", () => {
-      const where: CleanedWhere[] = [
-        { field: "name", operator: "eq", value: "Alice", connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "name", operator: "eq", value: "Alice", connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
@@ -287,8 +298,8 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with ne operator", () => {
-      const where: CleanedWhere[] = [
-        { field: "name", operator: "ne", value: "Alice", connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "name", operator: "ne", value: "Alice", connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(testData, where);
       expect(result).toHaveLength(4);
@@ -300,8 +311,8 @@ describe("filterListByWhere", () => {
         { id: 1, name: "Alice", age: null },
         { id: 2, name: "Bob", age: 30 },
       ];
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "eq", value: null, connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "eq", value: null, connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(dataWithNull, where);
       expect(result).toEqual([{ id: 1, name: "Alice", age: null }]);
@@ -314,8 +325,8 @@ describe("filterListByWhere", () => {
         { id: 3, name: "Charlie", age: 35 },
         { id: 4, name: "David", age: undefined },
       ];
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "ne", value: null, connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "ne", value: null, connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(dataWithNull, where);
       expect(result).toEqual([
@@ -327,7 +338,9 @@ describe("filterListByWhere", () => {
 
   describe("comparison operators", () => {
     it("should filter with lt operator", () => {
-      const where: CleanedWhere[] = [{ field: "age", operator: "lt", value: 30, connector: "AND" }];
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "lt", value: 30, connector: "AND", mode: "sensitive" },
+      ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
         {
@@ -355,8 +368,8 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with lte operator", () => {
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "lte", value: 30, connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "lte", value: 30, connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
@@ -392,7 +405,9 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with gt operator", () => {
-      const where: CleanedWhere[] = [{ field: "age", operator: "gt", value: 30, connector: "AND" }];
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "gt", value: 30, connector: "AND", mode: "sensitive" },
+      ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
         {
@@ -406,8 +421,8 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with gte operator", () => {
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "gte", value: 30, connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "gte", value: 30, connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
@@ -429,8 +444,8 @@ describe("filterListByWhere", () => {
     });
 
     it("should handle null values in comparison operators", () => {
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "lt", value: null, connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "lt", value: null, connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([]);
@@ -439,12 +454,13 @@ describe("filterListByWhere", () => {
 
   describe("string operators", () => {
     it("should filter with contains operator", () => {
-      const where: CleanedWhere[] = [
+      const where: NormalizedWhere[] = [
         {
           field: "email",
           operator: "contains",
           value: "test",
           connector: "AND",
+          mode: "sensitive",
         },
       ];
       const result = filterListByWhere(testData, where);
@@ -460,12 +476,13 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with starts_with operator", () => {
-      const where: CleanedWhere[] = [
+      const where: NormalizedWhere[] = [
         {
           field: "name",
           operator: "starts_with",
           value: "A",
           connector: "AND",
+          mode: "sensitive",
         },
       ];
       const result = filterListByWhere(testData, where);
@@ -481,8 +498,8 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with ends_with operator", () => {
-      const where: CleanedWhere[] = [
-        { field: "name", operator: "ends_with", value: "e", connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "name", operator: "ends_with", value: "e", connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
@@ -511,8 +528,8 @@ describe("filterListByWhere", () => {
     });
 
     it("should handle non-string values in string operators", () => {
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "contains", value: "test", connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "contains", value: "test", connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([]);
@@ -521,12 +538,13 @@ describe("filterListByWhere", () => {
 
   describe("in operator", () => {
     it("should filter with in operator for strings", () => {
-      const where: CleanedWhere[] = [
+      const where: NormalizedWhere[] = [
         {
           field: "name",
           operator: "in",
           value: ["Alice", "Bob"],
           connector: "AND",
+          mode: "sensitive",
         },
       ];
       const result = filterListByWhere(testData, where);
@@ -549,8 +567,8 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with in operator for numbers", () => {
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "in", value: [25, 30, 35], connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "in", value: [25, 30, 35], connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
@@ -579,12 +597,13 @@ describe("filterListByWhere", () => {
     });
 
     it("should filter with in operator for booleans", () => {
-      const where: CleanedWhere[] = [
+      const where: NormalizedWhere[] = [
         {
           field: "active",
           operator: "in",
           value: [true] as any,
           connector: "AND",
+          mode: "sensitive",
         },
       ];
       const result = filterListByWhere(testData, where);
@@ -614,12 +633,13 @@ describe("filterListByWhere", () => {
     });
 
     it("should handle non-array values in in operator", () => {
-      const where: CleanedWhere[] = [
+      const where: NormalizedWhere[] = [
         {
           field: "name",
           operator: "in",
           value: "Alice" as any,
           connector: "AND",
+          mode: "sensitive",
         },
       ];
       const result = filterListByWhere(testData, where);
@@ -629,9 +649,9 @@ describe("filterListByWhere", () => {
 
   describe("connectors", () => {
     it("should use explicit AND connector", () => {
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "gte", value: 25, connector: "AND" },
-        { field: "active", operator: "eq", value: true, connector: "AND" },
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "gte", value: 25, connector: "AND", mode: "sensitive" },
+        { field: "active", operator: "eq", value: true, connector: "AND", mode: "sensitive" },
       ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
@@ -660,9 +680,9 @@ describe("filterListByWhere", () => {
     });
 
     it("should use OR connector", () => {
-      const where: CleanedWhere[] = [
-        { field: "age", operator: "lt", value: 25, connector: "OR" },
-        { field: "active", operator: "eq", value: false, connector: "OR" },
+      const where: NormalizedWhere[] = [
+        { field: "age", operator: "lt", value: 25, connector: "OR", mode: "sensitive" },
+        { field: "active", operator: "eq", value: false, connector: "OR", mode: "sensitive" },
       ];
       const result = filterListByWhere(testData, where);
       expect(result).toEqual([
@@ -684,9 +704,9 @@ describe("filterListByWhere", () => {
     });
 
     it("should throw error for unsupported connector", () => {
-      const where: CleanedWhere[] = [
-        { field: "name", operator: "eq", value: "Alice", connector: "AND" },
-        { field: "age", operator: "eq", value: 25, connector: "XOR" as any },
+      const where: NormalizedWhere[] = [
+        { field: "name", operator: "eq", value: "Alice", connector: "AND", mode: "sensitive" },
+        { field: "age", operator: "eq", value: 25, connector: "XOR" as any, mode: "sensitive" },
       ];
       expect(() => filterListByWhere(testData, where)).toThrow("Unsupported connector: XOR");
     });
@@ -694,12 +714,13 @@ describe("filterListByWhere", () => {
 
   describe("error handling", () => {
     it("should throw error for unsupported operator", () => {
-      const where: CleanedWhere[] = [
+      const where: NormalizedWhere[] = [
         {
           field: "name",
           operator: "unsupported" as any,
           value: "Alice",
           connector: "AND",
+          mode: "sensitive",
         },
       ];
       expect(() => filterListByWhere(testData, where)).toThrow("Unsupported operator: unsupported");
@@ -715,13 +736,17 @@ describe("filterListByWhere with id", () => {
   ] as any[];
 
   it("should match by id when where field is 'id' (eq)", () => {
-    const where: CleanedWhere[] = [{ field: "id", operator: "eq", value: "a1", connector: "AND" }];
+    const where: NormalizedWhere[] = [
+      { field: "id", operator: "eq", value: "a1", connector: "AND", mode: "sensitive" },
+    ];
     const result = filterListByWhere(testData, where);
     expect(result).toEqual([{ id: "a1", name: "Alice", age: 25, active: true }]);
   });
 
   it("should return empty when no id matches", () => {
-    const where: CleanedWhere[] = [{ field: "id", operator: "eq", value: "z9", connector: "AND" }];
+    const where: NormalizedWhere[] = [
+      { field: "id", operator: "eq", value: "z9", connector: "AND", mode: "sensitive" },
+    ];
     const result = filterListByWhere(testData, where);
     expect(result).toEqual([]);
   });
@@ -957,32 +982,36 @@ describe("paginateList", () => {
 
 describe("isWhereBySingleField", () => {
   it("should return true if the where condition is an id", () => {
-    const where: CleanedWhere[] = [{ field: "id", operator: "eq", value: "1", connector: "AND" }];
+    const where: NormalizedWhere[] = [
+      { field: "id", operator: "eq", value: "1", connector: "AND", mode: "sensitive" },
+    ];
     expect(isWhereBySingleField("id", where)).toBe(true);
   });
 
   it("should return false if the where condition is not an id", () => {
-    const where: CleanedWhere[] = [
-      { field: "name", operator: "eq", value: "Alice", connector: "AND" },
+    const where: NormalizedWhere[] = [
+      { field: "name", operator: "eq", value: "Alice", connector: "AND", mode: "sensitive" },
     ];
     expect(isWhereBySingleField("id", where)).toBe(false);
   });
 
   it("should return false if the where condition has more than one condition", () => {
-    const where: CleanedWhere[] = [
-      { field: "name", operator: "eq", value: "Alice", connector: "AND" },
-      { field: "id", operator: "eq", value: "1", connector: "AND" },
+    const where: NormalizedWhere[] = [
+      { field: "name", operator: "eq", value: "Alice", connector: "AND", mode: "sensitive" },
+      { field: "id", operator: "eq", value: "1", connector: "AND", mode: "sensitive" },
     ];
     expect(isWhereBySingleField("id", where)).toBe(false);
   });
 
   it("should return false if the where condition has no condition", () => {
-    const where: CleanedWhere[] = [];
+    const where: NormalizedWhere[] = [];
     expect(isWhereBySingleField("id", where)).toBe(false);
   });
 
   it("should return false if the where condition on ID is not eq", () => {
-    const where: CleanedWhere[] = [{ field: "id", operator: "gt", value: "1", connector: "AND" }];
+    const where: NormalizedWhere[] = [
+      { field: "id", operator: "gt", value: "1", connector: "AND", mode: "sensitive" },
+    ];
     expect(isWhereBySingleField("id", where)).toBe(false);
   });
 });

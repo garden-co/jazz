@@ -18,11 +18,19 @@ function localAndEdgeWrites() {
   const local = deferred<void>();
   const edge = deferred<void>();
   const write = {
+    value: undefined,
     wait({ tier }: { tier?: "local" | "edge" | "global" } = {}) {
       return tier === "edge" ? edge.promise : local.promise;
     },
   };
   return { local, edge, write };
+}
+
+function settledWrite<T = void>() {
+  return {
+    value: undefined as T,
+    wait: async () => undefined as T,
+  };
 }
 
 async function flush() {
@@ -56,9 +64,12 @@ function submit(form: HTMLFormElement, input: HTMLInputElement, title: string) {
 test("a rejected local write reports failure without leaking its rejection", async () => {
   const local = deferred<void>();
   const { form, input, status } = mount({
-    insert: () => ({ wait: () => local.promise }),
-    update: () => ({ wait: async () => {} }),
-    delete: () => ({ wait: async () => {} }),
+    insert: <T>() => ({
+      value: undefined as T,
+      wait: () => local.promise as Promise<T>,
+    }),
+    update: () => ({ value: undefined, wait: async () => undefined }),
+    delete: () => ({ value: undefined, wait: async () => undefined }),
   });
 
   submit(form, input, "will fail");
@@ -74,9 +85,9 @@ test("overlapping adds do not let an older completion announce local durability"
   const second = localAndEdgeWrites();
   const writes = [first.write, second.write];
   const { form, input, status } = mount({
-    insert: () => writes.shift()!,
-    update: () => ({ wait: async () => {} }),
-    delete: () => ({ wait: async () => {} }),
+    insert: <T>() => writes.shift()! as ReturnType<typeof settledWrite<T>>,
+    update: settledWrite,
+    delete: settledWrite,
   });
 
   submit(form, input, "A");
@@ -97,9 +108,9 @@ test("overlapping adds do not let an older completion announce local durability"
 test("the local marker precedes edge durability, which alone resets the form", async () => {
   const write = localAndEdgeWrites();
   const { form, input, status, publishTodos } = mount({
-    insert: () => write.write,
-    update: () => ({ wait: async () => {} }),
-    delete: () => ({ wait: async () => {} }),
+    insert: <T>() => write.write as ReturnType<typeof settledWrite<T>>,
+    update: settledWrite,
+    delete: settledWrite,
   });
 
   submit(form, input, "wait for edge");
@@ -120,9 +131,9 @@ test("an older edge completion cannot reset a newer pending add", async () => {
   const second = localAndEdgeWrites();
   const writes = [first.write, second.write];
   const { form, input } = mount({
-    insert: () => writes.shift()!,
-    update: () => ({ wait: async () => {} }),
-    delete: () => ({ wait: async () => {} }),
+    insert: <T>() => writes.shift()! as ReturnType<typeof settledWrite<T>>,
+    update: settledWrite,
+    delete: settledWrite,
   });
 
   submit(form, input, "A");
@@ -143,9 +154,9 @@ test("an older edge completion cannot reset a newer pending add", async () => {
 test("an edge rejection keeps the local acknowledgement and reports sync failure", async () => {
   const write = localAndEdgeWrites();
   const { form, input, status } = mount({
-    insert: () => write.write,
-    update: () => ({ wait: async () => {} }),
-    delete: () => ({ wait: async () => {} }),
+    insert: <T>() => write.write as ReturnType<typeof settledWrite<T>>,
+    update: settledWrite,
+    delete: settledWrite,
   });
 
   submit(form, input, "edge failure");

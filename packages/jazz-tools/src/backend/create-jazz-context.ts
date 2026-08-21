@@ -139,7 +139,8 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         adminSecret: config.adminSecret,
         cookieSession: config.cookieSession,
         tier: nodeTier,
-        defaultDurabilityTier: config.serverUrl ? nodeTier : undefined,
+        defaultDurabilityTier:
+          this.config.defaultDurabilityTier ?? (config.serverUrl ? nodeTier : undefined),
       },
       { onAuthFailure },
     );

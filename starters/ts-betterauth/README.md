@@ -60,7 +60,7 @@ Two processes run in development:
 
 `src/main.ts` waits for BetterAuth's `useSession` atom to resolve before
 deciding what to mount. If there's no session, the shell renders the sign-in
-form. Once the user signs in, `authClient.token()` is called to fetch a JWT,
+form. Once the user signs in, `authClient.$fetch("/token")` is called to fetch a JWT,
 which is passed to `createDb({ jwtToken })`. The Jazz dev server verifies that
 JWT against the JWKS endpoint at `/api/auth/jwks`.
 

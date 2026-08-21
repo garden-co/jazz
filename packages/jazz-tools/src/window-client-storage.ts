@@ -45,16 +45,20 @@ function resolveStorageNamespace(config: DbConfig): string | null {
     return explicitDbName;
   }
 
-  const sessionUserId = resolveClientSessionSync({
+  // Mirror resolveDefaultPersistentDbName exactly (including the anonymous
+  // check) so the window storage API lists the namespace the client
+  // actually persists under.
+  const session = resolveClientSessionSync({
     appId: config.appId,
     jwtToken: config.jwtToken,
-  })?.user_id;
+    cookieSession: config.cookieSession,
+  });
 
-  if (!sessionUserId) {
+  if (!session?.user_id || session.authMode === "anonymous") {
     return config.appId;
   }
 
-  return `${config.appId}::${encodeURIComponent(sessionUserId)}`;
+  return `${config.appId}::${encodeURIComponent(session.user_id)}`;
 }
 
 function getLiveStorageContexts(currentWindow: Window): Set<LiveStorageContext> {
