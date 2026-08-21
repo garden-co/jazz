@@ -71,6 +71,30 @@ describe("branch API", () => {
     ).toMatchObject({ branch: "draft", title: "Draft title" });
   });
 
+  it("rejects updates that try to change a branch column", async () => {
+    db = await createDb({
+      appId: "branch-api-immutable-column",
+      driver: { type: "memory" },
+    });
+
+    const document = db.insert(
+      app.documents,
+      { branch: "draft", title: "Draft title" },
+      { branch: "draft" },
+    ).value;
+
+    expect(() =>
+      db!.update(app.documents, document.id, { branch: "published" }, { branch: "draft" }),
+    ).toThrow("branch column does not match exact branch key");
+
+    expect(await db.one(app.documents.where({ id: document.id }), { branch: "draft" })).toEqual(
+      document,
+    );
+    expect(
+      await db.one(app.documents.where({ id: document.id }), { branch: "published" }),
+    ).toBeNull();
+  });
+
   it("uses referenced row IDs as scalar branch selectors", async () => {
     db = await createDb({
       appId: "branch-api-reference-shorthand",

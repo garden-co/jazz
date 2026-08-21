@@ -120,6 +120,15 @@ tables in a schema, branch columns with the same name must have the same type
 and canonical encoding (`INV-BVIEW-1`, `INV-BVIEW-4`). Tables may use different
 subsets; a table with no `branchBy` columns is shared.
 
+Mutation admission enforces that immutability directly. Jazz derives the
+canonical branch-column cells from the mutation's branch selector and rejects
+an explicitly authored value when it disagrees with the selector. Parent
+versions must use the same canonical branch key, and replicated versions are
+revalidated against both their stored key and branch-column cells before
+admission. Moving an object therefore means writing its `RowUuid` in another
+branch view, not updating the branch column of an existing branch-qualified row
+version.
+
 Column names provide the uniform selector vocabulary, not durable identities.
 Ordinary schema lineage may rename a branch column because the migration lens
 retains the column's existing physical identity. Historical keys authored with

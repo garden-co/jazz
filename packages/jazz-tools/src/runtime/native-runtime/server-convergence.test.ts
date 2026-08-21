@@ -442,7 +442,7 @@ async function createClient({
   peer: string;
   schema?: WasmSchema;
 }): Promise<JazzClient> {
-  const runtime = await createWasmRuntime(clientSchema, { appId, identityScope: peer });
+  const runtime = await createWasmRuntime(clientSchema, { appId, peerId: peer });
   return JazzClient.connectWithRuntime(runtime, {
     appId,
     schema: clientSchema,

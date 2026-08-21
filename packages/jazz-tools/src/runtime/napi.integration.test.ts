@@ -1739,7 +1739,6 @@ describe("NAPI integration", () => {
       seedRuntime = (await createPersistentNapiNativeRuntimeAdapter(BYTEA_SCHEMA, dataPath, {
         appId,
         env: "dev",
-        tier: "edge",
       })) as unknown as {
         insert(table: string, values: unknown): { id: string };
         close(): void;
