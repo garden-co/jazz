@@ -791,7 +791,7 @@ pub(super) fn bind_query_params_with_mode(
 fn bind_exists_filter_literals(
     mut exists: crate::query::ExistsVia,
     binding: &Binding,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     mode: ParamBindingMode,
 ) -> Result<crate::query::ExistsVia, Error> {
     let source = bind_source_for_table(&exists.table);
@@ -1014,7 +1014,7 @@ pub(super) fn collect_reachable_seed_claim_params(
 }
 
 fn collect_reachable_seed_claim_params_from_alternatives(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     reachable: &[crate::query::ReachableVia],
     alternatives: &[crate::query::PolicyBranch],
     params: &mut BTreeMap<String, ProgramClaimParam>,

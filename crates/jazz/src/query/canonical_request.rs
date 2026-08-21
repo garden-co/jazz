@@ -200,7 +200,7 @@ fn canonical_policy_branch_key_for_schema(
 
 fn canonical_exists_key_for_schema(
     exists: &ExistsVia,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
 ) -> Result<Vec<u8>, QueryError> {
     let mut bytes = Vec::new();
     put_str(&mut bytes, &exists.table);

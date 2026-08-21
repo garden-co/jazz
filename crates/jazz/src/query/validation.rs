@@ -309,7 +309,7 @@ fn validate_query_canonical_parts(
 }
 
 fn validate_policy_branch(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     root: &TableSchema,
     root_table: &str,
     branch: &mut PolicyBranch,
@@ -334,7 +334,7 @@ fn validate_policy_branch(
 }
 
 fn validate_exists(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     exists: &mut ExistsVia,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {

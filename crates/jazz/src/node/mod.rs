@@ -1286,7 +1286,7 @@ impl CurrentRow {
                         | "schema_version"
                         | "parents"
                         | "authored_columns"
-                        | "global_seq"
+                        | "global_time"
                         | "settle_position"
                 ) || name.starts_with("__jazz_")
                     || (physical_current

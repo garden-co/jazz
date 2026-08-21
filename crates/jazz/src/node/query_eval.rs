@@ -1478,7 +1478,7 @@ where
     pub(crate) fn joined_read_policy_currency_changed_after(
         &mut self,
         table: &str,
-        position: GlobalSeq,
+        position: GlobalTime,
     ) -> Result<bool, Error> {
         let Some(policy) = self.table(table)?.read_policy.clone() else {
             return Ok(false);

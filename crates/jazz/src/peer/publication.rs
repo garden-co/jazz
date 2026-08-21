@@ -449,7 +449,7 @@ impl PeerState {
         )?;
         let drain_elapsed = trace_start.elapsed();
         let drain_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
-        let current_global_watermark = node.applied_global_watermark();
+        let current_global_watermark = node.committed_global_time();
         let previous_global_watermark = self
             .subscriptions
             .get(&subscription)
@@ -1091,7 +1091,7 @@ impl PeerState {
             maintained,
             terminal_schemas,
             tables,
-            observed_global_watermark: node.applied_global_watermark(),
+            observed_global_watermark: node.committed_global_time(),
         };
         let state = self.subscriptions.entry(subscription).or_default();
         state.maintained_subscription_view = Some(maintained_subscription);

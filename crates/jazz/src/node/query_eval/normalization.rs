@@ -2365,7 +2365,7 @@ fn normalize_exists_witness(
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
     reachable_contributions: &mut Vec<ReachableContribution>,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     exists: &crate::query::ExistsVia,
     prefix: &str,
     binding_source_shape: &str,
