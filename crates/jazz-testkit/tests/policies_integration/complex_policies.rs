@@ -758,7 +758,6 @@ async fn exists_rel_hop_grants_and_denies_correctly_inner() {
 /// alice(claims=sales) ───────────────────────────────► sees only sales-matching row
 /// ```
 #[tokio::test]
-#[ignore = "mixed SELECT policy stays closed once EXISTS / INHERITS composition is involved"]
 async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
     tokio::task::LocalSet::new()
         .run_until(mixed_predicates_claims_exists_and_inherits_fail_closed_inner())
