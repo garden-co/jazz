@@ -10,20 +10,23 @@ use jazz::db::{
     SubscriptionStream,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::peer::{MaintainedSubscriptionViewMetrics, PeerState};
 use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
 use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit, ne, param};
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
 use jazz::time::TxTime;
+use jazz::tools::public_schema::{
+    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_sim::distributions::Lcg;
 use jazz_sim::fixture::{
     CellValueGen, EdgeSet, EntitySet, Fixture, FixtureBuilder, FixtureCommit, FixtureCommitApply,
     RefDistribution, apply_fixture_commit,
 };
+use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::{
     DeterministicDriver, DriverContext, NodeRole, PauseMode, PeerProfile, SimulatorTransportCodec,
     ThreadedDriver, Topology, bench_profile, emit_json_line, metadata_fields, profiling,
@@ -273,7 +276,7 @@ pub fn db_surface_smoke() {
         .map(|(_, row)| row)
         .expect("representative S1 plan should match at least one issue");
     let patch = BTreeMap::from([
-        ("state".to_owned(), Value::U8(STATE_DONE)),
+        ("state".to_owned(), Value::EnumTag(STATE_DONE)),
         (
             "title".to_owned(),
             Value::String("db-surface-state-transition".to_owned()),
@@ -574,7 +577,7 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
 
     let query1 = Query::from(ISSUES)
         .filter(eq(col("assignee"), param("user")))
-        .filter(ne(col("state"), lit(Value::U8(STATE_DONE))))
+        .filter(ne(col("state"), lit(Value::EnumTag(STATE_DONE))))
         // The product query says "cycle = active"; v0 has no server-side
         // time-aware active-cycle primitive, so the client binds its active cycle.
         .filter(eq(col("cycle"), param("activeCycle")))
@@ -623,7 +626,7 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
         let binding2 = query2
             .bind(BTreeMap::from([
                 ("project".to_owned(), Value::Uuid(plan.project.0)),
-                ("state".to_owned(), Value::U8(STATE_IN_PROGRESS)),
+                ("state".to_owned(), Value::EnumTag(STATE_IN_PROGRESS)),
             ]))
             .expect("binding 2");
 
@@ -952,7 +955,7 @@ fn subscriber_sweep_summary(config: &Config, subscribers: usize) -> SweepSummary
         .iter()
         .filter(|commit| {
             commit.table == ISSUES
-                && !matches!(commit.cells.get("state"), Some(Value::U8(STATE_DONE)))
+                && !matches!(commit.cells.get("state"), Some(Value::EnumTag(STATE_DONE)))
         })
         .map(|commit| commit.row_uuid)
         .collect::<Vec<_>>();
@@ -963,7 +966,7 @@ fn subscriber_sweep_summary(config: &Config, subscribers: usize) -> SweepSummary
     };
     let shape = Query::from(ISSUES)
         .filter(eq(col("assignee"), param("user")))
-        .filter(ne(col("state"), lit(Value::U8(STATE_DONE))))
+        .filter(ne(col("state"), lit(Value::EnumTag(STATE_DONE))))
         .validate(&schema)
         .expect("sweep query");
     let mut peers = Vec::with_capacity(subscribers);
@@ -1223,24 +1226,21 @@ fn high_fan_out_hydration_summary(
 }
 
 fn high_fan_out_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            HF_PARENTS,
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("bucket", ColumnType::U64),
-            ],
-        ),
-        TableSchema::new(
-            HF_CHILDREN,
-            [
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("payload", ColumnType::String),
-                ColumnSchema::new("ordinal", ColumnType::U64),
-            ],
-        )
-        .with_reference("parent", HF_PARENTS),
-    ])
+    compile_public_schema(
+        SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder(HF_PARENTS)
+                    .column("name", PublicColumnType::Text)
+                    .column("bucket", PublicColumnType::Timestamp),
+            )
+            .table(
+                PublicTableSchema::builder(HF_CHILDREN)
+                    .fk_column("parent", HF_PARENTS)
+                    .column("payload", PublicColumnType::Text)
+                    .column("ordinal", PublicColumnType::Timestamp),
+            )
+            .build(),
+    )
 }
 
 fn commit_hydration_row(
@@ -1368,7 +1368,7 @@ fn hydrate_client(
 fn query1(schema: &JazzSchema) -> ValidatedQuery {
     Query::from(ISSUES)
         .filter(eq(col("assignee"), param("user")))
-        .filter(ne(col("state"), lit(Value::U8(STATE_DONE))))
+        .filter(ne(col("state"), lit(Value::EnumTag(STATE_DONE))))
         // The product query says "cycle = active"; v0 has no server-side
         // time-aware active-cycle primitive, so the client binds its active cycle.
         .filter(eq(col("cycle"), param("activeCycle")))
@@ -1406,7 +1406,7 @@ fn binding2(shape: &ValidatedQuery, plan: &ClientPlan) -> Binding {
     shape
         .bind(BTreeMap::from([
             ("project".to_owned(), Value::Uuid(plan.project.0)),
-            ("state".to_owned(), Value::U8(STATE_IN_PROGRESS)),
+            ("state".to_owned(), Value::EnumTag(STATE_IN_PROGRESS)),
         ]))
         .expect("binding 2")
 }
@@ -1948,7 +1948,7 @@ fn build_fixture(config: &Config) -> Fixture {
         if let Some(Value::EnumTag(discriminant)) = commit.cells.remove("state") {
             commit
                 .cells
-                .insert("state".to_owned(), Value::U8(discriminant));
+                .insert("state".to_owned(), Value::EnumTag(discriminant));
         }
     }
     fixture
@@ -1976,7 +1976,7 @@ fn representative_plan(fixture: &Fixture) -> ClientPlan {
         .iter()
         .filter(|commit| commit.table == ISSUES)
     {
-        if matches!(issue.cells.get("state"), Some(Value::U8(STATE_DONE))) {
+        if matches!(issue.cells.get("state"), Some(Value::EnumTag(STATE_DONE))) {
             continue;
         }
         let Some(user) = cell_uuid(issue, "assignee") else {
@@ -2066,102 +2066,78 @@ fn profile_leg_ms() -> (u64, u64) {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(ORGS, [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            USERS,
-            [
-                ColumnSchema::new("userID", ColumnType::Uuid),
-                ColumnSchema::new("name", ColumnType::String),
-            ],
-        ),
-        TableSchema::new(
-            TEAMS,
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("org", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("org", ORGS),
-        TableSchema::new(
-            USER_TEAM_MEMBERSHIPS,
-            [
-                ColumnSchema::new("user", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("user", USERS)
-        .with_reference("team", TEAMS),
-        TableSchema::new(
-            TAGS,
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("color", ColumnType::String),
-            ],
-        ),
-        TableSchema::new(
-            PROJECTS,
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("org", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("org", ORGS),
-        TableSchema::new(
-            PROJECT_TEAM_MEMBERSHIPS,
-            [
-                ColumnSchema::new("project", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("project", PROJECTS)
-        .with_reference("team", TEAMS),
-        TableSchema::new(MILESTONES, [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new(
-            MILESTONE_DEPENDENCIES,
-            [
-                ColumnSchema::new("dependsOn", ColumnType::Uuid),
-                ColumnSchema::new("dependent", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("dependsOn", MILESTONES)
-        .with_reference("dependent", MILESTONES),
-        TableSchema::new(
-            CYCLES,
-            [
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("start", ColumnType::U64),
-                ColumnSchema::new("end", ColumnType::U64),
-            ],
-        )
-        .with_reference("team", TEAMS),
-        TableSchema::new(
-            ISSUES,
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("body", ColumnType::String),
-                ColumnSchema::new("state", ColumnType::U8),
-                ColumnSchema::new("priority", ColumnType::U64),
-                ColumnSchema::new("assignee", ColumnType::Uuid),
-                ColumnSchema::new("milestone", ColumnType::Uuid),
-                ColumnSchema::new("project", ColumnType::Uuid),
-                ColumnSchema::new("cycle", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("assignee", USERS)
-        .with_reference("milestone", MILESTONES)
-        .with_reference("project", PROJECTS)
-        .with_reference("cycle", CYCLES),
-        TableSchema::new(
-            ISSUE_TAGS,
-            [
-                ColumnSchema::new("issue", ColumnType::Uuid),
-                ColumnSchema::new("tag", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("issue", ISSUES)
-        .with_reference("tag", TAGS),
-    ])
+    let issue_state = PublicColumnType::ScalarEnum {
+        name: "issue_state".to_owned(),
+        variants: vec![
+            "backlog".to_owned(),
+            "todo".to_owned(),
+            "in_progress".to_owned(),
+            "done".to_owned(),
+        ],
+    };
+    compile_public_schema(
+        SchemaBuilder::new()
+            .table(PublicTableSchema::builder(ORGS).column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchema::builder(USERS)
+                    .column("userID", PublicColumnType::Uuid)
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchema::builder(TEAMS)
+                    .column("name", PublicColumnType::Text)
+                    .fk_column("org", ORGS),
+            )
+            .table(
+                PublicTableSchema::builder(USER_TEAM_MEMBERSHIPS)
+                    .fk_column("user", USERS)
+                    .fk_column("team", TEAMS),
+            )
+            .table(
+                PublicTableSchema::builder(TAGS)
+                    .column("name", PublicColumnType::Text)
+                    .column("color", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchema::builder(PROJECTS)
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("org", ORGS),
+            )
+            .table(
+                PublicTableSchema::builder(PROJECT_TEAM_MEMBERSHIPS)
+                    .fk_column("project", PROJECTS)
+                    .fk_column("team", TEAMS),
+            )
+            .table(PublicTableSchema::builder(MILESTONES).column("title", PublicColumnType::Text))
+            .table(
+                PublicTableSchema::builder(MILESTONE_DEPENDENCIES)
+                    .fk_column("dependsOn", MILESTONES)
+                    .fk_column("dependent", MILESTONES),
+            )
+            .table(
+                PublicTableSchema::builder(CYCLES)
+                    .fk_column("team", TEAMS)
+                    .column("start", PublicColumnType::Timestamp)
+                    .column("end", PublicColumnType::Timestamp),
+            )
+            .table(
+                PublicTableSchema::builder(ISSUES)
+                    .column("title", PublicColumnType::Text)
+                    .column("body", PublicColumnType::Text)
+                    .column("state", issue_state)
+                    .column("priority", PublicColumnType::Timestamp)
+                    .fk_column("assignee", USERS)
+                    .fk_column("milestone", MILESTONES)
+                    .fk_column("project", PROJECTS)
+                    .fk_column("cycle", CYCLES),
+            )
+            .table(
+                PublicTableSchema::builder(ISSUE_TAGS)
+                    .fk_column("issue", ISSUES)
+                    .fk_column("tag", TAGS),
+            )
+            .build(),
+    )
 }
 
 fn open_node(
@@ -2209,7 +2185,7 @@ fn open_db(
 fn db_query1(plan: &ClientPlan) -> Query {
     Query::from(ISSUES)
         .filter(eq(col("assignee"), lit(Value::Uuid(plan.user.0))))
-        .filter(ne(col("state"), lit(Value::U8(STATE_DONE))))
+        .filter(ne(col("state"), lit(Value::EnumTag(STATE_DONE))))
         .filter(eq(col("cycle"), lit(Value::Uuid(plan.active_cycle.0))))
         .include("assignee")
         .include("project")
@@ -2219,7 +2195,7 @@ fn db_query1(plan: &ClientPlan) -> Query {
 fn db_query2(plan: &ClientPlan) -> Query {
     Query::from(ISSUES)
         .filter(eq(col("project"), lit(Value::Uuid(plan.project.0))))
-        .filter(eq(col("state"), lit(Value::U8(STATE_IN_PROGRESS))))
+        .filter(eq(col("state"), lit(Value::EnumTag(STATE_IN_PROGRESS))))
         .join_via(
             ISSUE_TAGS,
             "issue",
@@ -2265,7 +2241,7 @@ impl DbS1Oracle {
     fn query1(&self, plan: &ClientPlan) -> BTreeSet<(String, RowUuid)> {
         self.table_rows(ISSUES)
             .filter(|(_, cells)| cell_uuid_from_cells(cells, "assignee") == Some(plan.user))
-            .filter(|(_, cells)| cells.get("state") != Some(&Value::U8(STATE_DONE)))
+            .filter(|(_, cells)| cells.get("state") != Some(&Value::EnumTag(STATE_DONE)))
             .filter(|(_, cells)| cell_uuid_from_cells(cells, "cycle") == Some(plan.active_cycle))
             .filter(|(_, cells)| {
                 self.has_row(USERS, cell_uuid_from_cells(cells, "assignee"))
@@ -2279,7 +2255,7 @@ impl DbS1Oracle {
     fn query2(&self, plan: &ClientPlan) -> BTreeSet<(String, RowUuid)> {
         self.table_rows(ISSUES)
             .filter(|(_, cells)| cell_uuid_from_cells(cells, "project") == Some(plan.project))
-            .filter(|(_, cells)| cells.get("state") == Some(&Value::U8(STATE_IN_PROGRESS)))
+            .filter(|(_, cells)| cells.get("state") == Some(&Value::EnumTag(STATE_IN_PROGRESS)))
             .filter(|(issue, _)| self.issue_has_tag(**issue, plan.tag))
             .filter(|(_, cells)| self.has_row(PROJECTS, cell_uuid_from_cells(cells, "project")))
             .map(|(row_uuid, _)| (ISSUES.to_owned(), *row_uuid))

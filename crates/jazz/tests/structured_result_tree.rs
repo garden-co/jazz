@@ -1,49 +1,44 @@
 use std::collections::BTreeMap;
 
+mod common;
+
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::query::{ArraySubquery, OrderDirection, Query, col, eq, param};
 use jazz::result_tree::ResultRelation;
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+
+use common::{allow_all_policies, compile_schema};
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "parents",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("rank", ColumnType::U32),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "children",
-            [
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("rank", ColumnType::U32),
-            ],
-        )
-        .with_reference("parent_id", "parents")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "grandchildren",
-            [
-                ColumnSchema::new("child_id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("rank", ColumnType::U32),
-            ],
-        )
-        .with_reference("child_id", "children")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("parents")
+                    .column("title", ColumnType::Text)
+                    .column("rank", ColumnType::Integer)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("children")
+                    .fk_column("parent_id", "parents")
+                    .column("label", ColumnType::Text)
+                    .column("rank", ColumnType::Integer)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("grandchildren")
+                    .fk_column("child_id", "children")
+                    .column("label", ColumnType::Text)
+                    .column("rank", ColumnType::Integer)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
 }
 
 fn open_db() -> Db<MemoryStorage> {
@@ -91,7 +86,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
             "parents",
             BTreeMap::from([
                 ("title".to_owned(), Value::String("parent".to_owned())),
-                ("rank".to_owned(), Value::U32(0)),
+                ("rank".to_owned(), Value::I32(0)),
             ]),
         )
         .expect("insert parent")
@@ -104,7 +99,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
                 BTreeMap::from([
                     ("parent_id".to_owned(), Value::Uuid(parent.0)),
                     ("label".to_owned(), Value::String(label.to_owned())),
-                    ("rank".to_owned(), Value::U32(rank)),
+                    ("rank".to_owned(), Value::I32(rank)),
                 ]),
             )
             .expect("insert child")
@@ -117,7 +112,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
             BTreeMap::from([
                 ("child_id".to_owned(), Value::Uuid(child_ids[1].0)),
                 ("label".to_owned(), Value::String(label.to_owned())),
-                ("rank".to_owned(), Value::U32(rank)),
+                ("rank".to_owned(), Value::I32(rank)),
             ]),
         )
         .expect("insert grandchild");
@@ -218,7 +213,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
             "parents",
             BTreeMap::from([
                 ("title".to_owned(), Value::String("matching".to_owned())),
-                ("rank".to_owned(), Value::U32(7)),
+                ("rank".to_owned(), Value::I32(7)),
             ]),
         )
         .expect("insert matching parent")
@@ -227,7 +222,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
         "parents",
         BTreeMap::from([
             ("title".to_owned(), Value::String("other".to_owned())),
-            ("rank".to_owned(), Value::U32(8)),
+            ("rank".to_owned(), Value::I32(8)),
         ]),
     )
     .expect("insert non-matching parent");
@@ -237,7 +232,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
             BTreeMap::from([
                 ("parent_id".to_owned(), Value::Uuid(matching_parent.0)),
                 ("label".to_owned(), Value::String("initial".to_owned())),
-                ("rank".to_owned(), Value::U32(0)),
+                ("rank".to_owned(), Value::I32(0)),
             ]),
         )
         .expect("insert initial child")
@@ -249,7 +244,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
             ArraySubquery::new("children", "children", "parent_id", "id").select(["label"]),
         );
     let prepared = db
-        .prepare_query_bound(&query, BTreeMap::from([("rank".to_owned(), Value::U32(7))]))
+        .prepare_query_bound(&query, BTreeMap::from([("rank".to_owned(), Value::I32(7))]))
         .expect("prepare parameter-routed array query");
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
         .expect("open parameter-routed maintained array subscription");
@@ -282,7 +277,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
             BTreeMap::from([
                 ("parent_id".to_owned(), Value::Uuid(matching_parent.0)),
                 ("label".to_owned(), Value::String("later".to_owned())),
-                ("rank".to_owned(), Value::U32(1)),
+                ("rank".to_owned(), Value::I32(1)),
             ]),
         )
         .expect("insert later child")
@@ -322,7 +317,7 @@ fn omitted_array_limit_is_unbounded_for_prepare_read_and_subscribe() {
             "parents",
             BTreeMap::from([
                 ("title".to_owned(), Value::String("parent".to_owned())),
-                ("rank".to_owned(), Value::U32(0)),
+                ("rank".to_owned(), Value::I32(0)),
             ]),
         )
         .expect("insert parent")
@@ -332,7 +327,7 @@ fn omitted_array_limit_is_unbounded_for_prepare_read_and_subscribe() {
         BTreeMap::from([
             ("parent_id".to_owned(), Value::Uuid(parent.0)),
             ("label".to_owned(), Value::String("child".to_owned())),
-            ("rank".to_owned(), Value::U32(0)),
+            ("rank".to_owned(), Value::I32(0)),
         ]),
     )
     .expect("insert child");
@@ -390,7 +385,7 @@ fn large_parent_is_materialized_atomically_without_a_frame_bound() {
             "parents",
             BTreeMap::from([
                 ("title".to_owned(), Value::String("parent".to_owned())),
-                ("rank".to_owned(), Value::U32(0)),
+                ("rank".to_owned(), Value::I32(0)),
             ]),
         )
         .expect("insert parent")
@@ -402,7 +397,7 @@ fn large_parent_is_materialized_atomically_without_a_frame_bound() {
             BTreeMap::from([
                 ("parent_id".to_owned(), Value::Uuid(parent.0)),
                 ("label".to_owned(), Value::String(payload.clone())),
-                ("rank".to_owned(), Value::U32(rank)),
+                ("rank".to_owned(), Value::I32(rank)),
             ]),
         )
         .expect("insert individually valid child");

@@ -8,32 +8,32 @@
 
 use std::collections::BTreeMap;
 
+mod schema_fixture;
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz::db::{
     Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, block_on,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 type BenchDb = Db<MemoryStorage>;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "documents",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("content", ColumnType::String),
-            ColumnSchema::new("created_at", ColumnType::U64),
-        ],
+    schema_fixture::compile(
+        SchemaBuilder::new().table(
+            TableSchemaBuilder::new("documents")
+                .column("title", ColumnType::Text)
+                .column("content", ColumnType::Text)
+                .column("created_at", ColumnType::Timestamp),
+        ),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
 }
 
 fn open_db(seed: u64) -> BenchDb {

@@ -52,17 +52,15 @@ fn upstream_transport_rejects_forged_system_catalogue_publication() {
     let client = open_db(0x51, client_author, &base);
     let (client_transport, mut upstream_transport) = duplex();
     let upstream = client.connect_upstream(client_transport);
-    let target = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-            ColumnSchema::new("owner", ColumnType::Uuid),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())]));
+    let target = SchemaVersion::new(build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .column("body", PublicColumnType::Text),
+        ),
+    ));
     let lens = MigrationLens::new(
         base.version_id(),
         target.id,

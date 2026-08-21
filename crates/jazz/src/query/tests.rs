@@ -3,9 +3,13 @@ mod tests {
     use super::*;
     use groove::records::{EnumCase, EnumSchema, RecordDescriptor, ValueType};
     use groove::schema::{ColumnSchema, ColumnType};
+    use crate::tools::public_schema::{
+        ColumnType as PublicColumnType, SchemaBuilder as PublicSchemaBuilder,
+        TableSchemaBuilder as PublicTableSchemaBuilder,
+    };
 
-    fn schema() -> JazzSchema {
-        JazzSchema::new([
+    fn schema() -> RuntimeSchema {
+        RuntimeSchema::new([
             TableSchema::new(
                 "issues",
                 [
@@ -50,7 +54,7 @@ mod tests {
             .filter(ne(col("state"), lit("done")))
             .join_via("issue_tags", "issue", [eq(col("tag"), param("tag"))])
             .include("project.org");
-        let validated = query.validate(&schema()).unwrap();
+        let validated = query.validate_runtime(&schema()).unwrap();
         assert_eq!(validated.query().table, "issues");
         assert_eq!(validated.params().len(), 2);
         assert_eq!(validated.params()["user"], ColumnType::Uuid);
@@ -60,7 +64,7 @@ mod tests {
 
     #[test]
     fn integer_literals_normalize_to_comparison_column_width() {
-        let schema = JazzSchema::new([TableSchema::new(
+        let schema = RuntimeSchema::new([TableSchema::new(
             "metrics",
             [
                 ColumnSchema::new("narrow", ColumnType::I32),
@@ -70,11 +74,11 @@ mod tests {
 
         let widened = Query::from("metrics")
             .filter(gt(col("wide"), lit(9)))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .expect("i32 literal widens for an i64 column");
         let explicitly_wide = Query::from("metrics")
             .filter(gt(col("wide"), lit(9_i64)))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap();
         assert_eq!(
             widened.query().filters,
@@ -84,7 +88,7 @@ mod tests {
 
         let narrowed = Query::from("metrics")
             .filter(eq(col("narrow"), lit(9_i64)))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .expect("in-range i64 literal narrows for an i32 column");
         assert_eq!(
             narrowed.query().filters,
@@ -93,11 +97,11 @@ mod tests {
 
         let inferred_in = Query::from("metrics")
             .filter(in_list(col("wide"), [lit(9), lit(10_i64)]))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .expect("IN candidates normalize to the column width");
         let explicit_in = Query::from("metrics")
             .filter(in_list(col("wide"), [lit(9_i64), lit(10_i64)]))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap();
         assert_eq!(inferred_in.shape_id(), explicit_in.shape_id());
 
@@ -106,13 +110,13 @@ mod tests {
                 col("narrow"),
                 lit(i64::from(i32::MAX) + 1),
             ))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap_err();
         assert_eq!(out_of_range, QueryError::OperandTypeMismatch);
 
         let column_width_mismatch = Query::from("metrics")
             .filter(eq(col("narrow"), col("wide")))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap_err();
         assert_eq!(column_width_mismatch, QueryError::OperandTypeMismatch);
     }
@@ -153,7 +157,7 @@ mod tests {
     #[test]
     fn relation_payload_enum_match_lowers_and_validates_against_case_fields() {
         let event_payload = RecordDescriptor::new([("level", ValueType::I32)]);
-        let schema = JazzSchema::new([TableSchema::new(
+        let schema = RuntimeSchema::new([TableSchema::new(
             "events",
             [ColumnSchema::new(
                 "event",
@@ -210,14 +214,14 @@ mod tests {
                 )),
             }]
         );
-        assert!(query.validate(&schema).is_ok());
+        assert!(query.validate_runtime(&schema).is_ok());
     }
 
     #[test]
     fn enum_match_validation_uses_selected_case_fields_not_outer_table_fields() {
         let payload =
             RecordDescriptor::new([("case_only", ValueType::String), ("shared", ValueType::I32)]);
-        let schema = JazzSchema::new([TableSchema::new(
+        let schema = RuntimeSchema::new([TableSchema::new(
             "events",
             [
                 ColumnSchema::new("shared", ColumnType::String),
@@ -242,7 +246,7 @@ mod tests {
                     Operand::Column("case_only".to_owned()),
                     Operand::Literal(Value::String("present only in the case".to_owned())),
                 )))
-                .validate(&schema)
+                .validate_runtime(&schema)
                 .is_ok()
         );
         assert!(
@@ -251,7 +255,7 @@ mod tests {
                     Operand::Column("outer_only".to_owned()),
                     Operand::Literal(Value::String("outer".to_owned())),
                 )))
-                .validate(&schema)
+                .validate_runtime(&schema)
                 .is_err()
         );
         assert!(
@@ -260,7 +264,7 @@ mod tests {
                     Operand::Column("shared".to_owned()),
                     Operand::Literal(Value::String("outer type".to_owned())),
                 )))
-                .validate(&schema)
+                .validate_runtime(&schema)
                 .is_err()
         );
     }
@@ -269,7 +273,7 @@ mod tests {
     fn contains_param_array_against_column_infers_array_type() {
         let validated = Query::from("issues")
             .filter(contains(param("teams"), col("assignee")))
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
 
         assert_eq!(
@@ -280,7 +284,7 @@ mod tests {
 
     #[test]
     fn validates_same_table_reachability_correlation_column() {
-        let schema = JazzSchema::new([
+        let schema = RuntimeSchema::new([
             TableSchema::new("resources", [ColumnSchema::new("name", ColumnType::String)]),
             TableSchema::new(
                 "access_edges",
@@ -316,7 +320,7 @@ mod tests {
                 "target_id",
                 [],
             )
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap();
     }
 
@@ -326,12 +330,12 @@ mod tests {
         let left = Query::from("issues")
             .filter(eq(col("assignee"), param("user")))
             .filter(ne(col("state"), lit("done")))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap();
         let right = Query::from("issues")
             .filter(ne(lit("done"), col("state")))
             .filter(eq(param("user"), col("assignee")))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap();
         assert_eq!(left.shape_id(), right.shape_id());
     }
@@ -363,7 +367,7 @@ mod tests {
             .offset(5)
             .limit(10);
 
-        let validated = query.validate(&schema()).unwrap();
+        let validated = query.validate_runtime(&schema()).unwrap();
         assert_eq!(validated.params()["user"], ColumnType::Uuid);
         assert_eq!(validated.query().offset, 5);
         assert_eq!(validated.query().limit, Some(10));
@@ -399,7 +403,7 @@ mod tests {
                             .limit(5),
                     ),
             )
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
 
         assert_eq!(validated.params()["tag"], ColumnType::Uuid);
@@ -426,7 +430,7 @@ mod tests {
             .array_subquery(
                 ArraySubquery::new("projectIssues", "issues", "project", "project").limit(10),
             )
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
         let right = Query::from("issues")
             .array_subquery(
@@ -438,7 +442,7 @@ mod tests {
                     .filter(eq(col("tag"), param("tag")))
                     .limit(10),
             )
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
 
         assert_eq!(left.shape_id(), right.shape_id());
@@ -489,7 +493,7 @@ mod tests {
 
         for query in cases {
             assert!(matches!(
-                query.validate(&schema()),
+                query.validate_runtime(&schema()),
                 Err(QueryError::UnsupportedFlatJoinCombination { .. })
             ));
         }
@@ -497,7 +501,7 @@ mod tests {
 
     #[test]
     fn flat_join_allows_nullable_scalar_keys() {
-        let schema = JazzSchema::new([
+        let schema = RuntimeSchema::new([
             TableSchema::new(
                 "parents",
                 [ColumnSchema::new(
@@ -530,7 +534,7 @@ mod tests {
                     },
                 }],
             });
-            query.validate(&schema).unwrap();
+            query.validate_runtime(&schema).unwrap();
         }
     }
 
@@ -538,17 +542,15 @@ mod tests {
     /// while `_id` remains the UUID spelling for the physical row identity.
     #[test]
     fn flat_join_filters_distinguish_declared_id_from_physical_id() {
-        let schema = JazzSchema::new([
-            TableSchema::new("parents", [ColumnSchema::new("id", ColumnType::String)]),
-            TableSchema::new(
-                "children",
-                [
-                    ColumnSchema::new("id", ColumnType::String),
-                    ColumnSchema::new("parent", ColumnType::Uuid),
-                ],
+        let source = PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("parents").column("id", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("children")
+                    .column("id", PublicColumnType::Text)
+                    .fk_column("parent", "parents"),
             )
-            .with_reference("parent", "parents"),
-        ]);
+            .build();
+        let schema = JazzSchema::new(&source).expect("flat-join public schema compiles");
 
         let query = Query::from(table("parents").alias("parent"))
             .flat_join(table("children").alias("child"), "parent._id", "child.parent")
@@ -564,7 +566,7 @@ mod tests {
 
     #[test]
     fn flat_join_allows_array_element_keys() {
-        let schema = JazzSchema::new([
+        let schema = RuntimeSchema::new([
             TableSchema::new(
                 "parents",
                 [ColumnSchema::new(
@@ -597,7 +599,7 @@ mod tests {
                     },
                 }],
             });
-            query.validate(&schema).unwrap();
+            query.validate_runtime(&schema).unwrap();
         }
     }
 
@@ -607,26 +609,26 @@ mod tests {
 
         let err = Query::from("issues")
             .array_subquery(ArraySubquery::new("bad", "missing", "issue", "id"))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap_err();
         assert!(matches!(err, QueryError::UnknownTable(_)));
 
         let err = Query::from("issues")
             .array_subquery(ArraySubquery::new("bad", "issue_tags", "missing", "id"))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap_err();
         assert!(matches!(err, QueryError::UnknownColumn { .. }));
 
         let err = Query::from("issues")
             .array_subquery(ArraySubquery::new("bad", "issue_tags", "issue", "title"))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap_err();
         assert_eq!(err, QueryError::OperandTypeMismatch);
 
         let err = Query::from("issues")
             .array_subquery(ArraySubquery::new("dupe", "issue_tags", "issue", "id"))
             .array_subquery(ArraySubquery::new("dupe", "issues", "id", "id"))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap_err();
         assert!(matches!(err, QueryError::BadIncludePath { .. }));
     }
@@ -642,7 +644,7 @@ mod tests {
         ));
         assert_eq!(
             unbounded
-                .validate(&schema)
+                .validate_runtime(&schema)
                 .unwrap()
                 .query()
                 .array_subqueries[0]
@@ -655,7 +657,7 @@ mod tests {
                 .limit(1)
                 .nested(ArraySubquery::new("tagRows", "tags", "id", "tag")),
         );
-        nested_unbounded.validate(&schema).unwrap();
+        nested_unbounded.validate_runtime(&schema).unwrap();
 
         let zero = Query::from("issues").array_subquery(
             ArraySubquery::new("tags", "issue_tags", "issue", "id")
@@ -667,13 +669,13 @@ mod tests {
                 .offset(3)
                 .limit(0),
         );
-        let zero = zero.validate(&schema).unwrap();
+        let zero = zero.validate_runtime(&schema).unwrap();
         assert_eq!(zero.query().array_subqueries[0].offset, 2);
-        assert_ne!(zero.shape_id(), one.validate(&schema).unwrap().shape_id());
+        assert_ne!(zero.shape_id(), one.validate_runtime(&schema).unwrap().shape_id());
 
         Query::from("issues")
             .array_subquery(ArraySubquery::new("tags", "issue_tags", "issue", "id").offset(2))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap();
     }
 
@@ -682,7 +684,7 @@ mod tests {
         let validated = Query::from("issues")
             .order_by("state", OrderDirection::Asc)
             .order_by("priority", OrderDirection::Desc)
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
         assert_eq!(
             validated.query().order_by,
@@ -700,7 +702,7 @@ mod tests {
 
         let err = Query::from("issues")
             .order_by("missing", OrderDirection::Asc)
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap_err();
         assert!(matches!(err, QueryError::UnknownColumn { .. }));
     }
@@ -717,7 +719,7 @@ mod tests {
             .group_by("state")
             .order_by("state", OrderDirection::Asc)
             .order_by("count", OrderDirection::Desc)
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
         let aggregate = validated.query().aggregate.as_ref().unwrap();
         assert_eq!(aggregate.group_by.as_deref(), Some("state"));
@@ -725,20 +727,20 @@ mod tests {
 
         let err = Query::from("issues")
             .sum("title")
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap_err();
         assert_eq!(err, QueryError::OperandTypeMismatch);
 
         let err = Query::from("issues")
             .count()
             .group_by("missing")
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap_err();
         assert!(matches!(err, QueryError::UnknownColumn { .. }));
 
         let valid_user_alias = Query::from("issues")
             .aggregate([Aggregate::sum("priority").alias("user_total")])
-            .validate(&schema())
+            .validate_runtime(&schema())
             .expect("explicit aliases are logical names, not compiler fields");
         assert_eq!(
             valid_user_alias
@@ -752,14 +754,14 @@ mod tests {
         );
         let err = Query::from("issues")
             .aggregate([Aggregate::sum("priority").alias("__jazz_aggregate_user_total")])
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap_err();
         assert!(matches!(err, QueryError::ReservedAggregateAlias(_)));
 
         let err = Query::from("issues")
             .count()
             .order_by("priority", OrderDirection::Asc)
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap_err();
         assert!(matches!(err, QueryError::UnknownColumn { .. }));
     }
@@ -769,11 +771,11 @@ mod tests {
         let schema = schema();
         let left = Query::from("issues")
             .filter(eq(col("assignee"), param("user")))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap();
         let right = Query::from("issues")
             .filter(ne(col("assignee"), param("user")))
-            .validate(&schema)
+            .validate_runtime(&schema)
             .unwrap();
         assert_ne!(left.shape_id(), right.shape_id());
     }
@@ -781,7 +783,7 @@ mod tests {
     #[test]
     fn schema_version_context_changes_shape_id() {
         let base = schema();
-        let evolved = JazzSchema::new([
+        let evolved = RuntimeSchema::new([
             TableSchema::new(
                 "issues",
                 [
@@ -807,8 +809,8 @@ mod tests {
             TableSchema::new("tags", [ColumnSchema::new("name", ColumnType::String)]),
         ]);
         let query = Query::from("issues").filter(eq(col("assignee"), param("user")));
-        let left = query.validate(&base).unwrap();
-        let right = query.validate(&evolved).unwrap();
+        let left = query.validate_runtime(&base).unwrap();
+        let right = query.validate_runtime(&evolved).unwrap();
 
         assert_eq!(left.canonical_bytes(), right.canonical_bytes());
         assert_ne!(left.schema_version(), right.schema_version());
@@ -819,7 +821,7 @@ mod tests {
     fn binding_type_mismatch_errors() {
         let validated = Query::from("issues")
             .filter(eq(col("assignee"), param("user")))
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
         let err = validated
             .bind(BTreeMap::from([(
@@ -834,7 +836,7 @@ mod tests {
     fn claim_column_type_mismatch_errors_loudly() {
         let err = Query::from("issues")
             .filter(eq(col("state"), claim("sub")))
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap_err();
 
         assert_eq!(
@@ -852,12 +854,12 @@ mod tests {
     fn claim_column_matched_types_still_validate() {
         Query::from("issues")
             .filter(eq(col("assignee"), claim("sub")))
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
 
         Query::from("issues")
             .filter(eq(col("state"), claim("user_id")))
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
     }
 
@@ -865,12 +867,12 @@ mod tests {
     fn include_path_resolution_errors_on_bad_path() {
         let err = Query::from("issues")
             .include("project.missing")
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap_err();
         assert!(matches!(err, QueryError::UnknownColumn { .. }));
         let err = Query::from("issues")
             .include("title.name")
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap_err();
         assert!(matches!(err, QueryError::BadIncludePath { .. }));
     }
@@ -879,7 +881,7 @@ mod tests {
     fn binding_id_uses_canonical_binding_values() {
         let validated = Query::from("issues")
             .filter(eq(col("assignee"), param("user")))
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
         let user = uuid::uuid!("00000000-0000-0000-0000-000000000001");
         let binding = validated
@@ -901,7 +903,7 @@ mod tests {
             .filter(ne(col("state"), lit("done")))
             .join_via("issue_tags", "issue", [eq(col("tag"), param("tag"))])
             .include("project.org")
-            .validate(&schema())
+            .validate_runtime(&schema())
             .unwrap();
         // Regenerated for the unified 0..=15 tag space (Anselm 2026-08-07).
         // Shape ids are content-addressed over the canonical column-type tags,

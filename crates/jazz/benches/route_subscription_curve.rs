@@ -12,16 +12,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, Instant};
 
+mod schema_fixture;
+
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
     SubscriptionEvent, SubscriptionStream, block_on,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, param};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use serde::Serialize;
 
@@ -309,16 +310,14 @@ fn expected_initial_rows(team: usize) -> BTreeSet<RowUuid> {
 }
 
 fn open_db(seed: u64) -> BenchDb {
-    let schema = JazzSchema::new([TableSchema::new(
-        DOCUMENTS,
-        [
-            ColumnSchema::new("team", ColumnType::Uuid),
-            ColumnSchema::new("updated_at", ColumnType::U64),
-            ColumnSchema::new("title", ColumnType::String),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())]);
+    let schema = schema_fixture::compile(
+        SchemaBuilder::new().table(
+            TableSchemaBuilder::new(DOCUMENTS)
+                .column("team", ColumnType::Uuid)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("title", ColumnType::Text),
+        ),
+    );
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(

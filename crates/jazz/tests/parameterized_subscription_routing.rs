@@ -1,28 +1,33 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+mod common;
+
 use jazz::block_on;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, PreparedQuery, Propagation, ReadOpts,
     SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, param};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
+use common::{allow_all_policies, compile_schema};
+
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "documents",
-        [
-            ColumnSchema::new("team", ColumnType::Uuid),
-            ColumnSchema::new("updated_at", ColumnType::U64),
-        ],
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("team", ColumnType::Uuid)
+                    .column("updated_at", ColumnType::Timestamp)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
 }
 
 fn open_db() -> Db<MemoryStorage> {

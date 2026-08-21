@@ -3,6 +3,8 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+mod common;
+
 use jazz_testkit::duplex_transport;
 
 use jazz::block_on;
@@ -11,13 +13,15 @@ use jazz::db::{
     SeededRowIdSource, SubscriptionEvent,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::RocksDbStorage;
+
+use common::{allow_all_policies, compile_schema};
 
 struct CountingAllocator;
 
@@ -70,65 +74,40 @@ fn stop_alloc_counter() -> AllocSnapshot {
 }
 
 fn relation_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "parents",
-            [
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("ordinal", ColumnType::U32),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "children",
-            [
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("ordinal", ColumnType::U32),
-            ],
-        )
-        .with_reference("parent_id", "parents")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("parents")
+                    .column("label", ColumnType::Text)
+                    .column("ordinal", ColumnType::Integer)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("children")
+                    .fk_column("parent_id", "parents")
+                    .column("label", ColumnType::Text)
+                    .column("ordinal", ColumnType::Integer)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
 }
 
 fn write_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "parents",
-            [
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("ordinal", ColumnType::U32),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "children",
-            [
-                ColumnSchema::new("parent_id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-                ColumnSchema::new("ordinal", ColumnType::U32),
-            ],
-        )
-        .with_reference("parent_id", "parents")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-    ])
+    relation_schema()
 }
 
 fn reset_batch_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("label", ColumnType::String),
-            ColumnSchema::new("ordinal", ColumnType::U32),
-        ],
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column("label", ColumnType::Text)
+                    .column("ordinal", ColumnType::Integer)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
 }
 
 fn global_read_opts() -> ReadOpts {
@@ -227,7 +206,7 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
                 "label".to_owned(),
                 Value::String("canary-parent".to_owned()),
             ),
-            ("ordinal".to_owned(), Value::U32(0)),
+            ("ordinal".to_owned(), Value::I32(0)),
         ]),
     )
     .expect("insert parent");
@@ -239,7 +218,7 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
             BTreeMap::from([
                 ("parent_id".to_owned(), Value::Uuid(parent.0)),
                 ("label".to_owned(), Value::String(format!("child-{index}"))),
-                ("ordinal".to_owned(), Value::U32(index as u32)),
+                ("ordinal".to_owned(), Value::I32(index as i32)),
             ]),
         )
         .unwrap_or_else(|err| panic!("insert child {index}: {err}"));
@@ -256,7 +235,7 @@ fn seed_reset_batch_fixture(db: &Db<MemoryStorage>, rows: usize) {
             AuthorId::SYSTEM,
             BTreeMap::from([
                 ("label".to_owned(), Value::String(format!("item-{index}"))),
-                ("ordinal".to_owned(), Value::U32(index as u32)),
+                ("ordinal".to_owned(), Value::I32(index as i32)),
             ]),
         )
         .unwrap_or_else(|err| panic!("seed reset-batch item {index}: {err}"));
@@ -349,7 +328,7 @@ fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
                 "label".to_owned(),
                 Value::String(format!("measured-child-{scale}")),
             ),
-            ("ordinal".to_owned(), Value::U32((scale + 1) as u32)),
+            ("ordinal".to_owned(), Value::I32((scale + 1) as i32)),
         ]),
     )
     .expect("insert measured child");
@@ -411,7 +390,7 @@ fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
                     "label".to_owned(),
                     Value::String(format!("post-reset-{existing_rows}")),
                 ),
-                ("ordinal".to_owned(), Value::U32(existing_rows as u32)),
+                ("ordinal".to_owned(), Value::I32(existing_rows as i32)),
             ]),
         )
         .expect("seed post-reset item");
@@ -454,7 +433,7 @@ fn write_cells(parent: RowUuid, index: usize) -> BTreeMap<String, Value> {
             "label".to_owned(),
             Value::String(format!("write-child-{index}")),
         ),
-        ("ordinal".to_owned(), Value::U32(index as u32)),
+        ("ordinal".to_owned(), Value::I32(index as i32)),
     ])
 }
 
@@ -465,7 +444,7 @@ fn seed_rocks_write_fixture(db: &Db<RocksDbStorage>, child_rows: usize) -> RowUu
         parent,
         BTreeMap::from([
             ("label".to_owned(), Value::String("write-parent".to_owned())),
-            ("ordinal".to_owned(), Value::U32(0)),
+            ("ordinal".to_owned(), Value::I32(0)),
         ]),
     )
     .expect("insert write parent");

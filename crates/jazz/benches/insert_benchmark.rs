@@ -11,14 +11,16 @@
 
 use std::collections::BTreeMap;
 
+mod schema_fixture;
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, block_on};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::query::{Query, claim, col, eq};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::public_schema::{CmpOp, PolicyValue};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 type BenchDb = Db<MemoryStorage>;
@@ -27,51 +29,46 @@ const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-000000000
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
 fn public_schema_convert() -> JazzSchema {
-    let folder_owner_policy =
-        Policy::shape(Query::from("folders").filter(eq(col("owner"), claim("sub"))));
-    let folder_access_policy = Policy::shape(Query::from("documents").join_via_column(
-        "folder_access",
-        "folder",
-        "folder",
-        [eq(col("user"), claim("sub"))],
-    ));
-
-    JazzSchema::new([
-        TableSchema::new(
-            "folders",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("owner", ColumnType::Uuid),
-                ColumnSchema::new("created_at", ColumnType::U64),
-            ],
-        )
-        .with_read_policy(folder_owner_policy.clone())
-        .with_write_policy(folder_owner_policy),
-        TableSchema::new(
-            "folder_access",
-            [
-                ColumnSchema::new("folder", ColumnType::Uuid),
-                ColumnSchema::new("user", ColumnType::Uuid),
-                ColumnSchema::new("role", ColumnType::String),
-            ],
-        )
-        .with_reference("folder", "folders")
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
-        TableSchema::new(
-            "documents",
-            [
-                ColumnSchema::new("folder", ColumnType::Uuid),
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("content", ColumnType::String),
-                ColumnSchema::new("author", ColumnType::Uuid),
-                ColumnSchema::new("created_at", ColumnType::U64),
-            ],
-        )
-        .with_reference("folder", "folders")
-        .with_read_policy(Policy::public())
-        .with_write_policy(folder_access_policy),
-    ])
+    let folder_owner = schema_fixture::session_column("owner", "sub");
+    let folder_access = PolicyExpr::Exists {
+        table: "folder_access".to_owned(),
+        condition: Box::new(PolicyExpr::And(vec![
+            PolicyExpr::Cmp {
+                column: "folder".to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec![
+                    "__jazz_outer_row".to_owned(),
+                    "folder".to_owned(),
+                ]),
+            },
+            schema_fixture::session_column("user", "sub"),
+        ])),
+    };
+    schema_fixture::compile(
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("folders")
+                    .column("name", ColumnType::Text)
+                    .column("owner", ColumnType::Uuid)
+                    .column("created_at", ColumnType::Timestamp)
+                    .policies(schema_fixture::all_operations(folder_owner)),
+            )
+            .table(
+                TableSchemaBuilder::new("folder_access")
+                    .fk_column("folder", "folders")
+                    .column("user", ColumnType::Uuid)
+                    .column("role", ColumnType::Text),
+            )
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .fk_column("folder", "folders")
+                    .column("title", ColumnType::Text)
+                    .column("content", ColumnType::Text)
+                    .column("author", ColumnType::Uuid)
+                    .column("created_at", ColumnType::Timestamp)
+                    .policies(schema_fixture::write_operations(folder_access)),
+            ),
+    )
 }
 
 fn open_db(seed: u64) -> BenchDb {

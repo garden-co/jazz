@@ -1,6 +1,5 @@
 use jazz_testkit as support;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz::row_input;
@@ -19,7 +18,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(45);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(45);
 
 fn owned_docs_schema() -> jazz::tools::Schema {
-    HashMap::from([(
+    jazz::tools::Schema::from([(
         TableName::new("docs"),
         TableSchema::with_policies(
             RowDescriptor::new(vec![

@@ -3,13 +3,7 @@
 #[test]
 fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
     let base = schema();
-    let evolved = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]);
+    let evolved = evolved_todos_name_body_schema();
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x49), base.clone());
     let shape = Query::from("todos")
@@ -88,34 +82,31 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         "a plan prepared before lens publication must accept projection cases registered by the lens"
     );
 
-    let join_base = JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new(
-            "todo_members",
-            [
-                ColumnSchema::new("todo", ColumnType::Uuid),
-                ColumnSchema::new("member", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("todo", "todos"),
-    ]);
-    let join_evolved = SchemaVersion::new(JazzSchema::new([
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("body", ColumnType::String),
-            ],
-        ),
-        TableSchema::new(
-            "todo_members",
-            [
-                ColumnSchema::new("todo", ColumnType::Uuid),
-                ColumnSchema::new("member", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("todo", "todos"),
-    ]));
+    let join_base = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todo_members")
+                    .fk_column("todo", "todos")
+                    .column("member", PublicColumnType::Uuid),
+            ),
+    );
+    let join_evolved = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("body", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todo_members")
+                    .fk_column("todo", "todos")
+                    .column("member", PublicColumnType::Uuid),
+            ),
+    ));
     let (_join_dir, mut join_core) = open_node_with_schema(node(0x4d), join_base.clone());
     publish_schema_lineage(
         &mut join_core,
@@ -196,13 +187,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
 #[test]
 fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
     let base = schema();
-    let evolved = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]);
+    let evolved = evolved_todos_name_body_schema();
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x4c), base.clone());
     publish_schema_lineage(
@@ -287,54 +272,20 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
 
 #[test]
 fn schema_projected_current_reachable_filters_translate_old_names() {
-    let base = JazzSchema::new([
-        TableSchema::new("docs", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "teamEdges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("edge_kind", ColumnType::String),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-        TableSchema::new(
-            "teamAccess",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("access_kind", ColumnType::String),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams"),
-    ]);
-    let evolved = JazzSchema::new([
-        TableSchema::new("docs", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "teamEdges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("edge_label", ColumnType::String),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-        TableSchema::new(
-            "teamAccess",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("access_label", ColumnType::String),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams"),
-    ]);
+    let base = projected_reachable_schema(
+        "teamEdges",
+        "teamAccess",
+        "title",
+        "edge_kind",
+        "access_kind",
+    );
+    let evolved = projected_reachable_schema(
+        "teamEdges",
+        "teamAccess",
+        "title",
+        "edge_label",
+        "access_label",
+    );
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x4f), base.clone());
     publish_schema_lineage(
@@ -454,13 +405,7 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
 #[test]
 fn include_deleted_schema_projected_root_filters_translate_old_names() {
     let base = schema();
-    let evolved = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]));
+    let evolved = SchemaVersion::new(evolved_todos_name_body_schema());
     let (_dir, mut core) = open_node_with_schema(node(0x59), base.clone());
     publish_schema_lineage(
         &mut core,
@@ -537,28 +482,30 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
 
 #[test]
 fn include_deleted_schema_projected_join_filters_translate_old_names() {
-    let base = JazzSchema::new([
-        TableSchema::new("issues", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new(
-            "issue_tags",
-            [
-                ColumnSchema::new("issue", ColumnType::Uuid),
-                ColumnSchema::new("tag_kind", ColumnType::String),
-            ],
-        )
-        .with_reference("issue", "issues"),
-    ]);
-    let evolved = SchemaVersion::new(JazzSchema::new([
-        TableSchema::new("issues", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "issue_tags",
-            [
-                ColumnSchema::new("issue", ColumnType::Uuid),
-                ColumnSchema::new("tag_label", ColumnType::String),
-            ],
-        )
-        .with_reference("issue", "issues"),
-    ]));
+    let base = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag_kind", PublicColumnType::Text),
+            ),
+    );
+    let evolved = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag_label", PublicColumnType::Text),
+            ),
+    ));
     let (_dir, mut core) = open_node_with_schema(node(0x5a), base.clone());
     publish_schema_lineage(
         &mut core,
@@ -641,54 +588,20 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
 
 #[test]
 fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
-    let base = JazzSchema::new([
-        TableSchema::new("docs", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "team_edges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("edge_kind", ColumnType::String),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-        TableSchema::new(
-            "team_access",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("access_kind", ColumnType::String),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams"),
-    ]);
-    let evolved = SchemaVersion::new(JazzSchema::new([
-        TableSchema::new("docs", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "team_edges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("edge_label", ColumnType::String),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-        TableSchema::new(
-            "team_access",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("access_label", ColumnType::String),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams"),
-    ]));
+    let base = projected_reachable_schema(
+        "team_edges",
+        "team_access",
+        "title",
+        "edge_kind",
+        "access_kind",
+    );
+    let evolved = SchemaVersion::new(projected_reachable_schema(
+        "team_edges",
+        "team_access",
+        "name",
+        "edge_label",
+        "access_label",
+    ));
     let (_dir, mut core) = open_node_with_schema(node(0x5c), base.clone());
     publish_schema_lineage(
         &mut core,
@@ -819,13 +732,7 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
 #[test]
 fn historical_schema_projected_reads_use_projected_snapshot_source() {
     let base = schema();
-    let evolved = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]);
+    let evolved = evolved_todos_name_body_schema();
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x54), base.clone());
     publish_schema_lineage(
@@ -918,10 +825,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     // The physical key and bounded-source selection are intentionally internal;
     // user-visible historical rows and exclusive rejection cover their semantics.
     let base = schema();
-    let renamed_schema = JazzSchema::new([TableSchema::new(
-        "tasks",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]);
+    let renamed_schema = renamed_tasks_schema();
     let renamed = SchemaVersion::new(renamed_schema);
     let (dir, mut core) = open_node_with_schema(node(0x57), base.clone());
 
@@ -1072,54 +976,20 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
 
 #[test]
 fn historical_schema_projected_reachable_filters_translate_old_names() {
-    let base = JazzSchema::new([
-        TableSchema::new("docs", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "teamEdges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("edge_kind", ColumnType::String),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-        TableSchema::new(
-            "teamAccess",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("access_kind", ColumnType::String),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams"),
-    ]);
-    let evolved = JazzSchema::new([
-        TableSchema::new("docs", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "teamEdges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("edge_label", ColumnType::String),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-        TableSchema::new(
-            "teamAccess",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-                ColumnSchema::new("access_label", ColumnType::String),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams"),
-    ]);
+    let base = projected_reachable_schema(
+        "teamEdges",
+        "teamAccess",
+        "title",
+        "edge_kind",
+        "access_kind",
+    );
+    let evolved = projected_reachable_schema(
+        "teamEdges",
+        "teamAccess",
+        "name",
+        "edge_label",
+        "access_label",
+    );
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x55), base.clone());
     publish_schema_lineage(
@@ -1286,4 +1156,3 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
         "historical schema-projected reachable reads must lower over inline projected sources"
     );
 }
-

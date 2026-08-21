@@ -14,6 +14,7 @@
 //! `JAZZ_SELECTIVE_HYDRATION_BATCH_ROWS` control the fixed selection and seed
 //! batching.
 
+mod schema_fixture;
 mod support;
 
 use std::collections::BTreeMap;
@@ -26,10 +27,10 @@ use jazz::db::{
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
-use jazz::groove::schema::ColumnType;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit, param};
-use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::{Map, json};
@@ -272,16 +273,16 @@ fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        TABLE,
-        [
-            ColumnSchema::new("team", ColumnType::Uuid),
-            ColumnSchema::new("active", ColumnType::Bool),
-            ColumnSchema::new("updated_at", ColumnType::U64),
-            ColumnSchema::new("title", ColumnType::String),
-        ],
+    schema_fixture::compile(
+        SchemaBuilder::new().table(
+            TableSchemaBuilder::new(TABLE)
+                .column("team", ColumnType::Uuid)
+                .column("active", ColumnType::Boolean)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("title", ColumnType::Text)
+                .index_only(["team"]),
+        ),
     )
-    .with_indexed_column("team")])
 }
 
 fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) {

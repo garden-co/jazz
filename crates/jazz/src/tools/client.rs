@@ -32,7 +32,6 @@ use crate::tools::public_schema::TableName;
 use crate::tools::public_schema::{ColumnType, Session, TableSchema, Value, WriteContext};
 use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::tools::public_schema::{Schema, validate_json_value};
-use crate::tools::public_schema_convert::convert_public_schema;
 #[cfg(feature = "testing")]
 use crate::tools::sync::ClientId;
 use crate::tools::sync::DurabilityTier;
@@ -2718,7 +2717,7 @@ impl JazzClient {
         let default_session = default_session_from_context(&context);
         let has_server = !context.server_url.is_empty();
         {
-            let public_schema_convert = convert_public_schema(&context.schema)
+            let public_schema_convert = crate::schema::JazzSchema::new(&context.schema)
                 .map_err(|error| JazzError::Schema(error.to_string()))?;
             let identity = core_identity(&context, default_session.as_ref());
             let storage = core_storage(&public_schema_convert, &context)?;

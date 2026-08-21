@@ -2,6 +2,18 @@
 
 use super::*;
 
+fn schema_with_explicit_public_read() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    )
+}
+
 // Wire inspection is required because coverage-group keys and server-stamped
 // authorization generations are intentionally absent from the public API.
 // Final convergence is still asserted through the receiver's public read.
@@ -149,8 +161,7 @@ fn delayed_duplicate_usage_resets_stale_authorization_with_replacement_row() {
 
 #[test]
 fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
-    let mut schema = schema();
-    schema.tables[0].read_policy = Some(Query::from("todos"));
+    let schema = schema_with_explicit_public_read();
     let identity = AuthorId::from_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let shape = Query::from("todos").validate(&schema).unwrap();
@@ -246,8 +257,7 @@ fn legacy_authorization_scope_subscribe_refreshes_claims() {
 
 #[test]
 fn authorization_scope_rejects_unrelated_caller_intent() {
-    let mut schema = schema();
-    schema.tables[0].read_policy = Some(Query::from("todos"));
+    let schema = schema_with_explicit_public_read();
     let identity = AuthorId::from_bytes([0xc2; 16]);
     let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
     let shape = Query::from("todos").validate(&schema).unwrap();
@@ -292,22 +302,34 @@ fn authorization_scope_rejects_unrelated_caller_intent() {
 
 #[test]
 fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
-    let mut schema = schema();
-    schema.tables[0].write_policies = WritePolicies {
-        update_using: Some(Query::from("support_using")),
-        update_check: Some(Query::from("support_check")),
-        ..WritePolicies::default()
-    };
-    schema.tables.push(TableSchema::new(
-        "support_using",
-        Vec::<ColumnSchema>::new(),
-    ));
-    schema.tables.push(TableSchema::new(
-        "support_check",
-        Vec::<ColumnSchema>::new(),
-    ));
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column("owner", PublicColumnType::Uuid),
+            )
+            .table(PublicTableSchemaBuilder::new("support_using"))
+            .table(PublicTableSchemaBuilder::new("support_check")),
+    );
     let identity = AuthorId::from_bytes([0xc3; 16]);
     let server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    server
+        .node()
+        .borrow_mut()
+        .mutate_current_schema_for_testing(|compiled| {
+            compiled
+                .tables
+                .iter_mut()
+                .find(|table| table.name == "todos")
+                .expect("todos table")
+                .write_policies = WritePolicies {
+                update_using: Some(Query::from("support_using")),
+                update_check: Some(Query::from("support_check")),
+                ..WritePolicies::default()
+            };
+        });
     let action = PermissionAdviceAction::Update {
         table: "todos".to_owned(),
         row: row(1),
@@ -597,8 +619,7 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
 
 #[test]
 fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
-    let mut schema = schema();
-    schema.tables[0].read_policy = Some(Query::from("todos"));
+    let schema = schema_with_explicit_public_read();
     let identity = AuthorId::from_bytes([0xc4; 16]);
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();

@@ -6,26 +6,24 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, Error, MergeableTxOps, Node, ReadOpts, RowCells, SeededRowIdSource,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
 use jazz::query::Query;
-use jazz::schema::{JazzSchema, Policy, TableSchema};
-use jazz::tools::OpenTransactionId;
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate, RejectionReason, TxId};
 
-fn todo_table() -> TableSchema {
-    TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())
+fn todo_schema() -> JazzSchema {
+    let source = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean),
+        )
+        .build();
+    JazzSchema::new(&source).expect("todo public schema compiles")
 }
 
 fn todo_cells(title: &str, done: bool) -> RowCells {
@@ -40,7 +38,7 @@ fn title_patch(title: &str) -> RowCells {
 }
 
 fn open_db() -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
-    let schema = JazzSchema::new([todo_table()]);
+    let schema = todo_schema();
     let column_families = schema.column_families();
     let column_family_refs = column_families
         .iter()
@@ -67,7 +65,7 @@ struct CoreDb {
 }
 
 fn open_core() -> Result<CoreDb, Box<dyn std::error::Error>> {
-    let schema = JazzSchema::new([todo_table()]);
+    let schema = todo_schema();
     let column_families = schema.column_families();
     let column_family_refs = column_families
         .iter()
@@ -234,7 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .one(&core.table("todos"))?
         .expect("row remains visible");
     assert_eq!(
-        current.cell(&todo_table(), "title"),
+        current.cell(&core.schema.tables()[0], "title"),
         Some(Value::String("first writer".to_owned()))
     );
     println!("exclusive_tx committed {accepted:?} and rejected a stale writer");

@@ -24,10 +24,6 @@ import {
 } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
 import {
-  readSchemaSelectPolicyBranches,
-  readSchemaTableMetadata,
-} from "./native-runtime-policy.test-support.js";
-import {
   applySubscriptionDelta,
   decodeNativeDelta,
   SubscriptionManager,
@@ -42,6 +38,12 @@ async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
 }
 
 const previousWebSocket = globalThis.WebSocket;
+
+function decodeSchemaSource(bytes: Uint8Array) {
+  return JSON.parse(new TextDecoder().decode(bytes)) as {
+    tables: WasmSchema;
+  };
+}
 
 function decodeTestDeltas(
   deltas: unknown[],
@@ -63,7 +65,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
-  it("encodes indexed columns and counter merge strategies in native schemas", () => {
+  it("encodes indexes and merge strategies in schema source", () => {
     const schemaBytes = encodeSchema({
       counters: {
         columns: [
@@ -80,27 +82,30 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
     });
 
-    expect(readSchemaTableMetadata(schemaBytes, "counters")).toEqual({
-      indexedColumns: ["done", "title"],
-      mergeStrategies: [{ column: "count", strategy: "Counter" }],
+    expect(decodeSchemaSource(schemaBytes)).toMatchObject({
+      tables: {
+        counters: {
+          indexed_columns: ["title", "done"],
+          columns: [{ name: "count", merge_strategy: "Counter" }, {}, {}],
+        },
+      },
     });
   });
 
-  it("rejects unsupported native schema merge strategies instead of dropping them", () => {
-    expect(() =>
-      encodeSchema({
-        docs: {
-          columns: [
-            {
-              name: "tags",
-              column_type: { type: "Array", element: { type: "Text" } },
-              nullable: false,
-              merge_strategy: "GSet",
-            },
-          ],
-        },
-      }),
-    ).toThrow("GSet merge strategies");
+  it("preserves GSet merge strategies for Rust validation", () => {
+    const encoded = encodeSchema({
+      docs: {
+        columns: [
+          {
+            name: "tags",
+            column_type: { type: "Array", element: { type: "Text" } },
+            nullable: false,
+            merge_strategy: "GSet",
+          },
+        ],
+      },
+    });
+    expect(decodeSchemaSource(encoded).tables.docs?.columns[0]?.merge_strategy).toBe("GSet");
   });
 
   it("resolves connect only after the owned native transport has pumped", async () => {
@@ -1631,88 +1636,50 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
-  it("encodes signed Integer policy literals as logical I32 values", () => {
-    const policy = readSchemaSelectPolicyBranches(
-      encodeSchema({
-        metrics: {
-          columns: [{ name: "score", column_type: { type: "Integer" }, nullable: false }],
-          policies: {
-            select: {
-              using: {
-                type: "And",
-                exprs: [
-                  {
-                    type: "Cmp",
-                    column: "score",
-                    op: "Ge",
-                    value: { type: "Literal", value: { type: "Integer", value: -7 } },
-                  },
-                  {
-                    type: "Cmp",
-                    column: "score",
-                    op: "Le",
-                    value: { type: "Literal", value: { type: "Integer", value: 8 } },
-                  },
-                ],
-              },
+  it("preserves signed policy literals for Rust lowering", () => {
+    const encoded = encodeSchema({
+      metrics: {
+        columns: [{ name: "score", column_type: { type: "Integer" }, nullable: false }],
+        policies: {
+          select: {
+            using: {
+              type: "And",
+              exprs: [
+                {
+                  type: "Cmp",
+                  column: "score",
+                  op: "Ge",
+                  value: { type: "Literal", value: { type: "Integer", value: -7 } },
+                },
+                {
+                  type: "Cmp",
+                  column: "score",
+                  op: "Le",
+                  value: { type: "Literal", value: { type: "Integer", value: 8 } },
+                },
+              ],
             },
           },
         },
-      }),
-      "metrics",
-    );
-
-    expect(policy.filters).toEqual([
-      {
-        tag: 7,
-        column: "score",
-        operand: { tag: 3, literalTag: 14, value: -7n },
       },
-      {
-        tag: 9,
-        column: "score",
-        operand: { tag: 3, literalTag: 14, value: 8n },
-      },
-    ]);
-
-    for (const value of [-2_147_483_649, 2_147_483_648]) {
-      expect(() =>
-        encodeSchema({
-          metrics: {
-            columns: [{ name: "score", column_type: { type: "Integer" }, nullable: false }],
-            policies: {
-              select: {
-                using: {
-                  type: "Cmp",
-                  column: "score",
-                  op: "Eq",
-                  value: { type: "Literal", value: { type: "Integer", value } },
-                },
-              },
-            },
-          },
-        }),
-      ).toThrow("Integer policy literal default must be a signed 32-bit integer");
-    }
-    for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
-      expect(() =>
-        encodeSchema({
-          metrics: {
-            columns: [{ name: "score", column_type: { type: "BigInt" }, nullable: false }],
-            policies: {
-              select: {
-                using: {
-                  type: "Cmp",
-                  column: "score",
-                  op: "Eq",
-                  value: { type: "Literal", value: { type: "BigInt", value } },
-                },
-              },
-            },
-          },
-        }),
-      ).toThrow("BigInt policy literal must be a signed 64-bit integer");
-    }
+    });
+    expect(decodeSchemaSource(encoded).tables.metrics?.policies?.select?.using).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "score",
+          op: "Ge",
+          value: { type: "Literal", value: { type: "Integer", value: -7 } },
+        },
+        {
+          type: "Cmp",
+          column: "score",
+          op: "Le",
+          value: { type: "Literal", value: { type: "Integer", value: 8 } },
+        },
+      ],
+    });
   });
 
   it("materializes array subquery relation snapshots for subscriptions", async () => {

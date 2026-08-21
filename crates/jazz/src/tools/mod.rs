@@ -9,7 +9,6 @@ mod object;
 pub mod policy_claims;
 pub(crate) mod public_api;
 pub mod public_schema;
-#[cfg(any(feature = "runtime", test))]
 #[doc(hidden)]
 pub mod public_schema_convert;
 pub mod schema_lens;
@@ -35,10 +34,10 @@ use thiserror::Error;
 
 pub use app_id::AppId;
 pub use public_schema::{
-    AuthMode, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, OrderedRowDelta,
-    PolicyExpr, QueryResult, QueryResultField, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder,
-    SchemaHash, Session, TableName, TablePolicies, TableSchema, TableSchemaBuilder, TransactionId,
-    Value, WriteContext, permissions, policy_expr,
+    AuthMode, CmpOp, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, OrderedRowDelta,
+    PolicyExpr, PolicyValue, QueryResult, QueryResultField, Row, RowDelta, RowDescriptor, Schema,
+    SchemaBuilder, SchemaHash, Session, TableName, TablePolicies, TableSchema, TableSchemaBuilder,
+    TransactionId, Value, WriteContext, permissions, policy_expr,
 };
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenTransactionId;

@@ -108,15 +108,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use jazz::groove::records::Value;
-    use jazz::groove::schema::ColumnType;
     use jazz::ids::{AuthorId, NodeUuid, RowUuid};
     use jazz::protocol::{
         AuthorizationSupportScopeKey, PeerPayloadInventory, PermissionAdviceRequestId, ReadViewKey,
         SubscriptionKey,
     };
     use jazz::query::{BindingId, ShapeId};
-    use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
     use jazz::time::{GlobalSeq, TxTime};
+    use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
     use jazz::tx::{BranchLineage, DurabilityTier, Fate, Transaction, TxId, TxKind};
 
     use super::*;
@@ -126,12 +125,13 @@ mod tests {
     #[test]
     fn authorization_scope_view_accounts_for_nested_payload_and_floor() {
         let tx_id = TxId::new(TxTime::new(1, 0), NodeUuid(uuid::Uuid::nil()));
-        let schema = JazzSchema::new([TableSchema::new(
-            "items",
-            [ColumnSchema::new("name", ColumnType::String)],
-        )]);
+        let schema = crate::public_schema_fixture::compile_public_schema(
+            SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("items").column("name", ColumnType::Text))
+                .build(),
+        );
         let version = VersionRecord::from_cells(
-            &schema.tables[0],
+            &schema.tables()[0],
             schema.version_id(),
             RowUuid(uuid::Uuid::nil()),
             Vec::new(),

@@ -49,9 +49,16 @@ fn lowered_record_wrapper_field_indexes_match_open_descriptors() {
 fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
     fn fixture_schema() -> JazzSchema {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema.native.bin");
-        let bytes = std::fs::read(path).unwrap();
-        postcard::from_bytes(&bytes).unwrap()
+            .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema-source.json");
+        let source: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let source = serde_json::from_value::<std::collections::BTreeMap<_, _>>(
+            source["mergedSchema"].clone(),
+        )
+        .unwrap()
+        .into_iter()
+        .collect();
+        crate::schema::JazzSchema::new(&source).unwrap()
     }
 
     fn sample_value(column_type: &groove::schema::ColumnType, seed: u8) -> Value {

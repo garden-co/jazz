@@ -12,17 +12,19 @@
 
 use std::collections::BTreeMap;
 
+mod schema_fixture;
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz::db::{
     Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, SeededRowIdSource, SubscriptionEvent,
     block_on,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 type CoreDb = Db<MemoryStorage>;
@@ -32,19 +34,17 @@ const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-000
 const FANOUT_SUBSCRIPTIONS: usize = 100;
 
 fn schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "documents",
-        [
-            ColumnSchema::new("folder", ColumnType::Uuid),
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("content", ColumnType::String),
-            ColumnSchema::new("author", ColumnType::Uuid),
-            ColumnSchema::new("created_at", ColumnType::U64),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
+    schema_fixture::compile(
+        SchemaBuilder::new().table(
+            TableSchemaBuilder::new("documents")
+                .column("folder", ColumnType::Uuid)
+                .column("title", ColumnType::Text)
+                .column("content", ColumnType::Text)
+                .column("author", ColumnType::Uuid)
+                .column("created_at", ColumnType::Timestamp)
+                .column("done", ColumnType::Boolean),
+        ),
     )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())])
 }
 
 fn open_db(seed: u64) -> CoreDb {

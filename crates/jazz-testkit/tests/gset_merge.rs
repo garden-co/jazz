@@ -79,7 +79,7 @@ async fn merge_concurrently(
         .update(doc_id, vec![(column.to_string(), first_value)])
         .expect("first replica writes");
     support::wait_for_edge_txs(
-        &first,
+        first,
         &[first_tx.expect("ordinary mutation commits immediately")],
     )
     .await;
@@ -88,7 +88,7 @@ async fn merge_concurrently(
         .update(doc_id, vec![(column.to_string(), second_value)])
         .expect("second replica writes");
     support::wait_for_edge_txs(
-        &second,
+        second,
         &[second_tx.expect("ordinary mutation commits immediately")],
     )
     .await;

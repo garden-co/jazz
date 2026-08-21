@@ -8,7 +8,9 @@ fn main() {
 fn main() {
     use std::time::Instant;
 
-    let probes: &[(&str, u32, u32, fn(u32, u32) -> u64)] = &[
+    type Probe = (&'static str, u32, u32, fn(u32, u32) -> u64);
+
+    let probes: &[Probe] = &[
         (
             "arithmetic_hash",
             jazz_wasm::bench_probes::ARITHMETIC_ITERS,

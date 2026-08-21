@@ -276,7 +276,8 @@ impl SchemaViewId {
     }
 
     fn for_schema(schema: &JazzSchema) -> Self {
-        let bytes = postcard::to_allocvec(schema).expect("JazzSchema always serializes");
+        let bytes =
+            serde_json::to_vec(schema.public_schema()).expect("public schema always serializes");
         Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
     }
 }
@@ -1040,12 +1041,12 @@ pub mod doctest_support {
     use std::future::Future;
 
     use groove::records::Value;
-    use groove::schema::{ColumnSchema, ColumnType};
     pub use groove::storage::MemoryStorage;
 
     use crate::db::{Db, DbConfig, DbIdentity, Error, RowCells, SeededRowIdSource};
     use crate::ids::{AuthorId, NodeUuid};
-    use crate::schema::{JazzSchema, Policy, TableSchema};
+    use crate::schema::JazzSchema;
+    use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
     /// Poll a ready-immediate Db future in examples.
     pub fn block_on<F: Future>(future: F) -> F::Output {
@@ -1054,15 +1055,14 @@ pub mod doctest_support {
 
     /// Example schema used by Db doctests.
     pub fn schema() -> JazzSchema {
-        JazzSchema::new([TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("done", ColumnType::Bool),
-            ],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public())])
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .build();
+        crate::schema::JazzSchema::new(&source).expect("Db doctest public schema compiles")
     }
 
     /// Open a fresh Db over in-memory storage.

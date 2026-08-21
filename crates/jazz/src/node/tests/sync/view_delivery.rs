@@ -396,13 +396,11 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
 /// authored on the rebuilt wire unit and this test fails.
 #[test]
 fn reopened_pending_partial_update_upload_preserves_authored_columns() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("completed", ColumnType::Bool),
-        ],
-    )]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("completed", PublicColumnType::Boolean),
+    ));
     let (bob_dir, mut bob) = open_node_with_schema(node(0x91), schema.clone());
     let (_alice_dir, mut alice) = open_node_with_schema(node(0x92), schema.clone());
     let (_core_dir, mut core) =

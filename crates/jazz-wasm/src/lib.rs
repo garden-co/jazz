@@ -1200,8 +1200,7 @@ impl WasmDb {
     /// Register a typed schema view backed by this same runtime owner.
     #[wasm_bindgen(js_name = registerSchema)]
     pub fn register_schema(&self, schema: Vec<u8>) -> Result<WasmDb, JsValue> {
-        let schema: JazzSchema = postcard::from_bytes(&schema)
-            .map_err(|error| to_js_error(format!("decode schema: {error}")))?;
+        let schema = decode_public_schema(&schema)?;
         Ok(Self {
             inner: self
                 .inner
@@ -2386,11 +2385,14 @@ fn decode_open_args(
     schema: &[u8],
     config: &[u8],
 ) -> Result<(JazzSchema, WasmOpenDbConfig), JsValue> {
-    let schema: JazzSchema =
-        postcard::from_bytes(schema).map_err(|err| to_js_error(format!("decode schema: {err}")))?;
+    let schema = decode_public_schema(schema)?;
     let config: WasmOpenDbConfig = postcard::from_bytes(config)
         .map_err(|err| to_js_error(format!("decode open config: {err}")))?;
     Ok((schema, config))
+}
+
+fn decode_public_schema(schema: &[u8]) -> Result<JazzSchema, JsValue> {
+    jazz::tools::public_schema_convert::decode_public_schema_json(schema).map_err(to_js_error)
 }
 
 fn relation_query_from_json(query_json: &str) -> Result<RelationQuery, JsValue> {
@@ -2922,8 +2924,9 @@ fn unknown_transaction_kind_message(kind: &str) -> String {
 mod dynamic_schema_view_tests {
     use super::*;
     use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps};
-    use jazz::groove::schema::ColumnType;
-    use jazz::schema::{ColumnSchema, Policy, TableSchema};
+    use jazz::tools::public_schema::{
+        ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
+    };
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -3024,12 +3027,21 @@ mod dynamic_schema_view_tests {
     /// batch when the JavaScript wrapper is collected.
     #[test]
     fn attached_tx_drop_preserves_owner_batch() {
-        let schema = JazzSchema::new([TableSchema::new(
-            "items",
-            [ColumnSchema::new("label", ColumnType::String)],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public())]);
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("label", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = jazz::schema::JazzSchema::new(&source)
+            .expect("WASM transaction fixture public schema compiles");
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let owner = Rc::new(

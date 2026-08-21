@@ -100,7 +100,7 @@ async fn insert_visible_todo(client: &JazzClient, title: &str, completed: bool) 
         )
         .expect("insert visible todo");
     support::wait_for_edge_txs(
-        &client,
+        client,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
     .await;

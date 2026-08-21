@@ -3,23 +3,22 @@ use std::collections::BTreeMap;
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::node::CurrentRow;
-use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::schema::{JazzSchema, TableSchema};
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-fn todo_table() -> TableSchema {
-    TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())
+fn todo_schema() -> JazzSchema {
+    let source = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean),
+        )
+        .build();
+    JazzSchema::new(&source).expect("todo public schema compiles")
 }
 
 fn todo_cells(title: &str, done: bool) -> RowCells {
@@ -42,8 +41,8 @@ fn print_todos(label: &str, table: &TableSchema, rows: &[CurrentRow]) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let table = todo_table();
-    let schema = JazzSchema::new([table.clone()]);
+    let schema = todo_schema();
+    let table = schema.tables()[0].clone();
     let column_families = schema.column_families();
     let column_family_refs = column_families
         .iter()

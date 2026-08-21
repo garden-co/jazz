@@ -26,12 +26,15 @@
 //!
 //! use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 //! use jazz::protocol::SyncMessage;
-//! use jazz::schema::{JazzSchema, Policy, TableSchema};
+//! use jazz::schema::JazzSchema;
 //! use jazz::node::{MergeableCommit, NodeState};
 //! use jazz::tx::{DeletionEvent, DurabilityTier};
 //! use jazz::groove::records::Value;
-//! use jazz::groove::schema::{ColumnSchema, ColumnType};
 //! use jazz::groove::storage::MemoryStorage;
+//! use jazz::tools::{
+//!     CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies,
+//!     TableSchemaBuilder,
+//! };
 //!
 //! fn open_node(node: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
 //!     let cfs = schema.column_families();
@@ -40,15 +43,26 @@
 //! }
 //!
 //! let owner = AuthorId::from_bytes([0xa1; 16]);
-//! let schema = JazzSchema::new([TableSchema::new(
-//!     "todos",
-//!     [
-//!         ColumnSchema::new("title", ColumnType::String),
-//!         ColumnSchema::new("owner", ColumnType::Uuid),
-//!     ],
-//! )
-//! .with_read_policy(Policy::owner_only("todos", "owner"))
-//! .with_write_policy(Policy::owner_only("todos", "owner"))]);
+//! let owner_policy = PolicyExpr::Cmp {
+//!     column: "owner".to_owned(),
+//!     op: CmpOp::Eq,
+//!     value: PolicyValue::SessionRef(vec!["sub".to_owned()]),
+//! };
+//! let source = SchemaBuilder::new()
+//!     .table(
+//!         TableSchemaBuilder::new("todos")
+//!             .column("title", ColumnType::Text)
+//!             .column("owner", ColumnType::Uuid)
+//!             .policies(
+//!                 TablePolicies::new()
+//!                     .with_select(owner_policy.clone())
+//!                     .with_insert(owner_policy.clone())
+//!                     .with_update(Some(owner_policy.clone()), owner_policy.clone())
+//!                     .with_delete(owner_policy),
+//!             ),
+//!     )
+//!     .build();
+//! let schema = JazzSchema::new(&source).unwrap();
 //!
 //! let mut writer = open_node(NodeUuid::from_bytes([1; 16]), schema.clone());
 //! let mut core = open_node(NodeUuid::from_bytes([9; 16]), schema.clone());
@@ -67,7 +81,7 @@
 //!     .unwrap();
 //! let local_rows = writer.current_rows("todos", DurabilityTier::Local).unwrap();
 //! assert_eq!(local_rows[0].row_uuid(), row);
-//! assert_eq!(local_rows[0].cell(&schema.tables[0], "title"), Some(Value::String("draft".to_owned())));
+//! assert_eq!(local_rows[0].cell(&schema.tables()[0], "title"), Some(Value::String("draft".to_owned())));
 //!
 //! let SyncMessage::CommitUnit { tx, versions } = unit else { unreachable!() };
 //! let [fate] = core.ingest_commit_unit(tx, versions, 1_000).unwrap().try_into().unwrap();
@@ -128,6 +142,8 @@ pub mod schema;
 /// Platform-neutral client and server runtime APIs used by target shells.
 #[cfg(feature = "runtime")]
 pub mod serving;
+#[cfg(test)]
+mod test_public_schema;
 /// Logical time and sequence counters.
 pub mod time;
 /// Public runtime and data-model support APIs formerly provided by jazz-tools.

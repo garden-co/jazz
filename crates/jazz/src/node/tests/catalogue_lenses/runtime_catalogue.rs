@@ -374,10 +374,7 @@ fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
 #[test]
 fn shape_registration_parks_until_schema_version_catalogue_arrives() {
     let base = schema();
-    let evolved = JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
-    ]);
+    let evolved = todos_notes_schema();
     let shape = Query::from("todos").validate(&evolved).unwrap();
     let (dir, mut core) = open_node_with_schema(node(0x3c), base.clone());
 
@@ -464,10 +461,7 @@ fn publishing_schema_registers_new_physical_tables_live() {
 #[test]
 fn publishing_schema_registers_new_tables_without_storage_reopen() {
     let base = schema();
-    let evolved = JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
-    ]);
+    let evolved = todos_notes_schema();
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let mut core = open_reopen_refusing_node_with_schema(node(0x3e), base.clone());
 
@@ -567,10 +561,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
 #[test]
 fn transaction_version_scans_recover_table_names_from_physical_mappings() {
     let base = schema();
-    let evolved = JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
-    ]);
+    let evolved = todos_notes_schema();
     let evolved_payload = SchemaVersion::new(evolved);
     let (dir, mut core) = open_node_with_schema(node(0x3f), base.clone());
     publish_schema_lineage(

@@ -51,10 +51,10 @@ fn prepared_relation_terminal_keeps_branch_discriminator_in_public_payload() {
 
 #[test]
 fn lowered_groove_graph_differs_for_distinct_read_views() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "docs",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text)),
+    );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa4; 16]), schema.clone());
     let shape = Query::from("docs").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();

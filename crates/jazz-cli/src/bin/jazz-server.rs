@@ -14,6 +14,11 @@ use jazz::serving::{
 use jazz_server::loopback::http::load_latest_admin_schema_for_app;
 use jazz_server::loopback::websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig};
 
+fn empty_runtime_schema() -> JazzSchema {
+    let source = jazz::tools::public_schema::SchemaBuilder::new().build();
+    jazz::schema::JazzSchema::new(&source).expect("the empty public schema is valid")
+}
+
 fn start_loopback_server(
     config: LoopbackWebSocketServerConfig,
 ) -> jazz_server::loopback::websocket::LoopbackWebSocketResult<LoopbackWebSocketServer> {
@@ -144,13 +149,13 @@ fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
     let schema = match &options.storage {
         StorageConfig::RocksDb { path } => match load_latest_admin_schema_for_app(path, app_id) {
             Ok(Some(schema)) => schema,
-            Ok(None) => JazzSchema::new([]),
+            Ok(None) => empty_runtime_schema(),
             Err(error) => {
                 eprintln!("error=load_admin_schema_store: {error}");
                 return ExitCode::FAILURE;
             }
         },
-        _ => JazzSchema::new([]),
+        _ => empty_runtime_schema(),
     };
     let schema_catalogue = if schema.tables.is_empty() {
         "empty"
@@ -243,7 +248,8 @@ fn run_loopback_websocket_schema(
             return ExitCode::from(2);
         }
     };
-    let schema = match postcard::from_bytes::<JazzSchema>(&schema_bytes) {
+    let schema = match jazz::tools::public_schema_convert::decode_public_schema_json(&schema_bytes)
+    {
         Ok(schema) => schema,
         Err(error) => {
             eprintln!("error=decode_schema: {error}");
@@ -291,7 +297,7 @@ fn print_usage(program: &str) {
     );
     print_server_usage(program);
     print_serve_usage(program, "serve");
-    println!("alias={program} dev-server <schema-postcard-hex> [same options as serve]");
+    println!("alias={program} dev-server <schema-source-json-hex> [same options as serve]");
     print_serve_usage(program, "serve-loopback-websocket-schema");
     print_serve_data_dir_usage(program);
     println!(
@@ -305,7 +311,7 @@ fn print_usage_stderr(program: &str) {
     );
     print_server_usage_stderr(program);
     print_serve_usage_stderr(program, "serve");
-    eprintln!("alias={program} dev-server <schema-postcard-hex> [same options as serve]");
+    eprintln!("alias={program} dev-server <schema-source-json-hex> [same options as serve]");
     print_serve_usage_stderr(program, "serve-loopback-websocket-schema");
     print_serve_data_dir_usage_stderr(program);
     eprintln!(
@@ -327,25 +333,25 @@ fn print_server_usage_stderr(program: &str) {
 
 fn print_serve_usage(program: &str, command: &str) {
     println!(
-        "usage={program} {command} <schema-postcard-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_usage_stderr(program: &str, command: &str) {
     eprintln!(
-        "usage={program} {command} <schema-postcard-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_data_dir_usage(program: &str) {
     println!(
-        "usage={program} serve-loopback-websocket-schema-data-dir <schema-postcard-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_data_dir_usage_stderr(program: &str) {
     eprintln!(
-        "usage={program} serve-loopback-websocket-schema-data-dir <schema-postcard-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 

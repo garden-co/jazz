@@ -8,7 +8,6 @@ use std::time::Instant;
 
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
-use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
@@ -18,8 +17,12 @@ use jazz::protocol::{
 };
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
+use jazz::tools::public_schema::{
+    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+};
 use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
+use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::{emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
@@ -415,28 +418,34 @@ fn row_cells(row: CurrentRow, table: &TableSchema) -> (RowUuid, BTreeMap<String,
 }
 
 fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
-    let v1 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
-    let v2 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]);
-    let v3 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("name", ColumnType::String)],
-    )]);
-    let v4 = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("name", ColumnType::String),
-            ColumnSchema::new("search_name", ColumnType::String),
-        ],
-    )]);
+    let v1 = compile_public_schema(
+        SchemaBuilder::new()
+            .table(PublicTableSchema::builder("todos").column("title", PublicColumnType::Text))
+            .build(),
+    );
+    let v2 = compile_public_schema(
+        SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("body", PublicColumnType::Text),
+            )
+            .build(),
+    );
+    let v3 = compile_public_schema(
+        SchemaBuilder::new()
+            .table(PublicTableSchema::builder("todos").column("name", PublicColumnType::Text))
+            .build(),
+    );
+    let v4 = compile_public_schema(
+        SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("name", PublicColumnType::Text)
+                    .column("search_name", PublicColumnType::Text),
+            )
+            .build(),
+    );
     let lenses = vec![
         MigrationLens::new(
             v1.version_id(),

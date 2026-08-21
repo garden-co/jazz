@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::{RecordDescriptor, Value, ValueType};
-use groove::schema::ColumnType;
 use jazz::binding_codec::{
     RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
 };
@@ -18,9 +17,11 @@ use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
     lit,
 };
-use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
 use jazz::time::{GlobalSeq, TxTime};
-use jazz::tools::{ObjectId, ResultKey};
+use jazz::tools::{
+    ColumnType as PublicColumnType, ObjectId, ResultKey, SchemaBuilder, TableSchemaBuilder,
+};
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame,
@@ -118,6 +119,16 @@ struct NativeQueryCodecCase {
     query_hex: String,
 }
 
+fn compiled_todos_schema(columns: &[&str]) -> JazzSchema {
+    let table = columns
+        .iter()
+        .fold(TableSchemaBuilder::new("todos"), |table, column| {
+            table.column(column, PublicColumnType::Text)
+        });
+    let source = SchemaBuilder::new().table(table).build();
+    jazz::schema::JazzSchema::new(&source).expect("wire fixture source schema compiles")
+}
+
 fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     let node = NodeUuid::from_bytes([0x11; 16]);
     let tx_id = TxId::new(TxTime(12), node);
@@ -132,17 +143,8 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         binding_id,
         read_view: Default::default(),
     };
-    let lineage_source = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]));
-    let lineage_target = SchemaVersion::new(JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )]));
+    let lineage_source = SchemaVersion::new(compiled_todos_schema(&["title"]));
+    let lineage_target = SchemaVersion::new(compiled_todos_schema(&["title", "body"]));
     let lineage_target_id = lineage_target.id;
     let lineage_lens = MigrationLens::new(
         lineage_source.id,
@@ -378,13 +380,9 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "PublishSchema",
             SyncMessage::PublishSchema {
                 author,
-                schema: Box::new(SchemaVersion::new(JazzSchema::new([TableSchema::new(
-                    "todos",
-                    [
-                        ColumnSchema::new("title", ColumnType::String),
-                        ColumnSchema::new("body", ColumnType::String),
-                    ],
-                )]))),
+                schema: Box::new(SchemaVersion::new(compiled_todos_schema(&[
+                    "title", "body",
+                ]))),
             },
         ),
         (
@@ -483,7 +481,8 @@ fn mixed_version_carriers(
     schema_version: SchemaVersionId,
     author: AuthorId,
 ) -> Vec<VersionCarrier> {
-    let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+    let schema = compiled_todos_schema(&["title"]);
+    let table = &schema.tables()[0];
     let node = NodeUuid::from_bytes([0x88; 16]);
     let bundles = (0..4)
         .map(|index| {
@@ -505,7 +504,7 @@ fn mixed_version_carriers(
                 },
                 versions: vec![
                     VersionRecord::from_cells(
-                        &table,
+                        table,
                         schema_version,
                         RowUuid::from_bytes([0x90 + index as u8; 16]),
                         Vec::new(),
@@ -851,7 +850,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         rows: vec![
             RowBatch {
                 table: "todos",
-                descriptor: current_descriptor.clone(),
+                descriptor: current_descriptor,
                 rows: vec![
                     Row {
                         row_id: todo_one_id,
@@ -867,7 +866,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             },
             RowBatch {
                 table: "notes",
-                descriptor: logical_descriptor.clone(),
+                descriptor: logical_descriptor,
                 rows: vec![Row {
                     row_id: note_id,
                     deleted: false,
@@ -878,7 +877,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             // must create a new batch, even though its descriptor is identical.
             RowBatch {
                 table: "todos",
-                descriptor: current_descriptor.clone(),
+                descriptor: current_descriptor,
                 rows: vec![Row {
                     row_id: deleted_todo_id,
                     deleted: true,
@@ -897,7 +896,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let delta = SubscriptionDeltaPayload {
         added: vec![RowBatch {
             table: "todos",
-            descriptor: current_descriptor.clone(),
+            descriptor: current_descriptor,
             rows: vec![Row {
                 row_id: todo_one_id,
                 deleted: false,
@@ -906,7 +905,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         }],
         updated: vec![RowBatch {
             table: "notes",
-            descriptor: logical_descriptor.clone(),
+            descriptor: logical_descriptor,
             rows: vec![Row {
                 row_id: note_id,
                 deleted: false,
@@ -924,7 +923,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
 
     let current_layout = jazz::db::TerminalRootLayout {
         id: "current-row-v1".to_owned(),
-        root_descriptor: current_descriptor.clone(),
+        root_descriptor: current_descriptor,
         root_key_slot: 0,
         root_key_field_name: "row_uuid".to_owned(),
         public_fields: vec![jazz::db::TerminalRootPublicField {
@@ -937,7 +936,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     };
     let logical_layout = jazz::db::TerminalRootLayout {
         id: "logical-v1".to_owned(),
-        root_descriptor: logical_descriptor.clone(),
+        root_descriptor: logical_descriptor,
         root_key_slot: 0,
         root_key_field_name: "row_uuid".to_owned(),
         public_fields: vec![jazz::db::TerminalRootPublicField {
@@ -955,7 +954,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         .chain(note_id.0.as_bytes().iter().copied())
         .collect::<Vec<_>>();
     let current_insert = TerminalOperation {
-        root_descriptor: current_descriptor.clone(),
+        root_descriptor: current_descriptor,
         root_key: current_key.clone(),
         path: Vec::new(),
         edit: TerminalEdit::Insert {
@@ -965,7 +964,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         },
     };
     let logical_insert = TerminalOperation {
-        root_descriptor: logical_descriptor.clone(),
+        root_descriptor: logical_descriptor,
         root_key: logical_key.clone(),
         path: Vec::new(),
         edit: TerminalEdit::Insert {
@@ -975,7 +974,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         },
     };
     let current_update = TerminalOperation {
-        root_descriptor: current_descriptor.clone(),
+        root_descriptor: current_descriptor,
         root_key: current_key.clone(),
         path: Vec::new(),
         edit: TerminalEdit::Update {
@@ -984,7 +983,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         },
     };
     let logical_remove = TerminalOperation {
-        root_descriptor: logical_descriptor.clone(),
+        root_descriptor: logical_descriptor,
         root_key: logical_key.clone(),
         path: Vec::new(),
         edit: TerminalEdit::Remove {

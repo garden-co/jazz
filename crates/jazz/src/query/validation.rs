@@ -196,14 +196,14 @@ pub enum QueryError {
     },
 }
 
-fn validate_query(query: &Query, schema: &JazzSchema) -> Result<ValidatedQuery, QueryError> {
+fn validate_query(query: &Query, schema: &RuntimeSchema) -> Result<ValidatedQuery, QueryError> {
     let schema_version = schema.version_id();
     validate_query_with_schema_version(query, schema, schema_version)
 }
 
 fn validate_query_with_schema_version(
     query: &Query,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     schema_version: SchemaVersionId,
 ) -> Result<ValidatedQuery, QueryError> {
     let (normalized, params, canonical) = validate_query_canonical_parts(query, schema)?;
@@ -223,7 +223,7 @@ type ValidatedQueryCanonicalParts = (Query, BTreeMap<String, ColumnType>, Vec<u8
 
 fn validate_query_canonical_parts(
     query: &Query,
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
     let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
@@ -316,7 +316,7 @@ fn validate_query_canonical_parts(
 }
 
 fn flat_join_source_tables(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     root_table: &str,
     flat_join: &FlatJoin,
 ) -> Result<BTreeMap<String, TableSchema>, QueryError> {
@@ -538,7 +538,7 @@ fn flat_join_column_type<'a>(
 }
 
 fn validate_flat_join(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     root_table: &str,
     flat_join: &FlatJoin,
 ) -> Result<(), QueryError> {
@@ -583,7 +583,7 @@ fn validate_flat_join(
 }
 
 fn validate_join(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     root: &TableSchema,
     root_table: &str,
     join: &mut JoinVia,
@@ -772,7 +772,7 @@ fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), Query
     }
 }
 
-fn schema_table(schema: &JazzSchema, name: &str) -> Result<TableSchema, QueryError> {
+fn schema_table(schema: &RuntimeSchema, name: &str) -> Result<TableSchema, QueryError> {
     if name == "jazz_branches" {
         return Ok(branch_metadata_table_schema());
     }
@@ -839,7 +839,7 @@ fn is_permission_introspection_magic_column(column: &str) -> bool {
     matches!(column, "$canRead")
 }
 
-fn validate_include(schema: &JazzSchema, root: &TableSchema, path: &str) -> Result<(), QueryError> {
+fn validate_include(schema: &RuntimeSchema, root: &TableSchema, path: &str) -> Result<(), QueryError> {
     let mut current = root.clone();
     for segment in path.split('.') {
         column_type(&current, segment)?;
@@ -854,7 +854,7 @@ fn validate_include(schema: &JazzSchema, root: &TableSchema, path: &str) -> Resu
 }
 
 fn validate_array_subqueries(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     parent: &TableSchema,
     subqueries: &mut [ArraySubquery],
     params: &mut BTreeMap<String, ColumnType>,
@@ -875,7 +875,7 @@ fn validate_array_subqueries(
 }
 
 fn validate_array_subquery(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     parent: &TableSchema,
     subquery: &mut ArraySubquery,
     params: &mut BTreeMap<String, ColumnType>,
@@ -912,7 +912,7 @@ fn validate_array_subquery(
 }
 
 fn validate_reachable(
-    schema: &JazzSchema,
+    schema: &RuntimeSchema,
     root: &TableSchema,
     reachable: &mut ReachableVia,
     params: &mut BTreeMap<String, ColumnType>,

@@ -1,15 +1,13 @@
 use crate::query::{in_list, is_null};
 
 fn access_path_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "docs",
-        [
-            ColumnSchema::new("owner", ColumnType::Uuid),
-            ColumnSchema::new("status", ColumnType::String),
-            ColumnSchema::new("body", ColumnType::String),
-        ],
-    )
-    .with_indexed_column("owner")])
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("docs")
+            .column("owner", PublicColumnType::Uuid)
+            .column("status", PublicColumnType::Text)
+            .column("body", PublicColumnType::Text)
+            .index_only(["owner"]),
+    ))
 }
 
 fn access_path_doc_cells(owner: AuthorId, status: &str, body: &str) -> BTreeMap<String, Value> {
@@ -82,13 +80,11 @@ fn one_shot_filtered_read_uses_primary_key_scan_for_id_equality() {
 
 #[test]
 fn declared_id_column_filter_uses_declared_value_not_physical_row_uuid() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "things",
-        [
-            ColumnSchema::new("id", ColumnType::Uuid),
-            ColumnSchema::new("label", ColumnType::String),
-        ],
-    )]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("things")
+            .column("id", PublicColumnType::Uuid)
+            .column("label", PublicColumnType::Text),
+    ));
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let physical_row = row(0x11);
@@ -112,13 +108,11 @@ fn declared_id_column_filter_uses_declared_value_not_physical_row_uuid() {
 /// Alice's physical row UUID must not leak into either predicate evaluation.
 #[test]
 fn declared_id_column_in_and_is_null_use_declared_values() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "things",
-        [
-            ColumnSchema::new("id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
-            ColumnSchema::new("label", ColumnType::String),
-        ],
-    )]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("things")
+            .nullable_column("id", PublicColumnType::Uuid)
+            .column("label", PublicColumnType::Text),
+    ));
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let matching_row = row(0x12);
@@ -160,10 +154,12 @@ fn declared_id_column_in_and_is_null_use_declared_values() {
     assert_eq!(in_rows, vec![matching_row]);
     assert_eq!(null_rows, vec![null_row]);
 
-    let missing_id_schema = JazzSchema::new([TableSchema::new(
-        "without_declared_id",
-        [ColumnSchema::new("label", ColumnType::String)],
-    )]);
+    let missing_id_schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("without_declared_id")
+                .column("label", PublicColumnType::Text),
+        ),
+    );
     assert!(Query::from("without_declared_id")
         .filter(is_null(col("id")))
         .validate(&missing_id_schema)
@@ -174,23 +170,19 @@ fn declared_id_column_in_and_is_null_use_declared_values() {
 /// rather than accidentally comparing the child FK with the physical row UUID.
 #[test]
 fn inverse_join_via_column_uses_root_declared_id() {
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "parents",
-            [
-                ColumnSchema::new("id", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-            ],
-        ),
-        TableSchema::new(
-            "children",
-            [
-                ColumnSchema::new("parent", ColumnType::Uuid),
-                ColumnSchema::new("label", ColumnType::String),
-            ],
-        )
-        .with_reference("parent", "parents"),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("parents")
+                    .column("id", PublicColumnType::Uuid)
+                    .column("label", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("children")
+                    .fk_column("parent", "parents")
+                    .column("label", PublicColumnType::Text),
+            ),
+    );
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let parent = row(0x21);
@@ -225,13 +217,11 @@ fn inverse_join_via_column_uses_root_declared_id() {
 /// pagination, even when their physical row UUID order is the opposite.
 #[test]
 fn declared_id_order_and_pagination_use_declared_values() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "things",
-        [
-            ColumnSchema::new("id", ColumnType::Uuid),
-            ColumnSchema::new("label", ColumnType::String),
-        ],
-    )]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("things")
+            .column("id", PublicColumnType::Uuid)
+            .column("label", PublicColumnType::Text),
+    ));
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let physically_first = row(0x31);
@@ -334,27 +324,26 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
     // This is intentionally an internal receipt: schema evolution and query
     // results use the public protocol/query APIs, while physical read counts
     // and index names are implementation details with no public equivalent.
-    let base = JazzSchema::new([TableSchema::new(
-        "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
-    )]);
-    let indexed = SchemaVersion::new(JazzSchema::new([
-        TableSchema::new(
-            "todos",
-            [ColumnSchema::new("title", ColumnType::String)],
-        )
-        .with_indexed_column("title"),
-    ]));
-    let extended = SchemaVersion::new(JazzSchema::new([
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("body", ColumnType::String),
-            ],
-        )
-        .with_indexed_column("title"),
-    ]));
+    let base = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+        ),
+    );
+    let indexed = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .index_only(["title"]),
+        ),
+    ));
+    let extended = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .index_only(["title"]),
+        ),
+    ));
     let (_writer_dir, mut writer) = open_node_with_schema(node(0xb1), base.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0xb2), base.clone());
     let existing = row(0xb3);
@@ -516,10 +505,15 @@ fn one_shot_filtered_read_counts_full_scan_for_unindexed_filter() {
 
 #[test]
 fn whole_table_predicate_probe_uses_table_change_watermark() {
-    let schema = JazzSchema::new([
-        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("notes", [ColumnSchema::new("title", ColumnType::String)]),
-    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text),
+            ),
+    );
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
@@ -1080,103 +1074,89 @@ fn prepared_query_lowering_supports_ne_parameter_predicates() {
 }
 
 fn relation_snapshot_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("owner_id", "users"),
-        TableSchema::new(
-            "comments",
-            [
-                ColumnSchema::new("body", ColumnType::String),
-                ColumnSchema::new("todo_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("todo_id", "todos"),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("owner_id", "users"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("comments")
+                    .column("body", PublicColumnType::Text)
+                    .fk_column("todo_id", "todos"),
+            ),
+    )
 }
 
 fn relation_snapshot_policy_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("owner_id", "users")
-        .with_read_policy(Policy::owner_only("todos", "owner_id"))
-        .with_write_policy(Policy::owner_only("todos", "owner_id")),
-        TableSchema::new(
-            "comments",
-            [
-                ColumnSchema::new("body", ColumnType::String),
-                ColumnSchema::new("todo_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("todo_id", "todos"),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("owner_id", "users")
+                    .policies(public_owner_policies("owner_id")),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("comments")
+                    .column("body", PublicColumnType::Text)
+                    .fk_column("todo_id", "todos"),
+            ),
+    )
 }
 
 fn routed_nested_collector_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("owner_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("owner_id", "users")
-        .with_read_policy(Policy::owner_only("todos", "owner_id")),
-        TableSchema::new(
-            "comments",
-            [
-                ColumnSchema::new("body", ColumnType::String),
-                ColumnSchema::new("todo_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("todo_id", "todos"),
-        TableSchema::new(
-            "attachments",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("todo_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("todo_id", "todos"),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("owner_id", "users")
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                            "owner_id",
+                            vec!["claims".to_owned(), "sub".to_owned()],
+                        )),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("comments")
+                    .column("body", PublicColumnType::Text)
+                    .fk_column("todo_id", "todos"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("attachments")
+                    .column("name", PublicColumnType::Text)
+                    .fk_column("todo_id", "todos"),
+            ),
+    )
 }
 
 fn forward_include_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new(
-            "profiles",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("best_friend", ColumnType::Uuid.nullable()),
-            ],
-        )
-        .with_reference("best_friend", "profiles"),
-        TableSchema::new(
-            "groups",
-            [
-                ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("profile", ColumnType::Uuid.nullable()),
-                ColumnSchema::new("members", ColumnType::Uuid.array_of()),
-            ],
-        )
-        .with_reference("profile", "profiles")
-        .with_reference("members", "profiles"),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("profiles")
+                    .column("name", PublicColumnType::Text)
+                    .nullable_fk_column("best_friend", "profiles"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("groups")
+                    .column("name", PublicColumnType::Text)
+                    .nullable_fk_column("profile", "profiles")
+                    .array_fk_column("members", "profiles"),
+            ),
+    )
 }
 
 #[test]
@@ -2141,17 +2121,17 @@ fn include_deleted_one_shot_read_uses_lowered_param_filters() {
 }
 
 fn include_deleted_join_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("issues", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new(
-            "issue_tags",
-            [
-                ColumnSchema::new("issue", ColumnType::Uuid),
-                ColumnSchema::new("tag", ColumnType::String),
-            ],
-        )
-        .with_reference("issue", "issues"),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues").column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text),
+            ),
+    )
 }
 
 #[test]
@@ -2244,28 +2224,25 @@ fn include_deleted_one_shot_read_join_ignores_deleted_join_rows() {
 }
 
 fn include_deleted_reachable_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new("docs", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new(
-            "team_access",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams"),
-        TableSchema::new(
-            "team_edges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_access")
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_edges")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams"),
+            ),
+    )
 }
 
 fn include_deleted_reachable_shape(schema: &JazzSchema) -> ValidatedQuery {

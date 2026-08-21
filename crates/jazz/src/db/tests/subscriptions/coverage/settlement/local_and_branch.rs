@@ -34,15 +34,13 @@ fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
 
 #[test]
 fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("done", ColumnType::Bool),
-        ],
-    )
-    .with_read_policy(Policy::public())
-    .with_write_policy(Policy::public())]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean),
+        ),
+    );
     let owner = AuthorId::from_bytes([0x32; 16]);
     let db = open_db(0x32, owner, &schema);
     let query = Query::from("todos");
@@ -219,30 +217,29 @@ fn client_local_branch_subscription_survives_sparse_first_write_delete_and_resto
 
 #[test]
 fn denied_branch_subscription_does_not_allocate_sparse_source() {
-    let branch_policy = Query::from("jazz_branches").join_via(
+    let branch_policy = public_exists(
         "branch_access",
-        "branch_id",
-        [eq(col("user_id"), claim("sub"))],
+        [
+            public_outer_eq("branch_id", "id"),
+            public_session_eq("user_id", &["claims", "sub"]),
+        ],
     );
-    let schema = JazzSchema::new([
-        TableSchema::new(
-            "todos",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("done", ColumnType::Bool),
-                ColumnSchema::new("owner_id", ColumnType::Uuid),
-            ],
-        ),
-        TableSchema::new(
-            "branch_access",
-            [
-                ColumnSchema::new("branch_id", ColumnType::Uuid),
-                ColumnSchema::new("user_id", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("branch_id", "jazz_branches"),
-    ])
-    .with_branch_read_policy(branch_policy);
+    let schema = build_public_db_test_schema_with_branch_policies(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column("owner_id", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("branch_access")
+                    .fk_column("branch_id", "jazz_branches")
+                    .column("user_id", PublicColumnType::Uuid),
+            ),
+        Some(branch_policy),
+        None,
+    );
     let denied = AuthorId::from_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let branch = BranchId::from_bytes([0x42; 16]);

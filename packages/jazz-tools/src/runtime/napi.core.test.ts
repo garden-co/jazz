@@ -323,13 +323,15 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     globalThis.WebSocket = previousWebSocket;
   });
 
-  it("decodes the policy graph perf fixture through NAPI", async () => {
+  it("compiles the policy graph perf source fixture through NAPI", async () => {
     const { NapiDb } = await loadNapiModule();
-    const schema = new Uint8Array(
+    const source = JSON.parse(
       readFileSync(
-        new URL("../testing/fixtures/policy-graph-perf/schema.native.bin", import.meta.url),
+        new URL("../testing/fixtures/policy-graph-perf/schema-source.json", import.meta.url),
+        "utf8",
       ),
-    );
+    ) as { mergedSchema: WasmSchema };
+    const schema = encodeSchema(source.mergedSchema);
     const db = NapiDb.openMemory(
       schema,
       openConfig(

@@ -358,7 +358,7 @@ struct UpgradeAdmission {
 
 fn default_config() -> InMemoryServerShellConfig {
     InMemoryServerShellConfig::new(
-        JazzSchema::new([]),
+        JazzSchema::empty(),
         DbIdentity {
             node: NodeUuid::from_bytes([0x5e; 16]),
             author: AuthorId::SYSTEM,

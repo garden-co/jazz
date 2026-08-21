@@ -13,13 +13,11 @@ fn accept_global(core: &mut NodeState<RocksDbStorage>, commit: MergeableCommit) 
 }
 
 fn priority_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "todos",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("priority", ColumnType::U64),
-        ],
-    )])
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("priority", PublicColumnType::Timestamp),
+    ))
 }
 
 fn priority_cells(title: impl Into<String>, priority: u64) -> BTreeMap<String, Value> {
@@ -61,28 +59,25 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
 }
 
 fn recursive_reachable_schema() -> JazzSchema {
-    JazzSchema::new([
-        TableSchema::new("docs", [ColumnSchema::new("title", ColumnType::String)]),
-        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        TableSchema::new(
-            "teamEdges",
-            [
-                ColumnSchema::new("member", ColumnType::Uuid),
-                ColumnSchema::new("parent", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("member", "teams")
-        .with_reference("parent", "teams"),
-        TableSchema::new(
-            "teamAccess",
-            [
-                ColumnSchema::new("doc", ColumnType::Uuid),
-                ColumnSchema::new("team", ColumnType::Uuid),
-            ],
-        )
-        .with_reference("doc", "docs")
-        .with_reference("team", "teams"),
-    ])
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teamEdges")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teamAccess")
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams"),
+            ),
+    )
 }
 
 fn seed_recursive_reachable_fixture(core: &mut NodeState<RocksDbStorage>) {
@@ -228,4 +223,3 @@ fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.hits_out, 1);
 }
-

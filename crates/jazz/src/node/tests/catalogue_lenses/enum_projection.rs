@@ -1,35 +1,42 @@
 // Scalar, payload, and nested enum projection across schema evolution.
 
 fn independent_enum_schema(a: &[&str], b: &[&str]) -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new(
-                "a",
-                ColumnType::EnumTag(groove::records::ScalarEnumSchema::new("a", a.iter().copied()).unwrap()),
-            ),
-            ColumnSchema::new(
-                "b",
-                ColumnType::EnumTag(groove::records::ScalarEnumSchema::new("b", b.iter().copied()).unwrap()),
-            ),
-        ],
-    )])
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items")
+            .column("a", public_scalar_enum("a", a))
+            .column("b", public_scalar_enum("b", b)),
+    ))
 }
 
 fn enum_projection_schema(statuses: &[&str]) -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new(
-                "status",
-                ColumnType::EnumTag(
-                    groove::records::ScalarEnumSchema::new("status", statuses.iter().copied())
-                        .unwrap(),
-                ),
-            ),
-        ],
-    )])
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items")
+            .column("title", PublicColumnType::Text)
+            .column("status", public_scalar_enum("status", statuses)),
+    ))
+}
+
+fn public_scalar_enum(name: &str, variants: &[&str]) -> PublicColumnType {
+    PublicColumnType::ScalarEnum {
+        name: name.to_owned(),
+        variants: variants
+            .iter()
+            .map(|variant| (*variant).to_owned())
+            .collect(),
+    }
+}
+
+fn public_payload_enum(name: &str, cases: &[&str], field: &str) -> PublicColumnType {
+    PublicColumnType::CatalogueEnumPayload {
+        name: name.to_owned(),
+        cases: cases
+            .iter()
+            .map(|case| PublicEnumCaseDescriptor {
+                name: (*case).to_owned(),
+                fields: vec![PublicColumnDescriptor::new(field, PublicColumnType::Text)],
+            })
+            .collect(),
+    }
 }
 
 fn enum_identity_lens(source: SchemaVersionId, target: SchemaVersionId) -> MigrationLens {
@@ -181,73 +188,37 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
 }
 
 fn payload_enum_projection_schema(cases: &[&str]) -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new(
-                "status",
-                ColumnType::Enum(Box::new(
-                    groove::records::EnumSchema::new(
-                        "status",
-                        cases.iter().map(|case| {
-                            groove::records::EnumCase::new(
-                                *case,
-                                groove::records::RecordDescriptor::new([(
-                                    "note",
-                                    groove::records::ValueType::String,
-                                )]),
-                            )
-                        }),
-                    )
-                    .unwrap(),
-                )),
-            ),
-        ],
-    )])
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items")
+            .column("title", PublicColumnType::Text)
+            .column("status", public_payload_enum("status", cases, "note")),
+    ))
 }
 
 fn nested_scalar_enum_projection_schema(statuses: &[&str]) -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new(
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items")
+            .column("title", PublicColumnType::Text)
+            .column(
                 "statuses",
-                ColumnType::Array(Box::new(ColumnType::EnumTag(
-                    groove::records::ScalarEnumSchema::new("status", statuses.iter().copied())
-                        .unwrap(),
-                ))),
+                PublicColumnType::Array {
+                    element: Box::new(public_scalar_enum("status", statuses)),
+                },
             ),
-        ],
-    )])
+    ))
 }
 
 fn nested_payload_enum_projection_schema(cases: &[&str]) -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new(
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items")
+            .column("title", PublicColumnType::Text)
+            .column(
                 "statuses",
-                ColumnType::Array(Box::new(ColumnType::Enum(Box::new(
-                    groove::records::EnumSchema::new(
-                        "status",
-                        cases.iter().map(|case| {
-                            groove::records::EnumCase::new(
-                                *case,
-                                groove::records::RecordDescriptor::new([(
-                                    "note",
-                                    groove::records::ValueType::String,
-                                )]),
-                            )
-                        }),
-                    )
-                    .unwrap(),
-                )))),
+                PublicColumnType::Array {
+                    element: Box::new(public_payload_enum("status", cases, "note")),
+                },
             ),
-        ],
-    )])
+    ))
 }
 
 /// This is an internal physical-activation regression: public clients cannot
@@ -325,13 +296,16 @@ fn direct_payload_enum_append_activates_and_recovers() {
 #[test]
 fn payload_enum_unknown_case_is_ignored_only_when_unselected() {
     let schema = |extra| {
-        let record = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
-        let mut cases = vec![groove::records::EnumCase::new("open", record.clone())];
-        if extra { cases.push(groove::records::EnumCase::new("closed", record)); }
-        JazzSchema::new([TableSchema::new("items", [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("status", ColumnType::Enum(Box::new(groove::records::EnumSchema::new("status", cases).unwrap()))),
-        ])])
+        let cases = if extra {
+            vec!["open", "closed"]
+        } else {
+            vec!["open"]
+        };
+        build_public_test_schema(PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("title", PublicColumnType::Text)
+                .column("status", public_payload_enum("status", &cases, "x")),
+        ))
     };
     let base = schema(false); let evolved = SchemaVersion::new(schema(true));
     let (_dir, mut core) = open_node_with_schema(node(0x76), base.clone());
@@ -903,37 +877,19 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
     // A policy field is not part of the public output, but it still decides
     // whether the row exists. It therefore excludes an incompatible row
     // fail-closed rather than being treated like an unused cell.
-    let base = JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new(
-                "status",
-                ColumnType::EnumTag(
-                    groove::records::ScalarEnumSchema::new("status", ["open"]).unwrap(),
-                ),
-            ),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("items").filter(eq(col("status"), lit(Value::EnumTag(0)))),
-    ))]);
-    let evolved_schema = JazzSchema::new([TableSchema::new(
-        "items",
-        [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new(
-                "status",
-                ColumnType::EnumTag(
-                    groove::records::ScalarEnumSchema::new("status", ["open", "closed"])
-                        .unwrap(),
-                ),
-            ),
-        ],
-    )
-    .with_read_policy(Policy::shape(
-        Query::from("items").filter(eq(col("status"), lit(Value::EnumTag(0)))),
-    ))]);
+    let schema = |statuses: &[&str]| {
+        build_public_test_schema(PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("title", PublicColumnType::Text)
+                .column("status", public_scalar_enum("status", statuses))
+                .policies(PublicTablePolicies::new().with_select(public_literal_eq(
+                    "status",
+                    PublicValue::Text("open".to_owned()),
+                ))),
+        ))
+    };
+    let base = schema(&["open"]);
+    let evolved_schema = schema(&["open", "closed"]);
     let evolved = SchemaVersion::new(evolved_schema);
     let (_dir, mut core) = open_node_with_schema(node(0x77), base.clone());
     publish_schema_lineage(
@@ -1213,20 +1169,12 @@ fn old_enum_index_read_uses_global_index_before_post_winner_omission() {
     // while the old-schema compatibility boundary still runs after the chosen
     // winner. The unknown row must be omitted, not force a full table scan.
     let schema = |statuses: &[&str]| {
-        JazzSchema::new([TableSchema::new(
-            "items",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new(
-                    "status",
-                    ColumnType::EnumTag(
-                        groove::records::ScalarEnumSchema::new("status", statuses.iter().copied())
-                            .unwrap(),
-                    ),
-                ),
-            ],
-        )
-        .with_indexed_column("title")])
+        build_public_test_schema(PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("title", PublicColumnType::Text)
+                .column("status", public_scalar_enum("status", statuses))
+                .index_only(["title"]),
+        ))
     };
     let base = schema(&["open"]);
     let evolved = SchemaVersion::new(schema(&["open", "closed"]));
@@ -1269,15 +1217,20 @@ fn old_enum_index_read_uses_global_index_before_post_winner_omission() {
 
 #[test]
 fn enum_projection_requirement_none_allows_unused_relation_enum() {
-    let schema = |states: &[&str]| JazzSchema::new([
-        TableSchema::new("items", [
-            ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::new("state", ColumnType::Uuid),
-        ]).with_reference("state", "states"),
-        TableSchema::new("states", [ColumnSchema::new("status", ColumnType::EnumTag(
-            groove::records::ScalarEnumSchema::new("status", states.iter().copied()).unwrap(),
-        ))]),
-    ]);
+    let schema = |states: &[&str]| {
+        build_public_test_schema(
+            PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        .fk_column("state", "states"),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("states")
+                        .column("status", public_scalar_enum("status", states)),
+                ),
+        )
+    };
     let base = schema(&["open"]);
     let evolved = SchemaVersion::new(schema(&["open", "closed"]));
     let (_dir, mut core) = open_node_with_schema(node(0x78), base.clone());
@@ -1455,4 +1408,3 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
     );
     assert_eq!(reopened.query_table_versions("items").unwrap().len(), 3);
 }
-
