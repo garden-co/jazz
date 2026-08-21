@@ -3197,6 +3197,15 @@ mod tests {
             LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_USER_ID_CLAIM
         ));
 
+        for path_segments in [["user_id"], ["authMode"], ["auth_mode"]] {
+            rel_value_to_policy_operand(
+                &table,
+                path,
+                &RelValueRef::SessionRef(path_segments.into_iter().map(str::to_owned).collect()),
+            )
+            .expect("documented public session aliases are supported");
+        }
+
         let claim = rel_value_to_policy_operand(
             &table,
             path,
@@ -4394,7 +4403,7 @@ mod tests {
         let seed = reachable.seed.as_ref().unwrap();
         assert_eq!(seed.table, "teams");
         assert_eq!(seed.user_column.as_deref(), Some("identity_key"));
-        assert_eq!(seed.user_claim.as_deref(), Some("sub"));
+        assert_eq!(seed.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
         assert_eq!(seed.team_column, "id");
     }
 }
