@@ -291,50 +291,49 @@ pub(super) fn lowered_terminals(
                     });
                 }
             }
-            if has_explicit_closure_path(&request.input.shape) {
-                for contribution in &request.input.shape.join_contributions {
-                    let resolved_source =
-                        resolved_sources.get(&contribution.source).ok_or_else(|| {
-                            Box::new(CapabilityReport {
-                                gaps: vec![UnsupportedReason::Runtime(format!(
-                                    "join contribution source {:?} was not resolved",
-                                    contribution.source
-                                ))],
-                                explain: ExplainPlan::default(),
-                            })
-                        })?;
-                    let output = fact_output_with_terminal(
-                        fact,
-                        ProgramFactTerminal::Primary,
-                        plan,
-                        resolved_source,
-                        resolved_sources,
-                        claim_route_fields.clone(),
-                    )?;
-                    let contribution_graph = join_contribution_membership_graph(
-                        closure.visible_root.clone(),
-                        contribution,
-                        source,
-                        resolved_source,
-                        &request.input.shape.nodes,
-                        resolved_sources,
-                        request,
-                    )?;
-                    let graph = fact_terminal_graph(
-                        fact,
-                        contribution_graph,
-                        plan,
-                        resolved_source,
-                        resolved_sources,
-                        request,
-                        output_routing_fields(&output),
-                    )?;
-                    terminals.push(LoweredTerminal {
-                        sink: scoped_fact_sink_name(fact, &contribution.source),
-                        graph,
-                        output: OutputTerminalSchema::Fact(output),
-                    });
-                }
+            for contribution in &request.input.shape.join_contributions {
+                let resolved_source =
+                    resolved_sources.get(&contribution.source).ok_or_else(|| {
+                        Box::new(CapabilityReport {
+                            gaps: vec![UnsupportedReason::Runtime(format!(
+                                "join contribution source {:?} was not resolved",
+                                contribution.source
+                            ))],
+                            explain: ExplainPlan::default(),
+                        })
+                    })?;
+                let output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::Primary,
+                    plan,
+                    resolved_source,
+                    resolved_sources,
+                    claim_route_fields.clone(),
+                )?;
+                let contribution_graph = join_contribution_membership_graph(
+                    closure.visible_root.clone(),
+                    contribution,
+                    source,
+                    resolved_source,
+                    &request.input.shape.nodes,
+                    resolved_sources,
+                    request,
+                    &claim_route_fields,
+                )?;
+                let graph = fact_terminal_graph(
+                    fact,
+                    contribution_graph,
+                    plan,
+                    resolved_source,
+                    resolved_sources,
+                    request,
+                    output_routing_fields(&output),
+                )?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_fact_sink_name(fact, &contribution.source),
+                    graph,
+                    output: OutputTerminalSchema::Fact(output),
+                });
             }
         } else if matches!(fact, ProgramFactKey::VersionWitnesses) {
             for (source_id, resolved_source) in resolved_sources {

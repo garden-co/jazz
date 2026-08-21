@@ -1512,13 +1512,18 @@ fn reachable_access_key(
     source_column_value(schema, access_source, column, target)
 }
 
+struct NestedJoinContribution {
+    source: SourceId,
+    row_field: String,
+}
+
 fn normalize_join_via_right(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     schema: &RuntimeSchema,
     join: &JoinVia,
     path: &str,
-) -> Result<(RowSetNodeId, SourceId), Error> {
+) -> Result<(RowSetNodeId, SourceId, String, Vec<NestedJoinContribution>), Error> {
     let join_source = nested_join_source_id(join, path);
     auxiliary_sources.insert(join_source.clone());
     let table = table_schema(schema, &join.table)?;
@@ -1531,6 +1536,8 @@ fn normalize_join_via_right(
         },
     );
     let mut current = source_node;
+    let mut row_field = "row_uuid".to_owned();
+    let mut contributions = Vec::new();
     if !join.filters.is_empty() {
         let filter_node = RowSetNodeId(format!("{path}:filter"));
         nodes.insert(
@@ -1587,11 +1594,12 @@ fn normalize_join_via_right(
             },
         );
         current = lookup_project_node;
+        row_field = "id".to_owned();
     }
 
     for (nested_index, nested) in join.nested_joins.iter().enumerate() {
         let nested_path = format!("{path}:nested:{nested_index}");
-        let (nested_right, nested_source) =
+        let (nested_right, nested_source, _, nested_contributions) =
             normalize_join_via_right(nodes, auxiliary_sources, schema, nested, &nested_path)?;
         let nested_join_node = RowSetNodeId(format!("{nested_path}:join"));
         nodes.insert(
@@ -1604,17 +1612,37 @@ fn normalize_join_via_right(
             },
         );
         let project_node = RowSetNodeId(format!("{nested_path}:parent_project"));
+        let nested_row_field = format!("__jazz_join_contributor:{nested_path}");
+        let mut columns = source_public_field_projections(table, &join_source);
+        columns.push(RowProjection {
+            output: typed_output_field(nested_row_field.clone(), ColumnType::Uuid),
+            value: NormalizedValueRef::RowId(RowIdRef::Source(nested_source.clone())),
+        });
+        columns.extend(
+            nested_contributions
+                .iter()
+                .map(|contribution| RowProjection {
+                    output: typed_output_field(contribution.row_field.clone(), ColumnType::Uuid),
+                    value: NormalizedValueRef::RowId(RowIdRef::Source(contribution.source.clone())),
+                }),
+        );
         nodes.insert(
             project_node.clone(),
             RowSetExpr::Project {
                 input: nested_join_node,
-                columns: source_public_field_projections(table, &join_source),
+                columns,
             },
         );
         current = project_node;
+        row_field = "id".to_owned();
+        contributions.push(NestedJoinContribution {
+            source: nested_source,
+            row_field: nested_row_field,
+        });
+        contributions.extend(nested_contributions);
     }
 
-    Ok((current, join_source))
+    Ok((current, join_source, row_field, contributions))
 }
 
 fn reachable_dedupe_keys(
@@ -2206,7 +2234,7 @@ fn normalize_filter_join_chain(
         } else {
             format!("{prefix}:join_via:{index}")
         };
-        let (right, join_source) =
+        let (right, join_source, row_field, nested_contributions) =
             normalize_join_via_right(nodes, auxiliary_sources, schema, join, &path)?;
         let join_predicate = join_via_predicate(schema, root_source, &join_source, join);
         if record_join_contributions {
@@ -2214,8 +2242,18 @@ fn normalize_filter_join_chain(
                 id: path.clone(),
                 source: join_source.clone(),
                 input: right.clone(),
+                row_field,
                 membership: join_predicate.clone(),
             });
+            join_contributions.extend(nested_contributions.into_iter().map(|contribution| {
+                JoinContribution {
+                    id: format!("{path}:{}", contribution.row_field),
+                    source: contribution.source,
+                    input: right.clone(),
+                    row_field: contribution.row_field,
+                    membership: join_predicate.clone(),
+                }
+            }));
         }
         let join_node = RowSetNodeId(format!("{path}:join"));
         nodes.insert(

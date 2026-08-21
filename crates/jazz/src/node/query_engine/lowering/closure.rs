@@ -132,6 +132,7 @@ pub(super) fn join_contribution_membership_graph(
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let mut visited = BTreeSet::new();
     let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
@@ -172,11 +173,41 @@ pub(super) fn join_contribution_membership_graph(
             contribution_graph = unwrap_nullable_join_key(contribution_graph, join_key.clone(), 1);
         }
     }
-    Ok(
+    let mut root_keys = root_keys;
+    let mut join_keys = join_keys;
+    for route_field in route_fields {
+        root_keys.push(route_field.clone());
+        join_keys.push(route_field.clone());
+    }
+    let contributor_row_field = "__jazz_join_contributor_row_uuid";
+    let contribution_membership =
         GraphBuilder::join(visible_root, contribution_graph, root_keys, join_keys).project_fields(
-            project_source_fields_from_prefix(contribution_source, RIGHT_JOIN_PREFIX),
-        ),
+            std::iter::once(ProjectField::renamed(
+                right_field(&contribution.row_field),
+                contributor_row_field,
+            ))
+            .chain(
+                route_fields
+                    .iter()
+                    .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+            )
+            .collect::<Vec<_>>(),
+        );
+    let mut membership_keys = vec![contributor_row_field.to_owned()];
+    let mut source_keys = vec![contribution_source.row_shape.row_uuid_field.clone()];
+    membership_keys.extend(route_fields.iter().cloned());
+    source_keys.extend(route_fields.iter().cloned());
+    Ok(GraphBuilder::join(
+        contribution_membership,
+        contribution_source.graph.clone(),
+        membership_keys,
+        source_keys,
     )
+    .project_fields(project_source_fields_with_routes_from_prefix(
+        contribution_source,
+        RIGHT_JOIN_PREFIX,
+        route_fields,
+    )))
 }
 
 fn required_closure_parent_graph(

@@ -442,7 +442,7 @@ fn join_via_nested_joins_normalize_as_parent_projection_gate() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
 
-    assert_eq!(normalized.join_contributions.len(), 1);
+    assert_eq!(normalized.join_contributions.len(), 2);
     let contribution = &normalized.join_contributions[0];
     assert_eq!(contribution.input.0, "join_via:0:nested:0:parent_project");
     assert!(matches!(
@@ -452,6 +452,9 @@ fn join_via_nested_joins_normalize_as_parent_projection_gate() {
                 && columns.iter().any(|column| column.output.name == "id")
                 && columns.iter().any(|column| column.output.name == "issue")
                 && columns.iter().any(|column| column.output.name == "user")
+                && columns.iter().any(|column| {
+                    column.output.name == "__jazz_join_contributor:join_via:0:nested:0"
+                })
     ));
     assert!(matches!(
         normalized.nodes.get(&RowSetNodeId("join_via:0:nested:0:join".to_owned())),
@@ -463,6 +466,13 @@ fn join_via_nested_joins_normalize_as_parent_projection_gate() {
         normalized.nodes.get(&normalized.root),
         Some(RowSetExpr::Join { right, .. }) if right == &contribution.input
     ));
+    let nested_contribution = &normalized.join_contributions[1];
+    assert_eq!(nested_contribution.source.table, "users");
+    assert_eq!(nested_contribution.input, contribution.input);
+    assert_eq!(
+        nested_contribution.row_field,
+        "__jazz_join_contributor:join_via:0:nested:0"
+    );
 }
 
 #[test]

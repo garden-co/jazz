@@ -2247,6 +2247,11 @@ fn lower_relation_projection_ref(
 ) -> Result<Option<String>, UnsupportedReason> {
     match plan {
         RelationInputPlan::Linear(linear) => {
+            if let Some(LinearStep::Project(columns)) = linear.steps.last()
+                && let Some(column) = columns.iter().find(|column| &column.value == value)
+            {
+                return Ok(Some(column.output.name.clone()));
+            }
             if matches!(linear.root, LinearRoot::Source { .. }) {
                 if let Some(source_id) = linear.root.source() {
                     match value {
@@ -3340,11 +3345,4 @@ fn provenance_source_field(field: ProvenanceField) -> &'static str {
         ProvenanceField::UpdatedAt => "$updatedAt",
         ProvenanceField::UpdatedBy => "$updatedBy",
     }
-}
-
-pub(super) fn has_explicit_closure_path(shape: &NormalizedRowSetShape) -> bool {
-    shape
-        .closure_paths
-        .iter()
-        .any(|path| matches!(path, ClosurePath::ExplicitInclude { .. }))
 }

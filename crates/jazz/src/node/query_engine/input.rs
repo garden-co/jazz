@@ -158,6 +158,8 @@ pub(crate) struct JoinContribution {
     pub(crate) source: SourceId,
     /// Normalized relation node that proves payload rows contribute to visible roots.
     pub(crate) input: RowSetNodeId,
+    /// Field in the normalized contribution relation carrying the source row UUID.
+    pub(crate) row_field: String,
     /// Predicate between visible root rows and the contribution relation.
     pub(crate) membership: PredicateExpr,
 }

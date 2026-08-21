@@ -726,6 +726,7 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                     id: "join_via:0".to_owned(),
                     source: join_source.clone(),
                     input: join_source_node.clone(),
+                    row_field: "row_uuid".to_owned(),
                     membership: PredicateExpr::And(vec![
                         PredicateExpr::Compare {
                             left: NormalizedValueRef::SourceField {
@@ -844,6 +845,24 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                         )
             )
     )));
+    let contribution_membership = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| {
+            terminal.sink.starts_with("maintained.result_current")
+                && terminal.sink != "maintained.result_current"
+        })
+        .expect("join contribution membership terminal");
+    assert!(graph_any(
+        &contribution_membership.graph,
+        &|graph| matches!(
+            graph,
+            GraphBuilder::Join { left_on, right_on, .. }
+                if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "__jazz_join_contributor_row_uuid")
+                    && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+        )
+    ));
 }
 
 #[test]
@@ -875,6 +894,7 @@ fn join_contribution_membership_can_use_projected_bridge_fields() {
                     id: "join_via:0".to_owned(),
                     source: join_source.clone(),
                     input: bridge_node.clone(),
+                    row_field: "id".to_owned(),
                     membership: PredicateExpr::Compare {
                         left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
                         op: ComparisonOp::Eq,

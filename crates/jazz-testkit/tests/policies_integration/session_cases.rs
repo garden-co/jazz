@@ -5,13 +5,13 @@ use jazz::query::Query;
 
 use super::support::{
     TestingClient, collect_stream_deltas, connect_ready_claims, connect_ready_user, has_added_id,
-    has_any_change, has_removed, has_updated, wait_for_query, wait_for_query_results,
-    wait_for_rows, wait_for_subscription_update,
+    has_any_change, has_removed, has_updated, wait_for_edge_txs, wait_for_query, wait_for_rows,
+    wait_for_subscription_update,
 };
 use super::{pe, permissions};
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies,
-    TableSchema, TableSchemaBuilder, Value,
+    TableSchema, TableSchemaBuilder, TransactionId, Value,
 };
 use jazz_server::JazzServer;
 use serde_json::json;
@@ -193,35 +193,44 @@ async fn create_document(client: &JazzClient, owner_id: &str, title: &str) -> Ob
         .0
 }
 
-async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
-    client
+fn create_org(client: &JazzClient, name: &str) -> (ObjectId, TransactionId) {
+    let (id, _, transaction_id) = client
         .insert("orgs", jazz::row_input!("name" => name))
-        .expect("create org")
-        .0
+        .expect("create org");
+    (
+        id,
+        transaction_id.expect("org insert should commit immediately"),
+    )
 }
 
-async fn create_team(client: &JazzClient, name: &str, org_id: ObjectId) -> ObjectId {
-    client
+fn create_team(client: &JazzClient, name: &str, org_id: ObjectId) -> (ObjectId, TransactionId) {
+    let (id, _, transaction_id) = client
         .insert(
             "teams",
             jazz::row_input!("name" => name, "org_id" => Value::Uuid(org_id)),
         )
-        .expect("create team")
-        .0
+        .expect("create team");
+    (
+        id,
+        transaction_id.expect("team insert should commit immediately"),
+    )
 }
 
-async fn create_team_membership(
+fn create_team_membership(
     client: &JazzClient,
     owner_id: &str,
     team_id: ObjectId,
-) -> ObjectId {
-    client
+) -> (ObjectId, TransactionId) {
+    let (id, _, transaction_id) = client
         .insert(
             "team_memberships",
             jazz::row_input!("owner_id" => owner_id, "team_id" => Value::Uuid(team_id)),
         )
-        .expect("create team membership")
-        .0
+        .expect("create team membership");
+    (
+        id,
+        transaction_id.expect("membership insert should commit immediately"),
+    )
 }
 
 async fn create_team_document(client: &JazzClient, team_id: ObjectId, title: &str) -> ObjectId {
@@ -1128,7 +1137,6 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 ///   result:          [Bob Org]
 /// ```
 #[tokio::test]
-#[ignore = "policy-filtered nested query_results settles empty despite a visible membership path"]
 async fn select_policy_excludes_rows_from_join_results() {
     tokio::task::LocalSet::new()
         .run_until(select_policy_excludes_rows_from_join_results_inner())
@@ -1166,12 +1174,24 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
         .connect()
         .await;
 
-    let alice_org = create_org(&admin, "Alice Org").await;
-    let bob_org = create_org(&admin, "Bob Org").await;
-    let alice_team = create_team(&admin, "Alice Team", alice_org).await;
-    let bob_team = create_team(&admin, "Bob Team", bob_org).await;
-    let _alice_membership = create_team_membership(&admin, super::ALICE_ID, alice_team).await;
-    let _bob_membership = create_team_membership(&admin, super::BOB_ID, bob_team).await;
+    let (alice_org, alice_org_tx) = create_org(&admin, "Alice Org");
+    let (bob_org, bob_org_tx) = create_org(&admin, "Bob Org");
+    let (alice_team, alice_team_tx) = create_team(&admin, "Alice Team", alice_org);
+    let (bob_team, bob_team_tx) = create_team(&admin, "Bob Team", bob_org);
+    let (_, alice_membership_tx) = create_team_membership(&admin, super::ALICE_ID, alice_team);
+    let (_, bob_membership_tx) = create_team_membership(&admin, super::BOB_ID, bob_team);
+    wait_for_edge_txs(
+        &admin,
+        &[
+            alice_org_tx,
+            bob_org_tx,
+            alice_team_tx,
+            bob_team_tx,
+            alice_membership_tx,
+            bob_membership_tx,
+        ],
+    )
+    .await;
 
     let membership_join = Query::from("teams")
         .join_via("team_memberships", "team_id", [])
@@ -1181,9 +1201,9 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
         .expect("membership join");
     let query = Query::from("orgs")
         .join_via_with_nested_joins("teams", "org_id", [], [membership_join])
-        .select(["id", "name"]);
+        .select(["name"]);
 
-    let alice_rows = wait_for_query_results(
+    let alice_rows = wait_for_query(
         &alice,
         query.clone(),
         Some(DurabilityTier::EdgeServer),
@@ -1193,11 +1213,11 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
     )
     .await;
     assert_eq!(
-        alice_rows[0].clone().into_values(),
-        vec![Value::Uuid(alice_org), Value::from("Alice Org")]
+        alice_rows,
+        vec![(alice_org, vec![Value::from("Alice Org")])]
     );
 
-    let bob_rows = wait_for_query_results(
+    let bob_rows = wait_for_query(
         &bob,
         query,
         Some(DurabilityTier::EdgeServer),
@@ -1206,10 +1226,7 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
         |rows| (rows.len() == 1).then_some(rows),
     )
     .await;
-    assert_eq!(
-        bob_rows[0].clone().into_values(),
-        vec![Value::Uuid(bob_org), Value::from("Bob Org")]
-    );
+    assert_eq!(bob_rows, vec![(bob_org, vec![Value::from("Bob Org")])]);
 
     admin.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");
