@@ -474,15 +474,9 @@ fn bound_routed_multisink_graph(
     };
     if let GraphBuilder::CollectBy { input, collect } = &terminal.graph {
         // CollectBy is terminal-only. Route its flat input before rendering and
-        // remove hidden route columns from the collector's own projection,
-        // rather than appending filter/project consumers after the collector.
-        let mut collect = collect.as_ref().clone();
-        collect
-            .parent_fields
-            .retain(|field| terminal.public_fields.contains(&field.output_name));
-        collect
-            .tuple_fields
-            .retain(|field| terminal.public_fields.contains(&field.output_name));
+        // remove hidden route columns from the collector itself, rather than
+        // appending filter/project consumers after the collector.
+        let collect = public_collect_by(collect, terminal);
         let input = predicate
             .map(|predicate| input.as_ref().clone().filter(predicate))
             .unwrap_or_else(|| input.as_ref().clone());
@@ -495,6 +489,68 @@ fn bound_routed_multisink_graph(
         .map(|predicate| terminal.graph.clone().filter(predicate))
         .unwrap_or_else(|| terminal.graph.clone());
     graph.project(terminal.public_fields.clone())
+}
+
+fn prepared_routed_multisink_graph(terminal: &RoutedMultisinkTerminal) -> GraphBuilder {
+    match &terminal.graph {
+        // Bound collectors route their flat input before rendering. Retain the
+        // same public collector shape during preparation: the prepared output
+        // is never delivered, and grouping by raw route values would reject
+        // valid non-scalar bindings such as arrays.
+        GraphBuilder::CollectBy { input, collect } => GraphBuilder::CollectBy {
+            input: input.clone(),
+            collect: Box::new(public_collect_by(collect, terminal)),
+        },
+        graph => graph.clone(),
+    }
+}
+
+fn public_collect_by(
+    collect: &CollectByBuilder,
+    terminal: &RoutedMultisinkTerminal,
+) -> CollectByBuilder {
+    let mut collect = collect.clone();
+    let route_fields = terminal
+        .route_fields
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let hidden_route_fields = route_fields
+        .iter()
+        .filter(|field| !terminal.public_fields.contains(field))
+        .cloned()
+        .collect::<HashSet<_>>();
+    let grouping_route_fields = if collect.mode == CollectByMode::Root {
+        &route_fields
+    } else {
+        &hidden_route_fields
+    };
+    collect
+        .group_cols
+        .retain(|field| !grouping_route_fields.contains(&field.display_name()));
+    collect
+        .parent_fields
+        .retain(|field| terminal.public_fields.contains(&field.output_name));
+    collect
+        .tuple_fields
+        .retain(|field| terminal.public_fields.contains(&field.output_name));
+    for slot in &mut collect.slots {
+        strip_collect_slot_route_fields(slot, &hidden_route_fields);
+    }
+    collect
+}
+
+fn strip_collect_slot_route_fields(
+    slot: &mut CollectBySlotBuilder,
+    hidden_route_fields: &HashSet<String>,
+) {
+    slot.group_cols
+        .retain(|field| !hidden_route_fields.contains(&field.display_name()));
+    slot.owner_key_cols
+        .retain(|field| !hidden_route_fields.contains(&field.display_name()));
+    for child in &mut slot.slots {
+        strip_collect_slot_route_fields(child, hidden_route_fields);
+    }
 }
 
 fn route_predicate(field: &str, value: &Value) -> PredicateExpr {
@@ -1708,8 +1764,18 @@ impl IvmRuntime {
             {
                 return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(*index));
             }
-            let output = self.infer_builder_output(&terminal.graph)?;
-            for field in terminal.route_fields.iter().chain(&terminal.public_fields) {
+            let prepared_graph = prepared_routed_multisink_graph(terminal);
+            let output = self.infer_builder_output(&prepared_graph)?;
+            let route_output = match &terminal.graph {
+                GraphBuilder::CollectBy { input, .. } => self.infer_builder_output(input)?,
+                _ => output,
+            };
+            for field in &terminal.route_fields {
+                if route_output.field_index(field).is_none() {
+                    return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
+                }
+            }
+            for field in &terminal.public_fields {
                 if output.field_index(field).is_none() {
                     return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
                 }
@@ -1737,7 +1803,8 @@ impl IvmRuntime {
         }
         let mut terminal_states = BTreeMap::new();
         for terminal in terminals {
-            let output = self.add_dedup_graph(&terminal.graph)?;
+            let prepared_graph = prepared_routed_multisink_graph(&terminal);
+            let output = self.add_dedup_graph(&prepared_graph)?;
             self.add_retainer(
                 output.node,
                 Retainer::PreparedShape(shape_id.retainer_key()),

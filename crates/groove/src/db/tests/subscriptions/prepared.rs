@@ -247,6 +247,96 @@ fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
 }
 
 #[test]
+fn prepared_collect_routes_array_bindings_before_grouping() {
+    let storage = MemoryStorage::new(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("one".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("two".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(3), Value::String("three".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor =
+        RecordDescriptor::new([("wanted_ids", ValueType::Array(Box::new(ValueType::U64)))]);
+    let binding = GraphBuilder::binding_source("array_collect_route", binding_descriptor)
+        .unnest("wanted_ids", "wanted_id");
+    let rows = GraphBuilder::join(
+        binding,
+        GraphBuilder::table("albums"),
+        ["wanted_id"],
+        ["id"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+        ProjectField::renamed("left.wanted_ids", "wanted_ids"),
+    ]);
+    let graph = GraphBuilder::collect_root_ordered(
+        rows,
+        ["id", "wanted_ids"],
+        [
+            CollectByField::named("id"),
+            CollectByField::named("title"),
+            CollectByField::named("wanted_ids"),
+        ],
+        [TopByOrder::asc("id")],
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let shape = database
+        .prepare(
+            [RoutedMultisinkTerminal::new(
+                "rows",
+                graph,
+                ["wanted_ids"],
+                ["id", "title", "wanted_ids"],
+            )],
+            "array_collect_route",
+            binding_descriptor,
+        )
+        .unwrap();
+
+    let subscription = database
+        .bind_shape(
+            shape.id(),
+            &[Value::Array(vec![Value::U64(1), Value::U64(3)])],
+        )
+        .unwrap();
+    let rows = subscription.recv().unwrap();
+    assert_eq!(
+        rows.get("rows").unwrap().to_values().unwrap(),
+        [
+            (
+                vec![
+                    Value::U64(1),
+                    Value::String("one".to_owned()),
+                    Value::Array(vec![Value::U64(1), Value::U64(3)]),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(3),
+                    Value::String("three".to_owned()),
+                    Value::Array(vec![Value::U64(1), Value::U64(3)]),
+                ],
+                1,
+            ),
+        ]
+    );
+}
+
+#[test]
 fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
     let storage = MemoryStorage::new(&["docs"]);
     let mut database = Database::new(nullable_routed_docs_schema(), storage).unwrap();

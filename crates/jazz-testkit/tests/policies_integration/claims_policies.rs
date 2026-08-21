@@ -5,8 +5,8 @@ use jazz::query::Query;
 
 use super::support::{
     collect_stream_deltas, connect_ready_claims, connect_ready_client, connect_ready_user,
-    has_added_id, has_any_change, has_removed, has_updated, wait_for_query, wait_for_rows,
-    wait_for_subscription_update,
+    has_added_id, has_any_change, has_removed, has_updated, wait_for_edge_tx_rejection,
+    wait_for_edge_txs, wait_for_query, wait_for_rows, wait_for_subscription_update,
 };
 use super::{pe, permissions};
 use jazz::tools::{
@@ -441,7 +441,7 @@ async fn admin_role_claims_reject_member_mutations_inner() {
 /// observer ────────────────────────────► sees only the allowed update persist
 /// ```
 #[tokio::test]
-#[ignore = "an allowed update using id IN session.claims.editable_doc_ids is not persisted by the server"]
+#[ignore = "a rejected update broadcasts a spurious observer delta containing the unchanged row"]
 async fn claim_array_id_policy_gates_updates_by_primary_key() {
     tokio::task::LocalSet::new()
         .run_until(claim_array_id_policy_gates_updates_by_primary_key_inner())
@@ -536,12 +536,14 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
         .expect("subscribe observer");
     let mut observer_log = Vec::new();
 
-    alice
+    let allowed_update_tx = alice
         .update(
             allowed_doc,
             vec![("title".to_string(), "allowed updated".into())],
         )
-        .expect("optimistic local allowed update");
+        .expect("optimistic local allowed update")
+        .expect("allowed update should commit immediately");
+    wait_for_edge_txs(&alice, &[allowed_update_tx]).await;
 
     wait_for_query(
         &observer,
@@ -568,12 +570,14 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     )
     .await;
 
-    alice
+    let blocked_update_tx = alice
         .update(
             blocked_doc,
             vec![("title".to_string(), "blocked updated".into())],
         )
-        .expect("optimistic local blocked update");
+        .expect("optimistic local blocked update")
+        .expect("blocked update should commit locally");
+    wait_for_edge_tx_rejection(&alice, blocked_update_tx).await;
 
     let rows_after_rejected_update = observer
         .query(query.clone(), Some(DurabilityTier::EdgeServer))
@@ -753,7 +757,6 @@ async fn role_claim_presence_gates_row_visibility_inner() {
 /// claims[] or missing   ──query/stream──► {}
 /// ```
 #[tokio::test]
-#[ignore = "multiple claim-array-scoped live subscriptions hang for more than 60 seconds waiting for follow-up delivery"]
 async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates() {
     tokio::task::LocalSet::new()
         .run_until(groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner())

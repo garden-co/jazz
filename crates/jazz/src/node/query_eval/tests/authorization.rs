@@ -1166,6 +1166,25 @@ fn policy_claim_array_string_ids_bind_as_uuid_array() {
         .collect::<BTreeSet<_>>();
 
     assert_eq!(visible, BTreeSet::from([row(1)]));
+
+    let scope = node
+        .authorization_support_scope(
+            reader,
+            &PermissionAdviceAction::Read {
+                table: "issues".to_owned(),
+                row: row(1),
+            },
+        )
+        .expect("array claim read policy compiles as authorization support");
+    let options = scope.options.clone();
+    let (support_shape, support_binding) = scope
+        .subscriptions
+        .into_iter()
+        .next()
+        .expect("array claim read policy requires one support subscription");
+    PeerState::client_link(reader)
+        .rehydrate_authorization_support_query(&mut node, &support_shape, &support_binding, options)
+        .expect("array claim authorization support hydrates");
 }
 
 #[test]
