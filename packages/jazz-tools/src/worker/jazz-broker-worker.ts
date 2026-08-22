@@ -253,7 +253,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
   if (message.type === "close") {
     const releaseWhenIdle = peer.context.peers.size === 1 && message.releaseContext;
     if (message.id !== undefined) result(peer, message.id);
-    closeTab(peer.context, peer.tabId);
+    // The requester owns graceful port closure. Closing this endpoint in the
+    // same task as the acknowledgement can discard that queued message in
+    // WebKit, leaving shutdown pending forever. Detach runtime ownership now;
+    // the client closes both ends after it observes the result.
+    closeTab(peer.context, peer.tabId, false);
     if (releaseWhenIdle) scheduleIdleContextRelease(peer.context);
     return;
   }
@@ -428,7 +432,7 @@ function failPeer(peer: TabPeer, error: Error): void {
   closeTab(peer.context, peer.tabId);
 }
 
-function closeTab(context: RuntimeContext, tabId: string): void {
+function closeTab(context: RuntimeContext, tabId: string, closePort = true): void {
   const peer = context.peers.get(tabId);
   if (!peer) return;
   context.peers.delete(tabId);
@@ -436,7 +440,7 @@ function closeTab(context: RuntimeContext, tabId: string): void {
   peer.port.removeEventListener("message", peer.onMessage);
   peer.port.removeEventListener("messageerror", peer.onMessageError);
   detachPeerRuntime(peer);
-  peer.port.close();
+  if (closePort) peer.port.close();
 }
 
 function detachPeerRuntime(peer: TabPeer): void {
