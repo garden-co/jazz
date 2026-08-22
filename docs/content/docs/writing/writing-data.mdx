@@ -116,6 +116,23 @@ Required fields cannot be set to `null`.
   </Tab>
 </Tabs>
 
+### Editing large values
+
+Passing a `string`, `Uint8Array`, or JSON value replaces the complete column, just as it does for a
+small value. Large text and byte columns additionally accept `$splice`, while append-only workloads
+can use `$append`:
+
+```ts
+db.update(app.documents, documentId, {
+  body: { $splice: { at: 120, delete: 5, insert: "world" } },
+  recording: { $append: nextAudioChunk },
+});
+```
+
+The edit belongs to the normal row update: it uses the same permissions, transaction, history,
+sync, and conflict semantics. See [Editing without materializing](/docs/schemas/large-values#editing-without-materializing)
+for text, streams, files, and JSON.
+
 ## Write durability tiers
 
 For ordinary mutations and mergeable transactions, the tier passed to `wait({ tier })` controls how

@@ -1,0 +1,188 @@
+---
+title: Large Values
+description: Read and edit large text, byte streams, files, and JSON without materializing the whole value.
+---
+
+<Callout type="warn" title="Draft API proposal">
+  The TypeScript calls on this page intentionally describe the API we want, not an API available in
+  Jazz today. This page is being used to design the client API before implementing it.
+</Callout>
+
+Large values are ordinary `string`, `bytes`, and `json` columns. They are not a separate content
+type or sync system. Small values are stored inline; once a value grows, Jazz transparently changes
+its physical representation while preserving the owning row's permissions, transactions, history,
+subscriptions, and conflicts.
+
+## Define the schema
+
+The schema describes the logical value, not its expected size or access pattern:
+
+```ts
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  documents: s.table({
+    body: s.string(), // text
+    recording: s.bytes(), // append-only byte stream
+    attachment: s.bytes(), // mutable file
+    metadata: s.json(), // JSON document
+  }),
+};
+```
+
+By default, queries return a complete `string`, `Uint8Array`, or parsed JSON value, and mutations
+accept the same types. This keeps the common case indistinguishable from a small column.
+
+## Partial and streaming reads
+
+Use `select(...)` to opt individual columns into a non-default result shape. The returned values are
+immutable primitives or native streams, not handles tied to Jazz.
+
+### Text
+
+`$slice` uses Unicode-scalar offsets, so it cannot split a UTF-8 character. It returns a `string`.
+
+```ts
+const excerpt = await db.one(
+  app.documents.where({ id: documentId }).select({
+    id: true,
+    body: { $slice: { from: 1_000, to: 2_000 } },
+  }),
+);
+
+excerpt?.body; // string containing scalars 1,000..<2,000
+```
+
+### Append-only byte streams
+
+`$stream` returns a native `ReadableStream<Uint8Array>`. A range limits which bytes it yields.
+
+```ts
+const result = await db.one(
+  app.documents.where({ id: documentId }).select({
+    recording: { $stream: { from: resumeAt } },
+  }),
+);
+
+for await (const chunk of result!.recording) {
+  await play(chunk);
+}
+```
+
+Use `{ $slice: { from, to } }` instead when the desired byte range should be returned as one
+detached `Uint8Array`.
+
+### Mutable files
+
+Files use the same byte operations. Stream a download without first allocating the entire file:
+
+```ts
+const { attachment } = await db.one(
+  app.documents.where({ id: documentId }).select({
+    attachment: { $stream: true },
+  }),
+);
+
+return new Response(attachment);
+```
+
+### JSON
+
+`$pointer` parses and returns the detached JSON value at an
+[RFC 6901](https://www.rfc-editor.org/rfc/rfc6901) JSON pointer:
+
+```ts
+const result = await db.one(
+  app.documents.where({ id: documentId }).select({
+    metadata: { $pointer: "/chapters/3/title" },
+  }),
+);
+
+result?.metadata; // the native JSON value at that path
+```
+
+## Editing without materializing
+
+Edits are values passed directly to `update(...)`. Jazz applies them to the column value read by
+the mutation, then stores the resulting operation in the row update. There is no mutable content
+object and no separate value reference to retain.
+
+### Edit text
+
+`$splice` deletes a number of Unicode scalars and inserts a string at the same position:
+
+```ts
+db.update(app.documents, documentId, {
+  body: {
+    $splice: {
+      at: 1_420,
+      delete: 11,
+      insert: "large values",
+    },
+  },
+});
+```
+
+Use `delete: 0` to insert, or `insert: ""` to delete. Passing a plain string still replaces the
+whole value.
+
+### Append to a stream
+
+`$append` accepts a `Uint8Array` or a native byte stream. Every append is still a normal row
+mutation and has the row's normal authorization and durability behavior.
+
+```ts
+db.update(app.documents, documentId, {
+  recording: { $append: microphone.readable },
+});
+```
+
+### Edit a file
+
+For bytes, `$splice` uses byte offsets and accepts bytes or a byte stream as its insertion:
+
+```ts
+db.update(app.documents, documentId, {
+  attachment: {
+    $splice: {
+      at: headerLength,
+      delete: oldPreviewLength,
+      insert: newPreviewBytes,
+    },
+  },
+});
+```
+
+The same operation covers insertion, deletion, and replacement. Passing a plain `Uint8Array`
+still replaces the whole file.
+
+### Replace JSON
+
+JSON keeps one write shape: pass the desired native JSON value. Jazz can derive a compact byte edit
+without exposing byte offsets in the JSON API.
+
+```ts
+db.update(app.documents, documentId, {
+  metadata: {
+    ...document.metadata,
+    status: "published",
+  },
+});
+```
+
+JSON remains one logical value. Merge strategies may parse the base and both candidates to obtain a
+semantic, side-attributed JSON diff; that does not introduce independently mutable JSON paths.
+
+## What happens underneath
+
+Small values live inline. Large values use an immutable, content-defined chunk tree plus a short
+tail of recent byte edits. A small insertion usually rewrites nearby chunks while the tree rejoins
+unchanged content, and the tail avoids rebuilding the tree for every keystroke or append.
+
+When the tail reaches a built-in bound, Jazz consolidates it into a new immutable tree. Range reads
+visit only the relevant tree nodes and chunks. Streaming creation and reads keep memory proportional
+to the data currently being processed rather than the total value size.
+
+The tree and its edit tail form one atomic cell in the owning row. Readers never combine the tree
+from one row version with edits from another, and all writes continue through normal Jazz row
+permissions, sync, history, transactions, and conflict handling.

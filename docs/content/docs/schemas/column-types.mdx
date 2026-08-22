@@ -10,6 +10,26 @@ Any column can be made nullable by chaining `.optional()`.
 
 <AvailableColumnTypes />
 
+## Large values
+
+Strings, bytes, and JSON keep the same declarations as they grow. Jazz stores small values inline
+and transparently switches large values to its chunked representation.
+
+```ts
+const schema = {
+  documents: s.table({
+    body: s.string(),
+    recording: s.bytes(),
+    attachment: s.bytes(),
+    metadata: s.json(),
+  }),
+};
+```
+
+Ordinary reads and writes still use `string`, `Uint8Array`, and parsed JSON values. See
+[Large values](/docs/schemas/large-values) when you want to read a slice, stream bytes, append data,
+or edit part of a value without materializing all of it.
+
 ## Transformed Columns
 
 > **Experimental:** Transformed columns are an early TypeScript API and may change before the stable release.

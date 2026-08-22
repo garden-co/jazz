@@ -59,6 +59,22 @@ Queries are immutable and chainable. Each method returns a new query, so you can
 
 See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of `where` operators, `orderBy`, `limit`, and `offset`.
 
+## Reading large values
+
+A normal query materializes the complete native value, regardless of how Jazz stores it:
+
+```ts
+const document = await db.one(app.documents.where({ id: documentId }));
+
+document?.body; // string
+document?.attachment; // Uint8Array
+document?.metadata; // parsed JSON
+```
+
+For values that should not be materialized in full, `select(...)` can return an immutable text or
+byte slice, a byte stream, or a JSON-pointer projection. See
+[Partial and streaming reads](/docs/schemas/large-values#partial-and-streaming-reads).
+
 ## Read durability
 
 Queries and subscriptions return results as soon as they are available locally by default. Local reads are effectively instant, and remote updates stream in as they arrive, which is normally a good default. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.
