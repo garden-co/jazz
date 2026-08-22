@@ -60,6 +60,8 @@ decisions. Guidance appendices are entirely non-normative.
 | 15  | Sharding                                                                              | exploratory; mostly open questions                                             |
 | 16  | Maintained subscription views                                                         | target serving architecture for query-driven sync                              |
 | 17  | Integrability roadmap                                                                 | TS/WASM/NAPI, server shell, protocol, storage, topology                        |
+| 18  | Representation ownership                                                              | public, wire, binding and internal carrier boundaries                          |
+| 19  | Large-value capabilities                                                              | authorization, proxy, publication and retention of Groove chunks               |
 | A–E | _guidance:_ implementation discipline · benchmarks · performance · testing · glossary |
 | —   | _registry:_ `INVARIANTS.md`                                                           | out-of-band: every `INV-` id → test + impl                                     |
 

@@ -61,6 +61,12 @@ those concerns. A node opens its `groove::db::Database` from a lowered `groove`
 schema and never bypasses it for queryable record storage, current-row
 maintenance, or query/sync evaluation (`INV-LOWER-1`).
 
+Large values preserve this ownership rule in the other direction: Groove owns
+their indirect scalar format and every logical operation over it, while Jazz
+supplies only the authorized opaque-locator chunk capability specified by
+chapter 19. Jazz MUST NOT materialize descriptors after Groove has already
+evaluated filters, policies, ordering, grouping, joins, indices, or aggregates.
+
 ### 14.2 Schema → groove
 
 A jazz schema lowers its fixed system tables and direct record stores through
