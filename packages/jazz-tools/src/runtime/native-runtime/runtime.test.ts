@@ -52,10 +52,6 @@ function decodeTestDeltas(
   return deltas.map((delta) => decodeNativeDelta(delta as never, columns));
 }
 
-async function waitForServerPumpTimer(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 20));
-}
-
 async function waitForFakeWebSocketNegotiation(): Promise<void> {
   for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
 }
