@@ -10,9 +10,9 @@ mod store;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::future::Future;
-use std::pin::Pin;
+use std::rc::Rc;
 
 pub use store::{BoxFuture, Commit, MemoryPageStore, Metadata, PageStore};
 #[cfg(target_arch = "wasm32")]
@@ -22,6 +22,15 @@ use page::{Page, PageId, ValueCell, decode_page, encode_page};
 
 const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
 const MIN_PAGE_SIZE: usize = 1024;
+
+pub type KeyValue = (Vec<u8>, Vec<u8>);
+type LeafEntry = (Vec<u8>, ValueCell);
+type Descent = (PageId, Vec<LeafEntry>, Vec<(PageId, usize)>);
+
+pub enum WriteOperation {
+    Set { key: Vec<u8>, value: Vec<u8> },
+    Delete { key: Vec<u8> },
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -65,7 +74,7 @@ impl Options {
 
 /// The tree core. Cached pages make resident reads complete on their first
 /// poll; a cache miss awaits exactly the required page from the page store.
-pub struct IdbTree<S> {
+struct TreeCore<S> {
     store: S,
     options: Options,
     metadata: Metadata,
@@ -80,13 +89,165 @@ pub struct PreparedCommit {
     commit: Commit,
 }
 
+enum Attempt<T> {
+    Ready(T),
+    Missing(PageId),
+}
+
+impl<T> Attempt<T> {
+    fn map<U>(self, map: impl FnOnce(T) -> U) -> Attempt<U> {
+        match self {
+            Self::Ready(value) => Attempt::Ready(map(value)),
+            Self::Missing(page_id) => Attempt::Missing(page_id),
+        }
+    }
+}
+
+/// Cloneable, single-threaded handle used by Groove. No `RefCell` borrow is
+/// held across page I/O: operations attempt synchronously against resident
+/// pages, hydrate one precise miss, then retry.
+#[derive(Clone)]
+pub struct IdbTree<S> {
+    inner: Rc<RefCell<TreeCore<S>>>,
+}
+
+impl<S: PageStore + Clone> IdbTree<S> {
+    pub async fn open(store: S, options: Options) -> Result<Self, Error> {
+        Ok(Self {
+            inner: Rc::new(RefCell::new(TreeCore::open(store, options).await?)),
+        })
+    }
+
+    pub fn metadata(&self) -> Metadata {
+        self.inner.borrow().metadata.clone()
+    }
+
+    pub fn dirty_page_count(&self) -> usize {
+        self.inner.borrow().dirty.len()
+    }
+
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        loop {
+            let attempt = self.inner.borrow().try_get(key)?;
+            match attempt {
+                Attempt::Ready(value) => return Ok(value),
+                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+            }
+        }
+    }
+
+    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
+        loop {
+            let attempt = self.inner.borrow_mut().try_put(&key, &value)?;
+            match attempt {
+                Attempt::Ready(()) => return Ok(()),
+                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+            }
+        }
+    }
+
+    pub async fn delete(&self, key: &[u8]) -> Result<bool, Error> {
+        loop {
+            let attempt = self.inner.borrow_mut().try_delete(key)?;
+            match attempt {
+                Attempt::Ready(deleted) => return Ok(deleted),
+                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+            }
+        }
+    }
+
+    pub async fn write_many(&self, operations: Vec<WriteOperation>) -> Result<(), Error> {
+        for operation in &operations {
+            let key = match operation {
+                WriteOperation::Set { key, .. } | WriteOperation::Delete { key } => key,
+            };
+            loop {
+                let attempt = self.inner.borrow().write_path_resident(key)?;
+                match attempt {
+                    Attempt::Ready(()) => break,
+                    Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+                }
+            }
+        }
+
+        let mut tree = self.inner.borrow_mut();
+        for operation in operations {
+            let attempt = match operation {
+                WriteOperation::Set { key, value } => tree.try_put(&key, &value)?,
+                WriteOperation::Delete { key } => tree.try_delete(&key)?.map(|_| ()),
+            };
+            if let Attempt::Missing(page_id) = attempt {
+                return Err(Error::InvalidPage(format!(
+                    "prepared batch unexpectedly missed page {page_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn range(&self, start: &[u8], end: &[u8]) -> Result<Vec<KeyValue>, Error> {
+        loop {
+            let attempt = self.inner.borrow().try_range(start, end)?;
+            match attempt {
+                Attempt::Ready(rows) => return Ok(rows),
+                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+            }
+        }
+    }
+
+    pub async fn range_reverse(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KeyValue>, Error> {
+        loop {
+            let attempt = self.inner.borrow().try_range_reverse(start, end, limit)?;
+            match attempt {
+                Attempt::Ready(rows) => return Ok(rows),
+                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+            }
+        }
+    }
+
+    pub async fn flush(&self) -> Result<(), Error> {
+        let (store, prepared) = {
+            let mut tree = self.inner.borrow_mut();
+            (tree.store.clone(), tree.prepare_commit()?)
+        };
+        let Some(prepared) = prepared else {
+            return Ok(());
+        };
+        let outcome = store.commit(prepared.commit()).await;
+        self.inner.borrow_mut().complete_commit(prepared, outcome)
+    }
+
+    async fn hydrate(&self, page_id: PageId) -> Result<(), Error> {
+        let store = {
+            let tree = self.inner.borrow();
+            if tree.pages.contains_key(&page_id) {
+                return Ok(());
+            }
+            tree.store.clone()
+        };
+        let bytes = store
+            .read_page(page_id)
+            .await
+            .map_err(Error::Store)?
+            .ok_or(Error::MissingPage(page_id))?;
+        let page = decode_page(&bytes).map_err(Error::InvalidPage)?;
+        self.inner.borrow_mut().pages.entry(page_id).or_insert(page);
+        Ok(())
+    }
+}
+
 impl PreparedCommit {
     pub fn commit(&self) -> &Commit {
         &self.commit
     }
 }
 
-impl<S: PageStore> IdbTree<S> {
+impl<S: PageStore> TreeCore<S> {
     pub async fn open(store: S, options: Options) -> Result<Self, Error> {
         let options = options.validate()?;
         let metadata = store.load_metadata().await.map_err(Error::Store)?;
@@ -112,131 +273,114 @@ impl<S: PageStore> IdbTree<S> {
         Ok(tree)
     }
 
-    pub fn metadata(&self) -> &Metadata {
-        &self.metadata
-    }
-
-    pub fn is_resident(&self, page_id: PageId) -> bool {
-        self.pages.contains_key(&page_id)
-    }
-
-    pub fn dirty_page_count(&self) -> usize {
-        self.dirty.len()
-    }
-
-    pub async fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        let mut page_id = self.root_page_id();
-        loop {
-            match self.load_page(page_id).await?.clone() {
-                Page::Leaf { entries } => {
-                    let value = entries
-                        .binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
-                        .ok()
-                        .map(|index| entries[index].1.clone());
-                    return match value {
-                        Some(value) => self.read_value(value).await.map(Some),
-                        None => Ok(None),
-                    };
-                }
-                Page::Internal { keys, children } => {
-                    let child = keys.partition_point(|separator| separator.as_slice() <= key);
-                    page_id = children[child];
-                }
-                Page::Overflow { .. } => {
-                    return Err(Error::InvalidPage(
-                        "overflow page reached during tree descent".to_owned(),
-                    ));
-                }
-            }
+    fn try_get(&self, key: &[u8]) -> Result<Attempt<Option<Vec<u8>>>, Error> {
+        let Some((_, entries, _)) = self.resident_descent(key)? else {
+            return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
+        };
+        let value = entries
+            .binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+            .ok()
+            .map(|index| entries[index].1.clone());
+        match value {
+            Some(value) => self
+                .read_value_resident(&value)
+                .map(|attempt| match attempt {
+                    Attempt::Ready(value) => Attempt::Ready(Some(value)),
+                    Attempt::Missing(page_id) => Attempt::Missing(page_id),
+                }),
+            None => Ok(Attempt::Ready(None)),
         }
     }
 
-    pub async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
-        let mut page_id = self.root_page_id();
-        let mut path = Vec::new();
-        loop {
-            match self.load_page(page_id).await?.clone() {
-                Page::Leaf { mut entries } => {
-                    let value = self.build_value(value)?;
-                    match entries.binary_search_by(|(candidate, _)| candidate.cmp(&key)) {
-                        Ok(index) => {
-                            self.retire_value(&entries[index].1).await?;
-                            entries[index].1 = value;
-                        }
-                        Err(index) => entries.insert(index, (key, value)),
-                    }
-                    self.finish_leaf_write(page_id, entries, path)?;
-                    return Ok(());
-                }
-                Page::Internal { keys, children } => {
-                    let child_index = keys.partition_point(|separator| separator <= &key);
-                    path.push((page_id, child_index));
-                    page_id = children[child_index];
-                }
-                Page::Overflow { .. } => {
-                    return Err(Error::InvalidPage(
-                        "overflow page reached during tree descent".to_owned(),
-                    ));
-                }
-            }
+    fn try_put(&mut self, key: &[u8], value: &[u8]) -> Result<Attempt<()>, Error> {
+        let Some((page_id, entries, path)) = self.resident_descent(key)? else {
+            return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
+        };
+        if let Ok(index) = entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+            && let Attempt::Missing(page_id) = self.value_resident(&entries[index].1)?
+        {
+            return Ok(Attempt::Missing(page_id));
         }
+
+        let mut entries = entries;
+        let new_value = self.build_value(value.to_vec())?;
+        match entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key)) {
+            Ok(index) => {
+                self.retire_value_resident(&entries[index].1)?;
+                entries[index].1 = new_value;
+            }
+            Err(index) => entries.insert(index, (key.to_vec(), new_value)),
+        }
+        self.finish_leaf_write(page_id, entries, path)?;
+        Ok(Attempt::Ready(()))
     }
 
-    pub async fn delete(&mut self, key: &[u8]) -> Result<bool, Error> {
-        let mut page_id = self.root_page_id();
-        loop {
-            match self.load_page(page_id).await?.clone() {
-                Page::Leaf { mut entries } => {
-                    let Ok(index) =
-                        entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
-                    else {
-                        return Ok(false);
-                    };
-                    let (_, value) = entries.remove(index);
-                    self.retire_value(&value).await?;
-                    self.replace_page(page_id, Page::Leaf { entries });
-                    // Sparse leaves remain valid search targets. Compaction is
-                    // deliberately separate from correctness and can retire
-                    // underfull pages without complicating foreground deletes.
-                    return Ok(true);
-                }
-                Page::Internal { keys, children } => {
-                    let child = keys.partition_point(|separator| separator.as_slice() <= key);
-                    page_id = children[child];
-                }
-                Page::Overflow { .. } => {
-                    return Err(Error::InvalidPage(
-                        "overflow page reached during tree descent".to_owned(),
-                    ));
-                }
-            }
+    fn try_delete(&mut self, key: &[u8]) -> Result<Attempt<bool>, Error> {
+        let Some((page_id, entries, _)) = self.resident_descent(key)? else {
+            return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
+        };
+        let Ok(index) = entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+        else {
+            return Ok(Attempt::Ready(false));
+        };
+        if let Attempt::Missing(page_id) = self.value_resident(&entries[index].1)? {
+            return Ok(Attempt::Missing(page_id));
         }
+        let mut entries = entries;
+        let (_, value) = entries.remove(index);
+        self.retire_value_resident(&value)?;
+        self.replace_page(page_id, Page::Leaf { entries });
+        Ok(Attempt::Ready(true))
     }
 
-    pub async fn range(
-        &mut self,
+    fn write_path_resident(&self, key: &[u8]) -> Result<Attempt<()>, Error> {
+        let Some((_, entries, _)) = self.resident_descent(key)? else {
+            return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
+        };
+        let Ok(index) = entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+        else {
+            return Ok(Attempt::Ready(()));
+        };
+        self.value_resident(&entries[index].1)
+    }
+
+    fn try_range(&self, start: &[u8], end: &[u8]) -> Result<Attempt<Vec<KeyValue>>, Error> {
+        let mut cells = Vec::new();
+        if let Some(page_id) =
+            self.collect_range_resident(self.root_page_id(), start, end, &mut cells)?
+        {
+            return Ok(Attempt::Missing(page_id));
+        }
+        let mut rows = Vec::with_capacity(cells.len());
+        for (key, value) in cells {
+            match self.read_value_resident(&value)? {
+                Attempt::Ready(value) => rows.push((key, value)),
+                Attempt::Missing(page_id) => return Ok(Attempt::Missing(page_id)),
+            }
+        }
+        Ok(Attempt::Ready(rows))
+    }
+
+    fn try_range_reverse(
+        &self,
         start: &[u8],
         end: &[u8],
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+        limit: usize,
+    ) -> Result<Attempt<Vec<KeyValue>>, Error> {
         let mut cells = Vec::new();
-        self.collect_range(self.root_page_id(), start, end, &mut cells)
-            .await?;
-        let mut output = Vec::with_capacity(cells.len());
-        for (key, value) in cells {
-            output.push((key, self.read_value(value).await?));
+        if let Some(page_id) =
+            self.collect_range_reverse_resident(self.root_page_id(), start, end, limit, &mut cells)?
+        {
+            return Ok(Attempt::Missing(page_id));
         }
-        Ok(output)
-    }
-
-    /// Persist the current dirty generation atomically. A later concurrent
-    /// wrapper may swap generations before awaiting this call; the core keeps
-    /// this explicit boundary small and deterministic.
-    pub async fn flush(&mut self) -> Result<(), Error> {
-        let Some(prepared) = self.prepare_commit()? else {
-            return Ok(());
-        };
-        let outcome = self.store.commit(prepared.commit()).await;
-        self.complete_commit(prepared, outcome)
+        let mut rows = Vec::with_capacity(cells.len());
+        for (key, value) in cells {
+            match self.read_value_resident(&value)? {
+                Attempt::Ready(value) => rows.push((key, value)),
+                Attempt::Missing(page_id) => return Ok(Attempt::Missing(page_id)),
+            }
+        }
+        Ok(Attempt::Ready(rows))
     }
 
     /// Swap the active dirty generation without awaiting persistence. New
@@ -318,27 +462,152 @@ impl<S: PageStore> IdbTree<S> {
         }
     }
 
-    async fn load_page(&mut self, page_id: PageId) -> Result<&Page, Error> {
-        if !self.pages.contains_key(&page_id) {
-            let bytes = self
-                .store
-                .read_page(page_id)
-                .await
-                .map_err(Error::Store)?
-                .ok_or(Error::MissingPage(page_id))?;
-            let page = decode_page(&bytes).map_err(Error::InvalidPage)?;
-            self.pages.insert(page_id, page);
-        }
-        Ok(self
-            .pages
-            .get(&page_id)
-            .expect("page was just made resident"))
-    }
-
     fn root_page_id(&self) -> PageId {
         self.metadata
             .root_page_id
             .expect("open always installs a root page")
+    }
+
+    fn resident_descent(&self, key: &[u8]) -> Result<Option<Descent>, Error> {
+        let mut page_id = self.root_page_id();
+        let mut path = Vec::new();
+        loop {
+            let Some(page) = self.pages.get(&page_id) else {
+                return Ok(None);
+            };
+            match page {
+                Page::Leaf { entries } => {
+                    return Ok(Some((page_id, entries.clone(), path)));
+                }
+                Page::Internal { keys, children } => {
+                    let child_index = keys.partition_point(|separator| separator.as_slice() <= key);
+                    path.push((page_id, child_index));
+                    page_id = children[child_index];
+                }
+                Page::Overflow { .. } => {
+                    return Err(Error::InvalidPage(
+                        "overflow page reached during tree descent".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn missing_page_for_key(&self, key: &[u8]) -> Result<PageId, Error> {
+        let mut page_id = self.root_page_id();
+        loop {
+            let Some(page) = self.pages.get(&page_id) else {
+                return Ok(page_id);
+            };
+            match page {
+                Page::Leaf { .. } => {
+                    return Err(Error::InvalidPage(
+                        "requested a missing page for a resident descent".to_owned(),
+                    ));
+                }
+                Page::Internal { keys, children } => {
+                    page_id =
+                        children[keys.partition_point(|separator| separator.as_slice() <= key)];
+                }
+                Page::Overflow { .. } => {
+                    return Err(Error::InvalidPage(
+                        "overflow page reached during tree descent".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn collect_range_resident(
+        &self,
+        page_id: PageId,
+        start: &[u8],
+        end: &[u8],
+        output: &mut Vec<(Vec<u8>, ValueCell)>,
+    ) -> Result<Option<PageId>, Error> {
+        let Some(page) = self.pages.get(&page_id) else {
+            return Ok(Some(page_id));
+        };
+        match page {
+            Page::Leaf { entries } => output.extend(
+                entries
+                    .iter()
+                    .filter(|(key, _)| key.as_slice() >= start && key.as_slice() < end)
+                    .cloned(),
+            ),
+            Page::Internal { keys, children } => {
+                for (index, child) in children.iter().copied().enumerate() {
+                    let below_end = index == 0 || keys[index - 1].as_slice() < end;
+                    let above_start = index == keys.len() || keys[index].as_slice() > start;
+                    if below_end
+                        && above_start
+                        && let Some(missing) =
+                            self.collect_range_resident(child, start, end, output)?
+                    {
+                        return Ok(Some(missing));
+                    }
+                }
+            }
+            Page::Overflow { .. } => {
+                return Err(Error::InvalidPage(
+                    "overflow page reached during range traversal".to_owned(),
+                ));
+            }
+        }
+        Ok(None)
+    }
+
+    fn collect_range_reverse_resident(
+        &self,
+        page_id: PageId,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        output: &mut Vec<LeafEntry>,
+    ) -> Result<Option<PageId>, Error> {
+        if output.len() == limit {
+            return Ok(None);
+        }
+        let Some(page) = self.pages.get(&page_id) else {
+            return Ok(Some(page_id));
+        };
+        match page {
+            Page::Leaf { entries } => output.extend(
+                entries
+                    .iter()
+                    .rev()
+                    .filter(|(key, _)| key.as_slice() >= start && key.as_slice() < end)
+                    .take(limit - output.len())
+                    .cloned(),
+            ),
+            Page::Internal { keys, children } => {
+                for index in (0..children.len()).rev() {
+                    let below_end = index == 0 || keys[index - 1].as_slice() < end;
+                    let above_start = index == keys.len() || keys[index].as_slice() > start;
+                    if below_end
+                        && above_start
+                        && let Some(missing) = self.collect_range_reverse_resident(
+                            children[index],
+                            start,
+                            end,
+                            limit,
+                            output,
+                        )?
+                    {
+                        return Ok(Some(missing));
+                    }
+                    if output.len() == limit {
+                        break;
+                    }
+                }
+            }
+            Page::Overflow { .. } => {
+                return Err(Error::InvalidPage(
+                    "overflow page reached during reverse range traversal".to_owned(),
+                ));
+            }
+        }
+        Ok(None)
     }
 
     fn allocate_page(&mut self, page: Page) -> PageId {
@@ -437,41 +706,6 @@ impl<S: PageStore> IdbTree<S> {
         Ok(())
     }
 
-    fn collect_range<'a>(
-        &'a mut self,
-        page_id: PageId,
-        start: &'a [u8],
-        end: &'a [u8],
-        output: &'a mut Vec<(Vec<u8>, ValueCell)>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>> {
-        Box::pin(async move {
-            match self.load_page(page_id).await?.clone() {
-                Page::Leaf { entries } => {
-                    output.extend(
-                        entries
-                            .into_iter()
-                            .filter(|(key, _)| key.as_slice() >= start && key.as_slice() < end),
-                    );
-                }
-                Page::Internal { keys, children } => {
-                    for (index, child) in children.into_iter().enumerate() {
-                        let below_end = index == 0 || keys[index - 1].as_slice() < end;
-                        let above_start = index == keys.len() || keys[index].as_slice() > start;
-                        if below_end && above_start {
-                            self.collect_range(child, start, end, output).await?;
-                        }
-                    }
-                }
-                Page::Overflow { .. } => {
-                    return Err(Error::InvalidPage(
-                        "overflow page reached during range traversal".to_owned(),
-                    ));
-                }
-            }
-            Ok(())
-        })
-    }
-
     fn replace_page(&mut self, page_id: PageId, page: Page) {
         self.pages.insert(page_id, page.clone());
         self.dirty.insert(page_id, page);
@@ -510,44 +744,66 @@ impl<S: PageStore> IdbTree<S> {
         })
     }
 
-    async fn read_value(&mut self, value: ValueCell) -> Result<Vec<u8>, Error> {
+    fn value_resident(&self, value: &ValueCell) -> Result<Attempt<()>, Error> {
+        let ValueCell::Overflow { head, .. } = value else {
+            return Ok(Attempt::Ready(()));
+        };
+        let mut current = Some(*head);
+        while let Some(page_id) = current {
+            let Some(page) = self.pages.get(&page_id) else {
+                return Ok(Attempt::Missing(page_id));
+            };
+            let Page::Overflow { next, .. } = page else {
+                return Err(Error::InvalidPage(
+                    "value references a non-overflow page".to_owned(),
+                ));
+            };
+            current = *next;
+        }
+        Ok(Attempt::Ready(()))
+    }
+
+    fn read_value_resident(&self, value: &ValueCell) -> Result<Attempt<Vec<u8>>, Error> {
         match value {
-            ValueCell::Inline(value) => Ok(value),
+            ValueCell::Inline(value) => Ok(Attempt::Ready(value.clone())),
             ValueCell::Overflow { head, len } => {
-                let mut output = Vec::with_capacity(len);
-                let mut current = Some(head);
+                let mut output = Vec::with_capacity(*len);
+                let mut current = Some(*head);
                 while let Some(page_id) = current {
-                    let Page::Overflow { next, bytes } = self.load_page(page_id).await?.clone()
-                    else {
+                    let Some(page) = self.pages.get(&page_id) else {
+                        return Ok(Attempt::Missing(page_id));
+                    };
+                    let Page::Overflow { next, bytes } = page else {
                         return Err(Error::InvalidPage(
                             "value references a non-overflow page".to_owned(),
                         ));
                     };
-                    output.extend_from_slice(&bytes);
-                    current = next;
+                    output.extend_from_slice(bytes);
+                    current = *next;
                 }
-                if output.len() != len {
+                if output.len() != *len {
                     return Err(Error::InvalidPage(format!(
                         "overflow value length is {}, expected {len}",
                         output.len()
                     )));
                 }
-                Ok(output)
+                Ok(Attempt::Ready(output))
             }
         }
     }
 
-    async fn retire_value(&mut self, value: &ValueCell) -> Result<(), Error> {
+    fn retire_value_resident(&mut self, value: &ValueCell) -> Result<(), Error> {
         let ValueCell::Overflow { head, .. } = value else {
             return Ok(());
         };
         let mut current = Some(*head);
         while let Some(page_id) = current {
-            let Page::Overflow { next, .. } = self.load_page(page_id).await?.clone() else {
+            let Some(Page::Overflow { next, .. }) = self.pages.get(&page_id) else {
                 return Err(Error::InvalidPage(
-                    "value references a non-overflow page".to_owned(),
+                    "value references a nonresident or non-overflow page".to_owned(),
                 ));
             };
+            let next = *next;
             self.pages.remove(&page_id);
             self.dirty.remove(&page_id);
             self.deleted.push(page_id);
@@ -560,6 +816,8 @@ impl<S: PageStore> IdbTree<S> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::rc::Rc;
     use std::task::Poll;
 
@@ -575,7 +833,7 @@ mod tests {
         futures::executor::block_on(async {
             let store = MemoryPageStore::default();
             let options = Options { page_size: 1024 };
-            let mut tree = IdbTree::open(store.clone(), options).await.unwrap();
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
             for ordinal in (0..200).rev() {
                 tree.put(
                     format!("key-{ordinal:04}").into_bytes(),
@@ -588,7 +846,7 @@ mod tests {
             tree.flush().await.unwrap();
             drop(tree);
 
-            let mut reopened = IdbTree::open(store, options).await.unwrap();
+            let reopened = IdbTree::open(store, options).await.unwrap();
             assert_eq!(reopened.get(b"key-0042").await.unwrap(), Some(vec![42; 24]));
             let rows = reopened.range(b"key-0030", b"key-0040").await.unwrap();
             assert_eq!(rows.len(), 10);
@@ -602,13 +860,13 @@ mod tests {
         futures::executor::block_on(async {
             let store = MemoryPageStore::default();
             let options = Options::default();
-            let mut tree = IdbTree::open(store.clone(), options).await.unwrap();
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
             tree.put(b"a".to_vec(), b"one".to_vec()).await.unwrap();
             assert!(tree.delete(b"a").await.unwrap());
             assert_eq!(tree.get(b"a").await.unwrap(), None);
             tree.flush().await.unwrap();
 
-            let mut reopened = IdbTree::open(store, options).await.unwrap();
+            let reopened = IdbTree::open(store, options).await.unwrap();
             assert_eq!(reopened.get(b"a").await.unwrap(), None);
         });
     }
@@ -618,7 +876,7 @@ mod tests {
         futures::executor::block_on(async {
             let store = MemoryPageStore::default();
             let options = Options { page_size: 1024 };
-            let mut tree = IdbTree::open(store.clone(), options).await.unwrap();
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
             let first = vec![7; 10_000];
             tree.put(b"large".to_vec(), first.clone()).await.unwrap();
             for ordinal in 0..100 {
@@ -632,7 +890,7 @@ mod tests {
             assert_eq!(tree.get(b"large").await.unwrap(), Some(first));
             tree.flush().await.unwrap();
 
-            let mut reopened = IdbTree::open(store.clone(), options).await.unwrap();
+            let reopened = IdbTree::open(store.clone(), options).await.unwrap();
             let second = vec![9; 7_000];
             reopened
                 .put(b"large".to_vec(), second.clone())
@@ -640,7 +898,7 @@ mod tests {
                 .unwrap();
             reopened.flush().await.unwrap();
 
-            let mut reopened = IdbTree::open(store, options).await.unwrap();
+            let reopened = IdbTree::open(store, options).await.unwrap();
             assert_eq!(reopened.get(b"large").await.unwrap(), Some(second));
         });
     }
@@ -650,7 +908,7 @@ mod tests {
         futures::executor::block_on(async {
             let durable = MemoryPageStore::default();
             let options = Options::default();
-            let mut tree = IdbTree::open(durable.clone(), options).await.unwrap();
+            let tree = IdbTree::open(durable.clone(), options).await.unwrap();
             tree.put(b"resident".to_vec(), b"yes".to_vec())
                 .await
                 .unwrap();
@@ -667,7 +925,7 @@ mod tests {
             drop(tree);
 
             let delayed = YieldingPageStore::new(durable);
-            let mut reopened = IdbTree::open(delayed.clone(), options).await.unwrap();
+            let reopened = IdbTree::open(delayed.clone(), options).await.unwrap();
             let mut cold = Box::pin(reopened.get(b"resident"));
             assert!(matches!(poll_once(cold.as_mut()), Poll::Pending));
             assert_eq!(cold.await.unwrap(), Some(b"yes".to_vec()));
@@ -680,18 +938,21 @@ mod tests {
         futures::executor::block_on(async {
             let store = MemoryPageStore::default();
             let options = Options::default();
-            let mut tree = IdbTree::open(store.clone(), options).await.unwrap();
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
             tree.put(b"before".to_vec(), b"one".to_vec()).await.unwrap();
-            let prepared = tree.prepare_commit().unwrap().unwrap();
+            let prepared = tree.inner.borrow_mut().prepare_commit().unwrap().unwrap();
 
             tree.put(b"during".to_vec(), b"two".to_vec()).await.unwrap();
             assert!(tree.dirty_page_count() > 0);
             let outcome = store.commit(prepared.commit()).await;
-            tree.complete_commit(prepared, outcome).unwrap();
+            tree.inner
+                .borrow_mut()
+                .complete_commit(prepared, outcome)
+                .unwrap();
             assert!(tree.dirty_page_count() > 0);
             tree.flush().await.unwrap();
 
-            let mut reopened = IdbTree::open(store, options).await.unwrap();
+            let reopened = IdbTree::open(store, options).await.unwrap();
             assert_eq!(
                 reopened.get(b"before").await.unwrap(),
                 Some(b"one".to_vec())
@@ -708,19 +969,88 @@ mod tests {
         futures::executor::block_on(async {
             let store = MemoryPageStore::default();
             let options = Options::default();
-            let mut tree = IdbTree::open(store.clone(), options).await.unwrap();
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
             tree.put(b"retry".to_vec(), b"me".to_vec()).await.unwrap();
-            let prepared = tree.prepare_commit().unwrap().unwrap();
+            let prepared = tree.inner.borrow_mut().prepare_commit().unwrap().unwrap();
             assert_eq!(tree.dirty_page_count(), 0);
             assert!(
-                tree.complete_commit(prepared, Err("injected failure".to_owned()))
+                tree.inner
+                    .borrow_mut()
+                    .complete_commit(prepared, Err("injected failure".to_owned()))
                     .is_err()
             );
             assert!(tree.dirty_page_count() > 0);
 
             tree.flush().await.unwrap();
-            let mut reopened = IdbTree::open(store, options).await.unwrap();
+            let reopened = IdbTree::open(store, options).await.unwrap();
             assert_eq!(reopened.get(b"retry").await.unwrap(), Some(b"me".to_vec()));
+        });
+    }
+
+    #[test]
+    fn cold_read_does_not_block_a_resident_write() {
+        futures::executor::block_on(async {
+            let durable = MemoryPageStore::default();
+            let options = Options { page_size: 1024 };
+            let seed = IdbTree::open(durable.clone(), options).await.unwrap();
+            for ordinal in 0..200 {
+                seed.put(
+                    format!("key-{ordinal:04}").into_bytes(),
+                    vec![ordinal as u8; 24],
+                )
+                .await
+                .unwrap();
+            }
+            seed.flush().await.unwrap();
+            drop(seed);
+
+            let delayed = YieldingPageStore::new(durable);
+            let tree = IdbTree::open(delayed, options).await.unwrap();
+            assert_eq!(tree.get(b"key-0001").await.unwrap(), Some(vec![1; 24]));
+
+            let mut cold = Box::pin(tree.get(b"key-0199"));
+            assert!(matches!(poll_once(cold.as_mut()), Poll::Pending));
+            {
+                let resident_write = tree.put(b"key-0001".to_vec(), b"updated".to_vec());
+                futures::pin_mut!(resident_write);
+                assert!(resident_write.now_or_never().unwrap().is_ok());
+            }
+            assert_eq!(cold.await.unwrap(), Some(vec![199; 24]));
+            assert_eq!(
+                tree.get(b"key-0001").await.unwrap(),
+                Some(b"updated".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn in_flight_flush_does_not_block_the_next_resident_write_generation() {
+        futures::executor::block_on(async {
+            let durable = MemoryPageStore::default();
+            let delayed = YieldingPageStore::new(durable.clone());
+            let tree = IdbTree::open(delayed, Options::default()).await.unwrap();
+            tree.put(b"before".to_vec(), b"one".to_vec()).await.unwrap();
+
+            let mut flush = Box::pin(tree.flush());
+            assert!(matches!(poll_once(flush.as_mut()), Poll::Pending));
+            {
+                let resident_write = tree.put(b"during".to_vec(), b"two".to_vec());
+                futures::pin_mut!(resident_write);
+                assert!(resident_write.now_or_never().unwrap().is_ok());
+            }
+            flush.await.unwrap();
+            assert!(tree.dirty_page_count() > 0);
+            tree.flush().await.unwrap();
+
+            let reopened = IdbTree::open(durable, Options::default()).await.unwrap();
+            assert_eq!(
+                reopened.get(b"before").await.unwrap(),
+                Some(b"one".to_vec())
+            );
+            assert_eq!(
+                reopened.get(b"during").await.unwrap(),
+                Some(b"two".to_vec())
+            );
         });
     }
 
@@ -753,7 +1083,10 @@ mod tests {
         }
 
         fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
-            self.inner.commit(commit)
+            Box::pin(async move {
+                YieldOnce(false).await;
+                self.inner.commit(commit).await
+            })
         }
     }
 

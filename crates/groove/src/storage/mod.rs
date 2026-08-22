@@ -12,6 +12,7 @@
 //! adapters live in outward crates; higher layers decide when a batch is
 //! durable and how storage writes relate to an IVM tick.
 
+mod idb;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod key_codec;
 mod memory;
@@ -29,6 +30,7 @@ use crate::records::{Record, RecordDescriptor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use idb::IdbStorage;
 pub use memory::MemoryStorage;
 #[cfg(test)]
 pub type TestBtreeStorage = NativeBtreeStorage;
@@ -2437,6 +2439,8 @@ pub enum Error {
     },
     #[error(transparent)]
     Opfs(#[from] opfs_btree::BTreeError),
+    #[error(transparent)]
+    IdbTree(#[from] idb_tree::Error),
 }
 
 impl From<crate::records::Error> for Error {

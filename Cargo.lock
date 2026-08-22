@@ -1396,6 +1396,7 @@ dependencies = [
  "futures",
  "futures-test",
  "hdrhistogram",
+ "idb-tree",
  "internment",
  "jazz-benchmark-guard",
  "jazz-storage-rocksdb",
