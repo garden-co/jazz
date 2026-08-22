@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -18,10 +20,10 @@ type ColumnFamilies = BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>;
 type SharedColumnFamilies = Arc<Mutex<ColumnFamilies>>;
 
 /// The in-memory backend keeps only one cursor batch cloned at a time.  This
-/// matters even for test storage: transaction overlays deliberately leave the
-/// base request unbounded so staged deletes cannot under-fill a logical limit.
-/// A snapshotting memory scan would therefore defeat the overlay's bounded
-/// traversal contract.
+/// matters even for test storage: transaction overlays may need to read past
+/// their logical limit for staged deletes, but still carry a finite physical
+/// budget. A snapshotting memory scan would defeat that bounded-traversal
+/// contract.
 struct MemoryStorageCursor {
     storage: MemoryStorage,
     cf: String,
@@ -108,6 +110,10 @@ impl MemoryStorageCursor {
             };
             entries
         })?;
+        #[cfg(test)]
+        self.storage
+            .scan_entries_materialized
+            .fetch_add(values.len(), Ordering::Relaxed);
         if let Some((last_key, _)) = values.last() {
             self.last_key = Some(last_key.clone());
         } else {
@@ -165,6 +171,8 @@ struct MemoryStorageSnapshot {
 #[derive(Clone, Default)]
 pub struct MemoryStorage {
     inner: SharedColumnFamilies,
+    #[cfg(test)]
+    scan_entries_materialized: Arc<AtomicUsize>,
 }
 
 impl MemoryStorage {
@@ -192,6 +200,11 @@ impl MemoryStorage {
             .get(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))?;
         Ok(f(values))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_scan_entries_materialized(&self) -> usize {
+        self.scan_entries_materialized.swap(0, Ordering::Relaxed)
     }
 
     /// Export the full in-memory contents as compact versioned bytes.
@@ -440,6 +453,33 @@ mod tests {
         assert_eq!(rows.first().unwrap().0, b"a/299");
         assert_eq!(rows.last().unwrap().0, b"a/000");
         assert!(rows.iter().all(|(key, _)| key.starts_with(b"a/")));
+    }
+
+    #[futures_test::test]
+    async fn lazy_scan_observes_a_later_committed_value_in_its_next_batch() {
+        let storage = MemoryStorage::new(&["rows"]);
+        for index in 0..257 {
+            let key = format!("row:{index:03}").into_bytes();
+            storage
+                .set("rows".into(), key.clone(), b"before".to_vec())
+                .await
+                .unwrap();
+        }
+
+        let mut scan = storage
+            .scan(ScanRequest::prefix("rows".into(), b"row:".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(scan.next_batch().await.unwrap().unwrap().len(), 256);
+        storage
+            .set("rows".into(), b"row:256".to_vec(), b"after".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            scan.next_batch().await.unwrap(),
+            Some(vec![(b"row:256".to_vec(), b"after".to_vec())]),
+            "MemoryStorage is deliberately live between lazy cursor batches"
+        );
     }
 
     #[futures_test::test]

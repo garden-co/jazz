@@ -1678,15 +1678,6 @@ where
             }
     });
     Box::pin(async move {
-        // A base limit is unsound: staged deletes and deltas can remove or
-        // replace otherwise early durable candidates.  The merged cursor
-        // enforces the logical request limit only after applying staged work.
-        let base = base
-            .scan(ScanRequest {
-                max_items: None,
-                ..request.clone()
-            })
-            .await?;
         let mut staged = BTreeMap::<Vec<u8>, Vec<OwnedWriteOperation>>::new();
         for operation in operations {
             staged
@@ -1694,6 +1685,30 @@ where
                 .or_default()
                 .push(operation);
         }
+
+        // A base limit of only the logical result size is unsound: every
+        // staged key whose final operation is a Delete may consume one of
+        // those physical entries without producing a logical result.  The
+        // final operation is sufficient here: Set and Delta always retain a
+        // key (or surface their own error only if traversal reaches it), while
+        // Delete removes it regardless of its base value.  Thus `limit +
+        // deletes` is both a hard physical ceiling and enough base entries to
+        // fill the requested logical result when they exist.
+        let physical_max_items = request.max_items.map(|limit| {
+            let final_deletes = staged
+                .values()
+                .filter(|operations| {
+                    matches!(operations.last(), Some(OwnedWriteOperation::Delete { .. }))
+                })
+                .count();
+            limit.saturating_add(final_deletes)
+        });
+        let base = base
+            .scan(ScanRequest {
+                max_items: physical_max_items,
+                ..request.clone()
+            })
+            .await?;
         let mut staged = staged.into_iter().collect::<VecDeque<_>>();
         if request.direction == ScanDirection::Reverse {
             staged.make_contiguous().reverse();
@@ -2935,6 +2950,72 @@ mod tests {
             control.take_observed().is_empty(),
             "a filled overlay limit must not pull another base batch"
         );
+    }
+
+    #[futures_test::test]
+    async fn overlay_limit_caps_physical_memory_entries_after_staged_deletes() {
+        let storage = MemoryStorage::new(&["records"]);
+        for index in 0..300 {
+            let key = format!("row:{index:03}").into_bytes();
+            storage
+                .set("records".into(), key.clone(), key)
+                .await
+                .unwrap();
+        }
+        assert_eq!(storage.take_scan_entries_materialized(), 0);
+
+        let forward = storage.begin_txn();
+        forward
+            .write_many(vec![
+                OwnedWriteOperation::delete("records", b"row:000"),
+                OwnedWriteOperation::set("records", b"row:001", b"forward-override"),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(
+            collect_scan(
+                forward
+                    .scan(
+                        ScanRequest::prefix("records".into(), b"row:".to_vec())
+                            .with_max_items(1),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![(b"row:001".to_vec(), b"forward-override".to_vec())]
+        );
+        assert_eq!(
+            storage.take_scan_entries_materialized(),
+            2,
+            "limit one plus one staged delete must not hydrate Memory's default 256-entry batch"
+        );
+
+        let reverse = storage.begin_txn();
+        reverse
+            .write_many(vec![
+                OwnedWriteOperation::delete("records", b"row:299"),
+                OwnedWriteOperation::set("records", b"row:298", b"reverse-override"),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(
+            collect_scan(
+                reverse
+                    .scan(
+                        ScanRequest::prefix("records".into(), b"row:".to_vec())
+                            .reversed()
+                            .with_max_items(1),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![(b"row:298".to_vec(), b"reverse-override".to_vec())]
+        );
+        assert_eq!(storage.take_scan_entries_materialized(), 2);
     }
 
     // Internal receipt: the regression is work performed inside the storage overlay and is not

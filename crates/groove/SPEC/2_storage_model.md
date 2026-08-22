@@ -106,7 +106,7 @@ implementation; at the specification level, higher layers should reason in
 terms of record stores.
 
 The only ordering property groove requires from the backing store is
-lexicographic byte order. Scans return keys in that order, and `scan_range`
+lexicographic byte order. A range `ScanRequest` returns keys in that order and
 includes keys `>= start` while excluding keys `>= end` (`INV-STORAGE-1`). Batch
 writes are atomic: `write_many` applies every operation in the batch or none of
 them; if any operation is invalid, no operation partially applies
@@ -122,6 +122,18 @@ bound. `INV-STORAGE-29` — an explicit scan limit applies across all cursor
 batches and stops physical traversal rather than merely truncating a materialized
 result. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
 data while adding newly requested families.
+
+An ordered cursor is **not** a snapshot-isolation primitive. A backend may
+observe committed changes between batches; in particular, `MemoryStorage`
+reacquires its map for every lazy cursor batch to keep memory proportional to
+the active batch rather than the full scan. Code that requires a stable cut
+must obtain it at a higher layer rather than infer it from one scan cursor.
+
+A staged transaction overlay applies its logical limit after merging staged
+writes with base entries. To avoid under-filling after staged deletes, it may
+give its base scan a finite physical budget of the logical limit plus one entry
+for each in-range staged key whose final operation is `Delete`; it MUST NOT
+clear the bound and let a backend materialize its ordinary unbounded batch.
 
 **Implementation-status note.** The shared storage conformance tests exercise
 ordering, prefix upper-bound handling, and failed-batch atomicity on the host
@@ -363,8 +375,8 @@ The former hybrid columnar-base proposal is rejected and is not part of Groove's
   The draft avoids the problem by excluding the two, which costs compaction
   scheduling freedom under sustained read load. Relaxing it needs a source of
   reader isolation, and today there is none to draw on: `OrderedKvStorage`
-  offers `get`/`scan_range`/`scan_prefix`/`write_many` with no snapshot or
-  read-version, so a scan observes whatever is committed while it runs.
+  offers `get`/`scan(ScanRequest)`/`write_many` with no snapshot or
+  read-version, so a scan cursor observes whatever is committed while it runs.
   Keeping superseded material addressable and changing the storage contract
   are both possible answers. Neither should be pursued before the exclusion is
   measured and shown to bind.
