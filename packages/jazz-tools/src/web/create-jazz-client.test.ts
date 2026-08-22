@@ -50,6 +50,13 @@ const mocks = vi.hoisted(() => {
 vi.mock("../runtime/db.js", () => ({
   Db: class {},
   createDb: mocks.createDb,
+  resolveDefaultPersistentDbName: (config: DbConfig) => {
+    const driver = config.driver;
+    if (driver?.type === "persistent" && driver.dbName?.trim()) {
+      return driver.dbName.trim();
+    }
+    return config.dbName?.trim() || config.appId;
+  },
 }));
 
 vi.mock("../subscriptions-orchestrator.js", () => ({
