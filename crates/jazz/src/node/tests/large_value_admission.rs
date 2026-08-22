@@ -115,6 +115,42 @@ fn generated_large_value_node_rejects_orphan_closure_members() {
     assert!(matches!(error, Error::InvalidMergeableCommit(_)));
 }
 
+#[test]
+fn generated_large_value_descriptor_rejects_a_missing_root_without_pending_nodes() {
+    let (schema, owner, _, _, _, _) = large_value_admission_commits();
+    let (_dir, mut node) = open_node_with_schema(node(0xaa), schema);
+    let error = node.commit_mergeable(owner).unwrap_err();
+    assert!(matches!(error, Error::InvalidMergeableCommit(_)));
+}
+
+#[test]
+fn generated_large_value_descriptor_rejects_dishonest_stored_root_metrics() {
+    let (schema, owner, nodes, _, owner_row, _) = large_value_admission_commits();
+    let (_dir, mut node) = open_node_with_schema(node(0xab), schema.clone());
+    let mut initial = vec![owner.clone()];
+    initial.extend(nodes);
+    node.commit_mergeable_many(initial).unwrap();
+
+    let table = schema.tables.iter().find(|table| table.name == "todos").unwrap();
+    let large_schema = table.columns[0].large_value.as_ref().unwrap();
+    let stored = owner.cells.get("title").unwrap();
+    let mut value = crate::large_values::LargeValue::decode_storage_value(large_schema, stored)
+        .unwrap();
+    let crate::large_values::LargeValue::Chunked(chunked) = &mut value else {
+        panic!("fixture must be chunked");
+    };
+    chunked.root_byte_len += 1;
+    let forged = MergeableCommit::new("todos", owner_row, 20).cells(BTreeMap::from([
+        (
+            "title".to_owned(),
+            value.encode_storage_value(large_schema).unwrap(),
+        ),
+        ("body".to_owned(), Value::String("ordinary body".to_owned())),
+    ]));
+    let error = node.commit_mergeable(forged).unwrap_err();
+    assert!(matches!(error, Error::InvalidMergeableCommit(_)));
+}
+
 /// Once Alice has admitted a node, neither an update-shaped rewrite nor a
 /// deletion can enter its immutable hidden table.
 ///
@@ -198,6 +234,35 @@ fn generated_large_value_node_wire_admission_rejects_crafted_payload() {
             fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
             ..
         }] if reason.contains("generated large-value node")
+    ));
+    assert!(receiver.query_table_versions("todos").unwrap().is_empty());
+}
+
+#[test]
+fn generated_large_value_node_wire_admission_rejects_missing_root_closure() {
+    let (schema, owner, nodes, _, _, node_table) = large_value_admission_commits();
+    let (_source_dir, mut source) = open_node_with_schema(node(0xac), schema.clone());
+    let mut commits = vec![owner];
+    commits.extend(nodes);
+    let tx_id = source.commit_mergeable_many(commits).unwrap();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        mut versions,
+    } = source.commit_unit_for(tx_id).unwrap()
+    else {
+        panic!("local mergeable commit must serialize as a commit unit");
+    };
+    versions.retain(|version| version.table() != node_table);
+    tx.n_total_writes = versions.len() as u32;
+
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0xad), schema);
+    let updates = receiver.ingest_commit_unit(tx, versions, 100).unwrap();
+    assert!(matches!(
+        updates.as_slice(),
+        [SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
+            ..
+        }] if reason.contains("large-value descriptor")
     ));
     assert!(receiver.query_table_versions("todos").unwrap().is_empty());
 }

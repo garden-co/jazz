@@ -166,6 +166,8 @@ where
     let mut roots = Vec::<(
         crate::large_values::LargeValueOwnerDomain,
         crate::large_values::LargeValueNodeId,
+        u64,
+        Option<u64>,
     )>::new();
 
     for (schema_version, commit) in commits {
@@ -195,7 +197,12 @@ where
                 let value = crate::large_values::LargeValue::decode_storage_value(schema, stored)
                     .map_err(|_| Error::InvalidMergeableCommit("invalid large-value descriptor"))?;
                 if let crate::large_values::LargeValue::Chunked(value) = value {
-                    roots.push((domain.clone(), value.root));
+                    roots.push((
+                        domain.clone(),
+                        value.root,
+                        value.root_byte_len,
+                        value.root_utf16_len,
+                    ));
                 }
             }
             continue;
@@ -275,17 +282,22 @@ fn validate_generated_large_value_node_closure<S>(
     roots: Vec<(
         crate::large_values::LargeValueOwnerDomain,
         crate::large_values::LargeValueNodeId,
+        u64,
+        Option<u64>,
     )>,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage,
 {
-    if pending.is_empty() {
+    if pending.is_empty() && roots.is_empty() {
         return Ok(());
     }
     let reader = NodeLargeValueReader::new(state);
     let mut reachable = BTreeSet::new();
-    let mut stack = roots;
+    let mut stack = roots
+        .iter()
+        .map(|(owner, id, _, _)| (owner.clone(), *id))
+        .collect::<Vec<_>>();
     while let Some((owner, id)) = stack.pop() {
         if !reachable.insert((owner.clone(), id)) {
             continue;
@@ -311,6 +323,29 @@ where
             "generated large-value transaction contains an orphan node",
         ));
     }
+    for (owner, id, expected_bytes, expected_utf16) in roots {
+        let payload = if let Some(node) = pending.get(&(owner.clone(), id)) {
+            node.payload.clone()
+        } else {
+            crate::large_values::LargeValueNodeRows::get(&reader, &owner, id)
+                .map_err(|_| {
+                    Error::InvalidMergeableCommit(
+                        "large-value descriptor references an invalid stored root",
+                    )
+                })?
+                .ok_or(Error::InvalidMergeableCommit(
+                    "large-value descriptor references a missing root",
+                ))?
+        };
+        let actual = crate::large_values::canonical_node_metrics(&payload).map_err(|_| {
+            Error::InvalidMergeableCommit("large-value root metrics are invalid")
+        })?;
+        if actual != (expected_bytes, expected_utf16) {
+            return Err(Error::InvalidMergeableCommit(
+                "large-value descriptor root metrics do not match its canonical node",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -335,6 +370,8 @@ where
         let mut roots = Vec::<(
             crate::large_values::LargeValueOwnerDomain,
             crate::large_values::LargeValueNodeId,
+            u64,
+            Option<u64>,
         )>::new();
 
         for version in versions {
@@ -378,7 +415,12 @@ where
                     let value = crate::large_values::LargeValue::decode_storage_value(large_schema, stored)
                         .map_err(|_| Error::InvalidStoredValue("invalid large-value descriptor"))?;
                     if let crate::large_values::LargeValue::Chunked(value) = value {
-                        roots.push((domain.clone(), value.root));
+                        roots.push((
+                            domain.clone(),
+                            value.root,
+                            value.root_byte_len,
+                            value.root_utf16_len,
+                        ));
                     }
                 }
                 continue;

@@ -145,6 +145,12 @@ pub(crate) fn child_node_ids(payload: &[u8]) -> Result<Vec<LargeValueNodeId>, Co
     }
 }
 
+/// Authenticate the aggregate metrics carried by a root descriptor against
+/// the canonical node payload admitted under that root id.
+pub(crate) fn canonical_node_metrics(payload: &[u8]) -> Result<(u64, Option<u64>), ContentError> {
+    node_metrics(&decode_node(payload, Default::default())?)
+}
+
 /// Owning application location used to route and interpret node rows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LargeValueOwnerDomain {

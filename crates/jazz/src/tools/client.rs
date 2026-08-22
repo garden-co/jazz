@@ -2784,7 +2784,7 @@ impl JazzClient {
                 continue;
             };
             let (physical, node_rows) =
-                Self::encode_large_value_cell(table, row_id, &name, large_schema, logical)?;
+                Self::encode_large_value_cell(table, row_id, large_schema, logical)?;
             cells.insert(name, physical);
             dependencies.extend(node_rows);
         }
@@ -2795,13 +2795,8 @@ impl JazzClient {
             if cells.contains_key(&column.name) {
                 continue;
             }
-            let (physical, node_rows) = Self::encode_large_value_cell(
-                table,
-                row_id,
-                &column.name,
-                large_schema,
-                default.clone(),
-            )?;
+            let (physical, node_rows) =
+                Self::encode_large_value_cell(table, row_id, large_schema, default.clone())?;
             cells.insert(column.name.clone(), physical);
             dependencies.extend(node_rows);
         }
@@ -2811,7 +2806,6 @@ impl JazzClient {
     fn encode_large_value_cell(
         table: &str,
         row_id: CoreRowUuid,
-        column: &str,
         schema: &crate::large_values::LargeValueSchema,
         logical: CoreValue,
     ) -> Result<(CoreValue, Vec<crate::db::DependentRowWrite>)> {
