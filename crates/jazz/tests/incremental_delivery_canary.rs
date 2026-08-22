@@ -365,7 +365,7 @@ fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
     seed_reset_batch_fixture(&server, existing_rows);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = jazz::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, AuthorId::SYSTEM);
 
     let prepared = client

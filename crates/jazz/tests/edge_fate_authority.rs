@@ -112,7 +112,9 @@ fn connect_client_to_edge(
     client_wire: &QueuedWireTransport,
     identity: AuthorId,
 ) -> ServerSession {
-    client.connect_upstream(Box::new(WireTransportAdapter::current(client_wire.clone())));
+    jazz::db::block_on(
+        client.connect_upstream(Box::new(WireTransportAdapter::current(client_wire.clone()))),
+    );
     edge.accept_subscriber_session(identity).unwrap()
 }
 

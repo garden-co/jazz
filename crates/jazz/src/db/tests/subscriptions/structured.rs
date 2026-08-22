@@ -275,10 +275,10 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     // The normal connection remains live while a separately scoped invite
     // connection writes its membership. This is the production handoff.
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
     let (invite_transport, server_invite_transport) = duplex();
-    let _invite_upstream = invite_client.connect_upstream(invite_transport);
+    let _invite_upstream = crate::db::block_on(invite_client.connect_upstream(invite_transport));
     let _invite_subscriber =
         server.accept_subscriber_with_claims(server_invite_transport, reader, invite_claims);
     let chat = row(0xc1);
@@ -1088,7 +1088,7 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
     let client_author = AuthorId::from_bytes([0xc6; 16]);
     let client = open_db(0xc6, client_author, &schema);
     let (client_transport, server_transport) = byte_duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("users").array_subquery(ArraySubquery::new(

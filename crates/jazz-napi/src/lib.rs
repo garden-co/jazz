@@ -2310,11 +2310,11 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
             NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
         };
         Ok(Transport { inner, queues })
@@ -2369,11 +2369,11 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
             NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
         };
         Ok(Transport { inner, queues })

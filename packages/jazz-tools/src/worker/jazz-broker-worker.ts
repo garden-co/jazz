@@ -14,6 +14,10 @@ import type {
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
+
+// Worker failures cross a MessagePort boundary, so retain enough WASM frames to
+// identify the Rust call site before serializing them for the owning tab.
+(Error as ErrorConstructor & { stackTraceLimit?: number }).stackTraceLimit = 50;
 import { openConfig } from "../runtime/native-runtime/native-codec.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
@@ -287,7 +291,13 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
 }
 
 function result(peer: TabPeer, id: number, error?: Error): void {
-  post(peer.port, { type: "result", id, ...(error ? { error: error.message } : {}) });
+  post(peer.port, { type: "result", id, ...(error ? { error: errorDetails(error) } : {}) });
+}
+
+function errorDetails(error: Error): string {
+  const cause = error.cause;
+  if (!(cause instanceof Error) || !cause.stack) return error.stack ?? error.message;
+  return `${error.stack ?? error.message}\nCaused by: ${cause.stack}`;
 }
 
 function failPeer(peer: TabPeer, error: Error): void {

@@ -271,7 +271,7 @@ fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
     let _ = doctest_support::block_on(inspector.next_raw()).unwrap();
 
     let (client_transport, _server_transport) = duplex();
-    let upstream = db.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(db.connect_upstream(client_transport));
     let pending_subscribes = match &upstream.borrow().link {
         ConnectionLink::Upstream(UpstreamConnectionState { pending, .. }) => pending
             .iter()
@@ -289,7 +289,7 @@ fn db_facade_schedules_immediate_tick_for_upstream_connection() {
     db.set_tick_scheduler(Some(scheduler.clone()));
     let (client_transport, _server_transport) = duplex();
 
-    let _upstream = db.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(db.connect_upstream(client_transport));
 
     assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
 }
@@ -303,7 +303,7 @@ fn upstream_inbound_application_schedules_immediate_tick() {
     let scheduler = Rc::new(RecordingScheduler::default());
     client.set_tick_scheduler(Some(scheduler.clone()));
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     scheduler.take();
 

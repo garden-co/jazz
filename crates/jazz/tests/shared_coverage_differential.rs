@@ -304,7 +304,7 @@ fn run_scenario(mode: CoverageMode) -> ScenarioReceipt {
     seed_fixture(&server, visible_owner, hidden_owner);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = jazz::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, visible_owner);
 
     let mut traces = TABLES

@@ -3,6 +3,7 @@ import type { Transport } from "./native-runtime-adapter.js";
 export interface PeerTransportRuntime {
   onPeerTransportWork(listener: () => void): () => void;
   notifyPeerTransportActivity?(): void;
+  progressPeerTransport(): Promise<void>;
 }
 
 export class BrowserWorkerTransportPump {
@@ -18,8 +19,11 @@ export class BrowserWorkerTransportPump {
     private readonly sendFrames: (frames: Uint8Array[]) => void,
     private readonly onError: (error: unknown) => void,
   ) {
-    this.removeWorkListener = runtime.onPeerTransportWork(() => this.schedule());
-    this.schedule();
+    // The evaluator notifies every peer after a pass. This pump drains its
+    // transport immediately after the pass it requested, so that notification
+    // must not recursively request another identical pass.
+    this.removeWorkListener = runtime.onPeerTransportWork(() => this.schedule(false));
+    this.schedule(true);
   }
 
   receive(frames: readonly Uint8Array[]): void {
@@ -35,10 +39,10 @@ export class BrowserWorkerTransportPump {
     this.schedule();
   }
 
-  schedule(): void {
+  schedule(runAgainIfRunning = true): void {
     if (this.closed) return;
     if (this.running) {
-      this.runAgain = true;
+      this.runAgain ||= runAgainIfRunning;
       return;
     }
     if (this.scheduled) return;
@@ -64,11 +68,11 @@ export class BrowserWorkerTransportPump {
     let exhausted = true;
     try {
       for (let round = 0; round < 32; round += 1) {
-        const work = await this.transport.tick();
+        await this.runtime.progressPeerTransport();
         if (this.closed) return;
         const frames = normalizeTransportFrames(this.transport.recvWireFrames());
         if (frames.length > 0) this.sendFrames(frames);
-        if (work === 0 && frames.length === 0) {
+        if (frames.length === 0) {
           exhausted = false;
           break;
         }

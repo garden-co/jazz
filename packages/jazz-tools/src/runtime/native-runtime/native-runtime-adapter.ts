@@ -269,7 +269,7 @@ type NativeDb = {
     remoteEpoch: bigint,
     localNode: Uint8Array,
     localEpoch: bigint,
-  ): Transport;
+  ): Transport | Promise<Transport>;
   acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
   tick(): void | Promise<void>;
   close?(): void;
@@ -505,6 +505,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
+  private coreTickCompletion: Promise<void> | null = null;
   private serverPumpScheduled = false;
   private serverPumpRunning = false;
   private serverPumpAgain = false;
@@ -608,6 +609,11 @@ export class NativeRuntimeAdapter implements Runtime {
   notifyPeerTransportActivity(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.notifyPeerTransportActivity();
     this.peerTransportActivityEpoch += 1;
+  }
+
+  async progressPeerTransport(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.progressPeerTransport();
+    await this.runCoreTick();
   }
 
   setNonDurableClient(): void {
@@ -1361,17 +1367,20 @@ export class NativeRuntimeAdapter implements Runtime {
       },
     });
     this.serverCarrier = carrier;
-    this.serverCarrierPromise = carrier.ready().then((negotiation) => {
+    this.serverCarrierPromise = carrier.ready().then(async (negotiation) => {
       if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
         carrier.close();
         return carrier;
       }
-      const transport = this.connectNegotiatedUpstream(negotiation);
+      let transport: Transport;
+      try {
+        transport = await this.connectNegotiatedUpstream(negotiation);
+      } catch (error) {
+        throw contextualError("connecting the negotiated upstream transport", error);
+      }
       this.serverTransport = transport;
       this.flushQueuedServerFrames(carrier);
-      void this.pumpServerTransport().catch((error) =>
-        this.handleServerTransportError(error, generation),
-      );
+      await this.pumpServerTransport();
       this.pumpSubscriptions();
       return carrier;
     });
@@ -1380,12 +1389,12 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Transport {
+  private async connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Promise<Transport> {
     const authority = negotiation.authority;
     const connectWithSession = this.db.connectUpstreamWithSession;
     if (!authority || !connectWithSession) return this.db.connectUpstream();
     const localEpoch = this.nextServerConnectionEpoch++;
-    return connectWithSession.call(
+    return await connectWithSession.call(
       this.db,
       negotiation.protocolVersion,
       negotiation.features,
@@ -1881,20 +1890,36 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private async runCoreTick(): Promise<void> {
-    if (this.closed || this.coreTickRunning) return;
+  private runCoreTick(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    if (this.coreTickRunning) {
+      this.coreTickAgain = true;
+      return this.coreTickCompletion ?? Promise.resolve();
+    }
     this.coreTickRunning = true;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const completion = new Promise<void>((onResolve, onReject) => {
+      resolve = onResolve;
+      reject = onReject;
+    });
+    this.coreTickCompletion = completion;
+    void this.driveCoreTicks().then(resolve, reject);
+    return completion;
+  }
+
+  private async driveCoreTicks(): Promise<void> {
     try {
-      await this.db.tick();
-      this.pumpSubscriptions();
-      this.scheduleServerPump();
-      this.notifyPeerTransportWork();
+      do {
+        this.coreTickAgain = false;
+        await this.db.tick();
+        this.pumpSubscriptions();
+        this.scheduleServerPump();
+        this.notifyPeerTransportWork();
+      } while (!this.closed && this.coreTickAgain);
     } finally {
       this.coreTickRunning = false;
-    }
-    if (this.coreTickAgain) {
-      this.coreTickAgain = false;
-      this.scheduleCoreTick();
+      this.coreTickCompletion = null;
     }
   }
 
@@ -2198,10 +2223,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private scheduleServerPump(): void {
     if (this.closed || !this.serverTransport) return;
-    if (this.serverPumpRunning) {
-      this.serverPumpAgain = true;
-      return;
-    }
+    if (this.serverPumpRunning) return;
     if (this.serverPumpScheduled) return;
     this.serverPumpScheduled = true;
     setTimeout(() => {
@@ -2232,9 +2254,16 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.serverPumpRunning = true;
     try {
-      this.drainPendingInboundServerFrames(transport);
+      let processedInbound = this.drainPendingInboundServerFrames(transport);
       for (let round = 0; round < 32; round += 1) {
-        await transport.tick();
+        await this.runCoreTick();
+        if (processedInbound) {
+          // Frame arrival wakes waiters promptly, but the observable write or
+          // coverage state changes only after the evaluator consumes it.
+          // Publish that second edge so waiters re-read settled state.
+          processedInbound = false;
+          this.notifyServerTransportWork();
+        }
         if (
           this.closed ||
           generation !== this.serverConnectionGeneration ||
@@ -2262,14 +2291,15 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private drainPendingInboundServerFrames(transport: Transport): void {
-    if (this.pendingInboundServerFrames.length === 0) return;
+  private drainPendingInboundServerFrames(transport: Transport): boolean {
+    if (this.pendingInboundServerFrames.length === 0) return false;
     const frames = this.pendingInboundServerFrames.splice(0);
     if (transport.sendWireFrames) {
       transport.sendWireFrames(frames);
-      return;
+      return true;
     }
     for (const frame of frames) transport.sendWireFrame(frame);
+    return true;
   }
 
   private sendServerFrames(
@@ -3006,6 +3036,11 @@ function errorMessage(error: unknown): string {
     }
   }
   return String(error);
+}
+
+function contextualError(context: string, error: unknown): Error {
+  const cause = error instanceof Error ? error : new Error(errorMessage(error));
+  return new Error(`${context}: ${cause.message}`, { cause });
 }
 
 function schemaHasPolicies(schema: WasmSchema): boolean {

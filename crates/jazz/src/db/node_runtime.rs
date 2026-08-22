@@ -518,11 +518,18 @@ where
     }
 
     /// Attach this node to an upstream peer over a binding-supplied transport.
-    pub fn connect_upstream(
+    pub async fn connect_upstream(
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        let local_receiver = self.receives_commits_as_local();
+        // Connection installation mutates runtime metadata synchronously, but
+        // first needs a coherent view of storage-owning node state. Evaluation
+        // may temporarily own that state across an async hydration boundary,
+        // so wait for it instead of using the synchronous borrow escape hatch.
+        let node = self.node.lock().await;
+        let local_receiver = !node.is_history_complete();
+        let confirmation_floor = node.committed_global_time();
+        drop(node);
         let session_context = transport.connection_session_context();
         let connection_epoch = session_context
             .map(|context| context.local.epoch)
@@ -532,7 +539,7 @@ where
         // no settlement receipts until it sends a fresh ViewUpdate.
         *self.active_authority_view_receipts.borrow_mut() = Some(AuthorityViewReceipts {
             connection_epoch,
-            confirmation_floor: self.node.borrow().committed_global_time(),
+            confirmation_floor,
             binding_views: BTreeSet::new(),
         });
         // A replacement link invalidates the prior link's receipt before the

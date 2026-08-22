@@ -518,11 +518,11 @@ where
     /// separate history-complete path remains the Core authority.
     /// The binding drives it by calling [`PeerConnection::tick`] (or
     /// [`Db::tick`]) whenever it has staged inbound bytes or wants to flush.
-    pub fn connect_upstream(
+    pub async fn connect_upstream(
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        self.node.connect_upstream(transport)
+        self.node.connect_upstream(transport).await
     }
 
     /// Install or clear the scheduler used to wake this database's live peer

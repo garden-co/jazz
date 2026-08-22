@@ -136,8 +136,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    await waitForServerPumpTimer();
+    await runtime.waitForUpstreamServerConnection();
 
     expect(transport.tickCount).toBeGreaterThan(0);
     expect(decodeWebSocketFrameBatch(sockets[0]!.sent[2]! as Uint8Array)).toEqual([
@@ -173,9 +172,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
+    await runtime.waitForUpstreamServerConnection();
     await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
-    await waitForFakeWebSocketNegotiation();
+    await runtime.waitForUpstreamServerConnection();
 
     expect(sockets).toHaveLength(2);
     expect(decodeWebSocketFrameBatch(sockets[1]!.sent[2]! as Uint8Array)).toEqual([
@@ -2302,8 +2301,8 @@ describe("NativeRuntimeAdapter server transport", () => {
         1,
         true,
       );
-      await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-      await waitForFakeWebSocketNegotiation();
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
 
       const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
       await vi.advanceTimersByTimeAsync(40);
@@ -5223,6 +5222,8 @@ function fakeDb<T extends object>(
     tx?: TxForTest;
   };
   const implementation = db as T & {
+    connectUpstream?(): Transport;
+    tick?(): void | Promise<void>;
     mergeableTx?(openBatchId: string): TxForTest;
     mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
     exclusiveTx?(openBatchId: string): TxForTest;
@@ -5239,7 +5240,8 @@ function fakeDb<T extends object>(
           : (implementation.mergeableTx?.(openBatchId) ?? fakeTx());
     return batch.tx;
   };
-  return {
+  let upstream: Transport | undefined;
+  const result: Record<string, unknown> = {
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
     beginTransaction: (openBatchId: string, kind: FakeOpenBatch["kind"], author?: Uint8Array) => {
@@ -5260,6 +5262,21 @@ function fakeDb<T extends object>(
       openBatches.delete(openBatchId);
     },
     ...db,
+  };
+  if (implementation.connectUpstream) {
+    result.connectUpstream = () => {
+      upstream = implementation.connectUpstream!();
+      return upstream;
+    };
+  }
+  if (implementation.tick) {
+    result.tick = async () => {
+      await implementation.tick!();
+      await upstream?.tick();
+    };
+  }
+  return result as T & {
+    setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
   };
 }
 

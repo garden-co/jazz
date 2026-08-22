@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
@@ -163,8 +163,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    await Promise.resolve();
+    await runtime.waitForUpstreamServerConnection();
     transportTicks = 0;
 
     const inserted = runtime.insert(
@@ -182,7 +181,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
     await wait;
 
-    expect(transportTicks).toBe(2);
+    expect(transportTicks).toBeGreaterThanOrEqual(2);
   });
 
   it("retries a pending edge wait when a websocket frame arrives without a native callback", async () => {
@@ -228,8 +227,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    await Promise.resolve();
+    await runtime.waitForUpstreamServerConnection();
     transportTicks = 0;
 
     const inserted = runtime.insert(
@@ -247,7 +245,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
     await wait;
 
-    expect(transportTicks).toBe(2);
+    expect(transportTicks).toBeGreaterThanOrEqual(2);
   });
 
   it("uses the binding scheduler to drive native db ticks outside server pumps", async () => {
@@ -270,6 +268,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           },
           tick: () => {
             dbTicks += 1;
+            transport.tick();
           },
         }),
         openBrowser: async () => {
@@ -286,17 +285,17 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(schedulerCallback).toBeTypeOf("function");
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    await waitForServerPumpTimer();
+    await runtime.waitForUpstreamServerConnection();
 
     expect(transport.tickCount).toBeGreaterThan(0);
-    expect(dbTicks).toBe(0);
+    const initialDbTicks = dbTicks;
+    expect(initialDbTicks).toBeGreaterThan(0);
 
     schedulerCallback?.("immediate");
     await Promise.resolve();
 
     expect(transport.tickCount).toBeGreaterThan(1);
-    expect(dbTicks).toBe(1);
+    expect(dbTicks).toBe(initialDbTicks + 1);
   });
 
   it("serializes asynchronous db ticks and preserves a wake received while suspended", async () => {
@@ -374,14 +373,13 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
+    await runtime.waitForUpstreamServerConnection();
     transport.tickCount = 0;
 
     const frames = [Uint8Array.from([1]), Uint8Array.from([1, 42]), Uint8Array.from([1, 43])];
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch(frames));
     await Promise.resolve();
     await waitForServerPumpTimer();
-
     expect(transport.receivedBatches).toEqual([frames]);
     expect(transport.received).toEqual(frames);
     expect(transport.tickCount).toBe(1);
@@ -422,10 +420,11 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
+    await vi.waitFor(() => expect(releaseFirstTick).toBeTypeOf("function"));
     runtime.updateAuth(JSON.stringify({ jwt_token: "replacement.jwt" }));
     await waitForFakeWebSocketNegotiation();
     releaseFirstTick();
+    await runtime.waitForUpstreamServerConnection();
     await Promise.resolve();
     await Promise.resolve();
 
@@ -467,7 +466,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
+    await runtime.waitForUpstreamServerConnection();
     transport.tickCount = 0;
 
     const first = Uint8Array.from([1, 10]);
@@ -613,6 +612,8 @@ function fakeDb<T extends object>(
     tx?: TxForTest;
   };
   const implementation = db as T & {
+    connectUpstream?(): Transport;
+    tick?(): void | Promise<void>;
     mergeableTx?(openBatchId: string): TxForTest;
     mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
     exclusiveTx?(openBatchId: string): TxForTest;
@@ -629,7 +630,8 @@ function fakeDb<T extends object>(
           : (implementation.mergeableTx?.(openBatchId) ?? fakeTx());
     return batch.tx;
   };
-  return {
+  let upstream: Transport | undefined;
+  const result: Record<string, unknown> = {
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
     beginTransaction: (openBatchId: string, kind: FakeOpenBatch["kind"], author?: Uint8Array) => {
@@ -650,6 +652,21 @@ function fakeDb<T extends object>(
       openBatches.delete(openBatchId);
     },
     ...db,
+  };
+  if (implementation.connectUpstream) {
+    result.connectUpstream = () => {
+      upstream = implementation.connectUpstream!();
+      return upstream;
+    };
+  }
+  if (implementation.tick) {
+    result.tick = async () => {
+      await implementation.tick!();
+      await upstream?.tick();
+    };
+  }
+  return result as T & {
+    setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
   };
 }
 

@@ -34,7 +34,7 @@ fn db_sync_surface_round_trips_subscription_to_client() {
     seed(&server, "todos", cells("from server", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -82,7 +82,7 @@ fn large_logical_snapshot_crosses_byte_peer_transport_and_settles() {
     }
 
     let (client_transport, server_transport) = byte_duplex_uncompressed();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -140,7 +140,7 @@ fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() 
         .unwrap();
 
     let (client_transport, server_transport) = duplex();
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let opts = global_subscribe_opts()
@@ -171,7 +171,7 @@ fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() 
     assert!(server.server.detach_connection(&subscriber));
     assert!(client.detach_connection(&upstream));
     let (client_transport, server_transport) = duplex();
-    let _resumed_upstream = client.connect_upstream(client_transport);
+    let _resumed_upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let resumed = server.accept_subscriber_with_resume(server_transport, client_author, cursor);
     for _ in 0..10 {
         client.tick().unwrap();
@@ -275,7 +275,7 @@ fn branch_view_subscriptions_disambiguate_same_row_and_tx_by_branch() {
     }
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let mut left_subscription = prepared_subscribe(
         &client,

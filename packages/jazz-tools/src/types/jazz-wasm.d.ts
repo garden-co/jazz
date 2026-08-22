@@ -165,7 +165,7 @@ declare module "jazz-wasm" {
       remoteEpoch: bigint,
       localNode: Uint8Array,
       localEpoch: bigint,
-    ): WasmTransport;
+    ): Promise<WasmTransport>;
     acceptSubscriber(identity: Uint8Array, claims: Record<string, unknown>): WasmTransport;
     mergeableTx(openBatchId: string): WasmTx;
     mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;

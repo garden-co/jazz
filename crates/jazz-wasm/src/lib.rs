@@ -2475,12 +2475,12 @@ impl WasmDb {
         let inner = match &self.inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => WasmTransportInner::Browser {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
@@ -2495,7 +2495,7 @@ impl WasmDb {
     /// browser never asserts an authority endpoint itself; this context binds
     /// the authority advertised by the authenticated server response.
     #[wasm_bindgen(js_name = connectUpstreamWithSession)]
-    pub fn connect_upstream_with_session(
+    pub async fn connect_upstream_with_session(
         &self,
         protocol_version: u16,
         features: u32,
@@ -2535,12 +2535,12 @@ impl WasmDb {
         let inner = match &self.inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(db.connect_upstream(transport).await),
             },
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => WasmTransportInner::Browser {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(db.connect_upstream(transport).await),
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };

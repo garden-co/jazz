@@ -147,7 +147,7 @@ fn non_durable_browser_client_waits_for_worker_local_ack() {
     main_thread.set_non_durable_client();
 
     let (main_transport, worker_transport) = duplex();
-    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_connection = worker.accept_subscriber(worker_transport, alice);
 
     let write = main_thread
@@ -224,7 +224,7 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
     main_thread.set_non_durable_client();
 
     let (main_transport, worker_transport) = duplex();
-    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_connection = worker.accept_subscriber(worker_transport, alice);
 
     let open_todos = main_thread
@@ -321,11 +321,11 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     main_thread.set_non_durable_client();
 
     let (main_transport, worker_subscriber_transport) = duplex();
-    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
 
     let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = worker.connect_upstream(worker_upstream_transport);
+    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
     let _core_subscriber = core.accept_subscriber(core_transport, alice);
 
     let write = main_thread
@@ -458,7 +458,7 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
     let main_thread = open_db(0x13, alice, &schema);
     main_thread.set_non_durable_client();
     let (main_transport, worker_transport) = duplex();
-    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_connection = worker.accept_subscriber(worker_transport, alice);
 
     let todos = main_thread
@@ -515,10 +515,10 @@ fn browser_client_local_only_subscription_stops_at_worker() {
     let main_thread = open_db(0x1b, alice, &schema);
     main_thread.set_non_durable_client();
     let (main_transport, worker_subscriber_transport) = duplex();
-    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = worker.connect_upstream(worker_upstream_transport);
+    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
     let _core_subscriber = core.accept_subscriber(core_transport, alice);
 
     let todos = main_thread
@@ -572,7 +572,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
 
     let seeder = open_db(0x18, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
-    let _seeder_connection = seeder.connect_upstream(seeder_transport);
+    let _seeder_connection = jazz::db::block_on(seeder.connect_upstream(seeder_transport));
     let _core_seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
     let seeded = seeder
         .insert(
@@ -598,10 +598,10 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     // Match browser-worker initialization order: accept the main-thread relay
     // first, then attach the worker's server transport.
     let (main_transport, worker_subscriber_transport) = duplex();
-    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = worker.connect_upstream(worker_upstream_transport);
+    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
     let _core_subscriber = core.accept_subscriber(core_transport, alice);
 
     let todos = main_thread
@@ -674,7 +674,7 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
 
     let seeder = open_db(0x20, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
-    let _seeder_connection = seeder.connect_upstream(seeder_transport);
+    let _seeder_connection = jazz::db::block_on(seeder.connect_upstream(seeder_transport));
     let _core_seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
     let profile = seeder
         .insert(
@@ -700,10 +700,10 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     seeder.tick().expect("apply seeded relation fate");
 
     let (main_transport, worker_subscriber_transport) = duplex();
-    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = worker.connect_upstream(worker_upstream_transport);
+    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
     let _core_subscriber = core.accept_subscriber(core_transport, alice);
 
     let query = main_thread
@@ -761,10 +761,10 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     main_thread.set_non_durable_client();
 
     let (main_transport, worker_subscriber_transport) = duplex();
-    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = worker.connect_upstream(worker_upstream_transport);
+    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
     let _core_subscriber = core.accept_subscriber(core_transport, alice);
 
     let todos = main_thread
@@ -828,7 +828,7 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
     let core = open_core(0x38, &schema);
 
     let (worker_upstream_transport, core_transport) = duplex();
-    let worker_upstream = worker.connect_upstream(worker_upstream_transport);
+    let worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
     let core_subscriber = core.accept_subscriber(core_transport, alice);
     let base = worker
         .insert(
@@ -857,7 +857,8 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
     let first_main = open_db(0x19, alice, &schema);
     first_main.set_non_durable_client();
     let (first_main_transport, first_worker_transport) = duplex();
-    let first_main_connection = first_main.connect_upstream(first_main_transport);
+    let first_main_connection =
+        jazz::db::block_on(first_main.connect_upstream(first_main_transport));
     let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
     let todos = first_main
         .prepare_query(&first_main.table("todos"))
@@ -893,7 +894,8 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
     let reopened_main = open_db(0x19, alice, &schema);
     reopened_main.set_non_durable_client();
     let (reopened_main_transport, reopened_worker_transport) = duplex();
-    let _reopened_main_connection = reopened_main.connect_upstream(reopened_main_transport);
+    let _reopened_main_connection =
+        jazz::db::block_on(reopened_main.connect_upstream(reopened_main_transport));
     let _reopened_worker_connection = worker.accept_subscriber(reopened_worker_transport, alice);
 
     worker
@@ -934,10 +936,10 @@ fn worker_relay_forwards_authority_rejection_to_browser_client() {
     main_thread.set_non_durable_client();
 
     let (main_transport, worker_subscriber_transport) = duplex();
-    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = worker.connect_upstream(worker_upstream_transport);
+    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
     let _core_subscriber = core.accept_subscriber(core_transport, bob);
 
     let write = main_thread
@@ -984,7 +986,8 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
     first_main.set_non_durable_client();
     let first_worker = open_persistent_worker(storage.path(), 0x26, &schema);
     let (first_main_transport, first_worker_transport) = duplex();
-    let first_main_connection = first_main.connect_upstream(first_main_transport);
+    let first_main_connection =
+        jazz::db::block_on(first_main.connect_upstream(first_main_transport));
     let first_worker_connection = first_worker.accept_subscriber(first_worker_transport, alice);
 
     let write = first_main
@@ -1009,7 +1012,8 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
     second_main.set_non_durable_client();
     let second_worker = open_persistent_worker(storage.path(), 0x26, &schema);
     let (second_main_transport, second_worker_transport) = duplex();
-    let _second_main_connection = second_main.connect_upstream(second_main_transport);
+    let _second_main_connection =
+        jazz::db::block_on(second_main.connect_upstream(second_main_transport));
     let _second_worker_connection = second_worker.accept_subscriber(second_worker_transport, alice);
 
     second_worker
@@ -1047,7 +1051,8 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
     first_main.set_non_durable_client();
     let first_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
     let (first_main_transport, first_worker_transport) = duplex();
-    let first_main_connection = first_main.connect_upstream(first_main_transport);
+    let first_main_connection =
+        jazz::db::block_on(first_main.connect_upstream(first_main_transport));
     let first_worker_connection = first_worker.accept_subscriber(first_worker_transport, alice);
 
     let write = first_main
@@ -1073,10 +1078,11 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
     let reopened_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
     let core = open_core(0x3a, &schema);
     let (main_transport, worker_subscriber_transport) = duplex();
-    let _main_connection = reopened_main.connect_upstream(main_transport);
+    let _main_connection = jazz::db::block_on(reopened_main.connect_upstream(main_transport));
     let _worker_subscriber = reopened_worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = reopened_worker.connect_upstream(worker_upstream_transport);
+    let _worker_upstream =
+        jazz::db::block_on(reopened_worker.connect_upstream(worker_upstream_transport));
     let _core_subscriber = core.accept_subscriber(core_transport, bob);
 
     reopened_worker

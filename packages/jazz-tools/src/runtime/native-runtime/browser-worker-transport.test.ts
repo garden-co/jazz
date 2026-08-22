@@ -2,9 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { BrowserWorkerTransportPump } from "./browser-worker-transport.js";
 import type { Transport } from "./native-runtime-adapter.js";
 
-function runtime() {
+function runtime(peer: Transport) {
   return {
     onPeerTransportWork: () => () => undefined,
+    progressPeerTransport: () => Promise.resolve(peer.tick()).then(() => undefined),
   };
 }
 
@@ -23,8 +24,8 @@ describe("BrowserWorkerTransportPump", () => {
     const failure = new Error("tick failed");
     const onError = vi.fn();
     const pump = new BrowserWorkerTransportPump(
-      runtime(),
-      transport({ tick: () => Promise.reject(failure) }),
+      runtime(transport({ tick: () => Promise.reject(failure) })),
+      transport(),
       () => undefined,
       onError,
     );
@@ -40,7 +41,7 @@ describe("BrowserWorkerTransportPump", () => {
       tick: () => new Promise<number>((resolve) => (release = () => resolve(1))),
       recvWireFrames: () => [Uint8Array.from([1, 7])],
     });
-    const pump = new BrowserWorkerTransportPump(runtime(), peer, sendFrames, vi.fn());
+    const pump = new BrowserWorkerTransportPump(runtime(peer), peer, sendFrames, vi.fn());
 
     await Promise.resolve();
     pump.close();

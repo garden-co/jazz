@@ -8,7 +8,7 @@ fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let db = open_db(0x51, owner, &schema);
     let (client_transport, mut server_transport) = duplex();
-    let upstream = db.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(db.connect_upstream(client_transport));
 
     let prepared = db.prepare_query(&Query::from("todos")).unwrap();
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
@@ -51,7 +51,7 @@ fn upstream_transport_rejects_forged_system_catalogue_publication() {
     let client_author = AuthorId::from_bytes([0x51; 16]);
     let client = open_db(0x51, client_author, &base);
     let (client_transport, mut upstream_transport) = duplex();
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let target = SchemaVersion::new(build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
@@ -550,7 +550,7 @@ fn local_live_subscription_requests_global_upstream_coverage() {
     seed(&server, "todos", cells("first", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -582,7 +582,7 @@ fn edge_live_subscription_requests_global_upstream_coverage() {
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
