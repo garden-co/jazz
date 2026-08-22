@@ -11,8 +11,8 @@ rules for tables and indices. Chapters 3–7 build on these guarantees.
 Invariant digest:
 
 - `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the Database...
-- `INV-STORAGE-1`: `OrderedKvStorage` implementations MUST return scan results in lexicographic key order and `scan_range`/`range` MUST include keys `>= start` and exclude keys `>= end`.
-- `INV-STORAGE-2`: `OrderedKvStorage::scan_prefix`/`prefix` MUST return exactly keys beginning with the supplied byte prefix in lexicographic key order, including prefixes whose finite upper bound cannot be computed.
+- `INV-STORAGE-1`: `OrderedKvStorage::scan(ScanRequest)` MUST return range results in the requested lexicographic direction and include keys `>= start` while excluding keys `>= end`.
+- `INV-STORAGE-2`: A prefix `ScanRequest` MUST return exactly keys beginning with the supplied byte prefix in the requested lexicographic direction, including prefixes whose finite upper bound cannot be computed.
 - `INV-STORAGE-29`: An explicit ordered scan request's finite item bound MUST cap the complete cursor result in the requested direction; adapters MUST stop reading beyond that bound rather than treating it as a caller-side collection hint.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
@@ -116,8 +116,8 @@ commit. Backends must classify an uncertain acknowledgement conservatively as
 possibly committed; only a definitely-uncommitted outcome permits callers to
 roll back in-process state or retry the same batch.
 
-_Further invariants._ `INV-STORAGE-2` — `scan_prefix` returns exactly the keys
-with the given byte prefix, in order, including prefixes with no finite upper
+_Further invariants._ `INV-STORAGE-2` — a prefix scan request returns exactly the keys
+with the given byte prefix, in its requested direction, including prefixes with no finite upper
 bound. `INV-STORAGE-29` — an explicit scan limit applies across all cursor
 batches and stops physical traversal rather than merely truncating a materialized
 result. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
