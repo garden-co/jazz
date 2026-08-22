@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use jazz::large_values::{
     BytePatch, ContentDomain, ContentTree, KvContentStore, LargeValue, MemoryContentStore,
-    TailBounds, ValueEdit, ValueKind, ValueSelection,
+    TailBounds, ValueEdit, ValueKind, ValueSelection, ValueSelectionResult,
 };
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
@@ -40,7 +40,7 @@ fn deterministic_text(size: usize) -> String {
 struct DeterministicChunks {
     remaining: usize,
     chunk_bytes: usize,
-    state: u64,
+    position: usize,
 }
 
 impl DeterministicChunks {
@@ -48,7 +48,7 @@ impl DeterministicChunks {
         Self {
             remaining: bytes,
             chunk_bytes,
-            state: 0x4c61_7267_6556_616c_u64,
+            position: 0,
         }
     }
 }
@@ -62,15 +62,20 @@ impl Iterator for DeterministicChunks {
             return None;
         }
         self.remaining -= len;
-        let mut bytes = Vec::with_capacity(len);
-        for _ in 0..len {
-            self.state ^= self.state << 13;
-            self.state ^= self.state >> 7;
-            self.state ^= self.state << 17;
-            bytes.push(self.state as u8);
-        }
+        let start = self.position;
+        self.position += len;
+        let bytes = (start..start + len)
+            .map(deterministic_stream_byte)
+            .collect();
         Some(bytes)
     }
+}
+
+fn deterministic_stream_byte(position: usize) -> u8 {
+    let mut value = (position as u64).wrapping_add(0x4c61_7267_6556_616c);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    (value ^ (value >> 31)) as u8
 }
 
 /// Linux resident-set snapshot. This intentionally reports both current RSS
@@ -95,11 +100,22 @@ fn rss_current(snapshot: &serde_json::Value) -> Option<u64> {
     snapshot.get("current")?.as_u64()
 }
 
+fn rss_peak(snapshot: &serde_json::Value) -> Option<u64> {
+    snapshot.get("peak")?.as_u64()
+}
+
 fn rss_delta_from_open(
     snapshot: &serde_json::Value,
     after_open: &serde_json::Value,
 ) -> Option<i64> {
     Some(rss_current(snapshot)? as i64 - rss_current(after_open)? as i64)
+}
+
+fn rss_peak_delta_from_open(
+    snapshot: &serde_json::Value,
+    after_open: &serde_json::Value,
+) -> Option<i64> {
+    Some(rss_peak(snapshot)? as i64 - rss_peak(after_open)? as i64)
 }
 
 fn directory_bytes(path: &Path) -> u64 {
@@ -158,8 +174,8 @@ fn rocks_streaming_receipt() {
     let rss_after_create = rss_bytes();
     let metrics_after_create = storage.metrics().expect("read RocksDB metrics");
     let directory_bytes_after_create = directory_bytes(directory.path());
-    // Reopen before reads to ensure this is a persisted-lookup receipt rather
-    // than a favorable path through the writer's just-populated RocksDB cache.
+    // Reopen before reads to ensure this is a persisted lookup through a fresh
+    // RocksDB block cache. The operating-system page cache remains uncontrolled.
     drop(storage);
     let rss_after_close = rss_bytes();
     let start = Instant::now();
@@ -172,8 +188,12 @@ fn rocks_streaming_receipt() {
     let reopen_us = elapsed_us(start);
     let rss_after_reopen = rss_bytes();
 
-    let range_len = 4096_u64;
-    let offsets = [0, root_byte_len / 2, root_byte_len - range_len];
+    let range_len = root_byte_len.min(4096);
+    let offsets = [
+        0,
+        root_byte_len.saturating_sub(range_len) / 2,
+        root_byte_len.saturating_sub(range_len),
+    ];
     let mut range_us = Vec::new();
     for offset in offsets {
         let start = Instant::now();
@@ -192,8 +212,16 @@ fn rocks_streaming_receipt() {
                 )
                 .expect("read bounded byte range")
         };
-        black_box(selected);
-        range_us.push(elapsed_us(start));
+        let lookup_us = elapsed_us(start);
+        let ValueSelectionResult::Bytes(selected) = selected else {
+            panic!("byte range returned a non-byte value");
+        };
+        let expected = (offset..offset + range_len)
+            .map(|position| deterministic_stream_byte(position as usize))
+            .collect::<Vec<_>>();
+        assert_eq!(selected, expected, "persisted range at offset {offset}");
+        black_box(&selected);
+        range_us.push(lookup_us);
     }
     let rss_after_ranges = rss_bytes();
 
@@ -203,7 +231,7 @@ fn rocks_streaming_receipt() {
             "scenario": "large_value_rocksdb_streaming",
             "logical_bytes": root_byte_len,
             "source_chunk_bytes": chunk_bytes,
-            "active_streaming_bytes_upper_bound": streaming_memory_upper_bound(size, chunk_bytes),
+            "estimated_rust_builder_working_set_bytes": estimated_builder_working_set(size, chunk_bytes),
             "create_us": create_elapsed.as_micros(),
             "create_mib_per_s": mib_per_second(size, create_elapsed),
             "range_bytes": range_len,
@@ -215,21 +243,25 @@ fn rocks_streaming_receipt() {
             "rss_after_reopen": rss_after_reopen,
             "rss_after_ranges": rss_after_ranges,
             "rss_current_delta_after_create_from_open": rss_delta_from_open(&rss_after_create, &rss_after_open),
+            "rss_peak_delta_after_create_from_open": rss_peak_delta_from_open(&rss_after_create, &rss_after_open),
             "rss_current_delta_after_reopen_from_open": rss_delta_from_open(&rss_after_reopen, &rss_after_open),
             "rss_current_delta_after_ranges_from_open": rss_delta_from_open(&rss_after_ranges, &rss_after_open),
             "reopen_us": reopen_us,
             "rocksdb_after_create": metrics_after_create,
             "directory_bytes_after_create": directory_bytes_after_create,
-            "note": "RSS includes RocksDB's shared cache/write-buffer floor; compare phase deltas and active_streaming_bytes_upper_bound, not RSS to logical_bytes directly.",
+            "cache_state": "fresh RocksDB block cache after reopen; operating-system page cache uncontrolled",
+            "note": "RSS includes RocksDB cache, memtable, allocator, and Rust buffers. The builder estimate scopes only its payload/descriptor buffers and excludes allocator overhead and the backend.",
         })
     );
 }
 
-fn streaming_memory_upper_bound(logical_bytes: usize, source_chunk_bytes: usize) -> usize {
-    // Default profile: one <=64KiB leaf, the current source buffer, and at
-    // most one unfinished 128-child descriptor list per live level. Count
-    // levels using the *minimum* fanout, making this a conservative bound even
-    // when content-defined boundaries happen unusually early.
+fn estimated_builder_working_set(logical_bytes: usize, source_chunk_bytes: usize) -> usize {
+    // During leaf persistence, the builder may simultaneously retain the
+    // source buffer, detached leaf, preallocated next leaf, and canonical
+    // encoding. It also retains at most one unfinished descriptor list per
+    // live level. This estimate excludes allocator overhead and backend
+    // copies. Count levels using the *minimum* fanout, making this conservative
+    // even when content-defined boundaries happen unusually early.
     let profile = jazz::large_values::ChunkingProfile::default();
     let mut children = logical_bytes.div_ceil(profile.min_leaf_bytes).max(1);
     let mut levels = 1;
@@ -238,7 +270,7 @@ fn streaming_memory_upper_bound(logical_bytes: usize, source_chunk_bytes: usize)
         levels += 1;
     }
     source_chunk_bytes
-        + profile.max_leaf_bytes
+        + 3 * profile.max_leaf_bytes
         + levels * profile.max_children * (32 + std::mem::size_of::<u64>())
 }
 
