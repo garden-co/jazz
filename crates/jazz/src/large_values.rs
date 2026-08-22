@@ -1581,15 +1581,33 @@ fn leaf_ranges(bytes: &[u8], profile: ChunkingProfile) -> Vec<std::ops::Range<us
     let mask = u64::try_from(profile.target_leaf_bytes - 1).expect("target fits u64");
     let mut ranges = Vec::new();
     let mut start = 0;
+    // A finite window is what lets boundaries converge again after an insert:
+    // once the inserted bytes leave the window, unchanged suffixes have the
+    // same hash (and therefore the same boundaries) as before.
+    const WINDOW: usize = 63;
     let mut rolling = 0_u64;
+    let mut window = [0_u8; WINDOW];
+    let mut window_len = 0_usize;
+    let mut window_cursor = 0_usize;
     for (index, byte) in bytes.iter().copied().enumerate() {
-        rolling = rolling.rotate_left(1).wrapping_add(gear(byte));
+        if window_len < WINDOW {
+            rolling = rolling.rotate_left(1) ^ gear(byte);
+            window_len += 1;
+        } else {
+            let outgoing = window[window_cursor];
+            rolling =
+                rolling.rotate_left(1) ^ gear(byte) ^ gear(outgoing).rotate_left(WINDOW as u32);
+        }
+        window[window_cursor] = byte;
+        window_cursor = (window_cursor + 1) % WINDOW;
         let len = index + 1 - start;
         let boundary = len >= profile.min_leaf_bytes && rolling & mask == 0;
         if boundary || len >= profile.max_leaf_bytes {
             ranges.push(start..index + 1);
             start = index + 1;
             rolling = 0;
+            window_len = 0;
+            window_cursor = 0;
         }
     }
     if start < bytes.len() {
@@ -1605,8 +1623,11 @@ fn descriptor_groups(
     let mask = u64::try_from(profile.target_children - 1).expect("target fits u64");
     let mut groups = Vec::new();
     let mut start = 0;
-    let mut rolling = 0_u64;
     for (index, child) in children.iter().enumerate() {
+        // A descriptor is the indivisible unit at this level. Its stable
+        // identity provides a boundary predicate that survives insertions and
+        // deletions of neighboring descriptors.
+        let mut rolling = 0_u64;
         for byte in child
             .id
             .as_bytes()
@@ -1614,14 +1635,13 @@ fn descriptor_groups(
             .copied()
             .chain(child.byte_len.to_le_bytes())
         {
-            rolling = rolling.rotate_left(1).wrapping_add(gear(byte));
+            rolling = rolling.rotate_left(1) ^ gear(byte);
         }
         let len = index + 1 - start;
         let boundary = len >= profile.min_children && rolling & mask == 0;
         if boundary || len >= profile.max_children {
             groups.push(start..index + 1);
             start = index + 1;
-            rolling = 0;
         }
     }
     if start < children.len() {
@@ -1871,7 +1891,11 @@ mod tests {
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
         let reused = before.intersection(&after).count();
-        assert!(reused * 2 > before.len(), "expected majority object reuse");
+        assert!(
+            reused * 4 > before.len() * 3,
+            "expected at least 75% object reuse, reused {reused} of {}",
+            before.len()
+        );
     }
 
     #[test]
