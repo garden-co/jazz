@@ -427,7 +427,7 @@ pub struct AttributedJsonChange {
 /// Conservative semantic analysis delivered to a JSON merge strategy.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JsonMergeAnalysis {
-    /// Side-attributed changes whose paths do not overlap incompatibly.
+    /// Changes labelled by their authoring side whose paths do not overlap incompatibly.
     pub independent: Vec<AttributedJsonChange>,
     /// Pairs of overlapping or disagreeing candidate changes.
     pub conflicts: Vec<(AttributedJsonChange, AttributedJsonChange)>,
@@ -676,11 +676,11 @@ pub fn apply_patches(base: &[u8], patches: &[BytePatch]) -> Result<Vec<u8>, Cont
 
 /// Construct and read recursive content-defined immutable byte trees.
 #[derive(Clone, Copy, Debug)]
-pub struct ProllyTree {
+pub struct ContentTree {
     profile: ChunkingProfile,
 }
 
-impl ProllyTree {
+impl ContentTree {
     /// Construct a tree implementation for one validated format profile.
     pub fn new(profile: ChunkingProfile) -> Result<Self, ContentError> {
         Ok(Self {
@@ -742,7 +742,7 @@ impl ProllyTree {
         )?;
         if out.len() != expected_usize {
             return Err(ContentError::MalformedObject(
-                "root aggregate length does not match manifest".to_owned(),
+                "root aggregate length does not match descriptor".to_owned(),
             ));
         }
         Ok(out)
@@ -1006,7 +1006,7 @@ impl LargeValue {
         domain: &ContentDomain,
         bytes: impl Into<Vec<u8>>,
         inline_up_to: usize,
-        tree: ProllyTree,
+        tree: ContentTree,
         store: &mut S,
     ) -> Result<Self, ContentError> {
         let bytes = bytes.into();
@@ -1027,7 +1027,7 @@ impl LargeValue {
         &self,
         kind: ValueKind,
         domain: &ContentDomain,
-        tree: ProllyTree,
+        tree: ContentTree,
         store: &S,
     ) -> Result<Vec<u8>, ContentError> {
         let bytes = match self {
@@ -1046,7 +1046,7 @@ impl LargeValue {
         kind: ValueKind,
         selection: &ValueSelection,
         domain: &ContentDomain,
-        tree: ProllyTree,
+        tree: ContentTree,
         store: &S,
     ) -> Result<ValueSelectionResult, ContentError> {
         if let (ValueKind::Bytes, ValueSelection::ByteRange { offset, len }) = (kind, selection) {
@@ -1099,7 +1099,7 @@ impl LargeValue {
         kind: ValueKind,
         edit: ValueEdit,
         domain: &ContentDomain,
-        tree: ProllyTree,
+        tree: ContentTree,
         store: &S,
     ) -> Result<BytePatch, ContentError> {
         let bytes = self.materialize(kind, domain, tree, store)?;
@@ -1142,7 +1142,7 @@ impl LargeValue {
         patch: BytePatch,
         inline_up_to: usize,
         tail_bounds: TailBounds,
-        tree: ProllyTree,
+        tree: ContentTree,
         store: &mut S,
     ) -> Result<Self, ContentError> {
         let current = self.materialize(kind, domain, tree, store)?;
@@ -1296,7 +1296,7 @@ fn split_pieces_at(pieces: &mut Vec<MaterialPiece>, at: u64) -> Result<usize, Co
 fn materialize_large_range<S: ImmutableContentStore>(
     large: &ChunkedValue,
     domain: &ContentDomain,
-    tree: ProllyTree,
+    tree: ContentTree,
     store: &S,
     offset: u64,
     len: u64,
@@ -1679,7 +1679,7 @@ mod tests {
     }
 
     fn collect_leaf_ids(
-        tree: ProllyTree,
+        tree: ContentTree,
         store: &MemoryContentStore,
         id: ContentId,
         out: &mut Vec<ContentId>,
@@ -1696,7 +1696,7 @@ mod tests {
 
     #[test]
     fn tree_is_history_independent_and_ranges_are_lazy_values() {
-        let tree = ProllyTree::new(tiny_profile()).unwrap();
+        let tree = ContentTree::new(tiny_profile()).unwrap();
         let bytes = (0..=255).cycle().take(4096).collect::<Vec<_>>();
         let mut first = MemoryContentStore::default();
         let mut second = MemoryContentStore::default();
@@ -1712,7 +1712,7 @@ mod tests {
 
     #[test]
     fn declared_child_lengths_must_match_canonical_objects() {
-        let tree = ProllyTree::new(tiny_profile()).unwrap();
+        let tree = ContentTree::new(tiny_profile()).unwrap();
         let mut store = MemoryContentStore::default();
         let leaf = encode_object(&ContentObject::Leaf(b"abc".to_vec())).unwrap();
         let leaf_id = object_id(&domain(), &leaf);
@@ -1734,7 +1734,7 @@ mod tests {
 
     #[test]
     fn patched_range_does_not_load_unrelated_leaf_payloads() {
-        let tree = ProllyTree::new(tiny_profile()).unwrap();
+        let tree = ContentTree::new(tiny_profile()).unwrap();
         let mut store = MemoryContentStore::default();
         let bytes = (0..=255).cycle().take(4096).collect::<Vec<_>>();
         let value = LargeValue::create(ValueKind::Bytes, &domain(), bytes, 4, tree, &mut store)
@@ -1777,7 +1777,7 @@ mod tests {
 
     #[test]
     fn large_value_tail_is_ordered_and_consolidates_at_the_bound() {
-        let tree = ProllyTree::new(tiny_profile()).unwrap();
+        let tree = ContentTree::new(tiny_profile()).unwrap();
         let mut store = MemoryContentStore::default();
         let value = LargeValue::create(
             ValueKind::String,
@@ -1839,7 +1839,7 @@ mod tests {
 
     #[test]
     fn json_validation_observes_the_complete_atomic_tail() {
-        let tree = ProllyTree::new(tiny_profile()).unwrap();
+        let tree = ContentTree::new(tiny_profile()).unwrap();
         let mut store = MemoryContentStore::default();
         let value = LargeValue::create(
             ValueKind::Json,
@@ -1873,7 +1873,7 @@ mod tests {
     fn local_insert_reuses_most_content_defined_objects() {
         // Internal evidence is appropriate here: object identity reuse is the
         // physical invariant under test and has no public row API observation.
-        let tree = ProllyTree::new(tiny_profile()).unwrap();
+        let tree = ContentTree::new(tiny_profile()).unwrap();
         let original = (0..=255).cycle().take(16 * 1024).collect::<Vec<_>>();
         let mut edited = original.clone();
         edited.splice(257..257, [99, 98, 97]);
@@ -1900,7 +1900,7 @@ mod tests {
 
     #[test]
     fn projections_and_declarative_edits_use_native_values() {
-        let tree = ProllyTree::new(tiny_profile()).unwrap();
+        let tree = ContentTree::new(tiny_profile()).unwrap();
         let mut store = MemoryContentStore::default();
         let text = LargeValue::create(
             ValueKind::String,
@@ -2063,7 +2063,7 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_manifest_length_does_not_drive_prevalidation_allocation() {
+    fn untrusted_descriptor_length_does_not_drive_prevalidation_allocation() {
         let value = LargeValue::Chunked(ChunkedValue {
             root: ContentId([9; 32]),
             root_byte_len: u64::MAX,
@@ -2073,7 +2073,7 @@ mod tests {
             value.materialize(
                 ValueKind::Bytes,
                 &domain(),
-                ProllyTree::new(tiny_profile()).unwrap(),
+                ContentTree::new(tiny_profile()).unwrap(),
                 &MemoryContentStore::default(),
             ),
             Err(ContentError::MissingObject(_))

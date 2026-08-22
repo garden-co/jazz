@@ -2,7 +2,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use jazz::large_values::{
-    BytePatch, ContentDomain, LargeValue, MemoryContentStore, ProllyTree, TailBounds, ValueEdit,
+    BytePatch, ContentDomain, ContentTree, LargeValue, MemoryContentStore, TailBounds, ValueEdit,
     ValueKind, ValueSelection,
 };
 
@@ -42,7 +42,7 @@ fn main() {
         .unwrap_or(1024 * 1024);
     let bytes = deterministic_bytes(size);
     let domain = ContentDomain::new(b"large-value-benchmark".to_vec()).unwrap();
-    let tree = ProllyTree::new(Default::default()).unwrap();
+    let tree = ContentTree::new(Default::default()).unwrap();
     let mut store = MemoryContentStore::default();
 
     let start = Instant::now();
