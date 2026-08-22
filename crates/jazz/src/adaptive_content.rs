@@ -726,8 +726,9 @@ impl ProllyTree {
         expected_len: u64,
         store: &S,
     ) -> Result<Vec<u8>, ContentError> {
-        let capacity = usize::try_from(expected_len).map_err(|_| ContentError::LengthOverflow)?;
-        let mut out = Vec::with_capacity(capacity);
+        let expected_usize =
+            usize::try_from(expected_len).map_err(|_| ContentError::LengthOverflow)?;
+        let mut out = Vec::new();
         self.read_object_range(
             domain,
             root,
@@ -737,7 +738,7 @@ impl ProllyTree {
             store,
             &mut out,
         )?;
-        if out.len() != capacity {
+        if out.len() != expected_usize {
             return Err(ContentError::MalformedObject(
                 "root aggregate length does not match manifest".to_owned(),
             ));
@@ -765,8 +766,8 @@ impl ProllyTree {
                 value_len: root_len,
             });
         }
-        let capacity = usize::try_from(len).map_err(|_| ContentError::LengthOverflow)?;
-        let mut out = Vec::with_capacity(capacity);
+        usize::try_from(len).map_err(|_| ContentError::LengthOverflow)?;
+        let mut out = Vec::new();
         self.read_object_range(domain, root, offset, end, Some(root_len), store, &mut out)?;
         Ok(out)
     }
@@ -870,11 +871,39 @@ impl AdaptiveScalar {
     /// Encode the complete atomic physical cell for ordinary Jazz storage and
     /// wire transport.
     pub fn encode_cell(&self) -> Result<Vec<u8>, ContentError> {
-        let payload = postcard::to_allocvec(self)
-            .map_err(|error| ContentError::MalformedCell(error.to_string()))?;
-        let mut encoded = Vec::with_capacity(CELL_ENVELOPE.len() + payload.len());
+        let mut encoded = Vec::new();
         encoded.extend_from_slice(CELL_ENVELOPE);
-        encoded.extend_from_slice(&payload);
+        match self {
+            Self::Inline(bytes) => {
+                encoded.push(0);
+                encoded.extend_from_slice(
+                    &u64::try_from(bytes.len())
+                        .map_err(|_| ContentError::LengthOverflow)?
+                        .to_le_bytes(),
+                );
+                encoded.extend_from_slice(bytes);
+            }
+            Self::Large(large) => {
+                encoded.push(1);
+                encoded.extend_from_slice(large.root.as_bytes());
+                encoded.extend_from_slice(&large.root_byte_len.to_le_bytes());
+                encoded.extend_from_slice(
+                    &u64::try_from(large.edit_tail.len())
+                        .map_err(|_| ContentError::LengthOverflow)?
+                        .to_le_bytes(),
+                );
+                for patch in &large.edit_tail {
+                    encoded.extend_from_slice(&patch.offset.to_le_bytes());
+                    encoded.extend_from_slice(&patch.delete_len.to_le_bytes());
+                    encoded.extend_from_slice(
+                        &u64::try_from(patch.insert.len())
+                            .map_err(|_| ContentError::LengthOverflow)?
+                            .to_le_bytes(),
+                    );
+                    encoded.extend_from_slice(&patch.insert);
+                }
+            }
+        }
         Ok(encoded)
     }
 
@@ -888,12 +917,68 @@ impl AdaptiveScalar {
         let payload = encoded
             .strip_prefix(CELL_ENVELOPE)
             .ok_or(ContentError::UnknownCellFormat)?;
-        let cell: Self = postcard::from_bytes(payload)
-            .map_err(|error| ContentError::MalformedCell(error.to_string()))?;
-        if let Self::Large(large) = &cell {
-            if !tail_within_bounds(&large.edit_tail, schema.tail_bounds())? {
-                return Err(ContentError::TailTooLarge);
+        let (&tag, payload) = payload
+            .split_first()
+            .ok_or_else(|| ContentError::MalformedCell("missing cell tag".to_owned()))?;
+        let mut cursor = 0;
+        let cell = match tag {
+            0 => {
+                let len = read_u64(payload, &mut cursor)?;
+                if len > u64::from(schema.inline_up_to) {
+                    return Err(ContentError::MalformedCell(
+                        "inline scalar exceeds schema threshold".to_owned(),
+                    ));
+                }
+                let len = usize::try_from(len).map_err(|_| ContentError::LengthOverflow)?;
+                let bytes = take_cell_bytes(payload, &mut cursor, len)?.to_vec();
+                schema.kind.validate(&bytes)?;
+                Self::Inline(bytes)
             }
+            1 => {
+                let mut root = [0; 32];
+                root.copy_from_slice(take_cell_bytes(payload, &mut cursor, 32)?);
+                let root_byte_len = read_u64(payload, &mut cursor)?;
+                let count = read_u64(payload, &mut cursor)?;
+                if count > u64::from(schema.max_tail_entries) {
+                    return Err(ContentError::TailTooLarge);
+                }
+                let count = usize::try_from(count).map_err(|_| ContentError::LengthOverflow)?;
+                let mut edit_tail = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let offset = read_u64(payload, &mut cursor)?;
+                    let delete_len = read_u64(payload, &mut cursor)?;
+                    let insert_len = read_u64(payload, &mut cursor)?;
+                    let insert_len =
+                        usize::try_from(insert_len).map_err(|_| ContentError::LengthOverflow)?;
+                    if insert_len
+                        > usize::try_from(schema.max_tail_bytes)
+                            .map_err(|_| ContentError::LengthOverflow)?
+                    {
+                        return Err(ContentError::TailTooLarge);
+                    }
+                    let insert = take_cell_bytes(payload, &mut cursor, insert_len)?.to_vec();
+                    edit_tail.push(BytePatch {
+                        offset,
+                        delete_len,
+                        insert,
+                    });
+                }
+                let large = LargeScalar {
+                    root: ContentId(root),
+                    root_byte_len,
+                    edit_tail,
+                };
+                if !tail_within_bounds(&large.edit_tail, schema.tail_bounds())? {
+                    return Err(ContentError::TailTooLarge);
+                }
+                Self::Large(large)
+            }
+            _ => return Err(ContentError::UnknownCellFormat),
+        };
+        if cursor != payload.len() {
+            return Err(ContentError::MalformedCell(
+                "trailing adaptive scalar bytes".to_owned(),
+            ));
         }
         Ok(cell)
     }
@@ -1217,8 +1302,8 @@ fn materialize_large_range<S: ImmutableContentStore>(
             value_len: logical_len,
         });
     }
-    let mut out =
-        Vec::with_capacity(usize::try_from(len).map_err(|_| ContentError::LengthOverflow)?);
+    usize::try_from(len).map_err(|_| ContentError::LengthOverflow)?;
+    let mut out = Vec::new();
     let mut cursor = 0_u64;
     for piece in material_pieces(large)? {
         let piece_len = piece.len()?;
@@ -1456,6 +1541,21 @@ fn read_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, ContentError> {
     encoded.copy_from_slice(slice);
     *cursor = end;
     Ok(u64::from_le_bytes(encoded))
+}
+
+fn take_cell_bytes<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    len: usize,
+) -> Result<&'a [u8], ContentError> {
+    let end = cursor
+        .checked_add(len)
+        .ok_or(ContentError::LengthOverflow)?;
+    let slice = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| ContentError::MalformedCell("truncated cell payload".to_owned()))?;
+    *cursor = end;
+    Ok(slice)
 }
 
 fn leaf_ranges(bytes: &[u8], profile: ChunkingProfile) -> Vec<std::ops::Range<usize>> {
@@ -1899,6 +1999,35 @@ mod tests {
             AdaptiveScalar::decode_cell(&schema, &encoded),
             Err(ContentError::UnsupportedTreeFormat(schema.tree_format))
         );
+
+        let schema = AdaptiveScalarSchema::built_in(ScalarKind::Bytes);
+        let mut hostile = CELL_ENVELOPE.to_vec();
+        hostile.push(1);
+        hostile.extend_from_slice(&[0; 32]);
+        hostile.extend_from_slice(&0_u64.to_le_bytes());
+        hostile.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(
+            AdaptiveScalar::decode_cell(&schema, &hostile),
+            Err(ContentError::TailTooLarge)
+        );
+    }
+
+    #[test]
+    fn untrusted_manifest_length_does_not_drive_prevalidation_allocation() {
+        let value = AdaptiveScalar::Large(LargeScalar {
+            root: ContentId([9; 32]),
+            root_byte_len: u64::MAX,
+            edit_tail: Vec::new(),
+        });
+        assert!(matches!(
+            value.materialize(
+                ScalarKind::Bytes,
+                &domain(),
+                ProllyTree::new(tiny_profile()).unwrap(),
+                &MemoryContentStore::default(),
+            ),
+            Err(ContentError::MissingObject(_))
+        ));
     }
 
     #[test]
