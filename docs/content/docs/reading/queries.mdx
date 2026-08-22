@@ -71,8 +71,9 @@ document?.attachment; // Uint8Array
 document?.metadata; // parsed JSON
 ```
 
-For values that should not be materialized in full, `select(...)` can return a primitive text or
-byte slice, or a JSON-pointer projection. See [Partial reads](/docs/schemas/large-values#partial-reads).
+`select(...)` can return a primitive text or byte slice, or a JSON-pointer projection. The current
+prototype may still materialize the complete value internally before applying that projection. See
+[Partial reads](/docs/schemas/large-values#partial-reads).
 
 ## Read durability
 

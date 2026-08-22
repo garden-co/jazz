@@ -1,11 +1,12 @@
 ---
 title: Large Values
-description: Read and edit large text, byte streams, files, and JSON without materializing the whole value.
+description: Read and edit large text, byte streams, files, and JSON through ordinary Jazz columns.
 ---
 
 <Callout type="warn" title="Draft API proposal">
   The TypeScript and Rust calls on this page describe the API being implemented on this branch, not
-  an API available in a released Jazz version.
+  an API available in a released Jazz version. The current prototype exposes the partial API shapes
+  but may still materialize the complete value internally.
 </Callout>
 
 Large values are ordinary `string`, `bytes`, and `json` columns. They are not a separate content
@@ -90,7 +91,7 @@ const result = await db.one(
 );
 ```
 
-## Editing without materializing
+## Partial editing
 
 Edits repeat the slice used for the read and express the edit position relative to it. Keeping
 those coordinates together is the caller's responsibility; no provenance is hidden inside the
@@ -179,7 +180,8 @@ the ordinary declared type; the bulk payload lives only in the hidden Jazz rows.
 
 Every tree records aggregate UTF-8 byte lengths. Text trees additionally record aggregate UTF-16
 lengths. The tree algorithm can resolve either coordinate system in logarithmic time and visit only
-the target chunks. The generated node tables are not exposed through `app.*`.
+the target chunks. The current query integration may materialize more than those chunks before
+applying the projection. The generated node tables are not exposed through `app.*`.
 
 An edit tail records its changes in both metrics. When the tail reaches a built-in bound, Jazz
 consolidates it into a new immutable tree and updates metrics only along rewritten paths. The first
