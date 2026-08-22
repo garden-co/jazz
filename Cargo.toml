@@ -7,6 +7,7 @@ members = [
   "crates/jazz",
   "crates/jazz-compression",
   "crates/jazz-native-transport",
+  "crates/jazz-native-relay",
   "crates/jazz-cli",
   "crates/jazz-server",
   "crates/jazz-storage-rocksdb",

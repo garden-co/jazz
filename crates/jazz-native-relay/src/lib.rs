@@ -1,0 +1,555 @@
+//! Native, process-local Jazz relay for mobile and future platform bindings.
+//!
+//! The relay is deliberately a host component, not another Jazz runtime. It
+//! owns a durable [`jazz::db::Db`] over SQLite and serves one in-memory `Db`
+//! for each UI runtime over the ordinary Jazz peer protocol. React Native,
+//! Swift, and Kotlin bindings put their ABI-specific command codecs above this
+//! crate; they do not implement query, write, policy, or sync behavior here.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+
+use futures::lock::Mutex as LocalMutex;
+use jazz::db::{Db, DbConfig, DbIdentity, PeerConnection, Transport, block_on};
+use jazz::groove::records::Value;
+use jazz::groove::storage::MemoryStorage;
+use jazz::protocol::SyncMessage;
+use jazz::schema::JazzSchema;
+use jazz::wire::TransportError;
+use jazz_storage_sqlite::SqliteStorage;
+use thiserror::Error;
+
+/// Increment this only for a breaking change to the native command/wire ABI.
+/// JS wrappers must compare this with their expected range during startup and
+/// explain that an OTA update needs a new native development build when it is
+/// incompatible.
+pub const NATIVE_RELAY_ABI_VERSION: u16 = 1;
+
+/// Explicit process-local persistence/synchronization scope.
+///
+/// Authentication material is intentionally absent. `auth_scope` is an opaque
+/// stable subject/tenant discriminator supplied by the host after validation;
+/// tokens are sent to an upstream connection, never used as storage names.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RelayScope {
+    pub app_namespace: String,
+    pub storage_namespace: String,
+    pub auth_scope: Option<String>,
+}
+
+impl RelayScope {
+    pub fn validate(&self) -> Result<(), RelayError> {
+        for (field, value) in [
+            ("app namespace", self.app_namespace.as_str()),
+            ("storage namespace", self.storage_namespace.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(RelayError::InvalidScope(format!(
+                    "{field} must not be empty"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Immutable configuration used to start a relay owner thread.
+#[derive(Clone, Debug)]
+pub struct RelayOpenConfig {
+    pub scope: RelayScope,
+    /// Exact owned path chosen by the platform wrapper. The native relay never
+    /// interpolates auth tokens or untrusted strings into a filesystem path.
+    pub sqlite_path: PathBuf,
+    pub schema: JazzSchema,
+    pub identity: DbIdentity,
+}
+
+/// Stable handle for one process-local UI peer.
+#[derive(Clone)]
+pub struct NativeRelayClient {
+    relay: NativeRelay,
+    id: u64,
+}
+
+impl NativeRelayClient {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Run an ABI-adapter operation against this UI runtime on the relay's
+    /// owning thread. The closure is intentionally Rust-only; public bindings
+    /// expose a small encoded command surface instead of leaking `Db` handles
+    /// across JSI/JNI/Swift boundaries.
+    pub fn with_db<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&Db<MemoryStorage>) -> Result<T, RelayError> + Send + 'static,
+    ) -> Result<T, RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            let client = worker
+                .clients
+                .get(&id)
+                .ok_or(RelayError::UnknownClient(id))?;
+            operation(&client.db)
+        })
+    }
+
+    pub fn close(self) -> Result<(), RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            worker
+                .clients
+                .remove(&id)
+                .map(|_| ())
+                .ok_or(RelayError::UnknownClient(id))
+        })
+    }
+}
+
+/// Thread-safe handle to one executor-local relay owner.
+#[derive(Clone)]
+pub struct NativeRelay {
+    inner: Arc<RelayInner>,
+}
+
+struct RelayInner {
+    jobs: Mutex<Option<mpsc::Sender<RelayCommand>>>,
+    join: Mutex<Option<thread::JoinHandle<()>>>,
+    wire: NativeRelayWire,
+}
+
+impl Drop for RelayInner {
+    fn drop(&mut self) {
+        let Some(sender) = self.jobs.lock().ok().and_then(|mut sender| sender.take()) else {
+            return;
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        let _ = sender.send(RelayCommand::Shutdown(done_tx));
+        let _ = done_rx.recv();
+        if let Ok(mut join) = self.join.lock()
+            && let Some(join) = join.take()
+        {
+            let _ = join.join();
+        }
+    }
+}
+
+/// Thread-safe upstream protocol queues owned by the host integration.
+///
+/// A native network/ABI wrapper writes authenticated upstream messages to
+/// `inbound` and drains `outbound`. The relay only sees normal `SyncMessage`
+/// traffic through a regular `Db::connect_upstream` transport.
+#[derive(Clone, Default)]
+pub struct NativeRelayWire {
+    inbound: Arc<Mutex<VecDeque<SyncMessage>>>,
+    outbound: Arc<Mutex<VecDeque<SyncMessage>>>,
+}
+
+impl NativeRelayWire {
+    pub fn push_inbound(&self, message: SyncMessage) -> Result<(), RelayError> {
+        self.inbound
+            .lock()
+            .map_err(|_| RelayError::Poisoned("upstream inbound queue"))?
+            .push_back(message);
+        Ok(())
+    }
+
+    pub fn take_outbound(&self) -> Result<Vec<SyncMessage>, RelayError> {
+        Ok(self
+            .outbound
+            .lock()
+            .map_err(|_| RelayError::Poisoned("upstream outbound queue"))?
+            .drain(..)
+            .collect())
+    }
+}
+
+struct QueueTransport {
+    inbound: Arc<Mutex<VecDeque<SyncMessage>>>,
+    outbound: Arc<Mutex<VecDeque<SyncMessage>>>,
+}
+
+impl Transport for QueueTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.outbound
+            .lock()
+            .map_err(|_| TransportError::Failed("native relay outbound queue poisoned".to_owned()))?
+            .push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.lock().ok()?.pop_front()
+    }
+}
+
+struct DuplexTransport {
+    inbound: Arc<Mutex<VecDeque<SyncMessage>>>,
+    outbound: Arc<Mutex<VecDeque<SyncMessage>>>,
+}
+
+impl Transport for DuplexTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.outbound
+            .lock()
+            .map_err(|_| TransportError::Failed("native relay client queue poisoned".to_owned()))?
+            .push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.lock().ok()?.pop_front()
+    }
+}
+
+fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
+    let left = Arc::new(Mutex::new(VecDeque::new()));
+    let right = Arc::new(Mutex::new(VecDeque::new()));
+    (
+        Box::new(DuplexTransport {
+            inbound: Arc::clone(&left),
+            outbound: Arc::clone(&right),
+        }),
+        Box::new(DuplexTransport {
+            inbound: right,
+            outbound: left,
+        }),
+    )
+}
+
+struct ConnectedClient {
+    db: Db<MemoryStorage>,
+    // The core stores weak references for lifecycle ownership; retaining both
+    // endpoints is what keeps the normal peer protocol connection alive.
+    _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
+    _served: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+}
+
+struct RelayWorker {
+    persistent: Db<SqliteStorage>,
+    _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+    clients: BTreeMap<u64, ConnectedClient>,
+    next_client_id: u64,
+    schema: JazzSchema,
+}
+
+impl RelayWorker {
+    fn open(config: RelayOpenConfig, wire: NativeRelayWire) -> Result<Self, RelayError> {
+        let column_families = config.schema.column_families();
+        let refs = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let persistent = block_on(Db::open(DbConfig {
+            schema: config.schema.clone(),
+            storage: SqliteStorage::open(config.sqlite_path, &refs).map_err(RelayError::Storage)?,
+            identity: config.identity,
+            id_source: None,
+        }))
+        .map_err(RelayError::Db)?;
+        let upstream = persistent.connect_upstream(Box::new(QueueTransport {
+            inbound: wire.inbound,
+            outbound: wire.outbound,
+        }));
+        Ok(Self {
+            persistent,
+            _upstream: upstream,
+            clients: BTreeMap::new(),
+            next_client_id: 1,
+            schema: config.schema,
+        })
+    }
+
+    fn attach_client(
+        &mut self,
+        identity: DbIdentity,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<u64, RelayError> {
+        let column_families = self.schema.column_families();
+        let refs = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let db = block_on(Db::open(DbConfig {
+            schema: self.schema.clone(),
+            storage: MemoryStorage::new(&refs),
+            identity,
+            id_source: None,
+        }))
+        .map_err(RelayError::Db)?;
+        let (client_transport, relay_transport) = duplex();
+        let upstream = db.connect_upstream(client_transport);
+        let served =
+            self.persistent
+                .accept_subscriber_with_claims(relay_transport, identity.author, claims);
+        let id = self.next_client_id;
+        self.next_client_id = self
+            .next_client_id
+            .checked_add(1)
+            .ok_or(RelayError::ClientIdExhausted)?;
+        self.clients.insert(
+            id,
+            ConnectedClient {
+                db,
+                _upstream: upstream,
+                _served: served,
+            },
+        );
+        Ok(id)
+    }
+
+    fn pump(&mut self) -> Result<(), RelayError> {
+        // Keep cycling until the directly attached peer graph makes no new
+        // observable work. The bound makes a malformed loop fail loudly rather
+        // than keeping a mobile event-loop hot forever.
+        for _ in 0..64 {
+            block_on(self.persistent.tick()).map_err(RelayError::Db)?;
+            for client in self.clients.values() {
+                block_on(client.db.tick()).map_err(RelayError::Db)?;
+            }
+            // The public Db tick currently does not expose a "made progress"
+            // flag. Two passes are sufficient for the in-process duplex hops;
+            // continue the bounded loop to flush any cascading subscriptions.
+        }
+        Ok(())
+    }
+}
+
+type RelayJob = Box<dyn FnOnce(&mut RelayWorker) + Send + 'static>;
+
+enum RelayCommand {
+    Run(RelayJob),
+    Shutdown(mpsc::Sender<()>),
+}
+
+impl NativeRelay {
+    pub fn spawn(config: RelayOpenConfig) -> Result<Self, RelayError> {
+        config.scope.validate()?;
+        let wire = NativeRelayWire::default();
+        let (commands, receiver) = mpsc::channel::<RelayCommand>();
+        let (started_tx, started_rx) = mpsc::channel();
+        let owner_wire = wire.clone();
+        let join = thread::Builder::new()
+            .name("jazz-native-relay".to_owned())
+            .spawn(move || {
+                let mut worker = match RelayWorker::open(config, owner_wire) {
+                    Ok(worker) => {
+                        let _ = started_tx.send(Ok(()));
+                        worker
+                    }
+                    Err(error) => {
+                        let _ = started_tx.send(Err(error));
+                        return;
+                    }
+                };
+                while let Ok(command) = receiver.recv() {
+                    match command {
+                        RelayCommand::Run(job) => job(&mut worker),
+                        RelayCommand::Shutdown(done) => {
+                            drop(worker);
+                            let _ = done.send(());
+                            return;
+                        }
+                    }
+                }
+            })
+            .map_err(|error| RelayError::OwnerThread(error.to_string()))?;
+        started_rx.recv().map_err(|_| {
+            RelayError::OwnerThread("owner exited before opening relay".to_owned())
+        })??;
+        Ok(Self {
+            inner: Arc::new(RelayInner {
+                jobs: Mutex::new(Some(commands)),
+                join: Mutex::new(Some(join)),
+                wire,
+            }),
+        })
+    }
+
+    pub fn abi_version(&self) -> u16 {
+        NATIVE_RELAY_ABI_VERSION
+    }
+
+    pub fn wire(&self) -> NativeRelayWire {
+        self.inner.wire.clone()
+    }
+
+    pub fn attach_client(
+        &self,
+        identity: DbIdentity,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<NativeRelayClient, RelayError> {
+        let id = self.run(move |worker| worker.attach_client(identity, claims))?;
+        Ok(NativeRelayClient {
+            relay: self.clone(),
+            id,
+        })
+    }
+
+    pub fn pump(&self) -> Result<(), RelayError> {
+        self.run(|worker| worker.pump())
+    }
+
+    fn run<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut RelayWorker) -> Result<T, RelayError> + Send + 'static,
+    ) -> Result<T, RelayError> {
+        let (response_tx, response_rx) = mpsc::channel();
+        let job: RelayJob = Box::new(move |worker| {
+            let _ = response_tx.send(operation(worker));
+        });
+        self.inner
+            .jobs
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay command queue"))?
+            .as_ref()
+            .ok_or(RelayError::Closed)?
+            .send(RelayCommand::Run(job))
+            .map_err(|_| RelayError::Closed)?;
+        response_rx.recv().map_err(|_| RelayError::Closed)?
+    }
+}
+
+/// A registry is owned by the platform host (application process), not global
+/// Rust state. That makes teardown explicit and lets Android services, iOS app
+/// delegates, and test processes choose their own lifecycle semantics.
+#[derive(Default)]
+pub struct NativeRelayRegistry {
+    relays: Mutex<BTreeMap<RelayScope, NativeRelay>>,
+}
+
+impl NativeRelayRegistry {
+    pub fn open(&self, config: RelayOpenConfig) -> Result<NativeRelay, RelayError> {
+        config.scope.validate()?;
+        let mut relays = self
+            .relays
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        if let Some(existing) = relays.get(&config.scope) {
+            return Ok(existing.clone());
+        }
+        let relay = NativeRelay::spawn(config.clone())?;
+        relays.insert(config.scope, relay.clone());
+        Ok(relay)
+    }
+
+    pub fn close(&self, scope: &RelayScope) -> Result<bool, RelayError> {
+        Ok(self
+            .relays
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?
+            .remove(scope)
+            .is_some())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RelayError {
+    #[error("invalid native relay scope: {0}")]
+    InvalidScope(String),
+    #[error("failed to open native relay owner thread: {0}")]
+    OwnerThread(String),
+    #[error("native relay is closed")]
+    Closed,
+    #[error("native relay internal mutex poisoned: {0}")]
+    Poisoned(&'static str),
+    #[error("native relay does not know UI client {0}")]
+    UnknownClient(u64),
+    #[error("native relay UI client id space exhausted")]
+    ClientIdExhausted,
+    #[error("SQLite storage failed: {0}")]
+    Storage(jazz::groove::storage::Error),
+    #[error("Jazz database failed: {0}")]
+    Db(jazz::db::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    // This is intentionally an internal transport-ownership test: the public
+    // user-visible behavior of rows/subscriptions belongs to the Db suites.
+    // Here we prove the native host does not accidentally create one durable
+    // store per UI runtime or share it across explicit auth scopes.
+    use super::*;
+    use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+    use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+    use jazz::tx::DurabilityTier;
+
+    fn schema() -> JazzSchema {
+        JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap()
+    }
+
+    fn config(path: PathBuf, auth_scope: Option<&str>) -> RelayOpenConfig {
+        RelayOpenConfig {
+            scope: RelayScope {
+                app_namespace: "native-relay-test".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: auth_scope.map(str::to_owned),
+            },
+            sqlite_path: path,
+            schema: schema(),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xa1; 16]),
+                author: AuthorId::from_bytes([0xa2; 16]),
+            },
+        }
+    }
+
+    #[test]
+    fn registry_shares_one_relay_per_scope_and_keeps_auth_scopes_apart() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = NativeRelayRegistry::default();
+        let first = registry
+            .open(config(directory.path().join("alice.sqlite"), Some("alice")))
+            .unwrap();
+        let same = registry
+            .open(config(directory.path().join("alice.sqlite"), Some("alice")))
+            .unwrap();
+        let other = registry
+            .open(config(directory.path().join("bob.sqlite"), Some("bob")))
+            .unwrap();
+        assert!(Arc::ptr_eq(&first.inner, &same.inner));
+        assert!(!Arc::ptr_eq(&first.inner, &other.inner));
+
+        let first_client = first
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xb1; 16]),
+                    author: AuthorId::from_bytes([0xb2; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let second_client = first
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xc1; 16]),
+                    author: AuthorId::from_bytes([0xc2; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_ne!(first_client.id(), second_client.id());
+
+        first_client
+            .with_db(|db| {
+                let write = block_on(db.insert_with_id(
+                    "todos",
+                    RowUuid::from_bytes([0xd1; 16]),
+                    BTreeMap::from([("title".to_owned(), Value::String("native".to_owned()))]),
+                ))
+                .map_err(RelayError::Db)?;
+                block_on(write.wait(DurabilityTier::Local)).map_err(RelayError::Db)?;
+                Ok(())
+            })
+            .unwrap();
+        first.pump().unwrap();
+    }
+}

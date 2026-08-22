@@ -204,6 +204,21 @@ impl SqliteStorage {
                 "sqlite schema does not match jazz ordered-kv v1".to_owned(),
             ));
         }
+        validate_table_columns(
+            connection,
+            "meta",
+            &[("key", "TEXT", 1), ("value", "BLOB", 0)],
+        )?;
+        validate_table_columns(
+            connection,
+            "column_families",
+            &[("id", "INTEGER", 1), ("name", "TEXT", 0)],
+        )?;
+        validate_table_columns(
+            connection,
+            "kv",
+            &[("cf", "INTEGER", 1), ("k", "BLOB", 2), ("v", "BLOB", 0)],
+        )?;
         let format = connection
             .query_row("SELECT value FROM meta WHERE key = 'format'", [], |row| {
                 row.get::<_, Vec<u8>>(0)
@@ -322,6 +337,42 @@ impl SqliteStorage {
             }
         })
     }
+}
+
+fn validate_table_columns(
+    connection: &Connection,
+    table: &str,
+    expected: &[(&str, &str, i64)],
+) -> Result<(), Error> {
+    // `table` is an internal literal, never caller data. PRAGMA does not bind
+    // identifiers, so keeping it non-public avoids an SQL identifier seam.
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(backend)?;
+    let actual = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(backend)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(backend)?;
+    if actual.len() != expected.len()
+        || actual
+            .iter()
+            .zip(expected)
+            .any(|((name, kind, pk), expected)| {
+                name != expected.0 || !kind.eq_ignore_ascii_case(expected.1) || *pk != expected.2
+            })
+    {
+        return Err(Error::InvalidStorageLayout(format!(
+            "sqlite table {table} columns do not match jazz ordered-kv v1"
+        )));
+    }
+    Ok(())
 }
 
 impl ReopenableStorage for SqliteStorage {

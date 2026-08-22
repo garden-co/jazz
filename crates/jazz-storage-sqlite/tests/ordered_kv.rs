@@ -97,3 +97,20 @@ fn rejects_wrong_format_and_closed_store() {
         ));
     });
 }
+
+#[test]
+fn rejects_foreign_table_shape_before_adopting_data() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("jazz.sqlite");
+    let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+    drop(storage);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("DROP TABLE kv; CREATE TABLE kv (cf INTEGER, k BLOB, v BLOB)")
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+}

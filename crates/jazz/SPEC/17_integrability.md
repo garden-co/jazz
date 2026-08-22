@@ -173,19 +173,10 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 
 ### 17.6 Recorded packaging decision
 
-- ✅ **Conformance storage backends (decided 2026-07-02):** the alpha
-  conformance matrix covers the canonical topology's backends — in-memory
-  (client main thread), IndexedDB (client worker relay), and RocksDB (edge and
-  core). SQLite is conditionally in scope as the **last** alpha item, paired
-  with React Native support: it is needed only if RocksDB proves unworkable in
-  the RN environment. It is deliberately scheduled last because it is pure
-  tooling — a clean additional `OrderedKvStorage` backend behind the existing
-  storage contract, with no design decisions attached.
-
-**Implementation status.** The alpha conformance matrix covers in-memory
-(client main thread), IndexedDB (client worker relay), and RocksDB (edge and core).
-SQLite is conditionally last in scope with React Native, only if RocksDB is
-unsuitable there; this is a tooling decision rather than a semantic contract.
+- ✅ **Conformance storage backends:** the alpha matrix covers in-memory,
+  IndexedDB, RocksDB, and SQLite through Groove's ordered-KV contract. Native mobile
+  hosts use SQLite through a process-local native relay (chapter 19); that is a
+  storage adapter and host boundary, not a new Jazz query or sync runtime.
 
 ## Open Questions
 

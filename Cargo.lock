@@ -2130,6 +2130,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-native-relay"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "jazz",
+ "jazz-storage-sqlite",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "jazz-native-transport"
 version = "0.1.0"
 dependencies = [
