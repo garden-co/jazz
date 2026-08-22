@@ -51,6 +51,10 @@ export declare class NapiDb {
   subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
+  insertEncoded(table: string, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  insertEncodedForIdentity(table: string, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  insertEncodedInBranch(table: string, cells: Uint8Array, branch: JsonValue): Write
+  insertEncodedInBranchForIdentity(table: string, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
   insertWithIdEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): Write
   insertWithIdEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
@@ -134,6 +138,8 @@ export declare class Transport {
 }
 
 export declare class Tx {
+  insertEncoded(table: string, cells: Uint8Array, updatedAtMs?: number | undefined | null): Uint8Array
+  insertEncodedInBranch(table: string, cells: Uint8Array, branch: JsonValue): Uint8Array
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
   insertWithIdEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): void
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): void
@@ -150,6 +156,7 @@ export declare class Tx {
 export declare class Write {
   get batchId(): string
   get payload(): Uint8Array
+  get rowId(): Uint8Array
   writeState(): any
   wait(tier: string): Promise<undefined>
   close(): boolean

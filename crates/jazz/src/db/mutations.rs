@@ -460,6 +460,27 @@ where
         .await
     }
 
+    /// Insert a row with a generated id and an explicit millisecond provenance time.
+    pub async fn insert_at_ms(
+        &self,
+        table: &str,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        self.write_mergeable_at_ms(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+            now_ms,
+        )
+        .await
+    }
+
     /// Stream one large scalar into a newly inserted row without retaining the
     /// complete logical value in Jazz memory.
     ///

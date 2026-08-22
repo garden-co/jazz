@@ -2149,6 +2149,18 @@ where
         Ok(row)
     }
 
+    /// Stage an insert with a generated row id and explicit millisecond provenance time.
+    async fn insert_at_ms(
+        &self,
+        table: &str,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<RowUuid, Error> {
+        let row = self.db().row_id_source.borrow_mut().next_row_id();
+        self.insert_with_id_at_ms(table, row, cells, now_ms).await?;
+        Ok(row)
+    }
+
     /// Stage an insert with a caller-supplied row id.
     async fn insert_with_id(
         &self,
@@ -2171,6 +2183,19 @@ where
         self.db()
             .stage_mergeable_insert_in_branch(self.tx_id(), table, branch, row, cells, None)
             .await
+    }
+
+    /// Stage an insert in one exact branch-local row with a generated row id.
+    async fn insert_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        cells: RowCells,
+    ) -> Result<RowUuid, Error> {
+        let row = self.db().row_id_source.borrow_mut().next_row_id();
+        self.insert_with_id_in_branch(table, branch, row, cells)
+            .await?;
+        Ok(row)
     }
 
     /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.

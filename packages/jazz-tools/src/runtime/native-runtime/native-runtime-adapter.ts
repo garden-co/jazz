@@ -127,6 +127,20 @@ type NativeDb = {
     author: Uint8Array,
     opts: unknown,
   ): ReadableStream<unknown> | Subscription;
+  insertEncoded(table: string, cells: Uint8Array, updatedAtMs?: number | null): Write;
+  insertEncodedForIdentity(
+    table: string,
+    cells: Uint8Array,
+    author: Uint8Array,
+    updatedAtMs?: number | null,
+  ): Write;
+  insertEncodedInBranch?(table: string, cells: Uint8Array, branch: unknown): Write;
+  insertEncodedInBranchForIdentity?(
+    table: string,
+    cells: Uint8Array,
+    branch: unknown,
+    author: Uint8Array,
+  ): Write;
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
   insertWithIdEncodedForIdentity(
     table: string,
@@ -357,7 +371,8 @@ type Subscription = {
 
 type Write = {
   readonly batchId: string;
-  payload: Uint8Array;
+  readonly payload: Uint8Array;
+  readonly rowId: Uint8Array;
   wait(tier: string): Promise<void>;
   writeState(): unknown;
   close?(): boolean;
@@ -366,6 +381,8 @@ type Write = {
 type Tx = {
   commit(): Write;
   rollback(): void;
+  insertEncoded(table: string, cells: Uint8Array, updatedAtMs?: number | null): Uint8Array;
+  insertEncodedInBranch?(table: string, cells: Uint8Array, branch: unknown): Uint8Array;
   insertWithIdEncoded(
     table: string,
     rowId: Uint8Array,
@@ -616,7 +633,8 @@ export class NativeRuntimeAdapter implements Runtime {
     private readonly schema: WasmSchema,
     private readonly node: Uint8Array,
     author: Uint8Array,
-    sourceId: number,
+    // Retained for constructor compatibility; production row IDs must use the core clock source.
+    _sourceId: number,
     historyComplete: boolean,
     opts?: {
       persistentPath?: string;
@@ -641,7 +659,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.configBytes = openConfig(
       node,
       author,
-      sourceId,
+      undefined,
       historyComplete,
       opts?.initialSyncFlushEvery,
     );
@@ -946,7 +964,7 @@ export class NativeRuntimeAdapter implements Runtime {
     _writeContext?: string | null,
     objectId?: string | null,
   ): InsertResult {
-    const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
+    const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
     const cells = encodeCellsForRow(this.table(table), values);
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
@@ -956,13 +974,25 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
       const nativeTx = this.txForWrite(tx, writeIdentity);
+      let rowId: Uint8Array;
       if (branchView) {
-        requireBranchMethod(
-          nativeTx.insertWithIdEncodedInBranch,
-          "transaction branch inserts",
-        ).call(nativeTx, table, rowId, cells, branchView.head);
+        if (suppliedRowId) {
+          rowId = suppliedRowId;
+          requireBranchMethod(
+            nativeTx.insertWithIdEncodedInBranch,
+            "transaction branch inserts",
+          ).call(nativeTx, table, rowId, cells, branchView.head);
+        } else {
+          rowId = requireBranchMethod(
+            nativeTx.insertEncodedInBranch,
+            "transaction generated-id branch inserts",
+          ).call(nativeTx, table, cells, branchView.head);
+        }
       } else {
-        nativeTx.insertWithIdEncoded(table, rowId, cells, updatedAtMs);
+        rowId = suppliedRowId ?? nativeTx.insertEncoded(table, cells, updatedAtMs);
+        if (suppliedRowId) {
+          nativeTx.insertWithIdEncoded(table, rowId, cells, updatedAtMs);
+        }
       }
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
@@ -975,22 +1005,43 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const write = writeOrNormalizeRejection("Insert", () =>
       branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.insertWithIdEncodedInBranchForIdentity,
-              "identity-scoped branch inserts",
-            ).call(this.db, table, rowId, cells, branchView.head, writeIdentity)
-          : requireBranchMethod(this.db.insertWithIdEncodedInBranch, "branch inserts").call(
-              this.db,
-              table,
-              rowId,
-              cells,
-              branchView.head,
-            )
+        ? suppliedRowId
+          ? writeIdentity
+            ? requireBranchMethod(
+                this.db.insertWithIdEncodedInBranchForIdentity,
+                "identity-scoped branch inserts",
+              ).call(this.db, table, suppliedRowId, cells, branchView.head, writeIdentity)
+            : requireBranchMethod(this.db.insertWithIdEncodedInBranch, "branch inserts").call(
+                this.db,
+                table,
+                suppliedRowId,
+                cells,
+                branchView.head,
+              )
+          : writeIdentity
+            ? requireBranchMethod(
+                this.db.insertEncodedInBranchForIdentity,
+                "identity-scoped generated-id branch inserts",
+              ).call(this.db, table, cells, branchView.head, writeIdentity)
+            : requireBranchMethod(
+                this.db.insertEncodedInBranch,
+                "generated-id branch inserts",
+              ).call(this.db, table, cells, branchView.head)
         : writeIdentity
-          ? this.db.insertWithIdEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
-          : this.db.insertWithIdEncoded(table, rowId, cells, updatedAtMs),
+          ? suppliedRowId
+            ? this.db.insertWithIdEncodedForIdentity(
+                table,
+                suppliedRowId,
+                cells,
+                writeIdentity,
+                updatedAtMs,
+              )
+            : this.db.insertEncodedForIdentity(table, cells, writeIdentity, updatedAtMs)
+          : suppliedRowId
+            ? this.db.insertWithIdEncoded(table, suppliedRowId, cells, updatedAtMs)
+            : this.db.insertEncoded(table, cells, updatedAtMs),
     );
+    const rowId = suppliedRowId ?? write.rowId;
     return this.finishInsert(table, rowId, values, write);
   }
 

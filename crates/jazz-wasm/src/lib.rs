@@ -206,6 +206,7 @@ pub struct WasmQueryAttachment {
 #[wasm_bindgen]
 pub struct WasmWrite {
     payload: Vec<u8>,
+    row_id: RowUuid,
     batch_id: TransactionId,
     inner: Option<WasmWriteInner>,
 }
@@ -345,6 +346,11 @@ impl WasmWrite {
     #[wasm_bindgen(getter, js_name = payload)]
     pub fn payload(&self) -> Vec<u8> {
         self.payload.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = rowId)]
+    pub fn row_id(&self) -> Vec<u8> {
+        self.row_id.to_bytes()
     }
 
     #[wasm_bindgen(js_name = writeState)]
@@ -778,6 +784,35 @@ impl WasmDbInner {
         ))
     }
 
+    fn mergeable_insert_generated(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<RowUuid, jazz::db::Error> {
+        with_wasm_db!(self, |db| match now_ms {
+            Some(now_ms) => block_on(
+                db.mergeable_tx_ref(tx_id)
+                    .insert_at_ms(table, cells, now_ms)
+            ),
+            None => block_on(db.mergeable_tx_ref(tx_id).insert(table, cells)),
+        })
+    }
+
+    fn mergeable_insert_generated_in_branch(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        cells: RowCells,
+        branch: BranchSelector,
+    ) -> Result<RowUuid, jazz::db::Error> {
+        with_wasm_db!(self, |db| block_on(
+            db.mergeable_tx_ref(tx_id)
+                .insert_in_branch(table, branch, cells)
+        ))
+    }
+
     fn mergeable_update(
         &self,
         tx_id: OpenTransactionId,
@@ -881,6 +916,17 @@ impl WasmDbInner {
         with_wasm_db!(self, |db| block_on(
             db.exclusive_tx_ref(tx_id)
                 .insert_with_id(table, row_id, cells)
+        ))
+    }
+
+    fn exclusive_insert_generated(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<RowUuid, jazz::db::Error> {
+        with_wasm_db!(self, |db| block_on(
+            db.exclusive_tx_ref(tx_id).insert(table, cells)
         ))
     }
 
@@ -1051,17 +1097,118 @@ impl WasmDbInner {
         with_wasm_db!(self, |db| db.set_tick_scheduler(Some(scheduler)))
     }
 
-    fn insert(&self, table: &str, cells: RowCells) -> Result<WasmWrite, JsValue> {
+    fn insert(
+        &self,
+        table: &str,
+        cells: RowCells,
+        updated_at_ms: Option<u64>,
+    ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                block_on(db.insert(table, cells)).map_err(to_js_error)?,
+                match updated_at_ms {
+                    Some(now_ms) => block_on(db.insert_at_ms(table, cells, now_ms)),
+                    None => block_on(db.insert(table, cells)),
+                }
+                .map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.insert(table, cells)).map_err(to_js_error)?,
+                match updated_at_ms {
+                    Some(now_ms) => block_on(db.insert_at_ms(table, cells, now_ms)),
+                    None => block_on(db.insert(table, cells)),
+                }
+                .map_err(to_js_error)?,
             ),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    fn insert_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        cells: RowCells,
+        updated_at_ms: Option<u64>,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_memory(
+                    Rc::clone(db),
+                    match updated_at_ms {
+                        Some(now_ms) => {
+                            block_on(db.insert_for_identity_at_ms(identity, table, cells, now_ms))
+                        }
+                        None => block_on(db.insert_for_identity(identity, table, cells)),
+                    }
+                    .map_err(to_js_error)?,
+                )
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_browser(
+                    Rc::clone(db),
+                    match updated_at_ms {
+                        Some(now_ms) => {
+                            block_on(db.insert_for_identity_at_ms(identity, table, cells, now_ms))
+                        }
+                        None => block_on(db.insert_for_identity(identity, table, cells)),
+                    }
+                    .map_err(to_js_error)?,
+                )
+            }
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    fn insert_in_branch(
+        &self,
+        table: &str,
+        cells: RowCells,
+        branch: BranchSelector,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.insert_in_branch(table, branch, cells)).map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.insert_in_branch(table, branch, cells)).map_err(to_js_error)?,
+            ),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    fn insert_in_branch_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        cells: RowCells,
+        branch: BranchSelector,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_memory(
+                    Rc::clone(db),
+                    block_on(db.insert_in_branch_for_identity(identity, table, branch, cells))
+                        .map_err(to_js_error)?,
+                )
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_browser(
+                    Rc::clone(db),
+                    block_on(db.insert_in_branch_for_identity(identity, table, branch, cells))
+                        .map_err(to_js_error)?,
+                )
+            }
             Self::Closed => panic!("WasmDb is closed"),
         }
     }
@@ -2176,9 +2323,65 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = insertEncoded)]
-    pub fn insert_encoded(&self, table: String, cells: Vec<u8>) -> Result<WasmWrite, JsValue> {
+    pub fn insert_encoded(
+        &self,
+        table: String,
+        cells: Vec<u8>,
+        updated_at_ms: Option<f64>,
+    ) -> Result<WasmWrite, JsValue> {
         let cells = decode_cells(&cells)?;
-        self.inner.insert(&table, cells)
+        self.inner
+            .insert(&table, cells, updated_at_ms.map(|value| value as u64))
+    }
+
+    #[wasm_bindgen(js_name = insertEncodedForIdentity)]
+    pub fn insert_encoded_for_identity(
+        &self,
+        table: String,
+        cells: Vec<u8>,
+        author: Vec<u8>,
+        updated_at_ms: Option<f64>,
+    ) -> Result<WasmWrite, JsValue> {
+        let cells = decode_cells(&cells)?;
+        let author = author_id_from_bytes(&author)?;
+        self.inner.insert_for_identity(
+            author,
+            &table,
+            cells,
+            updated_at_ms.map(|value| value as u64),
+        )
+    }
+
+    #[wasm_bindgen(js_name = insertEncodedInBranch)]
+    pub fn insert_encoded_in_branch(
+        &self,
+        table: String,
+        cells: Vec<u8>,
+        branch: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        self.inner.insert_in_branch(
+            &table,
+            decode_cells(&cells)?,
+            serde_wasm_bindgen::from_value(branch)
+                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = insertEncodedInBranchForIdentity)]
+    pub fn insert_encoded_in_branch_for_identity(
+        &self,
+        table: String,
+        cells: Vec<u8>,
+        branch: JsValue,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        self.inner.insert_in_branch_for_identity(
+            author_id_from_bytes(&author)?,
+            &table,
+            decode_cells(&cells)?,
+            serde_wasm_bindgen::from_value(branch)
+                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
+        )
     }
 
     #[wasm_bindgen(js_name = canInsertEncoded)]
@@ -3300,6 +3503,52 @@ impl WasmTransport {
 
 #[wasm_bindgen]
 impl WasmTx {
+    #[wasm_bindgen(js_name = insertEncoded)]
+    pub fn insert_encoded(
+        &mut self,
+        table: String,
+        cells: Vec<u8>,
+        updated_at_ms: Option<f64>,
+    ) -> Result<Vec<u8>, JsValue> {
+        let cells = decode_cells(&cells)?;
+        let now_ms = updated_at_ms.map(|value| value as u64);
+        let open_tx = self.open_tx_for_read()?;
+        let row_id = match self.kind {
+            WasmTxKind::Mergeable => self
+                .db
+                .mergeable_insert_generated(open_tx, &table, cells, now_ms),
+            WasmTxKind::Exclusive => self.db.exclusive_insert_generated(open_tx, &table, cells),
+        }
+        .map_err(to_js_error)?;
+        Ok(row_id.to_bytes())
+    }
+
+    #[wasm_bindgen(js_name = insertEncodedInBranch)]
+    pub fn insert_encoded_in_branch(
+        &mut self,
+        table: String,
+        cells: Vec<u8>,
+        branch: JsValue,
+    ) -> Result<Vec<u8>, JsValue> {
+        if !matches!(self.kind, WasmTxKind::Mergeable) {
+            return Err(JsValue::from_str(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let branch = serde_wasm_bindgen::from_value(branch)
+            .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?;
+        let row_id = self
+            .db
+            .mergeable_insert_generated_in_branch(
+                self.open_tx_for_read()?,
+                &table,
+                decode_cells(&cells)?,
+                branch,
+            )
+            .map_err(to_js_error)?;
+        Ok(row_id.to_bytes())
+    }
+
     #[wasm_bindgen(js_name = insertWithIdEncoded)]
     pub fn insert_with_id_encoded(
         &mut self,
@@ -3842,6 +4091,7 @@ fn wasm_write_memory(
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(WasmWriteInner::MemoryTx { db, tx_id }),
     })
@@ -3859,6 +4109,7 @@ fn wasm_write_browser(
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(WasmWriteInner::BrowserTx { db, tx_id }),
     })
@@ -3871,6 +4122,7 @@ fn wasm_tx_write(tx_id: TxId, inner: Option<WasmWriteInner>) -> Result<WasmWrite
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner,
     })

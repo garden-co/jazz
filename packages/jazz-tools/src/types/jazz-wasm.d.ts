@@ -27,6 +27,7 @@ declare module "jazz-wasm" {
   export class WasmWrite {
     readonly batchId: string;
     readonly payload: Uint8Array;
+    readonly rowId: Uint8Array;
     writeState(): unknown;
     wait(tier: string): Promise<void>;
     close(): boolean;
@@ -47,11 +48,19 @@ declare module "jazz-wasm" {
   }
 
   export class WasmTx {
+    insertEncoded(table: string, cells: Uint8Array, updatedAtMs?: number | null): Uint8Array;
+    insertEncodedInBranch(table: string, cells: Uint8Array, branch: unknown): Uint8Array;
     insertWithIdEncoded(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
       updatedAtMs?: number | null,
+    ): void;
+    insertWithIdEncodedInBranch(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      branch: unknown,
     ): void;
     updateEncoded(
       table: string,
@@ -166,19 +175,51 @@ declare module "jazz-wasm" {
       opts: unknown,
     ): ReadableStream<unknown>;
 
-    insertEncoded(table: string, cells: Uint8Array): WasmWrite;
+    insertEncoded(table: string, cells: Uint8Array, updatedAtMs?: number | null): WasmWrite;
+    insertEncodedForIdentity(
+      table: string,
+      cells: Uint8Array,
+      author: Uint8Array,
+      updatedAtMs?: number | null,
+    ): WasmWrite;
+    insertEncodedInBranch(table: string, cells: Uint8Array, branch: unknown): WasmWrite;
+    insertEncodedInBranchForIdentity(
+      table: string,
+      cells: Uint8Array,
+      branch: unknown,
+      author: Uint8Array,
+    ): WasmWrite;
     canInsertEncoded(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
     requestInsertPermissionAdviceEncoded(
       table: string,
       cells: Uint8Array,
     ): WasmPermissionAdviceRequest;
     requestReadPermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
+    insertWithIdEncoded(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      updatedAtMs?: number | null,
+    ): WasmWrite;
+    insertWithIdEncodedInBranch(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      branch: unknown,
+    ): WasmWrite;
+    insertWithIdEncodedInBranchForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      branch: unknown,
+      author: Uint8Array,
+    ): WasmWrite;
     insertWithIdEncodedForIdentity(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
       author: Uint8Array,
+      updatedAtMs?: number | null,
     ): WasmWrite;
     updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite;
     updateEncodedForIdentity(

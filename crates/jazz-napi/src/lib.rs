@@ -204,6 +204,7 @@ pub struct QueryAttachment {
 #[napi(js_name = "Write")]
 pub struct Write {
     payload: Vec<u8>,
+    row_id: CoreRowUuid,
     batch_id: TransactionId,
     inner: Option<NapiWrite>,
 }
@@ -543,6 +544,11 @@ impl Write {
         Uint8Array::new(self.payload.clone())
     }
 
+    #[napi(getter, js_name = "rowId")]
+    pub fn row_id(&self) -> Uint8Array {
+        Uint8Array::new(self.row_id.to_bytes())
+    }
+
     #[napi(js_name = "writeState")]
     pub fn write_state(&self) -> napi::Result<serde_json::Value> {
         let Some(write) = &self.inner else {
@@ -691,6 +697,48 @@ impl Subscription {
 
 #[napi]
 impl Tx {
+    #[napi(js_name = "insertEncoded")]
+    pub fn insert_encoded(
+        &mut self,
+        table: String,
+        cells: Uint8Array,
+        updated_at_ms: Option<f64>,
+    ) -> napi::Result<Uint8Array> {
+        let cells = decode_core_cells(&cells)?;
+        let now_ms = updated_at_ms.map(|value| value as u64);
+        let row_id = match self.kind {
+            NapiTxKind::Mergeable => match now_ms {
+                Some(now_ms) => {
+                    with_napi_mergeable_tx!(self, |tx| tx.insert_at_ms(&table, cells, now_ms))
+                }
+                None => with_napi_mergeable_tx!(self, |tx| tx.insert(&table, cells)),
+            },
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.insert(&table, cells))
+            }
+        }?;
+        Ok(Uint8Array::new(row_id.to_bytes()))
+    }
+
+    #[napi(js_name = "insertEncodedInBranch")]
+    pub fn insert_encoded_in_branch(
+        &mut self,
+        table: String,
+        cells: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<Uint8Array> {
+        if !matches!(self.kind, NapiTxKind::Mergeable) {
+            return Err(napi::Error::from_reason(
+                "branch writes require a mergeable transaction",
+            ));
+        }
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        let row_id =
+            with_napi_mergeable_tx!(self, |tx| tx.insert_in_branch(&table, branch, cells))?;
+        Ok(Uint8Array::new(row_id.to_bytes()))
+    }
+
     #[napi(js_name = "insertWithIdEncoded")]
     pub fn insert_with_id_encoded(
         &mut self,
@@ -1860,6 +1908,134 @@ impl NapiDb {
             inner: Some(inner),
             published_terminal_layouts: HashSet::new(),
         })
+    }
+
+    #[napi(js_name = "insertEncoded")]
+    pub fn insert_encoded(
+        &self,
+        table: String,
+        cells: Uint8Array,
+        updated_at_ms: Option<f64>,
+    ) -> napi::Result<Write> {
+        let cells = decode_core_cells(&cells)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.insert_at_ms(&table, cells, now_ms),
+                    db.insert(&table, cells)
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.insert_at_ms(&table, cells, now_ms),
+                    db.insert(&table, cells)
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "insertEncodedForIdentity")]
+    pub fn insert_encoded_for_identity(
+        &self,
+        table: String,
+        cells: Uint8Array,
+        author: Uint8Array,
+        updated_at_ms: Option<f64>,
+    ) -> napi::Result<Write> {
+        let cells = decode_core_cells(&cells)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.insert_for_identity_at_ms(author, &table, cells, now_ms),
+                    db.insert_for_identity(author, &table, cells)
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.insert_for_identity_at_ms(author, &table, cells, now_ms),
+                    db.insert_for_identity(author, &table, cells)
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "insertEncodedInBranch")]
+    pub fn insert_encoded_in_branch(
+        &self,
+        table: String,
+        cells: Uint8Array,
+        branch: JsonValue,
+    ) -> napi::Result<Write> {
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.insert_in_branch(&table, branch, cells))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.insert_in_branch(&table, branch, cells))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "insertEncodedInBranchForIdentity")]
+    pub fn insert_encoded_in_branch_for_identity(
+        &self,
+        table: String,
+        cells: Uint8Array,
+        branch: JsonValue,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        let cells = decode_core_cells(&cells)?;
+        let branch = core_branch_selector_from_json(branch)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.insert_in_branch_for_identity(author, &table, branch, cells))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.insert_in_branch_for_identity(author, &table, branch, cells))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
     }
 
     #[napi(js_name = "insertWithIdEncoded")]
@@ -3162,6 +3338,7 @@ fn core_write_memory(
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Memory { db, tx_id }),
     })
@@ -3179,6 +3356,7 @@ fn core_write_persistent(
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Persistent { db, tx_id }),
     })
@@ -3245,6 +3423,7 @@ fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner,
     })
