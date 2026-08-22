@@ -18,6 +18,7 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
   assert.equal(configured.ios, original.ios, "unrelated Expo configuration is preserved");
   assert.equal(packageJson.exports["./app.plugin"], "./app.plugin.js");
   assert.equal(packageJson.files.includes("app.plugin.js"), true);
+  assert.equal(packageJson.files.includes("scripts"), true);
   assert.equal(packageJson.peerDependencies.expo, ">=54");
 });
 
