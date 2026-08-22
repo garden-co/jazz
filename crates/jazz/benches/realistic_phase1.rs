@@ -1369,8 +1369,7 @@ fn measure_r3_phase_sample(
         "R3 project-board result count changed"
     );
     if matches!(close_mode, R3CloseMode::Clean) {
-        db.close()
-            .expect("close R3 phase receipt db after measured read");
+        block_on(db.close()).expect("close R3 phase receipt db after measured read");
     }
 
     R3PhaseSample {
@@ -1394,8 +1393,7 @@ fn measure_r3_phase_sample(
 fn establish_r3_close_mode(path: &Path, close_mode: R3CloseMode) {
     let db = open_rocks_db_with_author(R3_REOPEN_SEED, AUTHOR, false, path);
     if matches!(close_mode, R3CloseMode::Clean) {
-        db.close()
-            .expect("establish clean-close marker before R3 phase samples");
+        block_on(db.close()).expect("establish clean-close marker before R3 phase samples");
     }
 }
 

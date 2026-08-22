@@ -122,7 +122,7 @@ fn open_receipt_counts_physical_recovery_scans_exactly() {
             )
             .unwrap();
         }
-        node.database.close().unwrap();
+        crate::db::block_on(node.database.close()).unwrap();
     }
 
     let cfs = schema.column_families();
@@ -207,7 +207,7 @@ fn opening_defers_malformed_current_row_to_read() {
             .unwrap();
         let variant_tag = raw.variant_tag();
         let (key, raw) = raw.into_parts();
-        node.database.close().unwrap();
+        crate::db::block_on(node.database.close()).unwrap();
         drop(node);
 
         let cfs = schema.column_families();

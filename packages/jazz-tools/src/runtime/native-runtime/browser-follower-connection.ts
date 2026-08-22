@@ -19,6 +19,7 @@ type BrowserFollowerPortRpcRequest =
   | { type: "init"; sessionClaims: Record<string, unknown> }
   | { type: "wait-server" }
   | { type: "disconnect" }
+  | { type: "delete-storage" }
   | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> };
 
 /** Connects one tab's non-durable in-memory runtime to the elected worker. */
@@ -78,6 +79,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   async disconnect(): Promise<void> {
     await this.ready();
     await this.request({ type: "disconnect" });
+  }
+
+  async deleteStorage(): Promise<void> {
+    await this.ready();
+    await this.request({ type: "delete-storage" });
   }
 
   async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {

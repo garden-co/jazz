@@ -187,6 +187,12 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       result(peer, message.id);
       return;
     }
+    if (message.type === "delete-storage") {
+      await deleteContextStorage(peer.context);
+      result(peer, message.id);
+      setTimeout(() => closeContextPeers(peer.context), 0);
+      return;
+    }
     if (message.type === "reconnect") {
       const serverUrl = peer.context.options.serverUrl;
       if (!serverUrl) throw new Error("Browser runtime reconnect requires a serverUrl");
@@ -230,6 +236,21 @@ function broadcast(context: RuntimeContext, event: BrowserFollowerPortEvent): vo
 function requireRuntime(context: RuntimeContext): NativeRuntimeAdapter {
   if (!context.runtime) throw new Error("Shared browser runtime is closed");
   return context.runtime;
+}
+
+async function deleteContextStorage(context: RuntimeContext): Promise<void> {
+  await context.runtime?.close();
+  context.runtime = null;
+  await context.pageStore?.clear();
+  context.pageStore?.close();
+  context.pageStore = null;
+  context.disposeTelemetry?.();
+  context.disposeTelemetry = null;
+  contexts.delete(context.key);
+}
+
+function closeContextPeers(context: RuntimeContext): void {
+  for (const tabId of [...context.peers.keys()]) closeTab(context, tabId);
 }
 
 function attachPeerTransport(

@@ -65,6 +65,7 @@ export type BrowserFollowerPortRequest =
   | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
   | { type: "wait-server"; id: number }
   | { type: "disconnect"; id: number }
+  | { type: "delete-storage"; id: number }
   | {
       type: "reconnect";
       id: number;

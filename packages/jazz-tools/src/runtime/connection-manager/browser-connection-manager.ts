@@ -97,7 +97,13 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   async deleteClientStorage(): Promise<void> {
     await this.connectionReady;
-    await this.connection?.deleteStorage();
+    const connection = this.connection;
+    await connection?.deleteStorage();
+    this.connection = null;
+    this.connectionReady = null;
+    await connection?.shutdown();
+    await this.shutdownClient();
+    this.connectionError = null;
   }
 
   override async shutdown(): Promise<void> {

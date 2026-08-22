@@ -114,7 +114,8 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   async detachFollowerPort(): Promise<void> {}
 
   async deleteStorage(): Promise<void> {
-    throw new Error("Shared browser storage reset is not implemented yet");
+    await this.ready();
+    await this.connection?.deleteStorage();
   }
 
   async simulateCrash(): Promise<void> {

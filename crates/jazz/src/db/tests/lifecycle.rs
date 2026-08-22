@@ -43,6 +43,6 @@ fn db_close_is_idempotent() {
     db.insert("todos", doctest_support::todo_cells("close me", false))
         .unwrap();
 
-    db.close().unwrap();
-    db.close().unwrap();
+    doctest_support::block_on(db.close()).unwrap();
+    doctest_support::block_on(db.close()).unwrap();
 }

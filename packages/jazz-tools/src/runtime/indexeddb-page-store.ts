@@ -132,6 +132,13 @@ export class IndexedDbPageStore {
     this.db.close();
   }
 
+  async clear(): Promise<void> {
+    const tx = relaxedReadWriteTransaction(this.db, [PAGES_STORE, METADATA_STORE]);
+    tx.objectStore(PAGES_STORE).clear();
+    tx.objectStore(METADATA_STORE).clear();
+    await transactionDone(tx);
+  }
+
   static async destroy(name: string): Promise<void> {
     const request = indexedDB.deleteDatabase(name);
     await requestResult(request);

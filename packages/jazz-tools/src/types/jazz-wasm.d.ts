@@ -156,7 +156,7 @@ declare module "jazz-wasm" {
     onMutationError(callback: (event: any) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
-    close(): boolean;
+    close(): Promise<boolean>;
     connectUpstream(): WasmTransport;
     connectUpstreamWithSession(
       protocolVersion: number,

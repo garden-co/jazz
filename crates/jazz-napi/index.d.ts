@@ -75,7 +75,7 @@ export declare class NapiDb {
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
   mergeableTx(openBatchId: string): Tx
   mergeableTxForIdentity(openBatchId: string, author: Uint8Array): Tx
-  close(): void
+  close(): Promise<undefined>
 }
 
 export declare class PreparedQuery {

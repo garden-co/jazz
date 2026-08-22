@@ -78,6 +78,7 @@ type NativeDbConstructor = {
 };
 
 type NativeDb = {
+  close?(): Promise<unknown>;
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;
   commitTransaction(openBatchId: string, kind?: TransactionKind): Write;
@@ -639,8 +640,14 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime.closed;
   }
 
-  close(): void {
-    if (this.closed) return;
+  async close(): Promise<void> {
+    if (!this.closeRuntimeState()) return;
+    await this.db.close?.();
+    this.db.free?.();
+  }
+
+  private closeRuntimeState(): boolean {
+    if (this.closed) return false;
     this.closed = true;
     for (const subscription of this.subscriptions.values()) {
       for (const source of subscription.sources) {
@@ -650,7 +657,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
       this.db.free?.();
-      return;
+      return false;
     }
     for (const write of this.writes.values()) {
       write.close?.();
@@ -669,8 +676,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerUpstreamAttached = false;
     this.serverCarrier?.close();
     this.serverCarrier = null;
-    this.db.close?.();
-    this.db.free?.();
+    return true;
   }
 
   insert(
