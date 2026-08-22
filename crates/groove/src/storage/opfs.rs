@@ -13,7 +13,8 @@ use opfs_btree::{BTreeOptions, OpfsBTree, SyncFile};
 
 use super::{
     ColumnFamilyName, Error, Key, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
-    StorageFuture, StorageScan, Value, apply_storage_delta, key_codec,
+    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, apply_storage_delta,
+    key_codec,
 };
 
 #[derive(Clone)]
@@ -196,63 +197,36 @@ where
         })
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
-            let start = self.encoded_key(&cf, &start)?;
-            let end = self.encoded_key(&cf, &end)?;
-            let values = self
-                .tree
-                .borrow_mut()
-                .range(&start, &end, usize::MAX)?
-                .into_iter()
-                .map(|(key, value)| {
-                    let (_, user_key) = key_codec::decode_column_family_key(&key)?;
-                    Ok((user_key.to_vec(), value))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let start = self.encoded_key(&cf, &prefix)?;
-            let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
-            let values = self
-                .tree
-                .borrow_mut()
-                .range(&start, &end, usize::MAX)?
-                .into_iter()
-                .map(|(key, value)| {
-                    let (_, user_key) = key_codec::decode_column_family_key(&key)?;
-                    Ok((user_key.to_vec(), value))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let start = self.encoded_key(&cf, &prefix)?;
-            let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
-            let values = self
-                .tree
-                .borrow_mut()
-                .range_reverse(&start, &end, usize::MAX)?
+            let ScanRequest {
+                cf,
+                bounds,
+                direction,
+                max_items,
+            } = request;
+            if max_items == Some(0) {
+                self.encoded_key(&cf, &[])?;
+                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
+            }
+            let (start, end) = match bounds {
+                ScanBounds::Prefix(prefix) => {
+                    let start = self.encoded_key(&cf, &prefix)?;
+                    let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
+                    (start, end)
+                }
+                ScanBounds::Range { start, end } => {
+                    (self.encoded_key(&cf, &start)?, self.encoded_key(&cf, &end)?)
+                }
+            };
+            let limit = max_items.unwrap_or(usize::MAX);
+            let rows = match direction {
+                ScanDirection::Forward => self.tree.borrow_mut().range(&start, &end, limit)?,
+                ScanDirection::Reverse => {
+                    self.tree.borrow_mut().range_reverse(&start, &end, limit)?
+                }
+            };
+            let values = rows
                 .into_iter()
                 .map(|(key, value)| {
                     let (_, user_key) = key_codec::decode_column_family_key(&key)?;

@@ -551,61 +551,6 @@ where
         self.storage.delete(cf, key)
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> crate::storage::StorageFuture<
-        '_,
-        Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
-    > {
-        self.metrics.borrow_mut().record_range(&cf, &start);
-        Box::pin(async move {
-            Ok(Box::new(MeteredStorageCursor {
-                inner: self.storage.scan_range(cf.clone(), start, end).await?,
-                column_family: cf,
-                metrics: &self.metrics,
-            }) as crate::storage::StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> crate::storage::StorageFuture<
-        '_,
-        Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
-    > {
-        self.metrics.borrow_mut().record_range(&cf, &prefix);
-        Box::pin(async move {
-            Ok(Box::new(MeteredStorageCursor {
-                inner: self.storage.scan_prefix(cf.clone(), prefix).await?,
-                column_family: cf,
-                metrics: &self.metrics,
-            }) as crate::storage::StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> crate::storage::StorageFuture<
-        '_,
-        Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
-    > {
-        self.metrics.borrow_mut().record_range(&cf, &prefix);
-        Box::pin(async move {
-            Ok(Box::new(MeteredStorageCursor {
-                inner: self.storage.scan_prefix_reverse(cf.clone(), prefix).await?,
-                column_family: cf,
-                metrics: &self.metrics,
-            }) as crate::storage::StorageScan<'_>)
-        })
-    }
-
     fn last_with_prefix(
         &self,
         cf: String,

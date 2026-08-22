@@ -145,31 +145,6 @@ impl<'a> OwnedStorage<'a> {
         Box::pin(async move { storage.get(cf, key).await })
     }
 
-    pub(crate) fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'a, Result<Vec<KeyValue>, Error>> {
-        let storage = Rc::clone(&self.0);
-        Box::pin(async move {
-            let scan = storage.scan_range(cf, start, end).await?;
-            collect_scan(scan).await
-        })
-    }
-
-    pub(crate) fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'a, Result<Vec<KeyValue>, Error>> {
-        let storage = Rc::clone(&self.0);
-        Box::pin(async move {
-            let scan = storage.scan_prefix(cf, prefix).await?;
-            collect_scan(scan).await
-        })
-    }
-
     pub(crate) fn scan(
         &self,
         request: ScanRequest,
@@ -189,32 +164,6 @@ pub trait StorageCursor {
 
 pub struct ReadyStorageCursor {
     values: std::vec::IntoIter<KeyValue>,
-}
-
-/// Enforces a request bound across cursor batches. This is primarily useful
-/// for delegating wrappers; physical adapters should additionally use the
-/// bound to stop their own iteration before decoding surplus entries.
-struct BoundedStorageCursor<'a> {
-    inner: StorageScan<'a>,
-    remaining: usize,
-}
-
-impl StorageCursor for BoundedStorageCursor<'_> {
-    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
-        Box::pin(async move {
-            if self.remaining == 0 {
-                return Ok(None);
-            }
-            let Some(mut batch) = self.inner.next_batch().await? else {
-                return Ok(None);
-            };
-            if batch.len() > self.remaining {
-                batch.truncate(self.remaining);
-            }
-            self.remaining -= batch.len();
-            Ok((!batch.is_empty()).then_some(batch))
-        })
-    }
 }
 
 impl ReadyStorageCursor {
@@ -453,81 +402,22 @@ pub trait OrderedKvStorage {
         Box::pin(async { Ok(None) })
     }
 
-    /// Begin one explicit ordered scan. New callers should use this method.
-    ///
-    /// The legacy-shaped helpers below remain as thin convenience methods while
-    /// adapters migrate; they deliberately delegate to this single semantic
-    /// request rather than growing a parallel family of bounded APIs.
-    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let ScanRequest {
-                cf,
-                bounds,
-                direction,
-                max_items,
-            } = request;
-            if max_items == Some(0) {
-                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
-            }
-            let scan = match (bounds, direction) {
-                (ScanBounds::Prefix(prefix), ScanDirection::Forward) => {
-                    self.scan_prefix(cf, prefix).await?
-                }
-                (ScanBounds::Prefix(prefix), ScanDirection::Reverse) => {
-                    self.scan_prefix_reverse(cf, prefix).await?
-                }
-                (ScanBounds::Range { start, end }, ScanDirection::Forward) => {
-                    self.scan_range(cf, start, end).await?
-                }
-                // Range scans had no reverse legacy method. The default keeps
-                // correctness during adapter migration; native adapters can
-                // override `scan` with a reverse iterator.
-                (ScanBounds::Range { start, end }, ScanDirection::Reverse) => {
-                    let mut values = collect_scan(self.scan_range(cf, start, end).await?).await?;
-                    values.reverse();
-                    Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>
-                }
-            };
-            Ok(match max_items {
-                Some(remaining) => Box::new(BoundedStorageCursor {
-                    inner: scan,
-                    remaining,
-                }) as StorageScan<'_>,
-                None => scan,
-            })
-        })
-    }
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>>;
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>>;
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let mut values = collect_scan(self.scan_prefix(cf, prefix).await?).await?;
-            values.reverse();
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
-    }
+    /// Begin one explicit ordered scan. `max_items` is part of the storage
+    /// contract: the backend must not decode or retain candidates beyond it.
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>>;
     fn last_with_prefix(
         &self,
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
-            Ok(collect_scan(self.scan_prefix(cf, prefix).await?)
-                .await?
-                .pop())
+            Ok(collect_scan(
+                self.scan(ScanRequest::prefix(cf, prefix).reversed())
+                    .await?,
+            )
+            .await?
+            .into_iter()
+            .next())
         })
     }
     fn last_with_prefix_before_or_at(
@@ -537,11 +427,13 @@ pub trait OrderedKvStorage {
         upper: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
-            Ok(collect_scan(self.scan_prefix(cf, prefix).await?)
-                .await?
-                .into_iter()
-                .take_while(|(key, _)| key <= &upper)
-                .last())
+            Ok(
+                collect_scan(self.scan(ScanRequest::prefix(cf, prefix)).await?)
+                    .await?
+                    .into_iter()
+                    .take_while(|(key, _)| key <= &upper)
+                    .last(),
+            )
         })
     }
     fn write_many(
@@ -564,7 +456,9 @@ pub trait OrderedKvStorage {
         start: Vec<u8>,
         end: Vec<u8>,
     ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
-        Box::pin(async move { collect_scan(self.scan_range(cf, start, end).await?).await })
+        Box::pin(
+            async move { collect_scan(self.scan(ScanRequest::range(cf, start, end)).await?).await },
+        )
     }
 
     fn prefix(
@@ -572,7 +466,9 @@ pub trait OrderedKvStorage {
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
-        Box::pin(async move { collect_scan(self.scan_prefix(cf, prefix).await?).await })
+        Box::pin(
+            async move { collect_scan(self.scan(ScanRequest::prefix(cf, prefix)).await?).await },
+        )
     }
 }
 
@@ -621,31 +517,6 @@ where
         self.as_ref().approximate_class_bytes(cf)
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.as_ref().scan_range(cf, start, end)
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.as_ref().scan_prefix(cf, prefix)
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.as_ref().scan_prefix_reverse(cf, prefix)
-    }
-
     fn last_with_prefix(
         &self,
         cf: String,
@@ -689,23 +560,6 @@ where
 
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         S::delete(*self, cf, key)
-    }
-
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        S::scan_range(*self, cf, start, end)
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        S::scan_prefix(*self, cf, prefix)
     }
 
     fn write_many(
@@ -1077,50 +931,6 @@ impl OrderedKvStorage for LayoutStorage {
         })
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let (physical_cf, physical_start, strip_len) = self.physical_prefix(&cf, &start);
-        let (_, physical_end, _) = self.physical_prefix(&cf, &end);
-        Box::pin(async move {
-            let inner = self
-                .inner
-                .scan_range(physical_cf, physical_start, physical_end)
-                .await?;
-            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
-        Box::pin(async move {
-            let inner = self.inner.scan_prefix(physical_cf, physical_prefix).await?;
-            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
-        Box::pin(async move {
-            let inner = self
-                .inner
-                .scan_prefix_reverse(physical_cf, physical_prefix)
-                .await?;
-            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
-        })
-    }
-
     fn last_with_prefix(
         &self,
         cf: String,
@@ -1128,11 +938,15 @@ impl OrderedKvStorage for LayoutStorage {
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
         Box::pin(async move {
-            Ok(self
-                .inner
-                .last_with_prefix(physical_cf, physical_prefix)
-                .await?
-                .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+            Ok(collect_scan(
+                self.inner
+                    .scan(ScanRequest::prefix(physical_cf, physical_prefix).reversed())
+                    .await?,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|(key, value)| (key[strip_len..].to_vec(), value)))
         })
     }
 
@@ -1145,11 +959,15 @@ impl OrderedKvStorage for LayoutStorage {
         let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
         let (_, physical_upper, _) = self.physical_prefix(&cf, &upper);
         Box::pin(async move {
-            Ok(self
-                .inner
-                .last_with_prefix_before_or_at(physical_cf, physical_prefix, physical_upper)
-                .await?
-                .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+            Ok(collect_scan(
+                self.inner
+                    .scan(ScanRequest::prefix(physical_cf, physical_prefix))
+                    .await?,
+            )
+            .await?
+            .into_iter()
+            .rfind(|(key, _)| key <= &physical_upper)
+            .map(|(key, value)| (key[strip_len..].to_vec(), value)))
         })
     }
 
@@ -1283,31 +1101,6 @@ impl OrderedKvStorage for BoxedStorage {
         self.inner.approximate_class_bytes(cf)
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.inner.scan_range(cf, start, end)
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.inner.scan_prefix(cf, prefix)
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.inner.scan_prefix_reverse(cf, prefix)
-    }
-
     fn last_with_prefix(
         &self,
         cf: String,
@@ -1415,26 +1208,13 @@ where
         Ok(records)
     }
 
-    pub fn scan_range(
-        &self,
-        start: &Key,
-        end: &Key,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.storage
-            .scan_range(self.column_family.to_owned(), start.to_vec(), end.to_vec())
-    }
-
-    pub fn scan_prefix(&self, prefix: &Key) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.storage
-            .scan_prefix(self.column_family.to_owned(), prefix.to_vec())
-    }
-
-    pub fn scan_prefix_reverse(
-        &self,
-        prefix: &Key,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.storage
-            .scan_prefix_reverse(self.column_family.to_owned(), prefix.to_vec())
+    pub fn scan(&self, bounds: ScanBounds) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.storage.scan(ScanRequest {
+            cf: self.column_family.to_owned(),
+            bounds,
+            direction: ScanDirection::Forward,
+            max_items: None,
+        })
     }
 
     pub async fn last_with_prefix(&self, prefix: &Key) -> Result<Option<KeyValue>, Error> {
@@ -1733,83 +1513,6 @@ where
     }
 }
 
-#[cfg(any())]
-impl<S> OrderedKvStorage for StorageTransaction<'_, S>
-where
-    S: OrderedKvStorage,
-{
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes).get(cf, key)
-    }
-
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes).set(cf, key, value)
-    }
-
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes).delete(cf, key)
-    }
-
-    fn scan_range(
-        &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes).scan_range(cf, start, end, visit)
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes).scan_prefix(cf, prefix, visit)
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes)
-            .scan_prefix_reverse(cf, prefix, visit)
-    }
-
-    fn last_with_prefix(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes).last_with_prefix(cf, prefix)
-    }
-
-    fn last_with_prefix_before_or_at(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes)
-            .last_with_prefix_before_or_at(cf, prefix, upper)
-    }
-
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes).write_many(operations)
-    }
-
-    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
-        self.base.approximate_class_bytes(cf)
-    }
-
-    fn column_family_names(&self) -> Option<Vec<String>> {
-        self.base.column_family_names()
-    }
-}
-
 impl<'a, S> StagedWriteOverlay<'a, S> {
     pub(crate) fn new(base: &'a S, staged_writes: &'a RefCell<StagedWriteState>) -> Self {
         Self {
@@ -1838,63 +1541,6 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
     pub fn drain_into(&self, target: &mut Vec<OwnedWriteOperation>) {
         let state = std::mem::take(&mut *self.staged_writes.borrow_mut());
         target.extend(state.into_operations());
-    }
-
-    fn scan_range_from_parts(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
-    where
-        S: OrderedKvStorage,
-    {
-        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
-            operation.cf() == cf
-                && operation.key() >= start.as_slice()
-                && operation.key() < end.as_slice()
-        });
-        let base = self.base.clone();
-        Box::pin(async move {
-            let mut values = collect_scan(
-                base.scan_range(cf.clone(), start.clone(), end.clone())
-                    .await?,
-            )
-            .await?;
-            let staged = RefCell::new(StagedWriteState::from(operations));
-            overlay_values(
-                &mut values,
-                &cf,
-                |key| key >= start.as_slice() && key < end.as_slice(),
-                &staged,
-            )?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'a>)
-        })
-    }
-
-    fn scan_prefix_from_parts(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-        reverse: bool,
-    ) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
-    where
-        S: OrderedKvStorage,
-    {
-        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
-            operation.cf() == cf && operation.key().starts_with(&prefix)
-        });
-        let base = self.base.clone();
-        Box::pin(async move {
-            let mut values =
-                collect_scan(base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
-            let staged = RefCell::new(StagedWriteState::from(operations));
-            overlay_values(&mut values, &cf, |key| key.starts_with(&prefix), &staged)?;
-            if reverse {
-                values.reverse();
-            }
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'a>)
-        })
     }
 }
 
@@ -2098,126 +1744,6 @@ where
         Box::pin(async { Ok(()) })
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.scan_range_from_parts(cf, start, end)
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.scan_prefix_from_parts(cf, prefix, false)
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        self.scan_prefix_from_parts(cf, prefix, true)
-    }
-
-    fn last_with_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
-        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
-            operation.cf() == cf && operation.key().starts_with(&prefix)
-        });
-        Box::pin(async move {
-            let staged = RefCell::new(StagedWriteState::from(operations));
-            let needs_full_merge = staged.borrow().operations.iter().any(|operation| {
-                operation.cf() == cf
-                    && operation.key().starts_with(&prefix)
-                    && matches!(
-                        operation,
-                        OwnedWriteOperation::Delete { .. } | OwnedWriteOperation::Delta { .. }
-                    )
-            });
-
-            if !needs_full_merge {
-                let largest_staged_set = staged_prefix_overlay_desc(&cf, &prefix, &staged)
-                    .into_iter()
-                    .find_map(|(key, value)| value.map(|value| (key, value)));
-                return match (
-                    self.base
-                        .last_with_prefix(cf.clone(), prefix.clone())
-                        .await?,
-                    largest_staged_set,
-                ) {
-                    (Some(base), Some(staged)) if staged.0 >= base.0 => Ok(Some(staged)),
-                    (Some(base), _) => Ok(Some(base)),
-                    (None, staged) => Ok(staged),
-                };
-            }
-
-            let mut values =
-                collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
-            overlay_values(&mut values, &cf, |key| key.starts_with(&prefix), &staged)?;
-            Ok(values.pop())
-        })
-    }
-
-    fn last_with_prefix_before_or_at(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-        upper: Vec<u8>,
-    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
-        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
-            operation.cf() == cf
-                && operation.key().starts_with(&prefix)
-                && operation.key() <= upper.as_slice()
-        });
-        Box::pin(async move {
-            let staged = RefCell::new(StagedWriteState::from(operations));
-            let needs_full_merge = staged.borrow().operations.iter().any(|operation| {
-                operation.cf() == cf
-                    && operation.key().starts_with(&prefix)
-                    && operation.key() <= upper.as_slice()
-                    && matches!(
-                        operation,
-                        OwnedWriteOperation::Delete { .. } | OwnedWriteOperation::Delta { .. }
-                    )
-            });
-
-            if !needs_full_merge {
-                let largest_staged_set =
-                    staged_prefix_overlay_desc_before_or_at(&cf, &prefix, &upper, &staged)
-                        .into_iter()
-                        .find_map(|(key, value)| value.map(|value| (key, value)));
-                return match (
-                    self.base
-                        .last_with_prefix_before_or_at(cf.clone(), prefix.clone(), upper.clone())
-                        .await?,
-                    largest_staged_set,
-                ) {
-                    (Some(base), Some(staged)) if staged.0 >= base.0 => Ok(Some(staged)),
-                    (Some(base), _) => Ok(Some(base)),
-                    (None, staged) => Ok(staged),
-                };
-            }
-
-            let mut values =
-                collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
-            values.retain(|(key, _)| key <= &upper);
-            overlay_values(
-                &mut values,
-                &cf,
-                |key| key.starts_with(&prefix) && key <= upper.as_slice(),
-                &staged,
-            )?;
-            Ok(values.pop())
-        })
-    }
-
     fn write_many(
         &self,
         operations: Vec<OwnedWriteOperation>,
@@ -2239,6 +1765,16 @@ impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        // The overlay is local to this future, so consume its borrowed cursor
+        // before returning an owned cursor to the transaction caller.
+        Box::pin(async move {
+            let overlay = StagedWriteOverlay::new(self.base, &self.staged_writes);
+            let values = collect_scan(overlay.scan(request).await?).await?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
+        })
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             StagedWriteOverlay::new(self.base, &self.staged_writes)
@@ -2264,34 +1800,6 @@ where
             .borrow_mut()
             .stage(OwnedWriteOperation::Delete { cf, key });
         Box::pin(async { Ok(()) })
-    }
-
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes)
-            .scan_range_from_parts(cf, start, end)
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes)
-            .scan_prefix_from_parts(cf, prefix, false)
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        StagedWriteOverlay::new(self.base, &self.staged_writes)
-            .scan_prefix_from_parts(cf, prefix, true)
     }
 
     fn write_many(
@@ -2648,53 +2156,6 @@ fn overlay_values(
     Ok(())
 }
 
-fn staged_prefix_overlay_desc(
-    cf: &ColumnFamilyName,
-    prefix: &Key,
-    staged_writes: &RefCell<StagedWriteState>,
-) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-    let mut overlay = BTreeMap::new();
-    for operation in staged_writes.borrow().operations.iter() {
-        if operation.cf() != cf || !operation.key().starts_with(prefix) {
-            continue;
-        }
-        match operation {
-            OwnedWriteOperation::Set { key, value, .. } => {
-                overlay.insert(key.clone(), Some(value.clone()));
-            }
-            OwnedWriteOperation::Delete { key, .. } => {
-                overlay.insert(key.clone(), None);
-            }
-            OwnedWriteOperation::Delta { .. } => {}
-        }
-    }
-    overlay.into_iter().rev().collect()
-}
-
-fn staged_prefix_overlay_desc_before_or_at(
-    cf: &ColumnFamilyName,
-    prefix: &Key,
-    upper: &Key,
-    staged_writes: &RefCell<StagedWriteState>,
-) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-    let mut overlay = BTreeMap::new();
-    for operation in staged_writes.borrow().operations.iter() {
-        if operation.cf() != cf || !operation.key().starts_with(prefix) || operation.key() > upper {
-            continue;
-        }
-        match operation {
-            OwnedWriteOperation::Set { key, value, .. } => {
-                overlay.insert(key.clone(), Some(value.clone()));
-            }
-            OwnedWriteOperation::Delete { key, .. } => {
-                overlay.insert(key.clone(), None);
-            }
-            OwnedWriteOperation::Delta { .. } => {}
-        }
-    }
-    overlay.into_iter().rev().collect()
-}
-
 #[cfg(any())]
 fn exclusive_upper_bound(key: &[u8]) -> Vec<u8> {
     let mut upper = key.to_vec();
@@ -2991,7 +2452,7 @@ mod tests {
     ) -> Result<Vec<KeyValue>, Error> {
         collect_scan(
             storage
-                .scan_prefix_reverse(cf.to_owned(), prefix.to_vec())
+                .scan(ScanRequest::prefix(cf.to_owned(), prefix.to_vec()).reversed())
                 .await?,
         )
         .await
@@ -3060,6 +2521,12 @@ mod tests {
         .await
         .unwrap();
         assert!(empty.is_empty());
+        assert!(matches!(
+            storage
+                .scan(ScanRequest::prefix("missing".into(), Vec::new()).with_max_items(0))
+                .await,
+            Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
+        ));
     }
 
     fn complex_record_descriptor_and_values() -> (RecordDescriptor, Vec<Value>) {
@@ -3503,11 +2970,11 @@ mod tests {
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.scan_range("missing".into(), b"a".to_vec(), b"z".to_vec()).await,
+            storage.scan(ScanRequest::range("missing".into(), b"a".to_vec(), b"z".to_vec())).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.scan_prefix("missing".into(), b"a".to_vec()).await,
+            storage.scan(ScanRequest::prefix("missing".into(), b"a".to_vec())).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
     }
@@ -3534,7 +3001,11 @@ mod tests {
 
         let visited = collect_scan(
             storage
-                .scan_range("records".into(), b"a".to_vec(), b"c".to_vec())
+                .scan(ScanRequest::range(
+                    "records".into(),
+                    b"a".to_vec(),
+                    b"c".to_vec(),
+                ))
                 .await
                 .unwrap(),
         )
@@ -3685,7 +3156,11 @@ mod tests {
         for _ in 0..REPETITIONS {
             let range = collect_scan(
                 transaction
-                    .scan_range("records".into(), b"target:".to_vec(), b"target;".to_vec())
+                    .scan(ScanRequest::range(
+                        "records".into(),
+                        b"target:".to_vec(),
+                        b"target;".to_vec(),
+                    ))
                     .await
                     .unwrap(),
             )
@@ -3695,7 +3170,7 @@ mod tests {
 
             let prefix = collect_scan(
                 transaction
-                    .scan_prefix("records".into(), b"target:".to_vec())
+                    .scan(ScanRequest::prefix("records".into(), b"target:".to_vec()))
                     .await
                     .unwrap(),
             )
@@ -3705,7 +3180,7 @@ mod tests {
 
             let reverse = collect_scan(
                 transaction
-                    .scan_prefix_reverse("records".into(), b"target:".to_vec())
+                    .scan(ScanRequest::prefix("records".into(), b"target:".to_vec()).reversed())
                     .await
                     .unwrap(),
             )
@@ -4117,7 +3592,11 @@ mod tests {
 
         let range = collect_scan(
             storage
-                .scan_range("records".into(), b"a".to_vec(), b"b".to_vec())
+                .scan(ScanRequest::range(
+                    "records".into(),
+                    b"a".to_vec(),
+                    b"b".to_vec(),
+                ))
                 .await
                 .unwrap(),
         )
@@ -4133,7 +3612,7 @@ mod tests {
 
         let prefix = collect_scan(
             storage
-                .scan_prefix("records".into(), b"a".to_vec())
+                .scan(ScanRequest::prefix("records".into(), b"a".to_vec()))
                 .await
                 .unwrap(),
         )
@@ -4156,6 +3635,13 @@ mod tests {
         where
             S: OrderedKvStorage,
         {
+            fn scan(
+                &self,
+                request: ScanRequest,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.0.scan(request)
+            }
+
             fn get(
                 &self,
                 cf: String,
@@ -4175,23 +3661,6 @@ mod tests {
 
             fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
                 self.0.delete(cf, key)
-            }
-
-            fn scan_range(
-                &self,
-                cf: String,
-                start: Vec<u8>,
-                end: Vec<u8>,
-            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-                self.0.scan_range(cf, start, end)
-            }
-
-            fn scan_prefix(
-                &self,
-                cf: String,
-                prefix: Vec<u8>,
-            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-                self.0.scan_prefix(cf, prefix)
             }
 
             fn write_many(
@@ -4226,7 +3695,7 @@ mod tests {
 
             let optimized = collect_scan(
                 overlay
-                    .scan_prefix_reverse("indices".into(), prefix.to_vec())
+                    .scan(ScanRequest::prefix("indices".into(), prefix.to_vec()).reversed())
                     .await
                     .unwrap(),
             )
@@ -4235,7 +3704,7 @@ mod tests {
 
             let defaulted = collect_scan(
                 default_reverse
-                    .scan_prefix_reverse("indices".into(), prefix.to_vec())
+                    .scan(ScanRequest::prefix("indices".into(), prefix.to_vec()).reversed())
                     .await
                     .unwrap(),
             )
@@ -4366,18 +3835,14 @@ mod tests {
     async fn staged_overlay_last_with_prefix_no_delete_uses_one_base_seek() {
         struct CountingStorage<S> {
             inner: S,
-            prefix_scans: Cell<usize>,
-            reverse_prefix_scans: Cell<usize>,
-            last_with_prefix_calls: Cell<usize>,
+            scans: Cell<usize>,
         }
 
         impl<S> CountingStorage<S> {
             fn new(inner: S) -> Self {
                 Self {
                     inner,
-                    prefix_scans: Cell::new(0),
-                    reverse_prefix_scans: Cell::new(0),
-                    last_with_prefix_calls: Cell::new(0),
+                    scans: Cell::new(0),
                 }
             }
         }
@@ -4407,42 +3872,12 @@ mod tests {
                 self.inner.delete(cf, key)
             }
 
-            fn scan_range(
+            fn scan(
                 &self,
-                cf: String,
-                start: Vec<u8>,
-                end: Vec<u8>,
+                request: ScanRequest,
             ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-                self.inner.scan_range(cf, start, end)
-            }
-
-            fn scan_prefix(
-                &self,
-                cf: String,
-                prefix: Vec<u8>,
-            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-                self.prefix_scans.set(self.prefix_scans.get() + 1);
-                self.inner.scan_prefix(cf, prefix)
-            }
-
-            fn scan_prefix_reverse(
-                &self,
-                cf: String,
-                prefix: Vec<u8>,
-            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-                self.reverse_prefix_scans
-                    .set(self.reverse_prefix_scans.get() + 1);
-                self.inner.scan_prefix_reverse(cf, prefix)
-            }
-
-            fn last_with_prefix(
-                &self,
-                cf: String,
-                prefix: Vec<u8>,
-            ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
-                self.last_with_prefix_calls
-                    .set(self.last_with_prefix_calls.get() + 1);
-                self.inner.last_with_prefix(cf, prefix)
+                self.scans.set(self.scans.get() + 1);
+                self.inner.scan(request)
             }
 
             fn write_many(
@@ -4483,9 +3918,7 @@ mod tests {
                 .unwrap(),
             Some((b"user:3".to_vec(), b"staged-3".to_vec()))
         );
-        assert_eq!(storage.last_with_prefix_calls.get(), 1);
-        assert_eq!(storage.prefix_scans.get(), 0);
-        assert_eq!(storage.reverse_prefix_scans.get(), 0);
+        assert_eq!(storage.scans.get(), 1);
     }
 
     #[futures_test::test]

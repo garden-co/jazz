@@ -104,6 +104,8 @@ impl StorageFactory for RocksDbStorageFactory {
 struct RocksDbCursor<'a> {
     iterator: DBIteratorWithThreadMode<'a, DB>,
     prefix: Option<Vec<u8>>,
+    lower_bound: Vec<u8>,
+    upper_bound: Option<Vec<u8>>,
     done: bool,
     remaining: Option<usize>,
 }
@@ -112,11 +114,15 @@ impl<'a> RocksDbCursor<'a> {
     fn new(
         iterator: DBIteratorWithThreadMode<'a, DB>,
         prefix: Option<Vec<u8>>,
+        lower_bound: Vec<u8>,
+        upper_bound: Option<Vec<u8>>,
         remaining: Option<usize>,
     ) -> Self {
         Self {
             iterator,
             prefix,
+            lower_bound,
+            upper_bound,
             done: false,
             remaining,
         }
@@ -137,6 +143,19 @@ impl StorageCursor for RocksDbCursor<'_> {
                     break;
                 };
                 let (key, value) = item.storage()?;
+                if key.as_ref() < self.lower_bound.as_slice() {
+                    self.done = true;
+                    break;
+                }
+                if self
+                    .upper_bound
+                    .as_ref()
+                    .is_some_and(|upper_bound| key.as_ref() >= upper_bound.as_slice())
+                {
+                    // A reverse iterator positioned at an exclusive end first
+                    // yields that key if it exists. Skip it before traversal.
+                    continue;
+                }
                 if let Some(prefix) = &self.prefix
                     && !key.starts_with(prefix)
                 {
@@ -535,37 +554,14 @@ impl OrderedKvStorage for RocksDbStorage {
                 max_items,
             } = request;
             if max_items == Some(0) {
+                if cf != "default" {
+                    self.cf_handle(&cf)?;
+                }
                 return Ok(
                     Box::new(groove::storage::ReadyStorageCursor::new(Vec::new()))
                         as StorageScan<'_>,
                 );
             }
-            // The optimized path is intentionally only forward: the query
-            // lowerer currently proves source bounds in canonical forward
-            // order. Reverse requests retain the legacy correct behavior until
-            // a reverse range iterator is needed by a real caller.
-            if direction == ScanDirection::Reverse {
-                let mut rows = match bounds {
-                    ScanBounds::Prefix(prefix) => {
-                        groove::storage::collect_scan(self.scan_prefix_reverse(cf, prefix).await?)
-                            .await?
-                    }
-                    ScanBounds::Range { start, end } => {
-                        let mut rows =
-                            groove::storage::collect_scan(self.scan_range(cf, start, end).await?)
-                                .await?;
-                        rows.reverse();
-                        rows
-                    }
-                };
-                if let Some(limit) = max_items {
-                    rows.truncate(limit);
-                }
-                return Ok(
-                    Box::new(groove::storage::ReadyStorageCursor::new(rows)) as StorageScan<'_>
-                );
-            }
-
             let (start, upper_bound, prefix) = match bounds {
                 ScanBounds::Range { start, end } => (start, Some(end), None),
                 ScanBounds::Prefix(prefix) => {
@@ -575,10 +571,26 @@ impl OrderedKvStorage for RocksDbStorage {
                     (prefix.clone(), upper_bound, Some(prefix))
                 }
             };
-            let iterator = match upper_bound {
-                Some(end) => {
+            let iterator = match (direction, upper_bound.as_deref()) {
+                (ScanDirection::Reverse, Some(end)) => {
+                    let mode = IteratorMode::From(end, Direction::Reverse);
+                    if cf == "default" {
+                        self.db.iterator(mode)
+                    } else {
+                        self.db.iterator_cf(self.cf_handle(&cf)?, mode)
+                    }
+                }
+                (ScanDirection::Reverse, None) => {
+                    let mode = IteratorMode::End;
+                    if cf == "default" {
+                        self.db.iterator(mode)
+                    } else {
+                        self.db.iterator_cf(self.cf_handle(&cf)?, mode)
+                    }
+                }
+                (ScanDirection::Forward, Some(end)) => {
                     let mut options = ReadOptions::default();
-                    options.set_iterate_upper_bound(end);
+                    options.set_iterate_upper_bound(end.to_vec());
                     let mode = IteratorMode::From(&start, Direction::Forward);
                     if cf == "default" {
                         self.db.iterator_opt(mode, options)
@@ -586,7 +598,7 @@ impl OrderedKvStorage for RocksDbStorage {
                         self.db.iterator_cf_opt(self.cf_handle(&cf)?, options, mode)
                     }
                 }
-                None => {
+                (ScanDirection::Forward, None) => {
                     let mode = IteratorMode::From(&start, Direction::Forward);
                     if cf == "default" {
                         self.db.iterator(mode)
@@ -595,59 +607,13 @@ impl OrderedKvStorage for RocksDbStorage {
                     }
                 }
             };
-            Ok(Box::new(RocksDbCursor::new(iterator, prefix, max_items)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let mut options = ReadOptions::default();
-            options.set_iterate_upper_bound(end.to_vec());
-
-            let mode = IteratorMode::From(&start, Direction::Forward);
-            let iterator = if cf == "default" {
-                self.db.iterator_opt(mode, options)
-            } else {
-                self.db.iterator_cf_opt(self.cf_handle(&cf)?, options, mode)
-            };
-            Ok(Box::new(RocksDbCursor::new(iterator, None, None)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let mut upper_bound = prefix.to_vec();
-            if !advance_prefix_upper_bound(&mut upper_bound) {
-                let mode = IteratorMode::From(&prefix, Direction::Forward);
-                let iterator = if cf == "default" {
-                    self.db.iterator(mode)
-                } else {
-                    self.db.iterator_cf(self.cf_handle(&cf)?, mode)
-                };
-                return Ok(
-                    Box::new(RocksDbCursor::new(iterator, Some(prefix), None)) as StorageScan<'_>
-                );
-            }
-
-            let mut options = ReadOptions::default();
-            options.set_iterate_upper_bound(upper_bound);
-
-            let mode = IteratorMode::From(&prefix, Direction::Forward);
-            let iterator = if cf == "default" {
-                self.db.iterator_opt(mode, options)
-            } else {
-                self.db.iterator_cf_opt(self.cf_handle(&cf)?, options, mode)
-            };
-            Ok(Box::new(RocksDbCursor::new(iterator, None, None)) as StorageScan<'_>)
+            Ok(Box::new(RocksDbCursor::new(
+                iterator,
+                prefix,
+                start,
+                upper_bound,
+                max_items,
+            )) as StorageScan<'_>)
         })
     }
 

@@ -139,9 +139,6 @@ impl OrderedKvStorage for MemoryStorage {
 
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
-            if request.max_items == Some(0) {
-                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
-            }
             let max_items = request.max_items.unwrap_or(usize::MAX);
             let ScanRequest {
                 cf,
@@ -149,6 +146,10 @@ impl OrderedKvStorage for MemoryStorage {
                 direction,
                 ..
             } = request;
+            if max_items == 0 {
+                self.with_cf(&cf, |_| ())?;
+                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
+            }
             let values = self.with_cf(&cf, |values| match (bounds, direction) {
                 (ScanBounds::Prefix(prefix), ScanDirection::Forward) => values
                     .range(prefix.clone()..)
@@ -184,40 +185,6 @@ impl OrderedKvStorage for MemoryStorage {
                     .take(max_items)
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect(),
-            })?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let values = self.with_cf(&cf, |values| {
-                values
-                    .range(start..end)
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            })?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let values = self.with_cf(&cf, |values| {
-                values
-                    .range(prefix.clone()..)
-                    .take_while(|(key, _)| key.starts_with(&prefix))
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
             })?;
             Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
         })

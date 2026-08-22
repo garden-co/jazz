@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp};
 use crate::records::RecordDescriptor;
-use crate::storage::{OrderedKvStorage, StorageFuture};
+use crate::storage::{OrderedKvStorage, ScanBounds, StorageFuture};
 
 use super::evaluation_session::EvaluationInputs;
 use super::subscriptions::BindingDelta;
@@ -468,11 +468,13 @@ pub(super) async fn snapshot_table_deltas(
         let storage_descriptor = table_schema.record_schema();
         let store = super::record_store_for_table(storage, table_schema, &storage_descriptor);
         let mut cursor = match &source.scan {
-            None => Some(store.scan_prefix(b"").await?),
+            None => Some(store.scan(ScanBounds::Prefix(Vec::new())).await?),
             Some(scan) => match scan_bounds(scan)? {
-                StaticScanBounds::Prefix(prefix) => Some(store.scan_prefix(&prefix).await?),
+                StaticScanBounds::Prefix(prefix) => {
+                    Some(store.scan(ScanBounds::Prefix(prefix)).await?)
+                }
                 StaticScanBounds::Range { start, end } if start < end => {
-                    Some(store.scan_range(&start, &end).await?)
+                    Some(store.scan(ScanBounds::Range { start, end }).await?)
                 }
                 StaticScanBounds::Range { .. } => None,
             },
@@ -1136,7 +1138,7 @@ impl HydrationEvaluator<'_> {
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.table.clone()))?;
         let storage_descriptor = table_schema.record_schema();
         let store = super::record_store_for_table(self.storage, table_schema, &storage_descriptor);
-        let mut scan = store.scan_prefix(b"").await?;
+        let mut scan = store.scan(ScanBounds::Prefix(Vec::new())).await?;
         let mut stored_records = Vec::<Vec<u8>>::new();
         while let Some(batch) = scan.next_batch().await? {
             stored_records.extend(batch.into_iter().map(|(_, record)| record));

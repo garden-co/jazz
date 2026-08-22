@@ -765,27 +765,11 @@ impl OrderedKvStorage for FailReplayScanStorage {
         self.inner.delete(cf, key)
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+    fn scan(&self, request: groove::storage::ScanRequest) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
         if self.fail_scans.replace(false) {
             return Box::pin(async { Err(groove::storage::Error::InvalidStorageLayout("injected replay index scan failure".to_owned())) });
         }
-        self.inner.scan_range(cf, start, end)
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
-        if self.fail_scans.replace(false) {
-            return Box::pin(async { Err(groove::storage::Error::InvalidStorageLayout("injected replay index scan failure".to_owned())) });
-        }
-        self.inner.scan_prefix(cf, prefix)
+        self.inner.scan(request)
     }
 
     fn write_many(&self, operations: Vec<groove::storage::OwnedWriteOperation>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {

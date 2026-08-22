@@ -1850,7 +1850,10 @@ fn run_oneshot_scan() {
         let mut rows = 0usize;
         block_on(async {
             let mut scan = storage
-                .scan_prefix("posts".to_owned(), Vec::new())
+                .scan(groove::storage::ScanRequest::prefix(
+                    "posts".to_owned(),
+                    Vec::new(),
+                ))
                 .await
                 .expect("scan posts");
             while let Some(batch) = scan.next_batch().await.expect("scan batch") {

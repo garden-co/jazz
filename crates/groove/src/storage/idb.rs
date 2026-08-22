@@ -116,15 +116,16 @@ where
 
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
-            if request.max_items == Some(0) {
-                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
-            }
             let ScanRequest {
                 cf,
                 bounds,
                 direction,
                 max_items,
             } = request;
+            if max_items == Some(0) {
+                self.encoded_key(&cf, &[])?;
+                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
+            }
             let (start, end) = match bounds {
                 ScanBounds::Range { start, end } => {
                     (self.encoded_key(&cf, &start)?, self.encoded_key(&cf, &end)?)
@@ -141,46 +142,6 @@ where
                 ScanDirection::Reverse => self.tree.range_reverse(&start, &end, limit).await?,
             };
             Ok(Box::new(ReadyStorageCursor::new(Self::decode_rows(rows)?)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let start = self.encoded_key(&cf, &start)?;
-            let end = self.encoded_key(&cf, &end)?;
-            let rows = Self::decode_rows(self.tree.range(&start, &end).await?)?;
-            Ok(Box::new(ReadyStorageCursor::new(rows)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let start = self.encoded_key(&cf, &prefix)?;
-            let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xff]);
-            let rows = Self::decode_rows(self.tree.range(&start, &end).await?)?;
-            Ok(Box::new(ReadyStorageCursor::new(rows)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let start = self.encoded_key(&cf, &prefix)?;
-            let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xff]);
-            let rows = Self::decode_rows(self.tree.range_reverse(&start, &end, usize::MAX).await?)?;
-            Ok(Box::new(ReadyStorageCursor::new(rows)) as StorageScan<'_>)
         })
     }
 
