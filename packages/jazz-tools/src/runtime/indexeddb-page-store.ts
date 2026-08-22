@@ -162,7 +162,12 @@ export class IndexedDbPageStore {
 
   static async destroy(name: string): Promise<void> {
     const request = indexedDB.deleteDatabase(name);
-    await requestResult(request);
+    await new Promise<void>((resolve, reject) => {
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error ?? new Error("IndexedDB deletion failed"));
+      request.onblocked = () =>
+        reject(new Error(`IndexedDB deletion was blocked by an open connection: ${name}`));
+    });
   }
 
   private readonly handleVersionChange = (): void => {

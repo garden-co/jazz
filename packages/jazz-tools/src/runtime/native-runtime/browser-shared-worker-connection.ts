@@ -55,6 +55,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           runtime,
           port,
           options.sessionClaims,
+          options.dbName,
           {
             onAuthFailure: callbacks.onAuthFailure,
             onAuthRestored: callbacks.onAuthRestored,
@@ -116,6 +117,11 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     await this.connection?.shutdown();
     this.connection = null;
     this.worker.port.close();
+  }
+
+  async flushLocal(): Promise<void> {
+    await this.ready();
+    await this.connection?.flushLocal();
   }
 
   async deleteStorage(): Promise<void> {

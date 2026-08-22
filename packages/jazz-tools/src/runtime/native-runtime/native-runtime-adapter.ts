@@ -483,10 +483,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly pendingTxs: Map<string, PendingTx>;
   private readonly completedTxs: Map<string, CompletedTx>;
   private readonly writes: Map<string, Write>;
+  private readonly pendingLocalSettlements = new Set<Promise<void>>();
   private readonly ownerRuntime: NativeRuntimeAdapter;
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
+  private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
+  private readonly deliveredMutationErrors = new Set<string>();
   private serverTransport: Transport | null = null;
   private peerUpstreamAttached = false;
   private nonDurableClient = false;
@@ -647,6 +650,9 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   async close(): Promise<void> {
+    if (this === this.ownerRuntime && this.pendingLocalSettlements.size > 0) {
+      await Promise.all(this.pendingLocalSettlements);
+    }
     if (!this.closeRuntimeState()) return;
     await this.db.close?.();
     this.db.free?.();
@@ -1086,7 +1092,9 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
-    return recordWrite(write, this.writes);
+    const batchId = recordWrite(write, this.writes);
+    this.trackLocalSettlement(batchId);
+    return batchId;
   }
 
   async waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
@@ -1441,7 +1449,36 @@ export class NativeRuntimeAdapter implements Runtime {
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onMutationError(callback);
-    this.db.onMutationError(callback);
+    this.mutationErrorCallback = callback;
+    this.db.onMutationError((event) => this.deliverMutationError(event));
+  }
+
+  reportRemoteMutationError(event: MutationErrorEvent): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.reportRemoteMutationError(event);
+    this.deliverMutationError(event);
+  }
+
+  async flushLocalSettlements(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.flushLocalSettlements();
+    if (this.pendingLocalSettlements.size > 0) {
+      await Promise.all(this.pendingLocalSettlements);
+    }
+  }
+
+  private deliverMutationError(event: MutationErrorEvent): void {
+    const transactionId = event.transaction.transactionId;
+    if (this.deliveredMutationErrors.has(transactionId)) return;
+    this.deliveredMutationErrors.add(transactionId);
+    this.mutationErrorCallback?.(event);
+  }
+
+  private trackLocalSettlement(batchId: BatchId): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.trackLocalSettlement(batchId);
+    let settlement!: Promise<void>;
+    settlement = this.waitForTransaction(batchId, "local")
+      .catch(() => undefined)
+      .finally(() => this.pendingLocalSettlements.delete(settlement));
+    this.pendingLocalSettlements.add(settlement);
   }
 
   private finishInsert(

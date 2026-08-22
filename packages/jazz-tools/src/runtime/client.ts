@@ -178,6 +178,8 @@ export interface Runtime {
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
   close?(): void | Promise<void>;
+  /** Abandon a runtime whose backing persistence epoch was invalidated. */
+  discard?(): void;
   clearClientStorage?(): Promise<void>;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect(url: string, auth_json: string): void;
@@ -1399,6 +1401,11 @@ export class JazzClient {
     })();
 
     return await this.shutdownPromise;
+  }
+
+  /** @internal Abandon runtime work after external storage invalidation/reset. */
+  discard(): void {
+    this.runtime.discard?.();
   }
 
   async clearClientStorage(): Promise<void> {

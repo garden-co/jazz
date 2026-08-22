@@ -9,6 +9,7 @@ import type {
   BrowserFollowerPortRequest,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
+import { IndexedDbPageStore } from "../indexeddb-page-store.js";
 
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
@@ -20,7 +21,11 @@ type BrowserFollowerPortRpcRequest =
   | { type: "init"; sessionClaims: Record<string, unknown> }
   | { type: "wait-server" }
   | { type: "disconnect" }
-  | { type: "delete-storage" }
+  | { type: "flush-local" }
+  | { type: "close" }
+  | { type: "prepare-storage-reset" }
+  | { type: "finish-storage-reset" }
+  | { type: "abort-storage-reset" }
   | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> };
 
 /** Connects one tab's non-durable in-memory runtime to the elected worker. */
@@ -33,9 +38,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private failed: Error | null = null;
 
   constructor(
-    runtime: NativeRuntimeAdapter,
+    private readonly runtime: NativeRuntimeAdapter,
     private readonly port: MessagePort,
     sessionClaims: Record<string, unknown>,
+    private readonly dbName: string | null,
     private readonly callbacks: Pick<
       BrowserFollowerConnectionContext,
       "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset" | "onStorageInvalidated"
@@ -84,7 +90,15 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
 
   async deleteStorage(): Promise<void> {
     await this.ready();
-    await this.request({ type: "delete-storage" });
+    if (!this.dbName) throw new Error("Browser storage reset requires its IndexedDB name");
+    await this.request({ type: "prepare-storage-reset" });
+    try {
+      await IndexedDbPageStore.destroy(this.dbName);
+    } catch (error) {
+      await this.request({ type: "abort-storage-reset" }).catch(() => undefined);
+      throw error;
+    }
+    await this.request({ type: "finish-storage-reset" });
   }
 
   async openInspectorControlPort(): Promise<MessagePort> {
@@ -126,8 +140,14 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
 
   async shutdown(): Promise<void> {
     if (this.closed) return;
-    this.port.postMessage({ type: "close" } satisfies BrowserFollowerPortRequest);
+    await this.request({ type: "close" });
     this.dispose(new Error("Browser follower connection is closed"));
+  }
+
+  async flushLocal(): Promise<void> {
+    await this.ready();
+    await this.pump.flush();
+    await this.request({ type: "flush-local" });
   }
 
   detachForReconnect(): void {
@@ -160,9 +180,13 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.callbacks.onAuthRestored();
       return;
     }
+    if (message.type === "mutation-error") {
+      this.runtime.reportRemoteMutationError(message.event);
+      return;
+    }
     if (message.type === "storage-reset") {
       for (const [id, pending] of this.pending) {
-        if (pending.type !== "delete-storage") continue;
+        if (pending.type !== "finish-storage-reset") continue;
         this.pending.delete(id);
         pending.resolve();
       }

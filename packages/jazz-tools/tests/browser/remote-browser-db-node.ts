@@ -7,6 +7,8 @@ import type {
 interface RemoteBrowserDbHandle {
   context: BrowserContext;
   pages: Page[];
+  input: RemoteBrowserDbCreateInput;
+  harnessUrl: string;
 }
 
 const HARNESS_LOAD_COUNT_KEY = "jazz-test:remote-harness-load-count";
@@ -75,7 +77,33 @@ export async function createRemoteBrowserDb(
   remoteBrowserDbs.set(input.id, {
     context: remoteContext,
     pages,
+    input,
+    harnessUrl: harnessUrlFromPage(currentPage),
   });
+}
+
+export async function restartRemoteBrowserDb(id: string): Promise<void> {
+  const handle = remoteBrowserDbs.get(id);
+  if (!handle) throw new Error(`Remote browser db "${id}" is not open`);
+  await Promise.all(
+    handle.pages.map((page) =>
+      evaluateHarness(page, "closeRemoteBrowserDb", id).catch(() => undefined),
+    ),
+  );
+  await Promise.all(handle.pages.map((page) => page.close()));
+  handle.pages.length = 0;
+  // With every owner page gone, the browser terminates the SharedWorker. The
+  // context remains alive so its origin-scoped IndexedDB survives the restart.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  for (let index = 0; index < (handle.input.tabCount ?? 1); index += 1) {
+    const page = await handle.context.newPage();
+    await page.goto(handle.harnessUrl, { waitUntil: "domcontentloaded" });
+    await evaluateHarness(page, "createRemoteBrowserDb", {
+      ...handle.input,
+      initialRow: undefined,
+    });
+    handle.pages.push(page);
+  }
 }
 
 export async function deleteRemoteBrowserIndexedDbAndWaitForReload(
@@ -112,6 +140,28 @@ export async function waitForRemoteBrowserDbTitle(
   }
 
   return evaluateHarness(handle.pages[0]!, "waitForRemoteBrowserDbTitle", input);
+}
+
+export async function insertRemoteBrowserDbRow(
+  id: string,
+  tabIndex: number,
+  row: Record<string, unknown>,
+): Promise<void> {
+  const handle = remoteBrowserDbs.get(id);
+  const page = handle?.pages[tabIndex];
+  if (!page) throw new Error(`Remote browser db "${id}" tab ${tabIndex} is not open`);
+  await evaluateHarness(page, "insertRemoteBrowserDbRow", { id, row });
+}
+
+export async function queryRemoteBrowserDbRows(
+  id: string,
+  tabIndex: number,
+  tier?: "local" | "edge",
+): Promise<Record<string, unknown>[]> {
+  const handle = remoteBrowserDbs.get(id);
+  const page = handle?.pages[tabIndex];
+  if (!page) throw new Error(`Remote browser db "${id}" tab ${tabIndex} is not open`);
+  return evaluateHarness(page, "queryRemoteBrowserDbRows", { id, tier });
 }
 
 export async function closeRemoteBrowserDb(id: string): Promise<void> {

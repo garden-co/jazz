@@ -1,5 +1,6 @@
 import type { WasmSchema } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
+import type { MutationErrorEvent } from "../client.js";
 
 export interface BrowserWorkerInitOptions {
   runtimeSources?: RuntimeSourcesConfig;
@@ -34,7 +35,10 @@ export type BrowserFollowerPortRequest =
   | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
   | { type: "wait-server"; id: number }
   | { type: "disconnect"; id: number }
-  | { type: "delete-storage"; id: number }
+  | { type: "flush-local"; id: number }
+  | { type: "prepare-storage-reset"; id: number }
+  | { type: "finish-storage-reset"; id: number }
+  | { type: "abort-storage-reset"; id: number }
   | { type: "storage-reset-observed"; resetId: number }
   | { type: "open-inspector-control"; id: number; port: MessagePort }
   | {
@@ -43,7 +47,7 @@ export type BrowserFollowerPortRequest =
       authJson: string;
       sessionClaims: Record<string, unknown>;
     }
-  | { type: "close" };
+  | { type: "close"; id?: number };
 
 export interface BrowserInspectorContext {
   key: string;
@@ -72,6 +76,7 @@ export type BrowserFollowerPortEvent =
   | { type: "result"; id: number; error?: string }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }
+  | { type: "mutation-error"; event: MutationErrorEvent }
   | { type: "storage-reset"; resetId: number }
   | { type: "storage-invalidated" }
   | { type: "error"; message: string };

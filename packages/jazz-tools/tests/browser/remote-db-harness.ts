@@ -27,6 +27,7 @@ export interface RemoteBrowserDbWaitForTitleInput {
 interface RemoteBrowserDbState {
   db: Db;
   query: QueryBuilder<Record<string, unknown>>;
+  table: QueryBuilder<Record<string, unknown>>;
 }
 
 declare global {
@@ -80,21 +81,40 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
   });
 
   const query = makeAllRowsQuery(input.table, schema);
+  const table = {
+    _table: input.table,
+    _schema: schema,
+    _rowType: {} as Record<string, unknown>,
+    _initType: {} as Record<string, unknown>,
+  };
   if (input.initialize) await db.all(query, { tier: "local" });
   if (input.initialRow) {
-    const table = {
-      _table: input.table,
-      _schema: schema,
-      _rowType: {} as Record<string, unknown>,
-      _initType: {} as Record<string, unknown>,
-    };
     await db.insert(table, input.initialRow).wait({ tier: "local" });
   }
 
   store.set(input.id, {
     db,
     query,
+    table,
   });
+}
+
+export async function insertRemoteBrowserDbRow(input: {
+  id: string;
+  row: Record<string, unknown>;
+}): Promise<void> {
+  const state = getRemoteStateStore().get(input.id);
+  if (!state) throw new Error(`Remote browser db "${input.id}" was not initialized`);
+  await state.db.insert(state.table, input.row).wait({ tier: "local" });
+}
+
+export async function queryRemoteBrowserDbRows(input: {
+  id: string;
+  tier?: "local" | "edge";
+}): Promise<Record<string, unknown>[]> {
+  const state = getRemoteStateStore().get(input.id);
+  if (!state) throw new Error(`Remote browser db "${input.id}" was not initialized`);
+  return state.db.all(state.query, { tier: input.tier ?? "local" });
 }
 
 export async function waitForRemoteBrowserDbTitle(

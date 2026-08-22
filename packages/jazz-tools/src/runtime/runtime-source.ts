@@ -29,12 +29,14 @@ export interface BrowserWorkerConnection {
   disconnect(): Promise<void>;
   reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   deleteStorage(): Promise<void>;
+  flushLocal(): Promise<void>;
   openInspectorControlPort(): Promise<MessagePort>;
   shutdown(): Promise<void>;
 }
 
 export interface BrowserFollowerConnection {
   ready(): Promise<void>;
+  flushLocal(): Promise<void>;
   waitForServerConnection(): Promise<void>;
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void;
   detachForReconnect(): void;

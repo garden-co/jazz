@@ -10,6 +10,7 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
     runtime: NativeRuntimeAdapter,
     port: MessagePort,
     sessionClaims: Record<string, unknown>,
+    dbName: string,
     callbacks: Pick<
       BrowserWorkerConnectionContext,
       "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset" | "onStorageInvalidated"
@@ -19,6 +20,7 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
       runtime,
       port,
       sessionClaims,
+      dbName,
       callbacks,
     );
   }
@@ -45,6 +47,10 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
 
   deleteStorage(): Promise<void> {
     return this.connection.deleteStorage();
+  }
+
+  flushLocal(): Promise<void> {
+    return this.connection.flushLocal();
   }
 
   shutdown(): Promise<void> {

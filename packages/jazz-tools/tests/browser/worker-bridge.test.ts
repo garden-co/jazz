@@ -31,10 +31,15 @@ import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
   deleteRemoteBrowserIndexedDbAndWaitForReload,
+  insertRemoteBrowserDbRow,
+  queryRemoteBrowserDbRows,
+  restartRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s } from "../../src/";
 import { deploy } from "../../src/dev/catalogue.js";
+
+declare const __JAZZ_BROWSER_SOAK__: string;
 
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
@@ -1918,6 +1923,126 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     unsubscribe();
   });
+
+  it("converges concurrent writes across three tabs with exact cardinality", async () => {
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("three-tab-cardinality"));
+    const dbName = uniqueDbName("three-tab-cardinality-store");
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId: "test-app",
+      dbName,
+      table: "todos",
+      schemaJson: JSON.stringify(app.wasmSchema),
+      tabCount: 3,
+      initialize: true,
+    });
+
+    const rows = Array.from({ length: 18 }, (_, index) => ({
+      title: `tab-${index % 3}-row-${index}`,
+      done: index % 2 === 0,
+    }));
+    await Promise.all(
+      rows.map((row, index) => insertRemoteBrowserDbRow(remoteDbId, index % 3, row)),
+    );
+
+    await waitForCondition(
+      async () => {
+        const snapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        );
+        return snapshots.every(
+          (snapshot) =>
+            snapshot.length === rows.length &&
+            new Set(snapshot.map((row) => row.title)).size === rows.length,
+        );
+      },
+      10_000,
+      "All tabs should observe every concurrent write exactly once",
+    );
+
+    for (let tabIndex = 0; tabIndex < 3; tabIndex += 1) {
+      const snapshot = await queryRemoteBrowserDbRows(remoteDbId, tabIndex);
+      expect(snapshot).toHaveLength(rows.length);
+      expect(snapshot.map((row) => row.title).sort()).toEqual(rows.map((row) => row.title).sort());
+    }
+  });
+
+  it("rehydrates exact multi-tab state after the SharedWorker restarts", async () => {
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("worker-restart-cardinality"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId: "test-app",
+      dbName: uniqueDbName("worker-restart-cardinality-store"),
+      table: "todos",
+      schemaJson: JSON.stringify(app.wasmSchema),
+      tabCount: 2,
+      initialize: true,
+    });
+    const expected = Array.from({ length: 12 }, (_, index) => ({
+      title: `before-worker-restart-${index}`,
+      done: index % 2 === 0,
+    }));
+    await Promise.all(
+      expected.map((row, index) => insertRemoteBrowserDbRow(remoteDbId, index % 2, row)),
+    );
+    await waitForCondition(
+      async () => (await queryRemoteBrowserDbRows(remoteDbId, 0)).length === expected.length,
+      8000,
+      "Seed writes should converge before terminating the worker",
+    );
+
+    await restartRemoteBrowserDb(remoteDbId);
+
+    for (let tabIndex = 0; tabIndex < 2; tabIndex += 1) {
+      const snapshot = await queryRemoteBrowserDbRows(remoteDbId, tabIndex);
+      expect(snapshot).toHaveLength(expected.length);
+      expect(new Set(snapshot.map((row) => row.title))).toEqual(
+        new Set(expected.map((row) => row.title)),
+      );
+    }
+  });
+
+  it.runIf(__JAZZ_BROWSER_SOAK__ === "1")(
+    "survives repeated concurrent writes and SharedWorker restarts without cardinality drift",
+    async () => {
+      const remoteDbId = trackRemoteBrowserDb(uniqueDbName("worker-restart-soak"));
+      await createRemoteBrowserDb({
+        id: remoteDbId,
+        appId: "test-app",
+        dbName: uniqueDbName("worker-restart-soak-store"),
+        table: "todos",
+        schemaJson: JSON.stringify(app.wasmSchema),
+        tabCount: 3,
+        initialize: true,
+      });
+      const expectedTitles = new Set<string>();
+      for (let round = 0; round < 12; round += 1) {
+        const writes = Array.from({ length: 6 }, (_, index) => ({
+          title: `soak-${round}-${index}-${Math.random().toString(36).slice(2)}`,
+          done: (round + index) % 2 === 0,
+        }));
+        writes.forEach((row) => expectedTitles.add(row.title));
+        await Promise.all(
+          writes.map((row, index) => insertRemoteBrowserDbRow(remoteDbId, index % 3, row)),
+        );
+        await waitForCondition(
+          async () =>
+            (await queryRemoteBrowserDbRows(remoteDbId, round % 3)).length === expectedTitles.size,
+          10_000,
+          `Soak round ${round} should converge before restart`,
+        );
+        await restartRemoteBrowserDb(remoteDbId);
+        const snapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        );
+        for (const snapshot of snapshots) {
+          expect(snapshot).toHaveLength(expectedTitles.size);
+          expect(new Set(snapshot.map((row) => row.title))).toEqual(expectedTitles);
+        }
+      }
+    },
+    180_000,
+  );
 
   it("syncs a tab opened after the shared runtime is already ready", async () => {
     const dbName = uniqueDbName("late-tab-route");

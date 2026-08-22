@@ -19,6 +19,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   private connectionReady: Promise<void> | null = null;
   private connectionError: Error | null = null;
   private disconnected = false;
+  private readonly reconnectWaiters = new Set<() => void>();
   private storageReset: Promise<void> | null = null;
 
   constructor(host: DbForConnection) {
@@ -50,12 +51,15 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   async ensureReady(tier?: DurabilityTier): Promise<void> {
+    if (this.host.isShuttingDown) return;
     await this.storageReset;
     if (this.connectionError) throw this.connectionError;
     await this.connectionReady;
+    if (this.host.isShuttingDown) return;
     if (this.connectionError) throw this.connectionError;
     if (this.disconnected && tier !== "local") {
-      throw new Error("Db is disconnected");
+      await new Promise<void>((resolve) => this.reconnectWaiters.add(resolve));
+      if (this.host.isShuttingDown) return;
     }
     if (this.host.config.serverUrl && tier !== "local") {
       await this.connection?.waitForServerConnection();
@@ -85,6 +89,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       runtimeSessionClaims(this.host.config),
     );
     this.disconnected = false;
+    this.resolveReconnectWaiters();
   }
 
   override updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
@@ -112,7 +117,9 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.connection = null;
     this.connectionReady = null;
     const client = this.detachClient();
-    this.storageReset = Promise.all([connection.shutdown(), client?.shutdown()])
+    client?.discard();
+    this.storageReset = connection
+      .shutdown()
       .then(() => undefined)
       .finally(() => {
         this.connectionError = null;
@@ -130,8 +137,16 @@ export class BrowserConnectionManager extends ConnectionManager {
     const connection = this.connection;
     this.connection = null;
     this.connectionReady = null;
-    await connection?.shutdown();
+    this.resolveReconnectWaiters();
+    await connection?.flushLocal();
     await super.shutdown();
+    await connection?.shutdown();
+  }
+
+  private resolveReconnectWaiters(): void {
+    const waiters = [...this.reconnectWaiters];
+    this.reconnectWaiters.clear();
+    for (const resolve of waiters) resolve();
   }
 }
 

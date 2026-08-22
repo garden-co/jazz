@@ -183,6 +183,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         runtime,
         config.runtimeSources.browserWorkerPort,
         resolveClientSessionSync(config)?.claims ?? {},
+        dbName,
         { onAuthFailure, onAuthRestored, onFailure, onStorageReset, onStorageInvalidated },
       );
     }
@@ -221,11 +222,17 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       throw new Error("Browser follower connections require the native runtime adapter");
     }
     const sessionClaims = resolveClientSessionSync(config)?.claims ?? {};
-    const connection = new MessagePortBrowserFollowerConnection(runtime, port, sessionClaims, {
-      onAuthFailure,
-      onAuthRestored,
-      onFailure,
-    });
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime,
+      port,
+      sessionClaims,
+      null,
+      {
+        onAuthFailure,
+        onAuthRestored,
+        onFailure,
+      },
+    );
     connection.updateAuth(JSON.stringify(runtimeAuth(config)), sessionClaims);
     return connection;
   }

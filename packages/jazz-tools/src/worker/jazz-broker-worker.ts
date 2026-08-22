@@ -21,6 +21,7 @@ import type {
 import { openConfig } from "../runtime/native-runtime/native-codec.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
+import type { MutationErrorEvent } from "../runtime/client.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -35,6 +36,7 @@ type TabPeer = {
   pump: BrowserWorkerTransportPump | null;
   subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]> | null;
   pendingFrames: Uint8Array[];
+  flushedLocal: boolean;
   onMessage: (event: MessageEvent<BrowserFollowerPortRequest>) => void;
   onMessageError: () => void;
 };
@@ -50,9 +52,11 @@ type RuntimeContext = {
   disposeTelemetry: (() => void) | null;
   resetBarrier: { id: number; pending: Set<string>; resolve: () => void } | null;
   storageInvalidated: boolean;
+  intentionalStorageReset: boolean;
   serverUrl: string | null;
   serverAuthJson: string;
   serverConnectionStarted: boolean;
+  pendingMutationErrors: Map<string, MutationErrorEvent>;
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
@@ -90,8 +94,8 @@ async function connectTab(
     }
     configureServer(context, message.options);
     await context.initialize;
-    post(port, { type: "runtime-ready" });
     attachTab(context, message.tabId, port);
+    post(port, { type: "runtime-ready" });
   } catch (error) {
     post(port, { type: "runtime-error", message: asError(error).message });
     port.close();
@@ -113,9 +117,11 @@ function createContext(
     disposeTelemetry: null,
     resetBarrier: null,
     storageInvalidated: false,
+    intentionalStorageReset: false,
     serverUrl: options.serverUrl ?? null,
     serverAuthJson: options.authJson,
     serverConnectionStarted: false,
+    pendingMutationErrors: new Map(),
     initialize: Promise.resolve(),
   };
   const initializeContext = contextInitializationTail.then(() => initialize(context));
@@ -152,6 +158,13 @@ async function initialize(context: RuntimeContext): Promise<void> {
     false,
   );
   context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
+  context.runtime.onMutationError((event) => {
+    if (context.peers.size === 0) {
+      context.pendingMutationErrors.set(event.transaction.transactionId, event);
+      return;
+    }
+    broadcast(context, { type: "mutation-error", event });
+  });
 }
 
 function configureServer(context: RuntimeContext, options: BrowserWorkerInitOptions): void {
@@ -186,6 +199,7 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
     pump: null,
     subscriber: null,
     pendingFrames: [],
+    flushedLocal: false,
     onMessage,
     onMessageError,
   };
@@ -197,6 +211,7 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
 async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortRequest): Promise<void> {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
   if (message.type === "frames") {
+    peer.flushedLocal = false;
     if (!peer.pump) {
       // The init handler may be awaiting an evaluator pass while MessagePort
       // delivery continues. Preserve ordering instead of treating those
@@ -208,6 +223,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     return;
   }
   if (message.type === "close") {
+    if (message.id !== undefined) result(peer, message.id);
+    if (peer.context.peers.size === 1 && peer.flushedLocal) {
+      releaseIdleContext(peer.context);
+    }
     closeTab(peer.context, peer.tabId);
     return;
   }
@@ -220,6 +239,22 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     result(peer, message.id);
     return;
   }
+  if (message.type === "prepare-storage-reset") {
+    peer.context.intentionalStorageReset = true;
+    result(peer, message.id);
+    return;
+  }
+  if (message.type === "abort-storage-reset") {
+    peer.context.intentionalStorageReset = false;
+    result(peer, message.id);
+    return;
+  }
+  if (message.type === "finish-storage-reset") {
+    await finalizeContextStorageReset(peer.context);
+    void notifyStorageReset(peer.context);
+    result(peer, message.id);
+    return;
+  }
 
   try {
     const activeRuntime = requireRuntime(peer.context);
@@ -229,12 +264,16 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       // If hydration currently owns node state, join that evaluator pass first
       // so attachment cannot use a binding-time borrow during evaluation.
       await activeRuntime.progressPeerTransport();
-      attachPeerTransport(peer, activeRuntime, message.sessionClaims);
+      const pump = attachPeerTransport(peer, activeRuntime, message.sessionClaims);
       if (peer.pendingFrames.length > 0) {
         const pending = peer.pendingFrames.splice(0);
-        peer.pump?.receive(pending);
+        pump.receive(pending);
       }
       ensureServerConnection(peer.context);
+      for (const event of peer.context.pendingMutationErrors.values()) {
+        post(peer.port, { type: "mutation-error", event });
+      }
+      peer.context.pendingMutationErrors.clear();
       result(peer, message.id);
       return;
     }
@@ -252,11 +291,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       result(peer, message.id);
       return;
     }
-    if (message.type === "delete-storage") {
-      await deleteContextStorage(peer.context);
-      await notifyStorageReset(peer.context);
+    if (message.type === "flush-local") {
+      await activeRuntime.progressPeerTransport();
+      await activeRuntime.flushLocalSettlements();
+      peer.flushedLocal = true;
       result(peer, message.id);
-      setTimeout(() => closeContextPeers(peer.context), 0);
       return;
     }
     if (message.type === "reconnect") {
@@ -354,9 +393,16 @@ function closeTab(context: RuntimeContext, tabId: string): void {
   acknowledgeReset(context, tabId);
   peer.port.removeEventListener("message", peer.onMessage);
   peer.port.removeEventListener("messageerror", peer.onMessageError);
-  peer.pump?.close();
-  peer.subscriber?.free?.();
+  detachPeerRuntime(peer);
   peer.port.close();
+}
+
+function detachPeerRuntime(peer: TabPeer): void {
+  peer.pump?.close();
+  peer.pump = null;
+  peer.subscriber?.free?.();
+  peer.subscriber = null;
+  peer.pendingFrames.length = 0;
 }
 
 function broadcast(context: RuntimeContext, event: BrowserFollowerPortEvent): void {
@@ -368,10 +414,18 @@ function requireRuntime(context: RuntimeContext): NativeRuntimeAdapter {
   return context.runtime;
 }
 
-async function deleteContextStorage(context: RuntimeContext): Promise<void> {
-  await context.runtime?.close();
+async function finalizeContextStorageReset(context: RuntimeContext): Promise<void> {
+  context.intentionalStorageReset = false;
+  for (const peer of context.peers.values()) {
+    // The persistence epoch is already gone. Do not call into transport or
+    // subscriber wrappers whose WASM receiver may still be unwinding the IDB
+    // versionchange; abandon them with the discarded runtime instead.
+    peer.pump = null;
+    peer.subscriber = null;
+    peer.pendingFrames.length = 0;
+  }
+  context.runtime?.discard();
   context.runtime = null;
-  await context.pageStore?.clear();
   context.pageStore?.close();
   context.pageStore = null;
   context.disposeTelemetry?.();
@@ -379,11 +433,32 @@ async function deleteContextStorage(context: RuntimeContext): Promise<void> {
   contexts.delete(context.key);
 }
 
+function releaseIdleContext(context: RuntimeContext): void {
+  if (contexts.get(context.key) === context) contexts.delete(context.key);
+  for (const peer of context.peers.values()) {
+    peer.pump = null;
+    peer.subscriber = null;
+    peer.pendingFrames.length = 0;
+  }
+  context.runtime?.discard();
+  context.runtime = null;
+  context.pageStore?.close();
+  context.pageStore = null;
+  context.disposeTelemetry?.();
+  context.disposeTelemetry = null;
+}
+
 function closeContextPeers(context: RuntimeContext): void {
   for (const tabId of context.peers.keys()) closeTab(context, tabId);
 }
 
 function handleStorageInvalidation(context: RuntimeContext): void {
+  if (context.intentionalStorageReset) {
+    context.runtime?.discard();
+    context.runtime = null;
+    context.pageStore = null;
+    return;
+  }
   if (context.storageInvalidated) return;
   context.storageInvalidated = true;
   contexts.delete(context.key);
@@ -422,7 +497,7 @@ function attachPeerTransport(
   peer: TabPeer,
   activeRuntime: NativeRuntimeAdapter,
   sessionClaims: Record<string, unknown>,
-): void {
+): BrowserWorkerTransportPump {
   peer.subscriber = activeRuntime.acceptPeer(sessionClaims);
   peer.pump = new BrowserWorkerTransportPump(
     activeRuntime,
@@ -436,6 +511,7 @@ function attachPeerTransport(
     },
     (error) => failPeer(peer, asError(error)),
   );
+  return peer.pump;
 }
 
 function runtimeKey(options: BrowserWorkerInitOptions): string {

@@ -11,6 +11,7 @@ export class BrowserWorkerTransportPump {
   private running = false;
   private runAgain = false;
   private closed = false;
+  private readonly idleWaiters = new Set<() => void>();
   private readonly removeWorkListener: () => void;
 
   constructor(
@@ -62,6 +63,12 @@ export class BrowserWorkerTransportPump {
     this.transport.close();
   }
 
+  async flush(): Promise<void> {
+    if (this.closed) return;
+    this.schedule();
+    await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
+  }
+
   private async pump(): Promise<void> {
     if (this.closed || this.running) return;
     this.running = true;
@@ -86,6 +93,10 @@ export class BrowserWorkerTransportPump {
       this.schedule();
     } else if (exhausted) {
       setTimeout(() => this.schedule(), 0);
+    } else {
+      const waiters = [...this.idleWaiters];
+      this.idleWaiters.clear();
+      for (const resolve of waiters) resolve();
     }
   }
 }
