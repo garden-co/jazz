@@ -108,12 +108,12 @@
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 
-/// Adaptive inline/large binary representation for built-in scalar values.
-pub mod adaptive_content;
 /// Shared, fail-closed state for authority-issued authorization-scope receipts.
 pub mod authorization_scope;
 /// Shared binary row payload contract for the NAPI and WASM bindings.
 pub mod binding_codec;
+/// Adaptive inline/large binary representation for built-in scalar values.
+pub mod large_values;
 
 /// Disabled-by-default counters used by the native cold-settle attribution bench.
 #[cfg(feature = "cold-settle-attribution")]

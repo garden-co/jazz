@@ -84,6 +84,10 @@ name = "sync"
 harness = false
 
 [[bench]]
+name = "large_values"
+harness = false
+
+[[bench]]
 name = "known_state_scaling"
 harness = false
 

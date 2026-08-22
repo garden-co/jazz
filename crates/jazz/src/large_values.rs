@@ -1,7 +1,7 @@
-//! Generic adaptive binary content used by large built-in scalar values.
+//! Generic binary storage used by large built-in values.
 //!
 //! The module deliberately owns no row identity, history, policy, or sync
-//! state. An [`AdaptiveScalar`] is one ordinary atomic cell whose large arm
+//! state. An [`LargeValue`] is one ordinary atomic cell whose large arm
 //! references immutable, domain-scoped objects.
 
 use std::collections::BTreeMap;
@@ -12,6 +12,7 @@ use thiserror::Error;
 use groove::records::Value as GrooveValue;
 use groove::storage::OrderedKvStorage;
 
+// Stable alpha-format domains retain their original bytes across terminology changes.
 const CONTENT_ID_DOMAIN: &[u8] = b"jazz-adaptive-content-v1";
 const OBJECT_FORMAT_VERSION: u8 = 1;
 const CELL_ENVELOPE: &[u8] = b"JAZZ-ADAPTIVE-SCALAR-V2\0";
@@ -268,9 +269,9 @@ impl Default for TailBounds {
     }
 }
 
-/// Large physical arm of an adaptive scalar cell.
+/// Chunked physical arm of a large-value cell.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LargeScalar {
+pub struct ChunkedValue {
     /// Root of the immutable recursive byte tree.
     pub root: ContentId,
     /// Materialized root length before applying the tail.
@@ -279,18 +280,18 @@ pub struct LargeScalar {
     pub edit_tail: Vec<BytePatch>,
 }
 
-/// One ordinary scalar cell with transparent inline/large representation.
+/// One ordinary value cell with transparent inline/chunked representation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AdaptiveScalar {
+pub enum LargeValue {
     /// Direct bytes for small values.
     Inline(#[serde(with = "serde_bytes")] Vec<u8>),
     /// Immutable byte tree plus a bounded ordered patch tail.
-    Large(LargeScalar),
+    Chunked(ChunkedValue),
 }
 
-/// Built-in semantic interpretation of adaptive bytes.
+/// Built-in semantic interpretation of large-value bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ScalarKind {
+pub enum ValueKind {
     /// Uninterpreted bytes.
     Bytes,
     /// UTF-8 text.
@@ -299,11 +300,11 @@ pub enum ScalarKind {
     Json,
 }
 
-/// Schema-stable storage policy for one built-in adaptive scalar column.
+/// Schema-stable storage policy for one built-in large value column.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdaptiveScalarSchema {
+pub struct LargeValueSchema {
     /// Logical interpretation retained at every public/query boundary.
-    pub kind: ScalarKind,
+    pub kind: ValueKind,
     /// Largest newly authored value that remains inline.
     pub inline_up_to: u32,
     /// Maximum ordered patch count before synchronous consolidation.
@@ -314,9 +315,9 @@ pub struct AdaptiveScalarSchema {
     pub tree_format: u16,
 }
 
-impl AdaptiveScalarSchema {
+impl LargeValueSchema {
     /// Built-in alpha defaults for one logical kind.
-    pub fn built_in(kind: ScalarKind) -> Self {
+    pub fn built_in(kind: ValueKind) -> Self {
         Self {
             kind,
             inline_up_to: 8 * 1024,
@@ -347,10 +348,10 @@ impl AdaptiveScalarSchema {
     }
 }
 
-/// Immutable query projection over one adaptive scalar.
+/// Immutable query projection over one large value.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ScalarSelection {
-    /// Materialize the complete idiomatic value.
+pub enum ValueSelection {
+    /// Materialize the complete native value.
     Value,
     /// Return one absolute byte range.
     ByteRange {
@@ -370,9 +371,9 @@ pub enum ScalarSelection {
     JsonPointer(String),
 }
 
-/// Idiomatic immutable result of a scalar query projection.
+/// Native immutable result of a value query projection.
 #[derive(Clone, Debug, PartialEq)]
-pub enum ScalarSelectionValue {
+pub enum ValueSelectionResult {
     /// Complete or ranged bytes.
     Bytes(Vec<u8>),
     /// Complete or ranged UTF-8 text.
@@ -383,7 +384,7 @@ pub enum ScalarSelectionValue {
 
 /// Declarative update authored against an ordinary immutable row snapshot.
 #[derive(Clone, Debug, PartialEq)]
-pub enum ScalarEdit {
+pub enum ValueEdit {
     /// Replace an absolute byte range.
     Bytes(BytePatch),
     /// Replace a Unicode-scalar text range.
@@ -397,7 +398,7 @@ pub enum ScalarEdit {
     },
     /// Append bytes to a stream or byte value.
     Append(Vec<u8>),
-    /// Replace JSON with one arbitrary idiomatic value.
+    /// Replace JSON with one arbitrary native value.
     Json(serde_json::Value),
 }
 
@@ -410,7 +411,7 @@ pub enum JsonSide {
     B,
 }
 
-/// One semantic, side-attributed JSON replacement.
+/// One semantic JSON replacement labelled by its authoring side.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AttributedJsonChange {
     /// Candidate that authored the change.
@@ -433,7 +434,7 @@ pub struct JsonMergeAnalysis {
 }
 
 /// Parse base and candidate JSON bytes and compute a conservative semantic,
-/// side-attributed three-way change analysis.
+/// three-way change analysis labelled by authoring side.
 pub fn analyze_json_merge(
     base: &[u8],
     side_a: &[u8],
@@ -534,7 +535,7 @@ fn json_paths_overlap(left: &str, right: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-impl ScalarKind {
+impl ValueKind {
     /// Validate one complete materialized value.
     pub fn validate(self, bytes: &[u8]) -> Result<(), ContentError> {
         match self {
@@ -551,8 +552,8 @@ impl ScalarKind {
         }
     }
 
-    /// Convert one existing logical Groove scalar to its canonical source
-    /// bytes before adaptive physical encoding.
+    /// Convert one existing logical Groove value to its canonical source
+    /// bytes before large-value physical encoding.
     pub fn logical_bytes(self, value: &GrooveValue) -> Result<Vec<u8>, ContentError> {
         match (self, value) {
             (Self::Bytes, GrooveValue::Bytes(bytes)) => Ok(bytes.clone()),
@@ -566,7 +567,7 @@ impl ScalarKind {
     }
 
     /// Convert complete materialized bytes back to the existing logical Groove
-    /// scalar consumed by queries, policies, indices, and bindings.
+    /// value consumed by queries, policies, indices, and bindings.
     pub fn logical_value(self, bytes: Vec<u8>) -> Result<GrooveValue, ContentError> {
         self.validate(&bytes)?;
         match self {
@@ -588,16 +589,16 @@ pub enum ContentError {
     #[error("invalid content chunking profile")]
     InvalidChunkingProfile,
     /// The schema declares an immutable-tree format this runtime cannot read.
-    #[error("unsupported adaptive content tree format {0}")]
+    #[error("unsupported large-value content tree format {0}")]
     UnsupportedTreeFormat(u16),
-    /// Adaptive scalar cell envelope is unknown.
-    #[error("unknown adaptive scalar cell format")]
+    /// Large value cell envelope is unknown.
+    #[error("unknown large value cell format")]
     UnknownCellFormat,
-    /// Adaptive scalar cell payload is malformed.
-    #[error("malformed adaptive scalar cell: {0}")]
+    /// Large value cell payload is malformed.
+    #[error("malformed large value cell: {0}")]
     MalformedCell(String),
     /// Ordered key/value persistence failed.
-    #[error("adaptive content storage failed: {0}")]
+    #[error("large-value content storage failed: {0}")]
     Storage(String),
     /// An immutable identity was observed with different bytes.
     #[error("immutable content collision for {0:?}")]
@@ -628,19 +629,19 @@ pub enum ContentError {
     #[error("content edit tail exceeds configured bounds")]
     TailTooLarge,
     /// Text is not valid UTF-8.
-    #[error("adaptive string is not valid UTF-8")]
+    #[error("large-value string is not valid UTF-8")]
     InvalidUtf8,
     /// JSON source is invalid.
-    #[error("adaptive JSON is invalid: {0}")]
+    #[error("large-value JSON is invalid: {0}")]
     InvalidJson(String),
-    /// A query projection does not apply to the logical scalar kind.
-    #[error("query selection does not apply to this scalar kind")]
+    /// A query projection does not apply to the logical value kind.
+    #[error("query selection does not apply to this value kind")]
     InvalidSelection,
-    /// An update operation does not apply to the logical scalar kind.
-    #[error("edit operation does not apply to this scalar kind")]
+    /// An update operation does not apply to the logical value kind.
+    #[error("edit operation does not apply to this value kind")]
     InvalidEdit,
-    /// A Groove value does not match the adaptive column's logical scalar.
-    #[error("logical value does not match adaptive scalar kind")]
+    /// A Groove value does not match the column's logical value kind.
+    #[error("logical value does not match large-value kind")]
     LogicalTypeMismatch,
     /// A text scalar position exceeds the string.
     #[error("text scalar offset {offset} exceeds scalar length {scalar_len}")]
@@ -868,7 +869,7 @@ impl ProllyTree {
     }
 }
 
-impl AdaptiveScalar {
+impl LargeValue {
     /// Encode the complete atomic physical cell for ordinary Jazz storage and
     /// wire transport.
     pub fn encode_cell(&self) -> Result<Vec<u8>, ContentError> {
@@ -884,7 +885,7 @@ impl AdaptiveScalar {
                 );
                 encoded.extend_from_slice(bytes);
             }
-            Self::Large(large) => {
+            Self::Chunked(large) => {
                 encoded.push(1);
                 encoded.extend_from_slice(large.root.as_bytes());
                 encoded.extend_from_slice(&large.root_byte_len.to_le_bytes());
@@ -910,10 +911,7 @@ impl AdaptiveScalar {
 
     /// Decode one exact alpha physical cell. There is deliberately no legacy
     /// or compatibility fallback.
-    pub fn decode_cell(
-        schema: &AdaptiveScalarSchema,
-        encoded: &[u8],
-    ) -> Result<Self, ContentError> {
+    pub fn decode_cell(schema: &LargeValueSchema, encoded: &[u8]) -> Result<Self, ContentError> {
         schema.validate()?;
         let payload = encoded
             .strip_prefix(CELL_ENVELOPE)
@@ -927,7 +925,7 @@ impl AdaptiveScalar {
                 let len = read_u64(payload, &mut cursor)?;
                 if len > u64::from(schema.inline_up_to) {
                     return Err(ContentError::MalformedCell(
-                        "inline scalar exceeds schema threshold".to_owned(),
+                        "inline value exceeds schema threshold".to_owned(),
                     ));
                 }
                 let len = usize::try_from(len).map_err(|_| ContentError::LengthOverflow)?;
@@ -975,7 +973,7 @@ impl AdaptiveScalar {
                         insert,
                     });
                 }
-                let large = LargeScalar {
+                let large = ChunkedValue {
                     root: ContentId(root),
                     root_byte_len,
                     edit_tail,
@@ -983,20 +981,20 @@ impl AdaptiveScalar {
                 if !tail_within_bounds(&large.edit_tail, schema.tail_bounds())? {
                     return Err(ContentError::TailTooLarge);
                 }
-                Self::Large(large)
+                Self::Chunked(large)
             }
             _ => return Err(ContentError::UnknownCellFormat),
         };
         if cursor != payload.len() {
             return Err(ContentError::MalformedCell(
-                "trailing adaptive scalar bytes".to_owned(),
+                "trailing large value bytes".to_owned(),
             ));
         }
         Ok(cell)
     }
 
-    /// Create an inline scalar after logical validation.
-    pub fn inline(kind: ScalarKind, bytes: impl Into<Vec<u8>>) -> Result<Self, ContentError> {
+    /// Create an inline value after logical validation.
+    pub fn inline(kind: ValueKind, bytes: impl Into<Vec<u8>>) -> Result<Self, ContentError> {
         let bytes = bytes.into();
         kind.validate(&bytes)?;
         Ok(Self::Inline(bytes))
@@ -1004,7 +1002,7 @@ impl AdaptiveScalar {
 
     /// Create the representation selected by one promotion threshold.
     pub fn create<S: ImmutableContentStore>(
-        kind: ScalarKind,
+        kind: ValueKind,
         domain: &ContentDomain,
         bytes: impl Into<Vec<u8>>,
         inline_up_to: usize,
@@ -1017,7 +1015,7 @@ impl AdaptiveScalar {
             return Ok(Self::Inline(bytes));
         }
         let (root, root_byte_len) = tree.build(domain, &bytes, store)?;
-        Ok(Self::Large(LargeScalar {
+        Ok(Self::Chunked(ChunkedValue {
             root,
             root_byte_len,
             edit_tail: Vec::new(),
@@ -1027,14 +1025,14 @@ impl AdaptiveScalar {
     /// Materialize and validate the complete logical value.
     pub fn materialize<S: ImmutableContentStore>(
         &self,
-        kind: ScalarKind,
+        kind: ValueKind,
         domain: &ContentDomain,
         tree: ProllyTree,
         store: &S,
     ) -> Result<Vec<u8>, ContentError> {
         let bytes = match self {
             Self::Inline(bytes) => bytes.clone(),
-            Self::Large(large) => {
+            Self::Chunked(large) => {
                 materialize_large_range(large, domain, tree, store, 0, patched_length(large)?)?
             }
         };
@@ -1045,45 +1043,45 @@ impl AdaptiveScalar {
     /// Evaluate one immutable query projection.
     pub fn select<S: ImmutableContentStore>(
         &self,
-        kind: ScalarKind,
-        selection: &ScalarSelection,
+        kind: ValueKind,
+        selection: &ValueSelection,
         domain: &ContentDomain,
         tree: ProllyTree,
         store: &S,
-    ) -> Result<ScalarSelectionValue, ContentError> {
-        if let (ScalarKind::Bytes, ScalarSelection::ByteRange { offset, len }) = (kind, selection) {
+    ) -> Result<ValueSelectionResult, ContentError> {
+        if let (ValueKind::Bytes, ValueSelection::ByteRange { offset, len }) = (kind, selection) {
             let selected = match self {
                 Self::Inline(bytes) => checked_slice(bytes, *offset, *len)?.to_vec(),
-                Self::Large(large) => {
+                Self::Chunked(large) => {
                     materialize_large_range(large, domain, tree, store, *offset, *len)?
                 }
             };
-            return Ok(ScalarSelectionValue::Bytes(selected));
+            return Ok(ValueSelectionResult::Bytes(selected));
         }
         let bytes = self.materialize(kind, domain, tree, store)?;
         match (kind, selection) {
-            (ScalarKind::Bytes, ScalarSelection::Value) => Ok(ScalarSelectionValue::Bytes(bytes)),
-            (ScalarKind::Bytes, ScalarSelection::ByteRange { .. }) => unreachable!(),
-            (ScalarKind::String, ScalarSelection::Value) => Ok(ScalarSelectionValue::String(
+            (ValueKind::Bytes, ValueSelection::Value) => Ok(ValueSelectionResult::Bytes(bytes)),
+            (ValueKind::Bytes, ValueSelection::ByteRange { .. }) => unreachable!(),
+            (ValueKind::String, ValueSelection::Value) => Ok(ValueSelectionResult::String(
                 String::from_utf8(bytes).map_err(|_| ContentError::InvalidUtf8)?,
             )),
-            (ScalarKind::String, ScalarSelection::TextRange { offset, len }) => {
+            (ValueKind::String, ValueSelection::TextRange { offset, len }) => {
                 let text = std::str::from_utf8(&bytes).map_err(|_| ContentError::InvalidUtf8)?;
                 let start = scalar_to_byte_offset(text, *offset)?;
                 let end_scalar = offset
                     .checked_add(*len)
                     .ok_or(ContentError::LengthOverflow)?;
                 let end = scalar_to_byte_offset(text, end_scalar)?;
-                Ok(ScalarSelectionValue::String(text[start..end].to_owned()))
+                Ok(ValueSelectionResult::String(text[start..end].to_owned()))
             }
-            (ScalarKind::Json, ScalarSelection::Value) => Ok(ScalarSelectionValue::Json(
+            (ValueKind::Json, ValueSelection::Value) => Ok(ValueSelectionResult::Json(
                 serde_json::from_slice(&bytes)
                     .map_err(|error| ContentError::InvalidJson(error.to_string()))?,
             )),
-            (ScalarKind::Json, ScalarSelection::JsonPointer(pointer)) => {
+            (ValueKind::Json, ValueSelection::JsonPointer(pointer)) => {
                 let value: serde_json::Value = serde_json::from_slice(&bytes)
                     .map_err(|error| ContentError::InvalidJson(error.to_string()))?;
-                Ok(ScalarSelectionValue::Json(
+                Ok(ValueSelectionResult::Json(
                     value.pointer(pointer).cloned().ok_or_else(|| {
                         ContentError::InvalidJson(format!(
                             "JSON pointer {pointer:?} does not exist"
@@ -1098,25 +1096,25 @@ impl AdaptiveScalar {
     /// Lower one declarative operation against this exact value snapshot.
     pub fn lower_edit<S: ImmutableContentStore>(
         &self,
-        kind: ScalarKind,
-        edit: ScalarEdit,
+        kind: ValueKind,
+        edit: ValueEdit,
         domain: &ContentDomain,
         tree: ProllyTree,
         store: &S,
     ) -> Result<BytePatch, ContentError> {
         let bytes = self.materialize(kind, domain, tree, store)?;
         match (kind, edit) {
-            (ScalarKind::Bytes, ScalarEdit::Bytes(patch)) => {
+            (ValueKind::Bytes, ValueEdit::Bytes(patch)) => {
                 apply_patches(&bytes, std::slice::from_ref(&patch))?;
                 Ok(patch)
             }
-            (ScalarKind::Bytes, ScalarEdit::Append(insert)) => Ok(BytePatch::insert(
+            (ValueKind::Bytes, ValueEdit::Append(insert)) => Ok(BytePatch::insert(
                 u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)?,
                 insert,
             )),
             (
-                ScalarKind::String,
-                ScalarEdit::Text {
+                ValueKind::String,
+                ValueEdit::Text {
                     offset,
                     delete_len,
                     insert,
@@ -1127,7 +1125,7 @@ impl AdaptiveScalar {
                 delete_len,
                 &insert,
             ),
-            (ScalarKind::Json, ScalarEdit::Json(value)) => {
+            (ValueKind::Json, ValueEdit::Json(value)) => {
                 let next = serde_json::to_vec(&value)
                     .map_err(|error| ContentError::InvalidJson(error.to_string()))?;
                 Ok(single_replace_diff(&bytes, &next))
@@ -1139,7 +1137,7 @@ impl AdaptiveScalar {
     /// Apply one declarative patch, consolidating only when tail bounds require it.
     pub fn apply_edit<S: ImmutableContentStore>(
         &self,
-        kind: ScalarKind,
+        kind: ValueKind,
         domain: &ContentDomain,
         patch: BytePatch,
         inline_up_to: usize,
@@ -1154,18 +1152,18 @@ impl AdaptiveScalar {
         match self {
             Self::Inline(_) if next.len() <= inline_up_to => Ok(Self::Inline(next)),
             Self::Inline(_) => Self::create(kind, domain, next, inline_up_to, tree, store),
-            Self::Large(large) => {
+            Self::Chunked(large) => {
                 let mut tail = large.edit_tail.clone();
                 tail.push(patch);
                 if tail_within_bounds(&tail, tail_bounds)? {
-                    Ok(Self::Large(LargeScalar {
+                    Ok(Self::Chunked(ChunkedValue {
                         root: large.root,
                         root_byte_len: large.root_byte_len,
                         edit_tail: tail,
                     }))
                 } else {
                     let (root, root_byte_len) = tree.build(domain, &next, store)?;
-                    Ok(Self::Large(LargeScalar {
+                    Ok(Self::Chunked(ChunkedValue {
                         root,
                         root_byte_len,
                         edit_tail: Vec::new(),
@@ -1212,7 +1210,7 @@ impl MaterialPiece {
     }
 }
 
-fn patched_length(large: &LargeScalar) -> Result<u64, ContentError> {
+fn patched_length(large: &ChunkedValue) -> Result<u64, ContentError> {
     large
         .edit_tail
         .iter()
@@ -1234,7 +1232,7 @@ fn patched_length(large: &LargeScalar) -> Result<u64, ContentError> {
         })
 }
 
-fn material_pieces(large: &LargeScalar) -> Result<Vec<MaterialPiece>, ContentError> {
+fn material_pieces(large: &ChunkedValue) -> Result<Vec<MaterialPiece>, ContentError> {
     let mut pieces = vec![MaterialPiece::Root {
         offset: 0,
         len: large.root_byte_len,
@@ -1296,7 +1294,7 @@ fn split_pieces_at(pieces: &mut Vec<MaterialPiece>, at: u64) -> Result<usize, Co
 }
 
 fn materialize_large_range<S: ImmutableContentStore>(
-    large: &LargeScalar,
+    large: &ChunkedValue,
     domain: &ContentDomain,
     tree: ProllyTree,
     store: &S,
@@ -1719,20 +1717,19 @@ mod tests {
         let tree = ProllyTree::new(tiny_profile()).unwrap();
         let mut store = MemoryContentStore::default();
         let bytes = (0..=255).cycle().take(4096).collect::<Vec<_>>();
-        let value =
-            AdaptiveScalar::create(ScalarKind::Bytes, &domain(), bytes, 4, tree, &mut store)
-                .unwrap()
-                .apply_edit(
-                    ScalarKind::Bytes,
-                    &domain(),
-                    BytePatch::insert(0, b"prefix"),
-                    4,
-                    TailBounds::default(),
-                    tree,
-                    &mut store,
-                )
-                .unwrap();
-        let AdaptiveScalar::Large(large) = &value else {
+        let value = LargeValue::create(ValueKind::Bytes, &domain(), bytes, 4, tree, &mut store)
+            .unwrap()
+            .apply_edit(
+                ValueKind::Bytes,
+                &domain(),
+                BytePatch::insert(0, b"prefix"),
+                4,
+                TailBounds::default(),
+                tree,
+                &mut store,
+            )
+            .unwrap();
+        let LargeValue::Chunked(large) = &value else {
             panic!("value must be large")
         };
         let mut leaves = Vec::new();
@@ -1743,27 +1740,27 @@ mod tests {
         assert_eq!(
             value
                 .select(
-                    ScalarKind::Bytes,
-                    &ScalarSelection::ByteRange { offset: 0, len: 6 },
+                    ValueKind::Bytes,
+                    &ValueSelection::ByteRange { offset: 0, len: 6 },
                     &domain(),
                     tree,
                     &store,
                 )
                 .unwrap(),
-            ScalarSelectionValue::Bytes(b"prefix".to_vec())
+            ValueSelectionResult::Bytes(b"prefix".to_vec())
         );
         assert!(matches!(
-            value.materialize(ScalarKind::Bytes, &domain(), tree, &store),
+            value.materialize(ValueKind::Bytes, &domain(), tree, &store),
             Err(ContentError::MissingObject(_))
         ));
     }
 
     #[test]
-    fn adaptive_tail_is_ordered_and_consolidates_at_the_bound() {
+    fn large_value_tail_is_ordered_and_consolidates_at_the_bound() {
         let tree = ProllyTree::new(tiny_profile()).unwrap();
         let mut store = MemoryContentStore::default();
-        let value = AdaptiveScalar::create(
-            ScalarKind::String,
+        let value = LargeValue::create(
+            ValueKind::String,
             &domain(),
             "abcdefghijklmnop",
             4,
@@ -1773,7 +1770,7 @@ mod tests {
         .unwrap();
         let value = value
             .apply_edit(
-                ScalarKind::String,
+                ValueKind::String,
                 &domain(),
                 BytePatch::insert(2, b"XX"),
                 4,
@@ -1785,10 +1782,10 @@ mod tests {
                 &mut store,
             )
             .unwrap();
-        assert!(matches!(&value, AdaptiveScalar::Large(value) if value.edit_tail.len() == 1));
+        assert!(matches!(&value, LargeValue::Chunked(value) if value.edit_tail.len() == 1));
         let value = value
             .apply_edit(
-                ScalarKind::String,
+                ValueKind::String,
                 &domain(),
                 BytePatch::delete(0, 1),
                 4,
@@ -1800,17 +1797,17 @@ mod tests {
                 &mut store,
             )
             .unwrap();
-        assert!(matches!(&value, AdaptiveScalar::Large(value) if value.edit_tail.is_empty()));
+        assert!(matches!(&value, LargeValue::Chunked(value) if value.edit_tail.is_empty()));
         assert_eq!(
             value
-                .materialize(ScalarKind::String, &domain(), tree, &store)
+                .materialize(ValueKind::String, &domain(), tree, &store)
                 .unwrap(),
             b"bXXcdefghijklmnop"
         );
     }
 
     #[test]
-    fn scalar_text_edits_lower_to_utf8_byte_patches() {
+    fn text_edits_lower_to_utf8_byte_patches() {
         let patch = text_replace_patch("a🦀z", 1, 1, "é").unwrap();
         assert_eq!(patch.offset, 1);
         assert_eq!(patch.delete_len, 4);
@@ -1824,8 +1821,8 @@ mod tests {
     fn json_validation_observes_the_complete_atomic_tail() {
         let tree = ProllyTree::new(tiny_profile()).unwrap();
         let mut store = MemoryContentStore::default();
-        let value = AdaptiveScalar::create(
-            ScalarKind::Json,
+        let value = LargeValue::create(
+            ValueKind::Json,
             &domain(),
             br#"{"a":1}"#.to_vec(),
             4,
@@ -1835,7 +1832,7 @@ mod tests {
         .unwrap();
         let value = value
             .apply_edit(
-                ScalarKind::Json,
+                ValueKind::Json,
                 &domain(),
                 BytePatch::replace(5, 1, b"2"),
                 4,
@@ -1846,7 +1843,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             value
-                .materialize(ScalarKind::Json, &domain(), tree, &store)
+                .materialize(ValueKind::Json, &domain(), tree, &store)
                 .unwrap(),
             br#"{"a":2}"#
         );
@@ -1878,11 +1875,11 @@ mod tests {
     }
 
     #[test]
-    fn projections_and_declarative_edits_use_idiomatic_values() {
+    fn projections_and_declarative_edits_use_native_values() {
         let tree = ProllyTree::new(tiny_profile()).unwrap();
         let mut store = MemoryContentStore::default();
-        let text = AdaptiveScalar::create(
-            ScalarKind::String,
+        let text = LargeValue::create(
+            ValueKind::String,
             &domain(),
             "zero 🦀 two",
             4,
@@ -1892,18 +1889,18 @@ mod tests {
         .unwrap();
         assert_eq!(
             text.select(
-                ScalarKind::String,
-                &ScalarSelection::TextRange { offset: 5, len: 1 },
+                ValueKind::String,
+                &ValueSelection::TextRange { offset: 5, len: 1 },
                 &domain(),
                 tree,
                 &store,
             )
             .unwrap(),
-            ScalarSelectionValue::String("🦀".to_owned())
+            ValueSelectionResult::String("🦀".to_owned())
         );
 
-        let json = AdaptiveScalar::create(
-            ScalarKind::Json,
+        let json = LargeValue::create(
+            ValueKind::Json,
             &domain(),
             br#"{"profile":{"name":"old"},"stable":1}"#.to_vec(),
             4,
@@ -1913,19 +1910,19 @@ mod tests {
         .unwrap();
         assert_eq!(
             json.select(
-                ScalarKind::Json,
-                &ScalarSelection::JsonPointer("/profile/name".to_owned()),
+                ValueKind::Json,
+                &ValueSelection::JsonPointer("/profile/name".to_owned()),
                 &domain(),
                 tree,
                 &store,
             )
             .unwrap(),
-            ScalarSelectionValue::Json(serde_json::json!("old"))
+            ValueSelectionResult::Json(serde_json::json!("old"))
         );
         let patch = json
             .lower_edit(
-                ScalarKind::Json,
-                ScalarEdit::Json(serde_json::json!({
+                ValueKind::Json,
+                ValueEdit::Json(serde_json::json!({
                     "profile": { "name": "new" },
                     "stable": 1
                 })),
@@ -1935,7 +1932,7 @@ mod tests {
             )
             .unwrap();
         let current = json
-            .materialize(ScalarKind::Json, &domain(), tree, &store)
+            .materialize(ValueKind::Json, &domain(), tree, &store)
             .unwrap();
         let next = apply_patches(&current, &[patch]).unwrap();
         assert_eq!(
@@ -1979,27 +1976,24 @@ mod tests {
 
     #[test]
     fn atomic_cell_round_trips_without_a_legacy_fallback() {
-        let schema = AdaptiveScalarSchema::built_in(ScalarKind::Bytes);
-        let cell = AdaptiveScalar::Large(LargeScalar {
+        let schema = LargeValueSchema::built_in(ValueKind::Bytes);
+        let cell = LargeValue::Chunked(ChunkedValue {
             root: ContentId([7; 32]),
             root_byte_len: 42,
             edit_tail: vec![BytePatch::insert(4, b"next")],
         });
         let encoded = cell.encode_cell().unwrap();
+        assert_eq!(LargeValue::decode_cell(&schema, &encoded).unwrap(), cell);
         assert_eq!(
-            AdaptiveScalar::decode_cell(&schema, &encoded).unwrap(),
-            cell
-        );
-        assert_eq!(
-            AdaptiveScalar::decode_cell(&schema, &encoded[CELL_ENVELOPE.len()..]),
+            LargeValue::decode_cell(&schema, &encoded[CELL_ENVELOPE.len()..]),
             Err(ContentError::UnknownCellFormat)
         );
     }
 
     #[test]
     fn decoded_cells_obey_the_schema_format_and_tail_bounds() {
-        let mut schema = AdaptiveScalarSchema::built_in(ScalarKind::Bytes);
-        let cell = AdaptiveScalar::Large(LargeScalar {
+        let mut schema = LargeValueSchema::built_in(ValueKind::Bytes);
+        let cell = LargeValue::Chunked(ChunkedValue {
             root: ContentId([7; 32]),
             root_byte_len: 42,
             edit_tail: (0..=schema.max_tail_entries)
@@ -2008,28 +2002,28 @@ mod tests {
         });
         let encoded = cell.encode_cell().unwrap();
         assert_eq!(
-            AdaptiveScalar::decode_cell(&schema, &encoded),
+            LargeValue::decode_cell(&schema, &encoded),
             Err(ContentError::TailTooLarge)
         );
 
         schema.tree_format += 1;
         assert_eq!(
-            AdaptiveScalar::decode_cell(&schema, &encoded),
+            LargeValue::decode_cell(&schema, &encoded),
             Err(ContentError::UnsupportedTreeFormat(schema.tree_format))
         );
 
-        let schema = AdaptiveScalarSchema::built_in(ScalarKind::Bytes);
+        let schema = LargeValueSchema::built_in(ValueKind::Bytes);
         let mut hostile = CELL_ENVELOPE.to_vec();
         hostile.push(1);
         hostile.extend_from_slice(&[0; 32]);
         hostile.extend_from_slice(&0_u64.to_le_bytes());
         hostile.extend_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(
-            AdaptiveScalar::decode_cell(&schema, &hostile),
+            LargeValue::decode_cell(&schema, &hostile),
             Err(ContentError::TailTooLarge)
         );
 
-        let oversized_bytes = AdaptiveScalar::Large(LargeScalar {
+        let oversized_bytes = LargeValue::Chunked(ChunkedValue {
             root: ContentId([7; 32]),
             root_byte_len: 42,
             edit_tail: (0..schema.max_tail_entries)
@@ -2039,21 +2033,21 @@ mod tests {
         .encode_cell()
         .unwrap();
         assert_eq!(
-            AdaptiveScalar::decode_cell(&schema, &oversized_bytes),
+            LargeValue::decode_cell(&schema, &oversized_bytes),
             Err(ContentError::TailTooLarge)
         );
     }
 
     #[test]
     fn untrusted_manifest_length_does_not_drive_prevalidation_allocation() {
-        let value = AdaptiveScalar::Large(LargeScalar {
+        let value = LargeValue::Chunked(ChunkedValue {
             root: ContentId([9; 32]),
             root_byte_len: u64::MAX,
             edit_tail: Vec::new(),
         });
         assert!(matches!(
             value.materialize(
-                ScalarKind::Bytes,
+                ValueKind::Bytes,
                 &domain(),
                 ProllyTree::new(tiny_profile()).unwrap(),
                 &MemoryContentStore::default(),

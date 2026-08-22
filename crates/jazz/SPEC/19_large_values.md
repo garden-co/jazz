@@ -1,34 +1,34 @@
-# jazz — Specification · 19. Adaptive large scalar values
+# jazz — Specification · 19. Large values
 
 ## Overview
 
 Jazz `string`, `bytes`, and `json` columns retain their ordinary logical types.
-Their physical cell representation adapts transparently between inline bytes and
-one atomic large-value manifest:
+Their physical representation switches transparently between inline bytes and
+one atomic large-value descriptor:
 
 ```text
-AdaptiveScalar = Inline(bytes) | Large { root, byteLength, editTail }
+LargeValue = Inline(bytes) | Chunked { root, byteLength, editTail }
 BytePatch      = Replace { offset, deleteLength, insertBytes }
 ```
 
 The owning application row remains the only mutable identity, history, policy,
 subscription, transaction, and conflict boundary. Large values do not have a
 separate mutable head or sync protocol. Query projections choose whether to
-return an idiomatic complete primitive or an immutable subset; updates combine
+return the usual complete application value or an immutable subset; updates combine
 an ordinary row snapshot with a declarative edit operation. Applications never
-author manifests or manage content objects.
+author descriptors or manage chunks.
 
 Invariant digest:
 
-- `INV-CONTENT-1`: one adaptive scalar cell is the atomic replicated value.
+- `INV-CONTENT-1`: one large value cell is the atomic replicated value.
 - `INV-CONTENT-2`: every object is immutable, canonical, and domain scoped.
 - `INV-CONTENT-3`: chunking is deterministic, recursive, and content defined.
 - `INV-CONTENT-4`: byte patches are ordered, bounded, and total over their base.
 - `INV-CONTENT-5`: logical consumers cannot observe the physical representation.
 
-## 19.1 Logical types and adaptive representation
+## 19.1 Logical types and large-value representation
 
-`string`, `bytes`, and `json` remain scalar schema types. Small values use the
+`string`, `bytes`, and `json` remain ordinary column types. Small values use the
 inline arm. A writer whose proposed inline value exceeds the built-in promotion
 threshold MUST construct a large representation before publishing the row.
 Once large, a value may remain large below that threshold; optional demotion is
@@ -41,7 +41,7 @@ Core MUST NOT combine a root from one candidate with a tail from another.
 The initial format is alpha and has no legacy or compatibility arm. Its format,
 chunking, and patch versions are explicit. Unknown versions fail closed.
 
-## 19.2 Immutable byte prolly tree
+## 19.2 Immutable chunk tree
 
 The large root names a recursive tree:
 
@@ -55,7 +55,8 @@ Leaves are selected by a versioned FastCDC-like content-defined byte chunker
 with hard minimum, target, and maximum sizes. Branches are selected by a
 versioned content-defined chunker over complete child descriptors. No boundary
 may split a child descriptor. Applying content-defined grouping recursively
-produces one history-independent prolly-tree root.
+produces one history-independent probabilistic tree (usually called a prolly
+tree): the same bytes produce the same shape and root regardless of edit history.
 
 `INV-CONTENT-2`: an object id MUST commit to the fixed Jazz content domain,
 format version, object kind, authorization/encryption domain, and canonical
@@ -69,7 +70,10 @@ size/fanout bounds and exact child aggregate lengths before returning bytes.
 Chunking occurs before encryption. Cross-domain equality MUST NOT be visible in
 object ids. The physical store may pack many logical objects together.
 
-## 19.3 Ordered byte-patch tail
+## 19.3 Recent edit tail
+
+The edit tail is the short, bounded list of recent changes stored after the
+chunk-tree root, avoiding an immediate tree rebuild for every small edit.
 
 All built-in content families use one patch operation:
 
@@ -96,16 +100,16 @@ MUST share one transaction or leave only unreachable immutable objects.
 ## 19.4 Built-in logical interpretation
 
 - `bytes` accepts every byte sequence. Full queries return the existing
-  idiomatic byte primitive; range queries return an immutable byte subset.
+  usual byte primitive; range queries return an immutable byte subset.
 - `string` requires the final bytes to be UTF-8. Text edit positions exposed by
   high-level APIs are Unicode-scalar positions and lower to byte offsets.
 - `json` requires final UTF-8 JSON. Its root is literal JSON source bytes, not a
-  graph of persistent JSON nodes. Full queries return an idiomatic parsed JSON
+  graph of persistent JSON nodes. Full queries return the usual parsed JSON
   value; path projections return immutable detached JSON subsets.
 - an append-only stream is a bytes interpretation that admits only append edits.
 - a mutable file is a bytes interpretation admitting insert/delete/replace.
 
-Default queries materialize complete idiomatic primitives efficiently from the
+Default queries assemble complete native values efficiently from the
 tree and patch tail. Query options may request a range, JSON projection, or
 native streaming delivery. Those options are projections, not new stored types
 or object-like value handles.
@@ -116,8 +120,8 @@ ordinary Jazz branch/conflict semantics. There is no explicit content-value
 reference API.
 
 `INV-CONTENT-5`: equality, policies, indices, projections, subscriptions,
-merges, and application reads MUST observe the materialized logical scalar.
-They MUST NOT branch semantically on Inline versus Large or ignore a live tail.
+merges, and application reads MUST observe the assembled logical value.
+They MUST NOT branch semantically on Inline versus Chunked or ignore a live tail.
 
 ## 19.5 Merge behavior
 
@@ -126,7 +130,8 @@ common base and both attributed sides. Bytes and strings may initially retain
 ordinary whole-cell conflict behavior or install an explicit strategy.
 
 JSON merge parses the base, side A, and side B source bytes and produces a
-semantic side-attributed diff for the selected merge strategy. Persisted edits
+semantic diff labelled by which side made each change for the selected merge
+strategy. Persisted edits
 remain byte-offset patches. A complete replacement value may be lowered by a
 deterministic binary diff; reconstructing authorial intent is not required.
 Ambiguous array identity or moves MUST be surfaced as conflicts unless the
@@ -134,7 +139,7 @@ application data supplies stable identities.
 
 ## 19.6 Lifecycle, history, and sync
 
-Historical row versions name exact adaptive scalar values. A retained Large
+Historical row versions name exact large values. A retained Chunked
 version pins every immutable object reachable from its root and tail. Sync sends
 the ordinary row cell plus required immutable dependencies; there is no content
 subscription or separately mutable content history.

@@ -492,7 +492,7 @@ impl RuntimeSchema {
                 .chain(std::iter::once("jazz_physical_register"))
                 .chain(std::iter::once("jazz_physical_global_current"))
                 .chain(std::iter::once("jazz_physical_ahead_current"))
-                .chain(std::iter::once(crate::adaptive_content::CONTENT_OBJECTS_CF)),
+                .chain(std::iter::once(crate::large_values::CONTENT_OBJECTS_CF)),
         )
     }
 
@@ -656,10 +656,10 @@ pub struct ColumnSchema {
     /// Literal value used when an insert omits this column.
     #[serde(default)]
     pub default: Option<Value>,
-    /// Built-in adaptive physical storage for logical string/bytes/JSON
-    /// scalars. This changes storage and projection, never the logical type.
+    /// Built-in large-value storage for logical string/bytes/JSON columns.
+    /// This changes storage and projection, never the logical type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adaptive_scalar: Option<crate::adaptive_content::AdaptiveScalarSchema>,
+    pub large_value: Option<crate::large_values::LargeValueSchema>,
 }
 
 impl ColumnSchema {
@@ -669,7 +669,7 @@ impl ColumnSchema {
             name: name.into(),
             column_type,
             default: None,
-            adaptive_scalar: None,
+            large_value: None,
         }
     }
 
@@ -686,7 +686,7 @@ impl From<groove::schema::ColumnSchema> for ColumnSchema {
             name: column.name,
             column_type: column.column_type,
             default: None,
-            adaptive_scalar: None,
+            large_value: None,
         }
     }
 }
@@ -1415,6 +1415,7 @@ fn transactions_table() -> GrooveTableSchema {
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
+    // Stable format identity; terminology changes do not rewrite schema ids.
     put_str(&mut bytes, "jazz-schema-v3-adaptive-scalars");
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
@@ -1425,7 +1426,7 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
         for column in &table.columns {
             put_str(&mut bytes, &column.name);
             put_column_type(&mut bytes, &column.column_type);
-            put_adaptive_scalar_schema(&mut bytes, column.adaptive_scalar.as_ref());
+            put_large_value_schema(&mut bytes, column.large_value.as_ref());
             put_merge_strategy(&mut bytes, table.merge_strategy(&column.name));
         }
         put_u64(&mut bytes, table.references.len() as u64);
@@ -1443,9 +1444,9 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     bytes
 }
 
-fn put_adaptive_scalar_schema(
+fn put_large_value_schema(
     bytes: &mut Vec<u8>,
-    schema: Option<&crate::adaptive_content::AdaptiveScalarSchema>,
+    schema: Option<&crate::large_values::LargeValueSchema>,
 ) {
     let Some(schema) = schema else {
         bytes.push(0);
@@ -1453,9 +1454,9 @@ fn put_adaptive_scalar_schema(
     };
     bytes.push(1);
     bytes.push(match schema.kind {
-        crate::adaptive_content::ScalarKind::Bytes => 0,
-        crate::adaptive_content::ScalarKind::String => 1,
-        crate::adaptive_content::ScalarKind::Json => 2,
+        crate::large_values::ValueKind::Bytes => 0,
+        crate::large_values::ValueKind::String => 1,
+        crate::large_values::ValueKind::Json => 2,
     });
     bytes.extend_from_slice(&schema.inline_up_to.to_le_bytes());
     bytes.extend_from_slice(&schema.max_tail_entries.to_le_bytes());
@@ -1694,27 +1695,25 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_scalar_policy_changes_schema_identity() {
-        let mut adaptive_column = ColumnSchema::new("body", ColumnType::String);
-        adaptive_column.adaptive_scalar =
-            Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
-                crate::adaptive_content::ScalarKind::String,
-            ));
-        let adaptive = RuntimeSchema::new([TableSchema::new("notes", [adaptive_column])]);
+    fn large_value_policy_changes_schema_identity() {
+        let mut large_column = ColumnSchema::new("body", ColumnType::String);
+        large_column.large_value = Some(crate::large_values::LargeValueSchema::built_in(
+            crate::large_values::ValueKind::String,
+        ));
+        let large = RuntimeSchema::new([TableSchema::new("notes", [large_column])]);
         let plain = RuntimeSchema::new([TableSchema::new(
             "notes",
             [ColumnSchema::new("body", ColumnType::String)],
         )]);
         let mut changed_column = ColumnSchema::new("body", ColumnType::String);
-        let mut changed_policy = crate::adaptive_content::AdaptiveScalarSchema::built_in(
-            crate::adaptive_content::ScalarKind::String,
-        );
+        let mut changed_policy =
+            crate::large_values::LargeValueSchema::built_in(crate::large_values::ValueKind::String);
         changed_policy.inline_up_to += 1;
-        changed_column.adaptive_scalar = Some(changed_policy);
+        changed_column.large_value = Some(changed_policy);
         let changed = RuntimeSchema::new([TableSchema::new("notes", [changed_column])]);
 
-        assert_ne!(adaptive.version_id(), plain.version_id());
-        assert_ne!(adaptive.version_id(), changed.version_id());
+        assert_ne!(large.version_id(), plain.version_id());
+        assert_ne!(large.version_id(), changed.version_id());
     }
 
     #[test]

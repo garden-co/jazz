@@ -593,15 +593,15 @@ fn convert_column(
         column_type = column_type.nullable();
     }
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
-    converted.adaptive_scalar = match &column.column_type {
-        ColumnType::Text => Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
-            crate::adaptive_content::ScalarKind::String,
+    converted.large_value = match &column.column_type {
+        ColumnType::Text => Some(crate::large_values::LargeValueSchema::built_in(
+            crate::large_values::ValueKind::String,
         )),
-        ColumnType::Bytea => Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
-            crate::adaptive_content::ScalarKind::Bytes,
+        ColumnType::Bytea => Some(crate::large_values::LargeValueSchema::built_in(
+            crate::large_values::ValueKind::Bytes,
         )),
-        ColumnType::Json { .. } => Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
-            crate::adaptive_content::ScalarKind::Json,
+        ColumnType::Json { .. } => Some(crate::large_values::LargeValueSchema::built_in(
+            crate::large_values::ValueKind::Json,
         )),
         _ => None,
     };
@@ -3090,9 +3090,9 @@ mod tests {
                 .iter()
                 .find(|column| column.name == "payload")
                 .unwrap()
-                .adaptive_scalar,
-            Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
-                crate::adaptive_content::ScalarKind::Json,
+                .large_value,
+            Some(crate::large_values::LargeValueSchema::built_in(
+                crate::large_values::ValueKind::Json,
             ))
         );
         assert_eq!(
@@ -3101,9 +3101,9 @@ mod tests {
                 .iter()
                 .find(|column| column.name == "metadata")
                 .unwrap()
-                .adaptive_scalar,
-            Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
-                crate::adaptive_content::ScalarKind::Json,
+                .large_value,
+            Some(crate::large_values::LargeValueSchema::built_in(
+                crate::large_values::ValueKind::Json,
             ))
         );
     }
