@@ -4,6 +4,7 @@ import { MessagePortBrowserFollowerConnection } from "./browser-follower-connect
 import type {
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
+  BrowserFollowerPortRequest,
   BrowserWorkerInitOptions,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
@@ -44,6 +45,12 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         }
         if (event.data?.type !== "runtime-ready") return;
         cleanup();
+        if (this.closed) {
+          port.postMessage({ type: "close" } satisfies BrowserFollowerPortRequest);
+          port.close();
+          resolve();
+          return;
+        }
         this.connection = new MessagePortBrowserFollowerConnection(
           runtime,
           port,
@@ -105,8 +112,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    await this.readyPromise.catch(() => undefined);
     await this.connection?.shutdown();
     this.connection = null;
+    this.worker.port.close();
   }
 
   async attachFollowerPort(): Promise<void> {

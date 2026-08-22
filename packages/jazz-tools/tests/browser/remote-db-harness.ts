@@ -13,6 +13,8 @@ export interface RemoteBrowserDbCreateInput {
   localFirstSecret?: string;
   logLevel?: DbConfig["logLevel"];
   initialize?: boolean;
+  tabCount?: number;
+  initialRow?: Record<string, unknown>;
 }
 
 export interface RemoteBrowserDbWaitForTitleInput {
@@ -79,6 +81,15 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
 
   const query = makeAllRowsQuery(input.table, schema);
   if (input.initialize) await db.all(query, { tier: "local" });
+  if (input.initialRow) {
+    const table = {
+      _table: input.table,
+      _schema: schema,
+      _rowType: {} as Record<string, unknown>,
+      _initType: {} as Record<string, unknown>,
+    };
+    await db.insert(table, input.initialRow).wait({ tier: "local" });
+  }
 
   store.set(input.id, {
     db,

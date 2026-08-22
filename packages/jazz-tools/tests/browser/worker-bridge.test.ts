@@ -809,7 +809,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
   });
 
-  it("reloads a tab when IndexedDB is externally deleted", async () => {
+  it("reloads every attached tab when IndexedDB is externally deleted with dirty writes", async () => {
     const dbName = uniqueDbName("external-indexeddb-delete");
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("external-indexeddb-delete-page"));
     await createRemoteBrowserDb({
@@ -819,6 +819,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
       table: "todos",
       schemaJson: JSON.stringify(app.wasmSchema),
       initialize: true,
+      tabCount: 2,
+      initialRow: { title: "dirty before external deletion", done: false },
     });
 
     await deleteRemoteBrowserIndexedDbAndWaitForReload(remoteDbId, dbName);

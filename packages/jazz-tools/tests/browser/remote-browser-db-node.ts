@@ -6,7 +6,7 @@ import type {
 
 interface RemoteBrowserDbHandle {
   context: BrowserContext;
-  page: Page;
+  pages: Page[];
 }
 
 const HARNESS_LOAD_COUNT_KEY = "jazz-test:remote-harness-load-count";
@@ -61,13 +61,20 @@ export async function createRemoteBrowserDb(
     const count = Number(sessionStorage.getItem(key) ?? 0);
     sessionStorage.setItem(key, String(count + 1));
   }, HARNESS_LOAD_COUNT_KEY);
-  const remotePage = await remoteContext.newPage();
-  await remotePage.goto(harnessUrlFromPage(currentPage), { waitUntil: "domcontentloaded" });
-  await evaluateHarness(remotePage, "createRemoteBrowserDb", input);
+  const pages: Page[] = [];
+  for (let index = 0; index < (input.tabCount ?? 1); index += 1) {
+    const page = await remoteContext.newPage();
+    await page.goto(harnessUrlFromPage(currentPage), { waitUntil: "domcontentloaded" });
+    await evaluateHarness(page, "createRemoteBrowserDb", {
+      ...input,
+      initialRow: index === 0 ? input.initialRow : undefined,
+    });
+    pages.push(page);
+  }
 
   remoteBrowserDbs.set(input.id, {
     context: remoteContext,
-    page: remotePage,
+    pages,
   });
 }
 
@@ -77,17 +84,22 @@ export async function deleteRemoteBrowserIndexedDbAndWaitForReload(
 ): Promise<void> {
   const handle = remoteBrowserDbs.get(id);
   if (!handle) throw new Error(`Remote browser db "${id}" is not open`);
-  const previousLoads = await handle.page.evaluate(
-    (key) => Number(sessionStorage.getItem(key) ?? 0),
-    HARNESS_LOAD_COUNT_KEY,
+  const previousLoads = await Promise.all(
+    handle.pages.map((page) =>
+      page.evaluate((key) => Number(sessionStorage.getItem(key) ?? 0), HARNESS_LOAD_COUNT_KEY),
+    ),
   );
-  await handle.page.evaluate((name) => {
+  await handle.pages[0]!.evaluate((name) => {
     indexedDB.deleteDatabase(name);
   }, dbName);
-  await handle.page.waitForFunction(
-    ({ key, previousLoads }) => Number(sessionStorage.getItem(key) ?? 0) > previousLoads,
-    { key: HARNESS_LOAD_COUNT_KEY, previousLoads },
-    { timeout: 10_000 },
+  await Promise.all(
+    handle.pages.map((page, index) =>
+      page.waitForFunction(
+        ({ key, previousLoads }) => Number(sessionStorage.getItem(key) ?? 0) > previousLoads,
+        { key: HARNESS_LOAD_COUNT_KEY, previousLoads: previousLoads[index]! },
+        { timeout: 10_000 },
+      ),
+    ),
   );
 }
 
@@ -99,7 +111,7 @@ export async function waitForRemoteBrowserDbTitle(
     throw new Error(`Remote browser db "${input.id}" is not open`);
   }
 
-  return evaluateHarness(handle.page, "waitForRemoteBrowserDbTitle", input);
+  return evaluateHarness(handle.pages[0]!, "waitForRemoteBrowserDbTitle", input);
 }
 
 export async function closeRemoteBrowserDb(id: string): Promise<void> {
@@ -110,7 +122,7 @@ export async function closeRemoteBrowserDb(id: string): Promise<void> {
 
   remoteBrowserDbs.delete(id);
   try {
-    await evaluateHarness(handle.page, "closeRemoteBrowserDb", id);
+    await evaluateHarness(handle.pages[0]!, "closeRemoteBrowserDb", id);
   } catch {
     // Best effort: page or worker may already be gone.
   }
