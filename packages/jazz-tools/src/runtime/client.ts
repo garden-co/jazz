@@ -623,10 +623,15 @@ export class PersistedWriteRejectedError extends Error {
  */
 export class WriteHandle<T = void> {
   readonly #client: JazzClient;
+  readonly value: T;
   readonly batchId: Promise<BatchId>;
+  /** @deprecated Use {@link batchId}. */
+  readonly transactionId: Promise<BatchId>;
 
-  constructor(batchId: BatchId | Promise<BatchId>, client: JazzClient) {
+  constructor(batchId: BatchId | Promise<BatchId>, client: JazzClient, value = undefined as T) {
+    this.value = value;
     this.batchId = Promise.resolve(batchId);
+    this.transactionId = this.batchId;
     this.#client = client;
   }
 
@@ -650,12 +655,8 @@ export class WriteHandle<T = void> {
  * to be persisted at a given durability tier.
  */
 export class WriteResult<T> extends WriteHandle<T> {
-  constructor(
-    readonly value: T,
-    batchId: BatchId | Promise<BatchId>,
-    client: JazzClient,
-  ) {
-    super(batchId, client);
+  constructor(value: T, batchId: BatchId | Promise<BatchId>, client: JazzClient) {
+    super(batchId, client, value);
   }
 
   /**

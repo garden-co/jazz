@@ -454,9 +454,11 @@ describe("JazzProvider local-first auth", () => {
       expect(view.getByTestId("identity-beta").dataset.scopedSecret).toBe(betaSecret);
     });
 
-    expect(mock.createJazzClient).toHaveBeenCalledWith(
-      expect.objectContaining({ secret: "alpha-replacement" }),
-    );
+    await waitFor(() => {
+      expect(mock.createJazzClient).toHaveBeenCalledWith(
+        expect.objectContaining({ secret: "alpha-replacement" }),
+      );
+    });
   });
 
   it("reloads the selected store when a mounted provider changes appId", async () => {

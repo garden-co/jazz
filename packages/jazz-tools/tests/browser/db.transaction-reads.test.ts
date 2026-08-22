@@ -345,7 +345,7 @@ describe("db exclusive transaction reads browser integration", () => {
     bobTx.update(todos, base.id, { title: "Bob's title" });
 
     await (await aliceTx.commit()).wait();
-    await expect(bobTx.commit().wait()).rejects.toThrow(
+    await expect(async () => bobTx.commit().wait()).rejects.toThrow(
       "(transaction_conflict): row visible parent changed since transaction write was staged",
     );
 
