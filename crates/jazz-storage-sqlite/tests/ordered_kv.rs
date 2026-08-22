@@ -1,0 +1,99 @@
+use futures::executor::block_on;
+use groove::storage::{Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage};
+use jazz_storage_sqlite::SqliteStorage;
+
+fn open(dir: &tempfile::TempDir) -> SqliteStorage {
+    SqliteStorage::open(dir.path().join("jazz.sqlite"), &["records"]).unwrap()
+}
+
+#[test]
+fn ordered_prefix_range_atomic_batch_and_reopen_contract() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = open(&dir);
+        storage
+            .set("records".into(), b"user:2".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"user:10".to_vec(), b"ten".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"user:1".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .prefix("records".into(), b"user:".to_vec())
+                .await
+                .unwrap(),
+            vec![
+                (b"user:1".to_vec(), b"one".to_vec()),
+                (b"user:10".to_vec(), b"ten".to_vec()),
+                (b"user:2".to_vec(), b"two".to_vec()),
+            ]
+        );
+        let error = storage
+            .write_many(vec![
+                OwnedWriteOperation::Set {
+                    cf: "records".into(),
+                    key: b"user:3".to_vec(),
+                    value: b"three".to_vec(),
+                },
+                OwnedWriteOperation::Set {
+                    cf: "missing".into(),
+                    key: b"user:4".to_vec(),
+                    value: b"four".to_vec(),
+                },
+            ])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::ColumnFamilyNotFound(name) if name == "missing"));
+        assert_eq!(
+            storage
+                .get("records".into(), b"user:3".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
+        let storage = storage
+            .reopen(vec!["records".into(), "indices".into()])
+            .await
+            .unwrap();
+        storage
+            .set("indices".into(), b"name:one".to_vec(), b"1".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .get("records".into(), b"user:1".to_vec())
+                .await
+                .unwrap(),
+            Some(b"one".to_vec())
+        );
+    });
+}
+
+#[test]
+fn rejects_wrong_format_and_closed_store() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jazz.sqlite");
+        let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+        storage.close().await.unwrap();
+        assert!(matches!(
+            storage.get("records".into(), vec![]).await,
+            Err(Error::Backend { .. })
+        ));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute("UPDATE meta SET value = x'00' WHERE key = 'format'", [])
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            SqliteStorage::open(&path, &["records"]),
+            Err(Error::InvalidStorageLayout(_))
+        ));
+    });
+}

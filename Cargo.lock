@@ -2246,6 +2246,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-storage-sqlite"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "groove",
+ "rusqlite",
+ "tempfile",
+]
+
+[[package]]
 name = "jazz-testkit"
 version = "0.1.0"
 dependencies = [
