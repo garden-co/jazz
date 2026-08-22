@@ -34,6 +34,7 @@ type TabPeer = {
   port: MessagePort;
   pump: BrowserWorkerTransportPump | null;
   subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]> | null;
+  pendingFrames: Uint8Array[];
   onMessage: (event: MessageEvent<BrowserFollowerPortRequest>) => void;
   onMessageError: () => void;
 };
@@ -49,6 +50,9 @@ type RuntimeContext = {
   disposeTelemetry: (() => void) | null;
   resetBarrier: { id: number; pending: Set<string>; resolve: () => void } | null;
   storageInvalidated: boolean;
+  serverUrl: string | null;
+  serverAuthJson: string;
+  serverConnectionStarted: boolean;
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
@@ -84,6 +88,7 @@ async function connectTab(
       context = createContext(key, message.fingerprint, message.options);
       contexts.set(key, context);
     }
+    configureServer(context, message.options);
     await context.initialize;
     post(port, { type: "runtime-ready" });
     attachTab(context, message.tabId, port);
@@ -108,6 +113,9 @@ function createContext(
     disposeTelemetry: null,
     resetBarrier: null,
     storageInvalidated: false,
+    serverUrl: options.serverUrl ?? null,
+    serverAuthJson: options.authJson,
+    serverConnectionStarted: false,
     initialize: Promise.resolve(),
   };
   const initializeContext = contextInitializationTail.then(() => initialize(context));
@@ -144,7 +152,24 @@ async function initialize(context: RuntimeContext): Promise<void> {
     false,
   );
   context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
-  if (options.serverUrl) context.runtime.connect(options.serverUrl, options.authJson);
+}
+
+function configureServer(context: RuntimeContext, options: BrowserWorkerInitOptions): void {
+  const requestedUrl = options.serverUrl;
+  if (!requestedUrl) return;
+  if (context.serverUrl && context.serverUrl !== requestedUrl) {
+    throw new Error("incompatible persistent browser server configuration");
+  }
+  context.serverUrl = requestedUrl;
+  context.serverAuthJson = options.authJson;
+}
+
+function ensureServerConnection(context: RuntimeContext): void {
+  const requestedUrl = context.serverUrl;
+  if (!requestedUrl) return;
+  if (context.serverConnectionStarted) return;
+  requireRuntime(context).connect(requestedUrl, context.serverAuthJson);
+  context.serverConnectionStarted = true;
 }
 
 function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): void {
@@ -160,6 +185,7 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
     port,
     pump: null,
     subscriber: null,
+    pendingFrames: [],
     onMessage,
     onMessageError,
   };
@@ -172,7 +198,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
   if (peer.context.peers.get(peer.tabId) !== peer) return;
   if (message.type === "frames") {
     if (!peer.pump) {
-      failPeer(peer, new Error("Browser tab sent frames before initializing session claims"));
+      // The init handler may be awaiting an evaluator pass while MessagePort
+      // delivery continues. Preserve ordering instead of treating those
+      // already-staged follower frames as a protocol violation.
+      peer.pendingFrames.push(...message.frames);
       return;
     }
     peer.pump.receive(message.frames);
@@ -196,19 +225,30 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     const activeRuntime = requireRuntime(peer.context);
     if (message.type === "init") {
       if (peer.pump || peer.subscriber) throw new Error("Browser tab is already initialized");
+      // Peer installation is synchronous once the shared evaluator is idle.
+      // If hydration currently owns node state, join that evaluator pass first
+      // so attachment cannot use a binding-time borrow during evaluation.
+      await activeRuntime.progressPeerTransport();
       attachPeerTransport(peer, activeRuntime, message.sessionClaims);
+      if (peer.pendingFrames.length > 0) {
+        const pending = peer.pendingFrames.splice(0);
+        peer.pump?.receive(pending);
+      }
+      ensureServerConnection(peer.context);
       result(peer, message.id);
       return;
     }
     if (message.type === "update-auth") {
       if (!peer.subscriber) throw new Error("Browser tab is not initialized");
       await peer.subscriber.updateAuthenticatedClaims?.(message.sessionClaims);
+      peer.context.serverAuthJson = message.authJson;
       await activeRuntime.updateAuth(message.authJson);
       broadcast(peer.context, { type: "auth-restored" });
       return;
     }
     if (message.type === "disconnect") {
       await activeRuntime.disconnect({ rejectWaiters: false });
+      peer.context.serverConnectionStarted = false;
       result(peer, message.id);
       return;
     }
@@ -220,10 +260,12 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       return;
     }
     if (message.type === "reconnect") {
-      const serverUrl = peer.context.options.serverUrl;
+      const serverUrl = peer.context.serverUrl;
       if (!serverUrl) throw new Error("Browser runtime reconnect requires a serverUrl");
       await peer.subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
+      peer.context.serverAuthJson = message.authJson;
       activeRuntime.connect(serverUrl, message.authJson);
+      peer.context.serverConnectionStarted = true;
       result(peer, message.id);
       return;
     }

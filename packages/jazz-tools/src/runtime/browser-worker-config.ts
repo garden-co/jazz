@@ -34,7 +34,6 @@ export function createBrowserWorkerFingerprint(
     appId: config.appId,
     dbName,
     env: config.env ?? "dev",
-    serverUrl: config.serverUrl ?? null,
     schemaHash,
     authClass: resolveAuthClass(config),
     workerUrl: resolveBrowserWorkerUrl(config.runtimeSources),

@@ -15,6 +15,7 @@ where
     S: OrderedKvStorage,
 {
     pub(super) node: SharedNodeState<S>,
+    receives_commits_as_local: bool,
     pub(super) subscriptions: SubscriptionList,
     pub(super) outbox: Outbox,
     pub(super) pending_local_publications: PendingLocalPublications,
@@ -50,6 +51,10 @@ where
 {
     /// Wrap a node for serving subscriber links.
     pub fn new(node: NodeState<S>) -> Self {
+        // History completeness is a structural property of the opened node,
+        // not evaluator state. Cache it so connection attachment never needs
+        // to synchronously borrow storage-owning state during evaluation.
+        let receives_commits_as_local = !node.is_history_complete();
         let pending_mutation_errors = node
             .rejected_transactions()
             .into_iter()
@@ -60,6 +65,7 @@ where
             .collect();
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
+            receives_commits_as_local,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
             outbox: Rc::new(RefCell::new(Vec::new())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
@@ -110,7 +116,7 @@ where
     /// Ordinary `Db::open` nodes are Local receivers. Only the structurally
     /// separate history-complete path acts as the Core fate authority.
     fn receives_commits_as_local(&self) -> bool {
-        !self.node.borrow().is_history_complete()
+        self.receives_commits_as_local
     }
 
     /// Borrow the served node.
