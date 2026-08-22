@@ -22,7 +22,7 @@ describe("IndexedDbPageStore", () => {
 
     const metadata = await store.commit({
       expectedGeneration: 0,
-      metadata: { pageSize: 16 * 1024, rootPageId: 7, totalPages: 8 },
+      metadata: { pageSize: 16 * 1024, rootPageId: 7, nextPageId: 8 },
       pages: new Map([
         [7, new Uint8Array([1, 2, 3])],
         [3, new Uint8Array([4, 5])],
@@ -41,7 +41,7 @@ describe("IndexedDbPageStore", () => {
     let store = await IndexedDbPageStore.open(name);
     await store.commit({
       expectedGeneration: 0,
-      metadata: { pageSize: 4096, rootPageId: 1, totalPages: 3 },
+      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 3 },
       pages: new Map([
         [1, new Uint8Array([1])],
         [2, new Uint8Array([2])],
@@ -49,7 +49,7 @@ describe("IndexedDbPageStore", () => {
     });
     await store.commit({
       expectedGeneration: 1,
-      metadata: { pageSize: 4096, rootPageId: 1, totalPages: 3 },
+      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 3 },
       pages: new Map([[1, new Uint8Array([9])]]),
       deletedPageIds: [2],
     });
@@ -67,14 +67,14 @@ describe("IndexedDbPageStore", () => {
     const store = await IndexedDbPageStore.open(name);
     await store.commit({
       expectedGeneration: 0,
-      metadata: { pageSize: 4096, rootPageId: 1, totalPages: 2 },
+      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 2 },
       pages: new Map([[1, new Uint8Array([1])]]),
     });
 
     await expect(
       store.commit({
         expectedGeneration: 0,
-        metadata: { pageSize: 4096, rootPageId: 2, totalPages: 3 },
+        metadata: { pageSize: 4096, rootPageId: 2, nextPageId: 3 },
         pages: new Map([[2, new Uint8Array([2])]]),
       }),
     ).rejects.toThrow("expected 0, found 1");

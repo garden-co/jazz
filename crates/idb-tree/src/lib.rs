@@ -7,12 +7,16 @@
 
 mod page;
 mod store;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 
 pub use store::{BoxFuture, Commit, MemoryPageStore, Metadata, PageStore};
+#[cfg(target_arch = "wasm32")]
+pub use web::IndexedDbPageStore;
 
 use page::{Page, PageId, ValueCell, decode_page, encode_page};
 

@@ -9,7 +9,7 @@ export interface IndexedDbBtreeMetadata {
   pageSize: number;
   generation: number;
   rootPageId: number | null;
-  totalPages: number;
+  nextPageId: number;
 }
 
 export interface IndexedDbPageCommit {
@@ -103,6 +103,31 @@ export class IndexedDbPageStore {
     return metadata;
   }
 
+  /** Narrow bridge used by wasm without serializing page bytes through serde. */
+  commitPages(
+    expectedGeneration: number,
+    pageSize: number,
+    rootPageId: number,
+    nextPageId: number,
+    pageIds: readonly number[],
+    pageBytes: readonly Uint8Array[],
+    deletedPageIds: readonly number[],
+  ): Promise<IndexedDbBtreeMetadata> {
+    if (pageIds.length !== pageBytes.length) {
+      return Promise.reject(new Error("IDBTree page ids and page bytes have different lengths"));
+    }
+    return this.commit({
+      expectedGeneration,
+      metadata: {
+        pageSize,
+        rootPageId: rootPageId < 0 ? null : rootPageId,
+        nextPageId,
+      },
+      pages: new Map(pageIds.map((pageId, index) => [pageId, pageBytes[index]!])),
+      deletedPageIds,
+    });
+  }
+
   close(): void {
     this.db.close();
   }
@@ -147,8 +172,8 @@ function assertMetadata(value: unknown): asserts value is IndexedDbBtreeMetadata
     !Number.isSafeInteger(metadata.generation) ||
     Number(metadata.generation) < 1 ||
     (metadata.rootPageId !== null && !isPageId(metadata.rootPageId)) ||
-    !Number.isSafeInteger(metadata.totalPages) ||
-    Number(metadata.totalPages) < 0
+    !Number.isSafeInteger(metadata.nextPageId) ||
+    Number(metadata.nextPageId) < 0
   ) {
     throw new Error("Invalid IndexedDB B-tree metadata");
   }
