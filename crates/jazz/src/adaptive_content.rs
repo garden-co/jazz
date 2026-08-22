@@ -117,9 +117,12 @@ impl ImmutableContentStore for MemoryContentStore {
     }
 }
 
-/// Adapter over Jazz's ordinary ordered key/value storage. Passing a Groove
-/// storage transaction makes immutable objects and the eventual row write part
-/// of the same physical commit boundary.
+/// Adapter over Jazz's ordinary ordered key/value storage.
+///
+/// This adapter verifies absent-or-identical behavior within one serialized
+/// writer or storage transaction. It does not manufacture compare-and-set
+/// semantics: integrations with concurrent writers must use a transaction
+/// conflict boundary that covers this column family.
 pub struct KvContentStore<'a, S> {
     storage: &'a S,
 }
@@ -329,6 +332,17 @@ impl AdaptiveScalarSchema {
             max_encoded_bytes: usize::try_from(self.max_tail_bytes)
                 .expect("u32 tail bound fits usize on supported targets"),
         }
+    }
+
+    /// Validate that this runtime understands the declared physical format.
+    pub fn validate(&self) -> Result<(), ContentError> {
+        if self.tree_format != u16::from(OBJECT_FORMAT_VERSION) {
+            return Err(ContentError::UnsupportedTreeFormat(self.tree_format));
+        }
+        if self.max_tail_entries == 0 || self.max_tail_bytes == 0 {
+            return Err(ContentError::TailTooLarge);
+        }
+        Ok(())
     }
 }
 
@@ -572,6 +586,9 @@ pub enum ContentError {
     /// Chunk parameters violate format bounds.
     #[error("invalid content chunking profile")]
     InvalidChunkingProfile,
+    /// The schema declares an immutable-tree format this runtime cannot read.
+    #[error("unsupported adaptive content tree format {0}")]
+    UnsupportedTreeFormat(u16),
     /// Adaptive scalar cell envelope is unknown.
     #[error("unknown adaptive scalar cell format")]
     UnknownCellFormat,
@@ -711,7 +728,15 @@ impl ProllyTree {
     ) -> Result<Vec<u8>, ContentError> {
         let capacity = usize::try_from(expected_len).map_err(|_| ContentError::LengthOverflow)?;
         let mut out = Vec::with_capacity(capacity);
-        self.read_object_range(domain, root, 0, expected_len, store, &mut out)?;
+        self.read_object_range(
+            domain,
+            root,
+            0,
+            expected_len,
+            Some(expected_len),
+            store,
+            &mut out,
+        )?;
         if out.len() != capacity {
             return Err(ContentError::MalformedObject(
                 "root aggregate length does not match manifest".to_owned(),
@@ -742,7 +767,7 @@ impl ProllyTree {
         }
         let capacity = usize::try_from(len).map_err(|_| ContentError::LengthOverflow)?;
         let mut out = Vec::with_capacity(capacity);
-        self.read_object_range(domain, root, offset, end, store, &mut out)?;
+        self.read_object_range(domain, root, offset, end, Some(root_len), store, &mut out)?;
         Ok(out)
     }
 
@@ -778,10 +803,18 @@ impl ProllyTree {
         id: ContentId,
         start: u64,
         end: u64,
+        expected_len: Option<u64>,
         store: &S,
         out: &mut Vec<u8>,
     ) -> Result<(), ContentError> {
-        match self.load_object(domain, id, store)? {
+        let object = self.load_object(domain, id, store)?;
+        let actual_len = object_len(&object)?;
+        if expected_len.is_some_and(|expected| expected != actual_len) {
+            return Err(ContentError::MalformedObject(
+                "child aggregate length does not match descriptor".to_owned(),
+            ));
+        }
+        match object {
             ContentObject::Leaf(bytes) => {
                 let leaf_len =
                     u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)?;
@@ -817,6 +850,7 @@ impl ProllyTree {
                             child.id,
                             overlap_start - child_start,
                             overlap_end - child_start,
+                            Some(child.byte_len),
                             store,
                             out,
                         )?;
@@ -846,12 +880,22 @@ impl AdaptiveScalar {
 
     /// Decode one exact alpha physical cell. There is deliberately no legacy
     /// or compatibility fallback.
-    pub fn decode_cell(encoded: &[u8]) -> Result<Self, ContentError> {
+    pub fn decode_cell(
+        schema: &AdaptiveScalarSchema,
+        encoded: &[u8],
+    ) -> Result<Self, ContentError> {
+        schema.validate()?;
         let payload = encoded
             .strip_prefix(CELL_ENVELOPE)
             .ok_or(ContentError::UnknownCellFormat)?;
-        postcard::from_bytes(payload)
-            .map_err(|error| ContentError::MalformedCell(error.to_string()))
+        let cell: Self = postcard::from_bytes(payload)
+            .map_err(|error| ContentError::MalformedCell(error.to_string()))?;
+        if let Self::Large(large) = &cell {
+            if !tail_within_bounds(&large.edit_tail, schema.tail_bounds())? {
+                return Err(ContentError::TailTooLarge);
+            }
+        }
+        Ok(cell)
     }
 
     /// Create an inline scalar after logical validation.
@@ -1447,10 +1491,15 @@ fn descriptor_groups(
     let mut start = 0;
     let mut rolling = 0_u64;
     for (index, child) in children.iter().enumerate() {
-        for byte in child.id.as_bytes() {
-            rolling = rolling.rotate_left(1).wrapping_add(gear(*byte));
+        for byte in child
+            .id
+            .as_bytes()
+            .iter()
+            .copied()
+            .chain(child.byte_len.to_le_bytes())
+        {
+            rolling = rolling.rotate_left(1).wrapping_add(gear(byte));
         }
-        rolling = rolling.rotate_left(1) ^ child.byte_len;
         let len = index + 1 - start;
         let boundary = len >= profile.min_children && rolling & mask == 0;
         if boundary || len >= profile.max_children {
@@ -1523,6 +1572,28 @@ mod tests {
                 .unwrap(),
             bytes[997..1208]
         );
+    }
+
+    #[test]
+    fn declared_child_lengths_must_match_canonical_objects() {
+        let tree = ProllyTree::new(tiny_profile()).unwrap();
+        let mut store = MemoryContentStore::default();
+        let leaf = encode_object(&ContentObject::Leaf(b"abc".to_vec())).unwrap();
+        let leaf_id = object_id(&domain(), &leaf);
+        store.put_if_absent_or_identical(leaf_id, &leaf).unwrap();
+        let branch = encode_object(&ContentObject::Branch(vec![ChildDescriptor {
+            id: leaf_id,
+            byte_len: 2,
+        }]))
+        .unwrap();
+        let root = object_id(&domain(), &branch);
+        store.put_if_absent_or_identical(root, &branch).unwrap();
+
+        assert!(matches!(
+            tree.materialize(&domain(), root, 2, &store),
+            Err(ContentError::MalformedObject(message))
+                if message.contains("child aggregate length")
+        ));
     }
 
     #[test]
@@ -1790,16 +1861,43 @@ mod tests {
 
     #[test]
     fn atomic_cell_round_trips_without_a_legacy_fallback() {
+        let schema = AdaptiveScalarSchema::built_in(ScalarKind::Bytes);
         let cell = AdaptiveScalar::Large(LargeScalar {
             root: ContentId([7; 32]),
             root_byte_len: 42,
             edit_tail: vec![BytePatch::insert(4, b"next")],
         });
         let encoded = cell.encode_cell().unwrap();
-        assert_eq!(AdaptiveScalar::decode_cell(&encoded).unwrap(), cell);
         assert_eq!(
-            AdaptiveScalar::decode_cell(&encoded[CELL_ENVELOPE.len()..]),
+            AdaptiveScalar::decode_cell(&schema, &encoded).unwrap(),
+            cell
+        );
+        assert_eq!(
+            AdaptiveScalar::decode_cell(&schema, &encoded[CELL_ENVELOPE.len()..]),
             Err(ContentError::UnknownCellFormat)
+        );
+    }
+
+    #[test]
+    fn decoded_cells_obey_the_schema_format_and_tail_bounds() {
+        let mut schema = AdaptiveScalarSchema::built_in(ScalarKind::Bytes);
+        let cell = AdaptiveScalar::Large(LargeScalar {
+            root: ContentId([7; 32]),
+            root_byte_len: 42,
+            edit_tail: (0..=schema.max_tail_entries)
+                .map(|_| BytePatch::insert(0, b"x"))
+                .collect(),
+        });
+        let encoded = cell.encode_cell().unwrap();
+        assert_eq!(
+            AdaptiveScalar::decode_cell(&schema, &encoded),
+            Err(ContentError::TailTooLarge)
+        );
+
+        schema.tree_format += 1;
+        assert_eq!(
+            AdaptiveScalar::decode_cell(&schema, &encoded),
+            Err(ContentError::UnsupportedTreeFormat(schema.tree_format))
         );
     }
 

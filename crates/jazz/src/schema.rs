@@ -1415,7 +1415,7 @@ fn transactions_table() -> GrooveTableSchema {
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_str(&mut bytes, "jazz-schema-v2-branch-columns");
+    put_str(&mut bytes, "jazz-schema-v3-adaptive-scalars");
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     put_u64(&mut bytes, tables.len() as u64);
@@ -1425,6 +1425,7 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
         for column in &table.columns {
             put_str(&mut bytes, &column.name);
             put_column_type(&mut bytes, &column.column_type);
+            put_adaptive_scalar_schema(&mut bytes, column.adaptive_scalar.as_ref());
             put_merge_strategy(&mut bytes, table.merge_strategy(&column.name));
         }
         put_u64(&mut bytes, table.references.len() as u64);
@@ -1440,6 +1441,26 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
         }
     }
     bytes
+}
+
+fn put_adaptive_scalar_schema(
+    bytes: &mut Vec<u8>,
+    schema: Option<&crate::adaptive_content::AdaptiveScalarSchema>,
+) {
+    let Some(schema) = schema else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(1);
+    bytes.push(match schema.kind {
+        crate::adaptive_content::ScalarKind::Bytes => 0,
+        crate::adaptive_content::ScalarKind::String => 1,
+        crate::adaptive_content::ScalarKind::Json => 2,
+    });
+    bytes.extend_from_slice(&schema.inline_up_to.to_le_bytes());
+    bytes.extend_from_slice(&schema.max_tail_entries.to_le_bytes());
+    bytes.extend_from_slice(&schema.max_tail_bytes.to_le_bytes());
+    bytes.extend_from_slice(&schema.tree_format.to_le_bytes());
 }
 
 fn put_merge_strategy(bytes: &mut Vec<u8>, strategy: MergeStrategy) {
@@ -1670,6 +1691,30 @@ mod tests {
         .with_column_merge_strategy("count", MergeStrategy::Counter)]);
 
         assert_ne!(lww.version_id(), counter.version_id());
+    }
+
+    #[test]
+    fn adaptive_scalar_policy_changes_schema_identity() {
+        let mut adaptive_column = ColumnSchema::new("body", ColumnType::String);
+        adaptive_column.adaptive_scalar =
+            Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
+                crate::adaptive_content::ScalarKind::String,
+            ));
+        let adaptive = RuntimeSchema::new([TableSchema::new("notes", [adaptive_column])]);
+        let plain = RuntimeSchema::new([TableSchema::new(
+            "notes",
+            [ColumnSchema::new("body", ColumnType::String)],
+        )]);
+        let mut changed_column = ColumnSchema::new("body", ColumnType::String);
+        let mut changed_policy = crate::adaptive_content::AdaptiveScalarSchema::built_in(
+            crate::adaptive_content::ScalarKind::String,
+        );
+        changed_policy.inline_up_to += 1;
+        changed_column.adaptive_scalar = Some(changed_policy);
+        let changed = RuntimeSchema::new([TableSchema::new("notes", [changed_column])]);
+
+        assert_ne!(adaptive.version_id(), plain.version_id());
+        assert_ne!(adaptive.version_id(), changed.version_id());
     }
 
     #[test]
