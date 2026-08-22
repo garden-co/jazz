@@ -1528,15 +1528,6 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  /** Drain evaluator work whose storage effects must be durable before an owner is released. */
-  async flushDurableWork(): Promise<void> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.flushDurableWork();
-    if (this.closed) return;
-    await this.runCoreTick();
-    await this.waitForCoreIdle();
-    await this.flushLocalSettlements();
-  }
-
   private deliverMutationError(event: MutationErrorEvent): void {
     const transactionId = event.transaction.transactionId;
     if (this.deliveredMutationErrors.has(transactionId)) return;

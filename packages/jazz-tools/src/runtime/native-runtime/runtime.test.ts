@@ -3719,8 +3719,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
 
     expect(callbacks).toHaveLength(1);
-    expect(callbacks[0]?.[0]).toBeInstanceOf(Error);
-    expect((callbacks[0]?.[0] as Error).message).toContain(
+    const error = callbacks[0]![0];
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(
       "settled relation subscription chunk retained unresolved placeholder rows",
     );
     runtime.close();
@@ -3836,8 +3837,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
 
     expect(callbacks).toHaveLength(1);
-    expect(callbacks[0]?.[0]).toBeInstanceOf(Error);
-    expect((callbacks[0]?.[0] as Error).message).toContain(
+    const error = callbacks[0]![0];
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(
       "relation subscription buffered unresolved placeholder rows beyond bounded limits",
     );
     runtime.close();

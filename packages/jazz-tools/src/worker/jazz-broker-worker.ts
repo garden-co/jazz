@@ -332,10 +332,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       peer.flushPumpComplete = false;
       peer.flushObserved = false;
       peer.pump?.drainOutboundFrames();
-      // The page-side pump barrier only proves delivery into this worker.
-      // Drive the durable owner through the work those frames scheduled before
-      // allowing the page to treat its local receipt as flush-complete.
-      await activeRuntime.flushDurableWork();
+      // The page reports `flush-local-observed` only after every pending local
+      // settlement handle has resolved. Those handles are acknowledged by the
+      // durable worker after persistence, so evaluator quiescence is neither
+      // necessary nor relevant to this durability barrier.
       peer.flushPumpComplete = true;
       completeLocalFlush(peer);
       return;
