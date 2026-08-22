@@ -106,9 +106,7 @@ describe("reconcileArray", () => {
     expect(target[0]!.name).toBe("Alice");
   });
 
-  // TEST_BURNDOWN_TS: reconcileArray > deletes dropped index properties so proxy-cached reads cannot resurface old rows
-  // known red; tracked in TEST_BURNDOWN.md — reconcileArray truncates with .length assignment, which does not delete dropped index properties, leaving proxy-cached per-index state stale.
-  it.skip("deletes dropped index properties so proxy-cached reads cannot resurface old rows", () => {
+  it("deletes dropped index properties so proxy-cached reads cannot resurface old rows", () => {
     const deletedIndices: string[] = [];
     const indexCache = new Map<string, unknown>();
     const invalidate = (key: string | symbol) => {
@@ -145,6 +143,39 @@ describe("reconcileArray", () => {
     expect([...deletedIndices].sort()).toEqual(["1", "2"]);
     expect(readCached(1)).toBeUndefined();
     expect(readCached(2)).toBeUndefined();
+  });
+
+  it("does not resurface a truncated row when a later reconciliation regrows the array", () => {
+    const indexCache = new Map<string, unknown>();
+    const rows = [
+      { id: "1", name: "Alice" },
+      { id: "2", name: "Bob" },
+    ];
+    const proxy = new Proxy(rows, {
+      set(target, key, value, receiver) {
+        if (typeof key === "string") indexCache.delete(key);
+        return Reflect.set(target, key, value, receiver);
+      },
+      deleteProperty(target, key) {
+        if (typeof key === "string") indexCache.delete(key);
+        return Reflect.deleteProperty(target, key);
+      },
+    });
+    const readCached = (index: number): unknown => {
+      const key = String(index);
+      if (!indexCache.has(key)) indexCache.set(key, proxy[index]);
+      return indexCache.get(key);
+    };
+
+    expect(readCached(1)).toEqual({ id: "2", name: "Bob" });
+    reconcileArray(proxy, [{ id: "1", name: "Alice" }]);
+    expect(readCached(1)).toBeUndefined();
+
+    reconcileArray(proxy, [
+      { id: "1", name: "Alice" },
+      { id: "3", name: "Cara" },
+    ]);
+    expect(readCached(1)).toEqual({ id: "3", name: "Cara" });
   });
 });
 
