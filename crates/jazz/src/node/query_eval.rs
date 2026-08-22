@@ -394,7 +394,9 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        self.compile_query_program_request(request).await
+        let access_paths = self.query_program_access_paths(&request)?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
     async fn compile_current_query_program_for_one_shot_read(
@@ -416,7 +418,10 @@ where
             settled_binding_view,
             authorization_mode,
         )?;
-        let access_paths = self.query_program_access_paths(&request)?;
+        // One-shot reads are the only compilation mode allowed to attach a
+        // physical source cap. Prepared/maintained and policy programs keep
+        // their ordinary unbounded access paths.
+        let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
     }
@@ -550,7 +555,12 @@ where
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
         };
-        self.compile_query_program_request(request).await
+        // This one-shot include-deleted source has no deletion anti-join after
+        // it. The proof remains deliberately narrower than ordinary visible
+        // reads, which discard the physical cap before their anti-join.
+        let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
     async fn compile_open_tx_query_program(

@@ -24,6 +24,11 @@ pub(super) enum StorageRequestKey {
         family: String,
         prefix: Vec<u8>,
     },
+    ScanPrefixLimit {
+        family: String,
+        prefix: Vec<u8>,
+        max_items: usize,
+    },
     IndexedRowsPrefix {
         table: String,
         index: String,
@@ -128,6 +133,21 @@ impl<'a> StorageRequests<'a> {
             }
             StorageRequestKey::ScanPrefix { family, prefix } => {
                 let future = storage.scan_prefix(family.clone(), prefix.clone());
+                Box::pin(async move {
+                    future
+                        .await
+                        .map(StorageRequestOutput::Rows)
+                        .map_err(Into::into)
+                }) as PendingRequest<'a>
+            }
+            StorageRequestKey::ScanPrefixLimit {
+                family,
+                prefix,
+                max_items,
+            } => {
+                let future = storage.scan(
+                    ScanRequest::prefix(family.clone(), prefix.clone()).with_max_items(*max_items),
+                );
                 Box::pin(async move {
                     future
                         .await

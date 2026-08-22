@@ -83,9 +83,19 @@ impl NodeState {
         Ok(
             match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())? {
                 StaticScanBounds::Prefix(prefix) => {
-                    Some(super::evaluation_session::StorageRequestKey::ScanPrefix {
-                        family: "indices".to_owned(),
-                        prefix,
+                    let max_items = scan_max_items(input.scan.as_ref());
+                    Some(match max_items {
+                        Some(max_items) => {
+                            super::evaluation_session::StorageRequestKey::ScanPrefixLimit {
+                                family: "indices".to_owned(),
+                                prefix,
+                                max_items,
+                            }
+                        }
+                        None => super::evaluation_session::StorageRequestKey::ScanPrefix {
+                            family: "indices".to_owned(),
+                            prefix,
+                        },
                     })
                 }
                 StaticScanBounds::Range { start, end } if start < end => {
@@ -357,17 +367,32 @@ impl NodeState {
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if eval_mode == EvalMode::Hydrate {
             let storage = storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
-            let store = RecordStore::new(storage, "indices", output_desc);
+            let max_items = scan_max_items(input.scan.as_ref());
             let scan =
                 match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
                 {
-                    StaticScanBounds::Prefix(prefix) => store.scan_prefix(&prefix).await?,
+                    StaticScanBounds::Prefix(prefix) => {
+                        storage
+                            .scan(ScanRequest {
+                                cf: "indices".to_owned(),
+                                bounds: ScanBounds::Prefix(prefix),
+                                direction: ScanDirection::Forward,
+                                max_items,
+                            })
+                            .await?
+                    }
                     StaticScanBounds::Range { start, end } => {
-                        if start < end {
-                            store.scan_range(&start, &end).await?
-                        } else {
+                        if start >= end {
                             return Ok(RecordDeltas::empty(*output_desc));
                         }
+                        storage
+                            .scan(ScanRequest {
+                                cf: "indices".to_owned(),
+                                bounds: ScanBounds::Range { start, end },
+                                direction: ScanDirection::Forward,
+                                max_items,
+                            })
+                            .await?
                     }
                 };
             let mut scan = scan;

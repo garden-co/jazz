@@ -21,7 +21,7 @@ mod opfs;
 mod test;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -1938,6 +1938,117 @@ impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        let cf = request.cf.clone();
+        let bounds = request.bounds.clone();
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
+            operation.cf() == cf
+                && match &bounds {
+                    ScanBounds::Prefix(prefix) => operation.key().starts_with(prefix),
+                    ScanBounds::Range { start, end } => {
+                        operation.key() >= start.as_slice() && operation.key() < end.as_slice()
+                    }
+                }
+        });
+        Box::pin(async move {
+            // Deltas require reading the base value to apply their operand.
+            // They retain the established complete logical merge; set/delete
+            // overlays below are incremental and honor the hard bound.
+            if operations
+                .iter()
+                .any(|operation| matches!(operation, OwnedWriteOperation::Delta { .. }))
+            {
+                let mut values = collect_scan(
+                    self.base
+                        .scan(ScanRequest {
+                            max_items: None,
+                            ..request.clone()
+                        })
+                        .await?,
+                )
+                .await?;
+                let staged = RefCell::new(StagedWriteState::from(operations));
+                let in_bounds = |key: &[u8]| match &request.bounds {
+                    ScanBounds::Prefix(prefix) => key.starts_with(prefix),
+                    ScanBounds::Range { start, end } => {
+                        key >= start.as_slice() && key < end.as_slice()
+                    }
+                };
+                overlay_values(&mut values, &request.cf, in_bounds, &staged)?;
+                if request.direction == ScanDirection::Reverse {
+                    values.reverse();
+                }
+                if let Some(max_items) = request.max_items {
+                    values.truncate(max_items);
+                }
+                return Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>);
+            }
+
+            let mut staged = BTreeMap::<Vec<u8>, Option<Vec<u8>>>::new();
+            for operation in operations {
+                match operation {
+                    OwnedWriteOperation::Set { key, value, .. } => {
+                        staged.insert(key, Some(value));
+                    }
+                    OwnedWriteOperation::Delete { key, .. } => {
+                        staged.insert(key, None);
+                    }
+                    OwnedWriteOperation::Delta { .. } => unreachable!("delta handled above"),
+                }
+            }
+            let mut staged = staged.into_iter().collect::<VecDeque<_>>();
+            if request.direction == ScanDirection::Reverse {
+                staged.make_contiguous().reverse();
+            }
+            let mut base = self
+                .base
+                .scan(ScanRequest {
+                    max_items: None,
+                    ..request.clone()
+                })
+                .await?;
+            let mut base_entries = VecDeque::new();
+            let mut base_done = false;
+            let mut values = Vec::new();
+            let limit = request.max_items.unwrap_or(usize::MAX);
+            while values.len() < limit {
+                while base_entries.is_empty() && !base_done {
+                    match base.next_batch().await? {
+                        Some(entries) => base_entries.extend(entries),
+                        None => base_done = true,
+                    }
+                }
+                let choice = match (base_entries.front(), staged.front()) {
+                    (None, None) => break,
+                    (Some(_), None) => (true, false),
+                    (None, Some(_)) => (false, true),
+                    (Some((base_key, _)), Some((staged_key, _))) if base_key == staged_key => {
+                        (true, true)
+                    }
+                    (Some((base_key, _)), Some((staged_key, _))) => {
+                        let staged_first = match request.direction {
+                            ScanDirection::Forward => staged_key < base_key,
+                            ScanDirection::Reverse => staged_key > base_key,
+                        };
+                        (!staged_first, staged_first)
+                    }
+                };
+                let base_entry = choice.0.then(|| base_entries.pop_front()).flatten();
+                let staged_entry = choice.1.then(|| staged.pop_front()).flatten();
+                match staged_entry {
+                    Some((key, Some(value))) => values.push((key, value)),
+                    Some((_, None)) => {}
+                    None => {
+                        if let Some(entry) = base_entry {
+                            values.push(entry);
+                        }
+                    }
+                }
+            }
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
+        })
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         let mut staged_writes = self.staged_writes.borrow_mut();
         if staged_writes.is_empty() {
@@ -3518,6 +3629,21 @@ mod tests {
                 (b"a".to_vec(), b"staged-a".to_vec()),
                 (b"c".to_vec(), b"staged-c".to_vec()),
             ]
+        );
+        assert_eq!(
+            collect_scan(
+                overlay
+                    .scan(ScanRequest::prefix("indices".into(), Vec::new()).with_max_items(2))
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![
+                (b"a".to_vec(), b"staged-a".to_vec()),
+                (b"c".to_vec(), b"staged-c".to_vec()),
+            ],
+            "the bounded merged scan applies staged override/delete/insert before its logical cap"
         );
         assert_eq!(
             storage.get("indices".into(), b"a".to_vec()).await.unwrap(),

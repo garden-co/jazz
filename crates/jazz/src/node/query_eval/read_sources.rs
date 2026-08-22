@@ -1369,6 +1369,9 @@ where
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
+                let source_limit = (request.visibility == RowVisibility::IncludeDeleted)
+                    .then_some(source_limit)
+                    .flatten();
                 let projection_target = self.current_projection_target(request, table)?;
                 let rows = self
                     .node
@@ -1667,6 +1670,7 @@ where
                     prefix,
                     source_limit,
                 }) => {
+                    let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
                     self.node.query_engine_read_metrics.source_index_probes += 1;
                     self.node
                         .physical_global_current_source_for_index_scan(
@@ -1757,6 +1761,7 @@ where
                 // A Global index already selects from the canonical settled
                 // winner relation. Project those raw physical rows first, then
                 // apply the compatibility boundary below.
+                let source_limit = (!exclude_deleted).then_some(*source_limit).flatten();
                 self.node.query_engine_read_metrics.source_index_probes += 1;
                 self.node
                     .physical_global_current_source_for_index_scan_with_output(
@@ -1764,7 +1769,7 @@ where
                         self.read_view.read_schema,
                         column,
                         prefix,
-                        *source_limit,
+                        source_limit,
                         &projection_target,
                         raw_global_output.clone(),
                     )
@@ -2873,7 +2878,42 @@ where
             None,
             false,
         );
-        self.normalized_program_access_paths(&input, &reads.primary, &PolicyContext::System)
+        let mut paths =
+            self.normalized_program_access_paths(&input, &reads.primary, &PolicyContext::System)?;
+
+        // A source cap is stronger than an index access path: it is only safe
+        // when the source is itself the final result prefix. In particular,
+        // ordinary visible reads retain their unbounded path because the
+        // deletion anti-join can discard sparse candidates after this source.
+        // `projected_content_current_source_graph` drops this cap whenever that
+        // anti-join is present, leaving the narrow IncludeDeleted one-shot
+        // shape below as the initial receipt.
+        let query = shape.query();
+        let Some(limit) = query.limit else {
+            return Ok(paths);
+        };
+        if query.offset != 0
+            || !query.order_by.is_empty()
+            || !query.joins.is_empty()
+            || query.flat_join.is_some()
+            || !query.policy_branches.is_empty()
+            || !query.reachable.is_empty()
+            || !query.inherits.is_empty()
+            || !query.includes.is_empty()
+            || !query.array_subqueries.is_empty()
+            || query.aggregate.is_some()
+        {
+            return Ok(paths);
+        }
+        let root = root_source_id(&query.table);
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        if table.read_policy.is_some() {
+            return Ok(paths);
+        }
+        if let Some(CurrentAccessPath::Index { source_limit, .. }) = paths.get_mut(&root) {
+            *source_limit = Some(limit);
+        }
+        Ok(paths)
     }
 
     pub(super) fn current_query_primary_key_access_paths(

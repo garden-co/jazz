@@ -297,4 +297,47 @@ mod tests {
             super::super::conformance::reopen_preserves_data_and_adds_families(storage).await;
         });
     }
+
+    #[test]
+    fn bounded_scan_stops_after_requested_prefix_entries_in_both_directions() {
+        futures::executor::block_on(async {
+            let storage = IdbStorage::open(MemoryPageStore::default(), &["records"])
+                .await
+                .unwrap();
+            for key in [b"a/1", b"a/2", b"a/3", b"b/1"] {
+                storage
+                    .set("records".into(), key.to_vec(), key.to_vec())
+                    .await
+                    .unwrap();
+            }
+            let forward = super::super::collect_scan(
+                storage
+                    .scan(ScanRequest::prefix("records".into(), b"a/".to_vec()).with_max_items(2))
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(forward.len(), 2);
+            assert_eq!(forward[0].0, b"a/1");
+            assert_eq!(forward[1].0, b"a/2");
+
+            let reverse = super::super::collect_scan(
+                storage
+                    .scan(
+                        ScanRequest::prefix("records".into(), b"a/".to_vec())
+                            .reversed()
+                            .with_max_items(2),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                reverse.iter().map(|entry| &entry.0).collect::<Vec<_>>(),
+                vec![b"a/3", b"a/2"]
+            );
+        });
+    }
 }
