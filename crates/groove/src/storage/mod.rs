@@ -1595,50 +1595,17 @@ where
                 }
         });
         Box::pin(async move {
-            // Deltas require reading the base value to apply their operand.
-            // They retain the established complete logical merge; set/delete
-            // overlays below are incremental and honor the hard bound.
-            if operations
-                .iter()
-                .any(|operation| matches!(operation, OwnedWriteOperation::Delta { .. }))
-            {
-                let mut values = collect_scan(
-                    self.base
-                        .scan(ScanRequest {
-                            max_items: None,
-                            ..request.clone()
-                        })
-                        .await?,
-                )
-                .await?;
-                let staged = RefCell::new(StagedWriteState::from(operations));
-                let in_bounds = |key: &[u8]| match &request.bounds {
-                    ScanBounds::Prefix(prefix) => key.starts_with(prefix),
-                    ScanBounds::Range { start, end } => {
-                        key >= start.as_slice() && key < end.as_slice()
-                    }
-                };
-                overlay_values(&mut values, &request.cf, in_bounds, &staged)?;
-                if request.direction == ScanDirection::Reverse {
-                    values.reverse();
-                }
-                if let Some(max_items) = request.max_items {
-                    values.truncate(max_items);
-                }
-                return Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>);
-            }
-
-            let mut staged = BTreeMap::<Vec<u8>, Option<Vec<u8>>>::new();
+            // Retain every staged operation per key. In particular, a Delta
+            // is evaluated only when this ordered merge reaches its key, with
+            // that key's base value when one exists. This keeps request bounds
+            // physical: later base rows are never decoded just to apply an
+            // earlier staged delta.
+            let mut staged = BTreeMap::<Vec<u8>, Vec<OwnedWriteOperation>>::new();
             for operation in operations {
-                match operation {
-                    OwnedWriteOperation::Set { key, value, .. } => {
-                        staged.insert(key, Some(value));
-                    }
-                    OwnedWriteOperation::Delete { key, .. } => {
-                        staged.insert(key, None);
-                    }
-                    OwnedWriteOperation::Delta { .. } => unreachable!("delta handled above"),
-                }
+                staged
+                    .entry(operation.key().to_vec())
+                    .or_default()
+                    .push(operation);
             }
             let mut staged = staged.into_iter().collect::<VecDeque<_>>();
             if request.direction == ScanDirection::Reverse {
@@ -1680,8 +1647,14 @@ where
                 let base_entry = choice.0.then(|| base_entries.pop_front()).flatten();
                 let staged_entry = choice.1.then(|| staged.pop_front()).flatten();
                 match staged_entry {
-                    Some((key, Some(value))) => values.push((key, value)),
-                    Some((_, None)) => {}
+                    Some((key, operations)) => {
+                        let base_value = base_entry.map(|(_, value)| value);
+                        if let Some(value) =
+                            overlay_point_value(base_value, &operations, &request.cf, &key)?
+                        {
+                            values.push((key, value));
+                        }
+                    }
                     None => {
                         if let Some(entry) = base_entry {
                             values.push(entry);
@@ -1829,343 +1802,6 @@ where
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.base.column_family_names()
     }
-}
-
-#[cfg(any())]
-impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
-where
-    S: OrderedKvStorage,
-{
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        if self.staged_writes.borrow().is_empty() {
-            return self.base.get(cf, key);
-        }
-
-        let mut staged_writes = self.staged_writes.borrow_mut();
-        if let Some(index) = staged_writes.latest_index(cf, key) {
-            let operation = &staged_writes.operations[index];
-            if operation.cf() == cf && operation.key() == key {
-                match operation {
-                    OwnedWriteOperation::Set { value, .. } => {
-                        return Ok(Some(value.clone()));
-                    }
-                    OwnedWriteOperation::Delete { .. } => {
-                        return Ok(None);
-                    }
-                    OwnedWriteOperation::Delta { .. } => {}
-                }
-            }
-        }
-        drop(staged_writes);
-
-        let mut value = self.base.get(cf, key)?;
-        for operation in self.staged_writes.borrow().operations.iter() {
-            if operation.cf() != cf || operation.key() != key {
-                continue;
-            }
-            match operation {
-                OwnedWriteOperation::Set { value: set, .. } => value = Some(set.clone()),
-                OwnedWriteOperation::Delete { .. } => value = None,
-                OwnedWriteOperation::Delta { delta, .. } => {
-                    let encoded = delta.encode()?;
-                    value = Some(apply_storage_delta(value.as_deref(), &encoded)?);
-                }
-            }
-        }
-        Ok(value)
-    }
-
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
-        self.stage(OwnedWriteOperation::Set {
-            cf: cf.to_owned(),
-            key: key.to_vec(),
-            value: value.to_vec(),
-        });
-        Ok(())
-    }
-
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
-        self.stage(OwnedWriteOperation::Delete {
-            cf: cf.to_owned(),
-            key: key.to_vec(),
-        });
-        Ok(())
-    }
-
-    fn scan_range(
-        &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        if self.staged_writes.borrow().is_empty() {
-            return self.base.scan_range(cf, start, end, visit);
-        }
-
-        let mut values = self.base.range(cf, start, end)?;
-        overlay_values(
-            &mut values,
-            cf,
-            |key| key >= start && key < end,
-            self.staged_writes,
-        )?;
-        for (key, value) in values {
-            visit(&key, &value)?;
-        }
-        Ok(())
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        if self.staged_writes.borrow().is_empty() {
-            return self.base.scan_prefix(cf, prefix, visit);
-        }
-
-        let mut values = self.base.prefix(cf, prefix)?;
-        overlay_values(
-            &mut values,
-            cf,
-            |key| key.starts_with(prefix),
-            self.staged_writes,
-        )?;
-        for (key, value) in values {
-            visit(&key, &value)?;
-        }
-        Ok(())
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        if self.staged_writes.borrow().is_empty() {
-            return self.base.scan_prefix_reverse(cf, prefix, visit);
-        }
-
-        if self
-            .staged_writes
-            .borrow()
-            .operations
-            .iter()
-            .any(|operation| {
-                operation.cf() == cf
-                    && operation.key().starts_with(prefix)
-                    && matches!(operation, OwnedWriteOperation::Delta { .. })
-            })
-        {
-            let mut values = self.base.prefix(cf, prefix)?;
-            overlay_values(
-                &mut values,
-                cf,
-                |key| key.starts_with(prefix),
-                self.staged_writes,
-            )?;
-            for (key, value) in values.into_iter().rev() {
-                visit(&key, &value)?;
-            }
-            return Ok(());
-        }
-
-        let staged = staged_prefix_overlay_desc(cf, prefix, self.staged_writes);
-        let mut staged_index = 0;
-        self.base
-            .scan_prefix_reverse(cf, prefix, &mut |base_key, base_value| {
-                while let Some((staged_key, staged_value)) = staged.get(staged_index) {
-                    if staged_key.as_slice() <= base_key {
-                        break;
-                    }
-                    if let Some(value) = staged_value {
-                        visit(staged_key, value)?;
-                    }
-                    staged_index += 1;
-                }
-
-                if let Some((staged_key, staged_value)) = staged.get(staged_index)
-                    && staged_key.as_slice() == base_key
-                {
-                    if let Some(value) = staged_value {
-                        visit(staged_key, value)?;
-                    }
-                    staged_index += 1;
-                    return Ok(());
-                }
-
-                visit(base_key, base_value)
-            })?;
-
-        while let Some((staged_key, staged_value)) = staged.get(staged_index) {
-            if let Some(value) = staged_value {
-                visit(staged_key, value)?;
-            }
-            staged_index += 1;
-        }
-        Ok(())
-    }
-
-    fn last_with_prefix(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        if self.staged_writes.borrow().is_empty() {
-            return self.base.last_with_prefix(cf, prefix);
-        }
-
-        let mut needs_full_merge = false;
-        for operation in self.staged_writes.borrow().operations.iter() {
-            if operation.cf() != cf || !operation.key().starts_with(prefix) {
-                continue;
-            }
-            match operation {
-                OwnedWriteOperation::Set { .. } => {}
-                OwnedWriteOperation::Delete { .. } | OwnedWriteOperation::Delta { .. } => {
-                    needs_full_merge = true
-                }
-            }
-        }
-
-        if !needs_full_merge {
-            let largest_staged_set = staged_prefix_overlay_desc(cf, prefix, self.staged_writes)
-                .into_iter()
-                .find_map(|(key, value)| value.map(|value| (key, value)));
-            return match (self.base.last_with_prefix(cf, prefix)?, largest_staged_set) {
-                (Some(base), Some(staged)) if staged.0 >= base.0 => Ok(Some(staged)),
-                (Some(base), _) => Ok(Some(base)),
-                (None, staged) => Ok(staged),
-            };
-        }
-
-        let mut values = self.base.prefix(cf, prefix)?;
-        overlay_values(
-            &mut values,
-            cf,
-            |key| key.starts_with(prefix),
-            self.staged_writes,
-        )?;
-        Ok(values.pop())
-    }
-
-    fn last_with_prefix_before_or_at(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        if self.staged_writes.borrow().is_empty() {
-            return self.base.last_with_prefix_before_or_at(cf, prefix, upper);
-        }
-
-        let mut needs_full_merge = false;
-        for operation in self.staged_writes.borrow().operations.iter() {
-            if operation.cf() != cf
-                || !operation.key().starts_with(prefix)
-                || operation.key() > upper
-            {
-                continue;
-            }
-            match operation {
-                OwnedWriteOperation::Set { .. } => {}
-                OwnedWriteOperation::Delete { .. } | OwnedWriteOperation::Delta { .. } => {
-                    needs_full_merge = true
-                }
-            }
-        }
-
-        if !needs_full_merge {
-            let largest_staged_set =
-                staged_prefix_overlay_desc_before_or_at(cf, prefix, upper, self.staged_writes)
-                    .into_iter()
-                    .find_map(|(key, value)| value.map(|value| (key, value)));
-            return match (
-                self.base.last_with_prefix_before_or_at(cf, prefix, upper)?,
-                largest_staged_set,
-            ) {
-                (Some(base), Some(staged)) if staged.0 >= base.0 => Ok(Some(staged)),
-                (Some(base), _) => Ok(Some(base)),
-                (None, staged) => Ok(staged),
-            };
-        }
-
-        let mut values = Vec::new();
-        self.base.scan_range(
-            cf,
-            prefix,
-            &exclusive_upper_bound(upper),
-            &mut |key, value| {
-                if key.starts_with(prefix) {
-                    values.push((key.to_vec(), value.to_vec()));
-                }
-                Ok(())
-            },
-        )?;
-        overlay_values(
-            &mut values,
-            cf,
-            |key| key.starts_with(prefix) && key <= upper,
-            self.staged_writes,
-        )?;
-        Ok(values.pop())
-    }
-
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
-        for operation in operations {
-            match operation {
-                WriteOperation::Set { cf, key, value } => self.set(cf, key, value)?,
-                WriteOperation::Delete { cf, key } => self.delete(cf, key)?,
-                WriteOperation::Delta { cf, key, delta } => {
-                    self.stage(OwnedWriteOperation::Delta {
-                        cf: (*cf).to_owned(),
-                        key: (*key).to_vec(),
-                        delta: (*delta).clone(),
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-fn overlay_values(
-    values: &mut Vec<KeyValue>,
-    cf: &ColumnFamilyName,
-    include: impl Fn(&[u8]) -> bool,
-    staged_writes: &RefCell<StagedWriteState>,
-) -> Result<(), Error> {
-    let mut overlay = values
-        .drain(..)
-        .map(|(key, value)| (key, Some(value)))
-        .collect::<BTreeMap<_, _>>();
-    for operation in staged_writes.borrow().operations.iter() {
-        if operation.cf() != cf || !include(operation.key()) {
-            continue;
-        }
-        match operation {
-            OwnedWriteOperation::Set { key, value, .. } => {
-                overlay.insert(key.clone(), Some(value.clone()));
-            }
-            OwnedWriteOperation::Delete { key, .. } => {
-                overlay.insert(key.clone(), None);
-            }
-            OwnedWriteOperation::Delta { key, delta, .. } => {
-                let encoded = delta.encode()?;
-                let existing = overlay.get(key).and_then(Option::as_deref);
-                overlay.insert(key.clone(), Some(apply_storage_delta(existing, &encoded)?));
-            }
-        }
-    }
-    values.extend(
-        overlay
-            .into_iter()
-            .filter_map(|(key, value)| value.map(|value| (key, value))),
-    );
-    Ok(())
 }
 
 #[cfg(any())]
@@ -3129,6 +2765,76 @@ mod tests {
         assert_eq!(
             storage.get("indices".into(), b"a".to_vec()).await.unwrap(),
             Some(b"base-a".to_vec())
+        );
+    }
+
+    #[futures_test::test]
+    async fn bounded_transaction_scan_applies_staged_deltas_without_underfilling() {
+        let storage = MemoryStorage::new(&["records"]);
+        let old = current_winner_test_record(10, 1, b"old");
+        let amended = current_winner_test_record(20, 2, b"amended");
+        let later = current_winner_test_record(15, 3, b"later");
+        storage
+            .set("records".into(), b"a".to_vec(), old)
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"b".to_vec(), later.clone())
+            .await
+            .unwrap();
+
+        let transaction = storage.begin_txn();
+        transaction
+            .write_many(vec![
+                OwnedWriteOperation::Delta {
+                    cf: "records".to_owned(),
+                    key: b"a".to_vec(),
+                    delta: current_winner_test_delta(20, 2, amended.clone()),
+                },
+                OwnedWriteOperation::Delete {
+                    cf: "records".to_owned(),
+                    key: b"b".to_vec(),
+                },
+                OwnedWriteOperation::Set {
+                    cf: "records".to_owned(),
+                    key: b"c".to_vec(),
+                    value: later.clone(),
+                },
+            ])
+            .await
+            .unwrap();
+
+        let forward = collect_scan(
+            transaction
+                .scan(ScanRequest::prefix("records".into(), Vec::new()).with_max_items(2))
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            forward,
+            vec![(b"a".to_vec(), amended), (b"c".to_vec(), later.clone())]
+        );
+
+        let reverse = collect_scan(
+            transaction
+                .scan(
+                    ScanRequest::prefix("records".into(), Vec::new())
+                        .reversed()
+                        .with_max_items(2),
+                )
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reverse,
+            vec![
+                (b"c".to_vec(), later),
+                (b"a".to_vec(), forward[0].1.clone())
+            ]
         );
     }
 
