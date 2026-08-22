@@ -213,6 +213,10 @@ projection have passed validation.
   query-local logical relation/source that materializes only large columns required by the plan;
   durable current/history relations remain authoritative physical storage. The planner and Groove
   source contract remain to be specified and implemented before this feature is releasable.
+- Every public/core mutation path must lower over-threshold logical values into descriptors and
+  generated node rows. The TypeScript client path does so, but direct Rust `Db`/node writes do not
+  yet share that lowering boundary; rejecting them at admission would also reject existing valid
+  `Db` facade writes, so the common lowering step remains required before release.
 - The initial promotion/demotion thresholds and chunk-size profile require
   workload receipts for rapid text edits, random file edits, JSON changes,
   append streams, slow peers, and pre-flush memory pressure.
