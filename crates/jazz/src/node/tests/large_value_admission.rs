@@ -124,6 +124,21 @@ fn generated_large_value_descriptor_rejects_a_missing_root_without_pending_nodes
 }
 
 #[test]
+fn direct_core_write_rejects_unpromoted_over_threshold_large_value() {
+    let schema = two_column_schema();
+    let (_dir, mut node) = open_node_with_schema(node(0xae), schema);
+    let raw = MergeableCommit::new("todos", row(0xaf), 10).cells(BTreeMap::from([
+        ("title".to_owned(), Value::String("x".repeat(128 * 1024))),
+        ("body".to_owned(), Value::String("ordinary body".to_owned())),
+    ]));
+    let error = node.commit_mergeable(raw).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("unframed large-value cell exceeds inline threshold"));
+    assert!(node.query_table_versions("todos").unwrap().is_empty());
+}
+
+#[test]
 fn generated_large_value_descriptor_rejects_dishonest_stored_root_metrics() {
     let (schema, owner, nodes, _, owner_row, _) = large_value_admission_commits();
     let (_dir, mut node) = open_node_with_schema(node(0xab), schema.clone());
