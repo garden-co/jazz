@@ -20,6 +20,7 @@ use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::{Map, json};
 
 const TABLE: &str = "documents";
+const PUBLIC_TABLE: &str = "public_documents";
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
@@ -49,41 +50,78 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
     drop(db);
 
     let cases = [
-        ("policy_only", policy_only_query(), owned_rows),
-        ("owner_predicate_all", owner_predicate_query(), owned_rows),
-        (
-            "owner_predicate_ordered_limit",
-            owner_predicate_query()
+        Case {
+            name: "policy_only",
+            query: policy_only_query(),
+            expected_rows: owned_rows,
+            mode: CaseMode::TrustedIdentity,
+            include_deleted: false,
+        },
+        Case {
+            name: "owner_predicate_all",
+            query: owner_predicate_query(),
+            expected_rows: owned_rows,
+            mode: CaseMode::TrustedIdentity,
+            include_deleted: false,
+        },
+        Case {
+            name: "public_owner_predicate_limit_include_deleted_system",
+            query: owner_predicate_limit_query(PUBLIC_TABLE, result_rows),
+            expected_rows: result_rows,
+            mode: CaseMode::SystemIdentity,
+            include_deleted: true,
+        },
+        Case {
+            name: "owner_predicate_ordered_limit",
+            query: owner_predicate_query()
                 .order_by("updated_at", OrderDirection::Desc)
                 .limit(result_rows),
-            result_rows,
-        ),
+            expected_rows: result_rows,
+            mode: CaseMode::TrustedIdentity,
+            include_deleted: false,
+        },
     ];
 
-    for (case, query, expected_rows) in cases {
+    for case in cases {
         let db = open_db(temp.path(), schema.clone());
         let open_metrics = db.take_storage_read_metrics_for_test();
         db.reset_storage_read_metrics_for_test();
         let prepare_started = Instant::now();
         let prepared = db
-            .prepare_query(&query)
+            .prepare_query(&case.query)
             .expect("prepare owner-filter query");
         let prepare_us = prepare_started.elapsed().as_micros();
         let prepare_metrics = db.take_storage_read_metrics_for_test();
 
         db.reset_storage_read_metrics_for_test();
         let query_started = Instant::now();
-        let rows = block_on(db.all_for_identity(&prepared, global_read_opts(), AUTHOR))
-            .expect("run owner-filter query");
+        let rows = match case.mode {
+            CaseMode::TrustedIdentity => block_on(db.all_for_identity(
+                &prepared,
+                global_read_opts(case.include_deleted),
+                AUTHOR,
+            )),
+            CaseMode::SystemIdentity => block_on(db.all_for_identity(
+                &prepared,
+                global_read_opts(case.include_deleted),
+                AuthorId::SYSTEM,
+            )),
+        }
+        .expect("run owner-filter query");
         let query_us = query_started.elapsed().as_micros();
         let query_metrics = db.take_storage_read_metrics_for_test();
 
-        assert_eq!(rows.len(), expected_rows, "{case} row count changed");
+        assert_eq!(
+            rows.len(),
+            case.expected_rows,
+            "{} row count changed",
+            case.name
+        );
         emit_case(
-            case,
+            case.name,
             table_rows,
             owned_rows,
-            expected_rows,
+            case.expected_rows,
             seed_us,
             prepare_us,
             query_us,
@@ -95,20 +133,43 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
     }
 }
 
+struct Case {
+    name: &'static str,
+    query: Query,
+    expected_rows: usize,
+    mode: CaseMode,
+    include_deleted: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CaseMode {
+    TrustedIdentity,
+    SystemIdentity,
+}
+
 fn schema() -> JazzSchema {
     schema_fixture::compile(
-        SchemaBuilder::new().table(
-            TableSchemaBuilder::new(TABLE)
-                .column("owner", ColumnType::Uuid)
-                .column("active", ColumnType::Boolean)
-                .column("updated_at", ColumnType::Timestamp)
-                .column("title", ColumnType::Text)
-                .policies(
-                    TablePolicies::new()
-                        .with_select(schema_fixture::session_user_id_column("owner")),
-                )
-                .index_only(["owner", "updated_at"]),
-        ),
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(TABLE)
+                    .column("owner", ColumnType::Uuid)
+                    .column("active", ColumnType::Boolean)
+                    .column("updated_at", ColumnType::Timestamp)
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(schema_fixture::session_user_id_column("owner")),
+                    )
+                    .index_only(["owner", "updated_at"]),
+            )
+            .table(
+                TableSchemaBuilder::new(PUBLIC_TABLE)
+                    .column("owner", ColumnType::Uuid)
+                    .column("active", ColumnType::Boolean)
+                    .column("updated_at", ColumnType::Timestamp)
+                    .column("title", ColumnType::Text)
+                    .index_only(["owner"]),
+            ),
     )
 }
 
@@ -158,6 +219,20 @@ fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batc
                 ]),
             ))
             .expect("stage owner-filter row");
+            block_on(tx.insert_with_id(
+                PUBLIC_TABLE,
+                public_row(index),
+                BTreeMap::from([
+                    ("owner".to_owned(), Value::Uuid(owner.0)),
+                    ("active".to_owned(), Value::Bool(true)),
+                    ("updated_at".to_owned(), Value::U64(index as u64)),
+                    (
+                        "title".to_owned(),
+                        Value::String(format!("public-document-{index}")),
+                    ),
+                ]),
+            ))
+            .expect("stage public owner-filter row");
         }
 
         let tx_id = block_on(tx.commit()).expect("commit owner-filter seed tx");
@@ -167,8 +242,16 @@ fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batc
 }
 
 fn row(index: usize) -> RowUuid {
+    row_with_prefix(0x61, index)
+}
+
+fn public_row(index: usize) -> RowUuid {
+    row_with_prefix(0x62, index)
+}
+
+fn row_with_prefix(prefix: u8, index: usize) -> RowUuid {
     let mut bytes = [0_u8; 16];
-    bytes[0] = 0x61;
+    bytes[0] = prefix;
     bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
     RowUuid::from_bytes(bytes)
 }
@@ -183,12 +266,18 @@ fn owner_predicate_query() -> Query {
         .filter(eq(col("active"), lit(true)))
 }
 
-fn global_read_opts() -> ReadOpts {
+fn owner_predicate_limit_query(table: &str, result_rows: usize) -> Query {
+    Query::from(table)
+        .filter(eq(col("owner"), lit(AUTHOR.0)))
+        .limit(result_rows)
+}
+
+fn global_read_opts(include_deleted: bool) -> ReadOpts {
     ReadOpts {
         tier: DurabilityTier::Global,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::LocalOnly,
-        include_deleted: false,
+        include_deleted,
         ..ReadOpts::default()
     }
 }

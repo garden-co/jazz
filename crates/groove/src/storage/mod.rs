@@ -105,6 +105,19 @@ impl<'a> OwnedStorage<'a> {
             collect_scan(scan).await
         })
     }
+
+    pub(crate) fn scan_prefix_limit(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+        limit: u64,
+    ) -> StorageFuture<'a, Result<Vec<KeyValue>, Error>> {
+        let storage = Rc::clone(&self.0);
+        Box::pin(async move {
+            let scan = storage.scan_prefix(cf, prefix).await?;
+            collect_scan_limit(scan, limit).await
+        })
+    }
 }
 
 /// Owned, executor-local cursor over an ordered scan.
@@ -140,6 +153,18 @@ async fn collect_scan(mut scan: StorageScan<'_>) -> Result<Vec<KeyValue>, Error>
     let mut values = Vec::new();
     while let Some(batch) = scan.next_batch().await? {
         values.extend(batch);
+    }
+    Ok(values)
+}
+
+async fn collect_scan_limit(mut scan: StorageScan<'_>, limit: u64) -> Result<Vec<KeyValue>, Error> {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut values = Vec::new();
+    while values.len() < limit
+        && let Some(batch) = scan.next_batch().await?
+    {
+        let remaining = limit - values.len();
+        values.extend(batch.into_iter().take(remaining));
     }
     Ok(values)
 }

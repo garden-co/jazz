@@ -71,6 +71,10 @@ pub struct IndexSourceOp {
 pub enum StaticScanSpec {
     Point(Vec<LiteralValue>),
     Prefix(Vec<LiteralValue>),
+    PrefixLimit {
+        prefix: Vec<LiteralValue>,
+        limit: u64,
+    },
     Range {
         start: Vec<LiteralValue>,
         end: Vec<LiteralValue>,

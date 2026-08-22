@@ -27,7 +27,11 @@ pub(super) struct CurrentSourceGraph {
 #[derive(Clone, Debug)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
-    Index { column: String, prefix: Vec<Value> },
+    Index {
+        column: String,
+        prefix: Vec<Value>,
+        limit: Option<u64>,
+    },
 }
 
 impl<S> SourceGraphPreparer for JazzSourceGraphPreparer<'_, S>
@@ -981,7 +985,8 @@ where
                 (graph, source.descriptor, source.metadata, BTreeSet::new())
             }
         } else if request.visibility == RowVisibility::IncludeDeleted
-            && self.needs_projected_current_source(&request.source.table)
+            && (self.needs_projected_current_source(&request.source.table)
+                || self.access_paths.contains_key(&request.source))
         {
             let tier = graph_tier.expect("visible current source has a tier");
             let base = self
@@ -1391,10 +1396,17 @@ where
                     table, tier, prefix,
                 )))
             }
-            CurrentAccessPath::Index { column, prefix } => {
+            CurrentAccessPath::Index {
+                column,
+                prefix,
+                limit,
+            } => {
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
+                let limit = (request.visibility == RowVisibility::IncludeDeleted)
+                    .then_some(limit)
+                    .flatten();
                 let projection_target = self.current_projection_target(request, table)?;
                 let rows = self
                     .node
@@ -1403,6 +1415,7 @@ where
                         self.read_view.read_schema,
                         &column,
                         &prefix,
+                        limit,
                         &projection_target,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
@@ -1687,7 +1700,12 @@ where
                             source_resolution_error(request, SourceGap::SchemaProjection)
                         })?
                 }
-                Some(CurrentAccessPath::Index { column, prefix }) => {
+                Some(CurrentAccessPath::Index {
+                    column,
+                    prefix,
+                    limit,
+                }) => {
+                    let limit = (!exclude_deleted).then_some(limit).flatten();
                     self.node.query_engine_read_metrics.source_index_probes += 1;
                     self.node
                         .physical_global_current_source_for_index_scan(
@@ -1695,6 +1713,7 @@ where
                             self.read_view.read_schema,
                             &column,
                             &prefix,
+                            limit,
                             &projection_target,
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
@@ -1769,10 +1788,15 @@ where
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
-            Some(CurrentAccessPath::Index { column, prefix }) if tier == DurabilityTier::Global => {
+            Some(CurrentAccessPath::Index {
+                column,
+                prefix,
+                limit,
+            }) if tier == DurabilityTier::Global => {
                 // A Global index already selects from the canonical settled
                 // winner relation. Project those raw physical rows first, then
                 // apply the compatibility boundary below.
+                let limit = if exclude_deleted { None } else { *limit };
                 self.node.query_engine_read_metrics.source_index_probes += 1;
                 self.node
                     .physical_global_current_source_for_index_scan_with_output(
@@ -1780,6 +1804,7 @@ where
                         self.read_view.read_schema,
                         column,
                         prefix,
+                        limit,
                         &projection_target,
                         raw_global_output.clone(),
                     )
@@ -2860,9 +2885,23 @@ where
         let mut access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
         let equalities = root_literal_equalities(query, binding)?;
-        let Some(access_path) = select_current_access_path(&table, &equalities) else {
+        let Some(mut access_path) = select_current_access_path(&table, &equalities) else {
             return Ok(access_paths);
         };
+        if table.read_policy.is_none()
+            && access_edge_parent_reference(&table).is_none()
+            && let CurrentAccessPath::Index { column, limit, .. } = &mut access_path
+            && query.order_by.is_empty()
+            && query.offset == 0
+            && query.limit.is_some()
+            && query.reachable.is_empty()
+            && query.inherits.is_empty()
+            && query.includes.is_empty()
+            && query.flat_join.is_none()
+            && root_filters_are_only_literal_equality_on(query, binding, column)?
+        {
+            *limit = query.limit.map(|limit| limit.min(u64::MAX as usize) as u64);
+        }
         access_paths.insert(root_source_id(&query.table), access_path);
         self.add_reachable_access_paths(query, shape.schema_version(), binding, &mut access_paths)?;
         Ok(access_paths)
@@ -2955,6 +2994,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        limit: Option<u64>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
         self.physical_global_current_source_for_index_scan_with_output(
@@ -2962,6 +3002,7 @@ where
             schema_version,
             column,
             prefix,
+            limit,
             projection_target,
             table.global_current_storage_tables()[0].record_schema(),
         )
@@ -2973,6 +3014,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        limit: Option<u64>,
         projection_target: &str,
         _output: RecordDescriptor,
     ) -> Result<GraphBuilder, Error> {
@@ -2996,7 +3038,15 @@ where
             storage_table,
             physical_current_index_name(column_id),
             projection_target,
-            StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect()),
+            match limit {
+                Some(limit) => StaticScanSpec::PrefixLimit {
+                    prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
+                    limit,
+                },
+                None => {
+                    StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
+                }
+            },
         ))
     }
 }

@@ -1401,6 +1401,7 @@ fn index_keys(
 
 pub(super) enum StaticScanBounds {
     Prefix(Vec<u8>),
+    PrefixLimit { prefix: Vec<u8>, limit: u64 },
     Range { start: Vec<u8>, end: Vec<u8> },
 }
 
@@ -1409,6 +1410,10 @@ pub(super) fn scan_bounds(scan: &StaticScanSpec) -> Result<StaticScanBounds, Ivm
         StaticScanSpec::Point(values) | StaticScanSpec::Prefix(values) => {
             Ok(StaticScanBounds::Prefix(static_scan_key(values)?))
         }
+        StaticScanSpec::PrefixLimit { prefix, limit } => Ok(StaticScanBounds::PrefixLimit {
+            prefix: static_scan_key(prefix)?,
+            limit: *limit,
+        }),
         StaticScanSpec::Range { start, end } => Ok(StaticScanBounds::Range {
             start: static_scan_key(start)?,
             end: static_scan_key(end)?,
@@ -1429,7 +1434,9 @@ pub(super) fn key_matches_static_scan(
     scan: &StaticScanSpec,
 ) -> Result<bool, IvmRuntimeError> {
     Ok(match scan_bounds(scan)? {
-        StaticScanBounds::Prefix(prefix) => key.starts_with(&prefix),
+        StaticScanBounds::Prefix(prefix) | StaticScanBounds::PrefixLimit { prefix, .. } => {
+            key.starts_with(&prefix)
+        }
         StaticScanBounds::Range { start, end } => start.as_slice() <= key && key < end.as_slice(),
     })
 }
@@ -1453,6 +1460,10 @@ pub(super) fn persisted_index_scan_bounds(
         Some(StaticScanSpec::Point(values) | StaticScanSpec::Prefix(values)) => {
             StaticScanBounds::Prefix(wrap_prefix(static_scan_key(values)?))
         }
+        Some(StaticScanSpec::PrefixLimit { prefix, limit }) => StaticScanBounds::PrefixLimit {
+            prefix: wrap_prefix(static_scan_key(prefix)?),
+            limit: *limit,
+        },
         Some(StaticScanSpec::Range { start, end }) => StaticScanBounds::Range {
             start: wrap_prefix(static_scan_key(start)?),
             end: wrap_prefix(static_scan_key(end)?),

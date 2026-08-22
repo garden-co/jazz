@@ -29,6 +29,12 @@ pub(super) enum StorageRequestKey {
         index: String,
         prefix: Vec<u8>,
     },
+    IndexedRowsPrefixLimit {
+        table: String,
+        index: String,
+        prefix: Vec<u8>,
+        limit: u64,
+    },
     IndexedRowsRange {
         table: String,
         index: String,
@@ -146,6 +152,30 @@ impl<'a> StorageRequests<'a> {
                     .clone();
                 let index = index.clone();
                 let scan = storage.scan_prefix("indices".to_owned(), prefix.clone());
+                let storage = storage.clone();
+                Box::pin(async move {
+                    let entries = scan.await?;
+                    load_indexed_rows(storage, table_schema, index_schema, index, entries).await
+                })
+            }
+            StorageRequestKey::IndexedRowsPrefixLimit {
+                table,
+                index,
+                prefix,
+                limit,
+            } => {
+                let table_schema = schema
+                    .table(table)
+                    .expect("compiled indexed-row source table exists")
+                    .clone();
+                let index_schema = table_schema
+                    .indices
+                    .iter()
+                    .find(|candidate| candidate.name == *index)
+                    .expect("compiled indexed-row source index exists")
+                    .clone();
+                let index = index.clone();
+                let scan = storage.scan_prefix_limit("indices".to_owned(), prefix.clone(), *limit);
                 let storage = storage.clone();
                 Box::pin(async move {
                     let entries = scan.await?;

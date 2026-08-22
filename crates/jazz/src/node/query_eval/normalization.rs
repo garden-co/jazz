@@ -242,6 +242,65 @@ pub(super) fn literal_equalities_for_filters(
     Ok(equalities)
 }
 
+pub(super) fn root_filters_are_only_literal_equality_on(
+    query: &JazzQuery,
+    binding: &Binding,
+    column: &str,
+) -> Result<bool, Error> {
+    let mut saw_equality = false;
+    for predicate in &query.filters {
+        if !predicate_is_only_literal_equality_on(predicate, binding, column, &mut saw_equality)? {
+            return Ok(false);
+        }
+    }
+    Ok(saw_equality)
+}
+
+fn predicate_is_only_literal_equality_on(
+    predicate: &Predicate,
+    binding: &Binding,
+    column: &str,
+    saw_equality: &mut bool,
+) -> Result<bool, Error> {
+    match predicate {
+        Predicate::All(predicates) => {
+            for predicate in predicates {
+                if !predicate_is_only_literal_equality_on(predicate, binding, column, saw_equality)?
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Predicate::Eq(left, right) => {
+            let equality = match root_equality_literal(left, right, binding)? {
+                Some(equality) => Some(equality),
+                None => root_equality_literal(right, left, binding)?,
+            };
+            let Some((field, _)) = equality else {
+                return Ok(false);
+            };
+            if field == column {
+                *saw_equality = true;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        Predicate::Any(_)
+        | Predicate::Not(_)
+        | Predicate::Ne(_, _)
+        | Predicate::In(_, _)
+        | Predicate::Gt(_, _)
+        | Predicate::Gte(_, _)
+        | Predicate::Lt(_, _)
+        | Predicate::Lte(_, _)
+        | Predicate::Contains(_, _)
+        | Predicate::EnumMatch { .. }
+        | Predicate::IsNull(_) => Ok(false),
+    }
+}
+
 fn collect_root_literal_equalities(
     predicate: &Predicate,
     binding: &Binding,
@@ -308,6 +367,7 @@ pub(super) fn select_current_access_path(
             return Some(CurrentAccessPath::Index {
                 column,
                 prefix: vec![Value::Nullable(Some(Box::new(value)))],
+                limit: None,
             });
         }
     }

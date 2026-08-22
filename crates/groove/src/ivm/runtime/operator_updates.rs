@@ -28,12 +28,12 @@ impl NodeState {
                 family: input.table.clone(),
                 prefix: Vec::new(),
             }),
-            Some(StaticScanBounds::Prefix(prefix)) => {
-                Some(super::evaluation_session::StorageRequestKey::ScanPrefix {
-                    family: input.table.clone(),
-                    prefix,
-                })
-            }
+            Some(
+                StaticScanBounds::Prefix(prefix) | StaticScanBounds::PrefixLimit { prefix, .. },
+            ) => Some(super::evaluation_session::StorageRequestKey::ScanPrefix {
+                family: input.table.clone(),
+                prefix,
+            }),
             Some(StaticScanBounds::Range { start, end }) if start < end => {
                 Some(super::evaluation_session::StorageRequestKey::ScanRange {
                     family: input.table.clone(),
@@ -59,6 +59,14 @@ impl NodeState {
                             prefix,
                         }
                     }
+                    StaticScanBounds::PrefixLimit { prefix, limit } => {
+                        super::evaluation_session::StorageRequestKey::IndexedRowsPrefixLimit {
+                            table: input.table.clone(),
+                            index: input.index.clone(),
+                            prefix,
+                            limit,
+                        }
+                    }
                     StaticScanBounds::Range { start, end } => {
                         super::evaluation_session::StorageRequestKey::IndexedRowsRange {
                             table: input.table.clone(),
@@ -72,7 +80,7 @@ impl NodeState {
         }
         Ok(
             match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())? {
-                StaticScanBounds::Prefix(prefix) => {
+                StaticScanBounds::Prefix(prefix) | StaticScanBounds::PrefixLimit { prefix, .. } => {
                     Some(super::evaluation_session::StorageRequestKey::ScanPrefix {
                         family: "indices".to_owned(),
                         prefix,
@@ -351,7 +359,10 @@ impl NodeState {
             let scan =
                 match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
                 {
-                    StaticScanBounds::Prefix(prefix) => store.scan_prefix(&prefix).await?,
+                    StaticScanBounds::Prefix(prefix)
+                    | StaticScanBounds::PrefixLimit { prefix, .. } => {
+                        store.scan_prefix(&prefix).await?
+                    }
                     StaticScanBounds::Range { start, end } => {
                         if start < end {
                             store.scan_range(&start, &end).await?

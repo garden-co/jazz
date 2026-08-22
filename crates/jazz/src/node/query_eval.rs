@@ -550,7 +550,13 @@ where
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
         };
-        self.compile_query_program_request(request).await
+        let root_source = root_source_id(&shape.query().table);
+        let mut access_paths = self.one_shot_access_paths(shape, binding, tier)?;
+        access_paths.retain(|source, access_path| {
+            *source == root_source && matches!(access_path, CurrentAccessPath::Index { .. })
+        });
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
     async fn compile_open_tx_query_program(

@@ -470,7 +470,9 @@ pub(super) async fn snapshot_table_deltas(
         let mut cursor = match &source.scan {
             None => Some(store.scan_prefix(b"").await?),
             Some(scan) => match scan_bounds(scan)? {
-                StaticScanBounds::Prefix(prefix) => Some(store.scan_prefix(&prefix).await?),
+                StaticScanBounds::Prefix(prefix) | StaticScanBounds::PrefixLimit { prefix, .. } => {
+                    Some(store.scan_prefix(&prefix).await?)
+                }
                 StaticScanBounds::Range { start, end } if start < end => {
                     Some(store.scan_range(&start, &end).await?)
                 }

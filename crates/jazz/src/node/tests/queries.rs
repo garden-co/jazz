@@ -464,6 +464,115 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
 }
 
 #[test]
+fn one_shot_include_deleted_indexed_first_page_hydrates_only_limited_rows() {
+    // Internal storage metrics are intentional here: the public rows match a
+    // full scan either way, but the regression is whether pagination hydrates
+    // every matching owner row before applying LIMIT.
+    let schema = access_path_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let owner = user(0xa1);
+    let other = user(0xb2);
+    let mut expected = Vec::new();
+
+    for index in 0..40_u8 {
+        let row = row(index);
+        if index < 5 {
+            expected.push(row);
+        }
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("docs", row, u64::from(index) + 10).cells(
+                access_path_doc_cells(owner, "open", &format!("owned-{index}")),
+            ),
+        );
+    }
+    for index in 40..50_u8 {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("docs", row(index), u64::from(index) + 10).cells(
+                access_path_doc_cells(other, "open", &format!("other-{index}")),
+            ),
+        );
+    }
+
+    let shape = Query::from("docs")
+        .filter(eq(col("owner"), lit(Value::Uuid(owner.0))))
+        .limit(5)
+        .validate(&core.catalogue.schema)
+        .expect("validate first-page query");
+    let binding = shape.bind(BTreeMap::new()).expect("bind first-page query");
+
+    core.reset_storage_read_metrics();
+    let rows = core
+        .query_rows_including_deleted_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            None,
+            AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .expect("run indexed first-page query");
+    let metrics = core.take_storage_read_metrics();
+
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        metrics.global_current_rows.reads, 5,
+        "LIMIT should cap row hydration after the indexed owner prefix"
+    );
+}
+
+#[test]
+fn one_shot_visible_indexed_first_page_fills_past_deleted_rows() {
+    let schema = access_path_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let owner = user(0xa1);
+    let deleted = row(0);
+
+    for index in 0..6_u8 {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("docs", row(index), u64::from(index) + 10).cells(
+                access_path_doc_cells(owner, "open", &format!("owned-{index}")),
+            ),
+        );
+    }
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("docs", deleted, 100).deletion(DeletionEvent::Deleted),
+    );
+
+    let shape = Query::from("docs")
+        .filter(eq(col("owner"), lit(Value::Uuid(owner.0))))
+        .limit(5)
+        .validate(&core.catalogue.schema)
+        .expect("validate visible first-page query");
+    let binding = shape.bind(BTreeMap::new()).expect("bind first-page query");
+
+    let rows = core
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+        .expect("run visible indexed first-page query");
+
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        (1..6).map(row).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     let schema = access_path_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
