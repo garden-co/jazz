@@ -1,0 +1,245 @@
+mod schema_fixture;
+mod support;
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Instant;
+
+use jazz::db::{
+    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
+    SeededRowIdSource, block_on,
+};
+use jazz::groove::db::StorageReadMetrics;
+use jazz::groove::records::Value;
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz::tx::DurabilityTier;
+use jazz_storage_rocksdb::RocksDbStorage;
+use serde_json::{Map, json};
+
+const TABLE: &str = "documents";
+const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+
+fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+
+    let table_rows = support::csv_usizes("JAZZ_OWNER_FILTER_ROWS", "10000,100000");
+    let owned_rows = support::env_usize("JAZZ_OWNER_FILTER_OWNED_ROWS", 500);
+    let result_rows = support::env_usize("JAZZ_OWNER_FILTER_RESULT_ROWS", 500);
+    let batch_rows = support::env_usize("JAZZ_OWNER_FILTER_BATCH_ROWS", 1000);
+
+    for rows in table_rows {
+        assert!(rows >= owned_rows);
+        run_rung(rows, owned_rows, result_rows, batch_rows);
+    }
+}
+
+fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows: usize) {
+    let temp = tempfile::tempdir().expect("create owner-filter RocksDB directory");
+    let schema = schema();
+    let db = open_db(temp.path(), schema.clone());
+
+    let seed_started = Instant::now();
+    seed_rows(&db, table_rows, owned_rows, batch_rows);
+    let seed_us = seed_started.elapsed().as_micros();
+    db.close().expect("close seeded owner-filter db");
+    drop(db);
+
+    let cases = [
+        ("policy_only", policy_only_query(), owned_rows),
+        ("owner_predicate_all", owner_predicate_query(), owned_rows),
+        (
+            "owner_predicate_ordered_limit",
+            owner_predicate_query()
+                .order_by("updated_at", OrderDirection::Desc)
+                .limit(result_rows),
+            result_rows,
+        ),
+    ];
+
+    for (case, query, expected_rows) in cases {
+        let db = open_db(temp.path(), schema.clone());
+        let open_metrics = db.take_storage_read_metrics_for_test();
+        db.reset_storage_read_metrics_for_test();
+        let prepare_started = Instant::now();
+        let prepared = db
+            .prepare_query(&query)
+            .expect("prepare owner-filter query");
+        let prepare_us = prepare_started.elapsed().as_micros();
+        let prepare_metrics = db.take_storage_read_metrics_for_test();
+
+        db.reset_storage_read_metrics_for_test();
+        let query_started = Instant::now();
+        let rows = block_on(db.all_for_identity(&prepared, global_read_opts(), AUTHOR))
+            .expect("run owner-filter query");
+        let query_us = query_started.elapsed().as_micros();
+        let query_metrics = db.take_storage_read_metrics_for_test();
+
+        assert_eq!(rows.len(), expected_rows, "{case} row count changed");
+        emit_case(
+            case,
+            table_rows,
+            owned_rows,
+            expected_rows,
+            seed_us,
+            prepare_us,
+            query_us,
+            &open_metrics,
+            &prepare_metrics,
+            &query_metrics,
+        );
+        db.close().expect("close owner-filter db");
+    }
+}
+
+fn schema() -> JazzSchema {
+    schema_fixture::compile(
+        SchemaBuilder::new().table(
+            TableSchemaBuilder::new(TABLE)
+                .column("owner", ColumnType::Uuid)
+                .column("active", ColumnType::Boolean)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("title", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(schema_fixture::session_user_id_column("owner")),
+                )
+                .index_only(["owner", "updated_at"]),
+        ),
+    )
+}
+
+fn open_db(path: &Path, schema: JazzSchema) -> Db<RocksDbStorage> {
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    block_on(Db::open_history_complete(
+        DbConfig::new(
+            schema,
+            RocksDbStorage::open(path, &refs).expect("open owner-filter RocksDB"),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x51; 16]),
+                author: AUTHOR,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(0x51)),
+    ))
+    .expect("open owner-filter Jazz db")
+}
+
+fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batch_rows: usize) {
+    for batch_start in (0..table_rows).step_by(batch_rows) {
+        let batch_end = table_rows.min(batch_start + batch_rows);
+        let tx = block_on(db.mergeable_tx()).expect("open owner-filter seed tx");
+
+        for index in batch_start..batch_end {
+            let owner = if index < owned_rows {
+                AUTHOR
+            } else {
+                OTHER_AUTHOR
+            };
+            block_on(tx.insert_with_id(
+                TABLE,
+                row(index),
+                BTreeMap::from([
+                    ("owner".to_owned(), Value::Uuid(owner.0)),
+                    ("active".to_owned(), Value::Bool(true)),
+                    ("updated_at".to_owned(), Value::U64(index as u64)),
+                    (
+                        "title".to_owned(),
+                        Value::String(format!("document-{index}")),
+                    ),
+                ]),
+            ))
+            .expect("stage owner-filter row");
+        }
+
+        let tx_id = block_on(tx.commit()).expect("commit owner-filter seed tx");
+        db.finalize_local_mergeable_commit_for_test(tx_id)
+            .expect("settle owner-filter seed tx");
+    }
+}
+
+fn row(index: usize) -> RowUuid {
+    let mut bytes = [0_u8; 16];
+    bytes[0] = 0x61;
+    bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
+    RowUuid::from_bytes(bytes)
+}
+
+fn policy_only_query() -> Query {
+    Query::from(TABLE)
+}
+
+fn owner_predicate_query() -> Query {
+    Query::from(TABLE)
+        .filter(eq(col("owner"), lit(AUTHOR.0)))
+        .filter(eq(col("active"), lit(true)))
+}
+
+fn global_read_opts() -> ReadOpts {
+    ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::LocalOnly,
+        include_deleted: false,
+        ..ReadOpts::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_case(
+    case: &str,
+    table_rows: usize,
+    owned_rows: usize,
+    result_rows: usize,
+    seed_us: u128,
+    prepare_us: u128,
+    query_us: u128,
+    open_metrics: &StorageReadMetrics,
+    prepare_metrics: &StorageReadMetrics,
+    query_metrics: &StorageReadMetrics,
+) {
+    let mut fields = Map::new();
+    fields.insert("phase".to_owned(), json!("owner_filter_diagnostic"));
+    fields.insert("case".to_owned(), json!(case));
+    fields.insert("table_rows".to_owned(), json!(table_rows));
+    fields.insert("owned_rows".to_owned(), json!(owned_rows));
+    fields.insert("result_rows".to_owned(), json!(result_rows));
+    fields.insert("seed_us".to_owned(), json!(seed_us));
+    fields.insert("prepare_us".to_owned(), json!(prepare_us));
+    fields.insert("query_us".to_owned(), json!(query_us));
+    insert_metrics(&mut fields, "open", open_metrics);
+    insert_metrics(&mut fields, "prepare", prepare_metrics);
+    insert_metrics(&mut fields, "query", query_metrics);
+    support::emit_json_line("owner_filter_diagnostic", fields);
+}
+
+fn insert_metrics(
+    fields: &mut Map<String, serde_json::Value>,
+    prefix: &str,
+    metrics: &StorageReadMetrics,
+) {
+    fields.insert(
+        format!("{prefix}_logical_reads"),
+        json!(metrics.total.reads),
+    );
+    fields.insert(
+        format!("{prefix}_logical_ranges"),
+        json!(metrics.total.ranges),
+    );
+    fields.insert(
+        format!("{prefix}_global_current_row_reads"),
+        json!(metrics.global_current_rows.reads),
+    );
+    fields.insert(
+        format!("{prefix}_global_current_index_reads"),
+        json!(metrics.global_current_indexes.reads),
+    );
+}

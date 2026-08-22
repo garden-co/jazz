@@ -904,13 +904,30 @@ where
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             } else {
-                let source = self
-                    .projected_visible_current_source_graph(
+                let tier = graph_tier.expect("visible current source has a tier");
+                let selected_policy_base = if self.access_paths.contains_key(&request.source) {
+                    None
+                } else {
+                    self.selected_policy_filtered_global_current_source_graph(
                         request,
                         &table,
-                        graph_tier.expect("visible current source has a tier"),
+                        tier,
+                        &authorization,
                     )
-                    .await?;
+                    .await?
+                };
+                let source = if let Some(graph) = selected_policy_base {
+                    CurrentSourceGraph {
+                        graph: graph.project_fields(storage_to_canonical_current_source_fields(
+                            &table, true, false,
+                        )),
+                        descriptor: current_row_descriptor(&table),
+                        metadata: BTreeMap::new(),
+                    }
+                } else {
+                    self.projected_visible_current_source_graph(request, &table, tier)
+                        .await?
+                };
                 let graph = match &authorization {
                     SourceAuthorizationRequest::System => source.graph,
                     SourceAuthorizationRequest::PolicyFiltered {
@@ -1064,20 +1081,29 @@ where
                 BTreeSet::new(),
             )
         } else {
+            let tier = graph_tier.expect("visible current source has a tier");
             let selected_base = self
-                .selected_global_current_source_graph(
-                    request,
-                    &table,
-                    graph_tier.expect("visible current source has a tier"),
-                )
+                .selected_global_current_source_graph(request, &table, tier)
                 .await?;
+            let selected_base = match selected_base {
+                Some(selected_base) => Some(selected_base),
+                None => {
+                    self.selected_policy_filtered_global_current_source_graph(
+                        request,
+                        &table,
+                        tier,
+                        &authorization,
+                    )
+                    .await?
+                }
+            };
             if selected_base.is_none() {
                 self.node.query_engine_read_metrics.source_full_scans += 1;
             }
             resolved_current_source_graph(
                 self.node,
                 &table,
-                graph_tier.expect("visible current source has a tier"),
+                tier,
                 &request.requirements,
                 &authorization,
                 self.read_view.policy_schema,
@@ -1277,6 +1303,87 @@ where
         let Some(access_path) = self.access_paths.get(&request.source).cloned() else {
             return Ok(None);
         };
+        self.selected_global_current_source_graph_for_access_path(request, table, tier, access_path)
+            .await
+    }
+
+    async fn selected_policy_filtered_global_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        tier: DurabilityTier,
+        authorization: &SourceAuthorizationRequest,
+    ) -> Result<Option<GraphBuilder>, SourceResolutionError> {
+        let (permission_subject, plan) = match authorization {
+            SourceAuthorizationRequest::PolicyFiltered {
+                permission_subject,
+                plan,
+            }
+            | SourceAuthorizationRequest::PolicyProof {
+                permission_subject,
+                plan,
+            } => (permission_subject, plan),
+            SourceAuthorizationRequest::System => return Ok(None),
+        };
+        if plan.protected_source.table != table.name
+            || plan.role != PolicyDecisionRole::Read
+            || plan.protected_row_field != "row_uuid"
+        {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        }
+        let param_binding_mode = if plan.binding_source_shape.is_some() {
+            ParamBindingMode::RetainAllParams
+        } else {
+            ParamBindingMode::InlineAllReachableSeeds
+        };
+        let policy_request = self.node.table_read_policy_authorization_request(
+            self.read_view.policy_schema,
+            &table.name,
+            *permission_subject,
+            param_binding_mode,
+            tier,
+            plan.binding_source_shape.clone(),
+            plan.binding_user_params.clone(),
+            plan.binding_claim_params.clone(),
+        );
+        let policy_request = policy_request.map(|mut policy_request| {
+            policy_request.reads.primary =
+                policy_read_view_projected_through(&policy_request.reads.primary, self.read_view);
+            policy_request
+        });
+        let policy_request = match policy_request {
+            Ok(policy_request) => policy_request,
+            Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
+                return Err(source_resolution_error_from_policy_proof(
+                    request,
+                    Error::QueryCapability(error),
+                ));
+            }
+            Err(Error::QueryCapability(_)) => return Ok(None),
+            Err(error) => return Err(source_resolution_error_from_policy_proof(request, error)),
+        };
+        let access_paths = self
+            .node
+            .policy_authorization_access_paths(&policy_request)
+            .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
+        let Some(access_path) = access_paths
+            .get(&plan.protected_source)
+            .cloned()
+            .or_else(|| access_paths.values().next().cloned())
+        else {
+            return Ok(None);
+        };
+        self.selected_global_current_source_graph_for_access_path(request, table, tier, access_path)
+            .await
+    }
+
+    async fn selected_global_current_source_graph_for_access_path(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        tier: DurabilityTier,
+        access_path: CurrentAccessPath,
+    ) -> Result<Option<GraphBuilder>, SourceResolutionError> {
         match access_path {
             CurrentAccessPath::PrimaryKey(prefix) => {
                 self.node.query_engine_read_metrics.source_primary_key_scans += 1;
@@ -2688,6 +2795,42 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn policy_authorization_access_paths(
+        &self,
+        request: &QueryProgramRequest,
+    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        let target = match &request.policy {
+            PolicyContext::AuthorizationSubplan {
+                protected_source,
+                role,
+                ..
+            } if *role == PolicyDecisionRole::Read => protected_source,
+            _ => return Ok(BTreeMap::new()),
+        };
+        if request.reads.primary.source_current_tier(target) != Some(DurabilityTier::Global) {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut equalities = BTreeMap::new();
+        let reaches_target = normalized_source_equalities_from_node(
+            &request.input.shape,
+            &request.input.shape.root,
+            target,
+            &request.input.binding,
+            &request.policy,
+            &mut equalities,
+        )?;
+        if !reaches_target {
+            return Ok(BTreeMap::new());
+        }
+
+        let table = self.table_in_schema(&target.table, request.reads.primary.read_schema)?;
+        let Some(access_path) = select_current_access_path(&table, &equalities) else {
+            return Ok(BTreeMap::new());
+        };
+        Ok(BTreeMap::from([(target.clone(), access_path)]))
+    }
+
     pub(super) fn one_shot_access_paths(
         &self,
         shape: &ValidatedQuery,
@@ -2855,6 +2998,129 @@ where
             projection_target,
             StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect()),
         ))
+    }
+}
+
+fn normalized_source_equalities_from_node(
+    shape: &NormalizedRowSetShape,
+    node_id: &RowSetNodeId,
+    target: &SourceId,
+    binding: &ProgramBinding,
+    policy: &PolicyContext,
+    equalities: &mut BTreeMap<String, Value>,
+) -> Result<bool, Error> {
+    let node = shape.nodes.get(node_id).ok_or(Error::InvalidStoredValue(
+        "normalized access-path node missing",
+    ))?;
+    match node {
+        RowSetExpr::Filter { input, predicate } => {
+            collect_normalized_source_equalities(predicate, target, binding, policy, equalities)?;
+            normalized_source_equalities_from_node(
+                shape, input, target, binding, policy, equalities,
+            )
+        }
+        RowSetExpr::Distinct { input, .. }
+        | RowSetExpr::OrderBy { input, .. }
+        | RowSetExpr::Project { input, .. }
+        | RowSetExpr::Slice { input, .. } => normalized_source_equalities_from_node(
+            shape, input, target, binding, policy, equalities,
+        ),
+        RowSetExpr::Source { source, .. } => Ok(source == target),
+        RowSetExpr::Aggregate { .. }
+        | RowSetExpr::CorrelatedPathProjection { .. }
+        | RowSetExpr::FrontierSource { .. }
+        | RowSetExpr::Join { .. }
+        | RowSetExpr::RecursiveRelation { .. }
+        | RowSetExpr::Union { .. }
+        | RowSetExpr::ValueSource { .. } => Ok(false),
+    }
+}
+
+fn collect_normalized_source_equalities(
+    predicate: &NormalizedPredicateExpr,
+    target: &SourceId,
+    binding: &ProgramBinding,
+    policy: &PolicyContext,
+    equalities: &mut BTreeMap<String, Value>,
+) -> Result<(), Error> {
+    match predicate {
+        NormalizedPredicateExpr::And(predicates) => {
+            for predicate in predicates {
+                collect_normalized_source_equalities(
+                    predicate, target, binding, policy, equalities,
+                )?;
+            }
+        }
+        NormalizedPredicateExpr::Compare {
+            left,
+            op: NormalizedComparisonOp::Eq,
+            right,
+        } => {
+            if let Some((field, value)) =
+                normalized_source_equality(left, right, target, binding, policy)?
+            {
+                equalities.entry(field).or_insert(value);
+            } else if let Some((field, value)) =
+                normalized_source_equality(right, left, target, binding, policy)?
+            {
+                equalities.entry(field).or_insert(value);
+            }
+        }
+        NormalizedPredicateExpr::ArrayContains { .. }
+        | NormalizedPredicateExpr::Compare { .. }
+        | NormalizedPredicateExpr::EnumMatch { .. }
+        | NormalizedPredicateExpr::False
+        | NormalizedPredicateExpr::In { .. }
+        | NormalizedPredicateExpr::IsNotNull(_)
+        | NormalizedPredicateExpr::IsNull(_)
+        | NormalizedPredicateExpr::Not(_)
+        | NormalizedPredicateExpr::Or(_)
+        | NormalizedPredicateExpr::TextContains { .. }
+        | NormalizedPredicateExpr::True => {}
+    }
+    Ok(())
+}
+
+fn normalized_source_equality(
+    field: &NormalizedValueRef,
+    value: &NormalizedValueRef,
+    target: &SourceId,
+    binding: &ProgramBinding,
+    policy: &PolicyContext,
+) -> Result<Option<(String, Value)>, Error> {
+    let Some(field) = normalized_source_field(field, target) else {
+        return Ok(None);
+    };
+    let Some(value) = normalized_bound_value(value, binding, policy)? else {
+        return Ok(None);
+    };
+    Ok(Some((field, value)))
+}
+
+fn normalized_source_field(value: &NormalizedValueRef, target: &SourceId) -> Option<String> {
+    match value {
+        NormalizedValueRef::SourceField { source, field } if source == target => {
+            Some(field.clone())
+        }
+        NormalizedValueRef::RowId(RowIdRef::Source(source)) if source == target => {
+            Some("id".to_owned())
+        }
+        _ => None,
+    }
+}
+
+fn normalized_bound_value(
+    value: &NormalizedValueRef,
+    binding: &ProgramBinding,
+    policy: &PolicyContext,
+) -> Result<Option<Value>, Error> {
+    match value {
+        NormalizedValueRef::Param(name) => Ok(binding.values.get(name).cloned()),
+        NormalizedValueRef::Literal(bytes) => postcard::from_bytes::<Value>(bytes)
+            .map(Some)
+            .map_err(|err| Error::QueryLowering(format!("literal decoding failed: {err}"))),
+        NormalizedValueRef::Claim(path) => prepared_claim_value(path, policy),
+        _ => Ok(None),
     }
 }
 
