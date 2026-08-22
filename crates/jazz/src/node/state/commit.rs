@@ -1004,11 +1004,6 @@ where
                 }
                 cells.insert(column, value);
             }
-            for column in &table_schema.columns {
-                if let Some(value) = cells.get(&column.name) {
-                    crate::node::codec::validate_cell_value(column, value)?;
-                }
-            }
             let authored_columns = Some(
                 commit
                     .authored_columns

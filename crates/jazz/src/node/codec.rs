@@ -2008,15 +2008,10 @@ pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Resul
             crate::large_values::LargeValue::decode_storage_value(schema, logical)
                 .map_err(|_| Error::InvalidStoredValue("invalid large-value cell"))?;
         } else {
-            let bytes = schema
+            schema
                 .kind
                 .logical_bytes(logical)
                 .map_err(|_| Error::InvalidStoredValue("invalid logical large-value cell"))?;
-            if bytes.len() > schema.inline_up_to as usize {
-                return Err(Error::InvalidStoredValue(
-                    "unframed large-value cell exceeds inline threshold",
-                ));
-            }
         }
     }
     Ok(())
