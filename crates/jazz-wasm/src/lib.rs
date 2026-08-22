@@ -7,6 +7,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::lock::Mutex as LocalMutex;
 use futures_util::{Stream, StreamExt};
+#[cfg(target_arch = "wasm32")]
+use idb_tree::IndexedDbPageStore;
 use jazz::db::{
     block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
     InitialSyncFlushCadence, LocalUpdates, MergeableTxOps, MutationErrorCallback, PeerConnection,
@@ -16,7 +18,7 @@ use jazz::db::{
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
-use jazz::groove::storage::OpfsStorage;
+use jazz::groove::storage::IdbStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::protocol::{BranchSelector, BranchViewBase, PermissionAdviceAction, ReadViewSpec};
@@ -26,6 +28,9 @@ use jazz::tools::{OpenTransactionId, TransactionId};
 use jazz::tx::{DurabilityTier, TxId};
 use jazz::wire::{TransportError, WireAuthorityEndpoint, WireTransport};
 use serde::{Deserialize, Serialize};
+
+#[cfg(target_arch = "wasm32")]
+type BrowserStorage = IdbStorage<IndexedDbPageStore>;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
@@ -212,7 +217,7 @@ enum WasmWriteInner {
     },
     #[cfg(target_arch = "wasm32")]
     BrowserTx {
-        db: Rc<Db<OpfsStorage>>,
+        db: Rc<Db<BrowserStorage>>,
         tx_id: TxId,
     },
 }
@@ -273,7 +278,7 @@ pub struct WasmDb {
 enum WasmDbInner {
     Memory(Rc<Db<MemoryStorage>>),
     #[cfg(target_arch = "wasm32")]
-    Browser(Rc<Db<OpfsStorage>>),
+    Browser(Rc<Db<BrowserStorage>>),
     Closed,
 }
 
@@ -302,8 +307,8 @@ enum WasmTransportInner {
     },
     #[cfg(target_arch = "wasm32")]
     Browser {
-        db: Rc<Db<OpfsStorage>>,
-        connection: Option<Rc<LocalMutex<PeerConnection<OpfsStorage>>>>,
+        db: Rc<Db<BrowserStorage>>,
+        connection: Option<Rc<LocalMutex<PeerConnection<BrowserStorage>>>>,
     },
 }
 
@@ -1516,7 +1521,7 @@ impl WasmDb {
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = openBrowser)]
     pub async fn open_browser(
-        namespace: String,
+        page_store: JsValue,
         schema: Vec<u8>,
         config: Vec<u8>,
     ) -> Result<WasmDb, JsValue> {
@@ -1524,7 +1529,7 @@ impl WasmDb {
         let (schema, config) = decode_open_args(&schema, &config)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = OpfsStorage::open(&namespace, &refs)
+        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
         let db = open_db(schema, storage, config)
@@ -1651,12 +1656,6 @@ impl WasmDb {
         self.inner
             .abandon_transaction(open_batch_id)
             .map_err(to_js_error)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = destroyBrowserStorage)]
-    pub async fn destroy_browser_storage(namespace: String) -> Result<(), JsValue> {
-        OpfsStorage::destroy(&namespace).await.map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = prepareQuery)]
@@ -3248,8 +3247,8 @@ fn wasm_write_memory(
 
 #[cfg(target_arch = "wasm32")]
 fn wasm_write_browser(
-    db: Rc<Db<OpfsStorage>>,
-    write: WriteHandle<OpfsStorage>,
+    db: Rc<Db<BrowserStorage>>,
+    write: WriteHandle<BrowserStorage>,
 ) -> Result<WasmWrite, JsValue> {
     let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {

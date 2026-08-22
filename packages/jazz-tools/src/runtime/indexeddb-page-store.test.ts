@@ -82,6 +82,23 @@ describe("IndexedDbPageStore", () => {
     expect((await store.metadata())?.rootPageId).toBe(1);
     store.close();
   });
+
+  it("accepts the typed-array wasm bridge without re-encoding page bodies", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    const metadata = await store.commitPages(
+      0,
+      4096,
+      4,
+      5,
+      [4],
+      [new Uint8Array([8, 6, 7, 5, 3, 0, 9])],
+      [],
+    );
+    expect(metadata).toMatchObject({ generation: 1, rootPageId: 4, nextPageId: 5 });
+    expect(await store.readPage(4)).toEqual(new Uint8Array([8, 6, 7, 5, 3, 0, 9]));
+    store.close();
+  });
 });
 
 function databaseName(): string {

@@ -1,5 +1,6 @@
 import { loadWasmModule, type WasmModule } from "../client.js";
 import { installWasmTelemetry } from "../sync-telemetry.js";
+import { IndexedDbPageStore } from "../indexeddb-page-store.js";
 import { tryAcquireWebLock, type LeaderLockLease } from "../leader-lock.js";
 import { BrowserWorkerTransportPump, transferableFrames } from "./browser-worker-transport.js";
 import type {
@@ -23,6 +24,7 @@ const workerScope = self as unknown as {
 
 let wasmModule: WasmModule | null = null;
 let runtime: NativeRuntimeAdapter | null = null;
+let pageStore: IndexedDbPageStore | null = null;
 let relayPump: BrowserWorkerTransportPump | null = null;
 let subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]> | null = null;
 let initOptions: BrowserWorkerInitOptions | null = null;
@@ -97,8 +99,9 @@ async function initialize(options: BrowserWorkerInitOptions): Promise<void> {
       appId: options.appId,
       runtimeThread: "worker",
     });
+    pageStore = await IndexedDbPageStore.open(options.dbName);
     const db = await wasmModule.WasmDb.openBrowser(
-      options.dbName,
+      pageStore,
       encodeSchema(options.schema),
       openConfig(options.node, options.author, 1, false, options.initialSyncFlushEvery),
     );
@@ -175,9 +178,9 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
       break;
     case "delete-storage": {
       const dbName = initOptions?.dbName;
-      if (!dbName || !wasmModule) throw new Error("Browser storage namespace is unavailable");
+      if (!dbName) throw new Error("Browser storage namespace is unavailable");
       await closeRuntime();
-      await wasmModule.WasmDb.destroyBrowserStorage(dbName);
+      await IndexedDbPageStore.destroy(dbName);
       break;
     }
     case "simulate-crash":
@@ -239,6 +242,8 @@ async function closeRuntime(): Promise<void> {
   subscriber = null;
   await runtime?.close();
   runtime = null;
+  pageStore?.close();
+  pageStore = null;
   disposeTelemetry?.();
   disposeTelemetry = null;
   activeLeadershipId = null;
