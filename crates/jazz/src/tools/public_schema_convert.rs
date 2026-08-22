@@ -593,6 +593,18 @@ fn convert_column(
         column_type = column_type.nullable();
     }
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
+    converted.adaptive_scalar = match &column.column_type {
+        ColumnType::Text => Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
+            crate::adaptive_content::ScalarKind::String,
+        )),
+        ColumnType::Bytea => Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
+            crate::adaptive_content::ScalarKind::Bytes,
+        )),
+        ColumnType::Json { .. } => Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
+            crate::adaptive_content::ScalarKind::Json,
+        )),
+        _ => None,
+    };
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
     }
@@ -3071,6 +3083,28 @@ mod tests {
                 .unwrap()
                 .column_type,
             GrooveColumnType::String.nullable()
+        );
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .find(|column| column.name == "payload")
+                .unwrap()
+                .adaptive_scalar,
+            Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
+                crate::adaptive_content::ScalarKind::Json,
+            ))
+        );
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .find(|column| column.name == "metadata")
+                .unwrap()
+                .adaptive_scalar,
+            Some(crate::adaptive_content::AdaptiveScalarSchema::built_in(
+                crate::adaptive_content::ScalarKind::Json,
+            ))
         );
     }
 

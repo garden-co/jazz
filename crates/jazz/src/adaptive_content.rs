@@ -9,8 +9,14 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use groove::records::Value as GrooveValue;
+use groove::storage::OrderedKvStorage;
+
 const CONTENT_ID_DOMAIN: &[u8] = b"jazz-adaptive-content-v1";
 const OBJECT_FORMAT_VERSION: u8 = 1;
+const CELL_ENVELOPE: &[u8] = b"JAZZ-ADAPTIVE-SCALAR-V1\0";
+/// Physical column family containing domain-scoped immutable content objects.
+pub const CONTENT_OBJECTS_CF: &str = "jazz_content_objects";
 
 /// Stable identifier of one immutable content object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -107,6 +113,45 @@ impl ImmutableContentStore for MemoryContentStore {
                 self.objects.insert(id, canonical_bytes.to_vec());
                 Ok(())
             }
+        }
+    }
+}
+
+/// Adapter over Jazz's ordinary ordered key/value storage. Passing a Groove
+/// storage transaction makes immutable objects and the eventual row write part
+/// of the same physical commit boundary.
+pub struct KvContentStore<'a, S> {
+    storage: &'a S,
+}
+
+impl<'a, S> KvContentStore<'a, S> {
+    /// Wrap one storage or storage transaction.
+    pub fn new(storage: &'a S) -> Self {
+        Self { storage }
+    }
+}
+
+impl<S: OrderedKvStorage> ImmutableContentStore for KvContentStore<'_, S> {
+    fn get(&self, id: ContentId) -> Result<Option<Vec<u8>>, ContentError> {
+        self.storage
+            .get(CONTENT_OBJECTS_CF, id.as_bytes())
+            .map_err(|error| ContentError::Storage(error.to_string()))
+    }
+
+    fn put_if_absent_or_identical(
+        &mut self,
+        id: ContentId,
+        canonical_bytes: &[u8],
+    ) -> Result<(), ContentError> {
+        match self.get(id)? {
+            Some(existing) if existing != canonical_bytes => {
+                Err(ContentError::ImmutableCollision(id))
+            }
+            Some(_) => Ok(()),
+            None => self
+                .storage
+                .set(CONTENT_OBJECTS_CF, id.as_bytes(), canonical_bytes)
+                .map_err(|error| ContentError::Storage(error.to_string())),
         }
     }
 }
@@ -240,7 +285,7 @@ pub enum AdaptiveScalar {
 }
 
 /// Built-in semantic interpretation of adaptive bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScalarKind {
     /// Uninterpreted bytes.
     Bytes,
@@ -248,6 +293,43 @@ pub enum ScalarKind {
     String,
     /// UTF-8 JSON source.
     Json,
+}
+
+/// Schema-stable storage policy for one built-in adaptive scalar column.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveScalarSchema {
+    /// Logical interpretation retained at every public/query boundary.
+    pub kind: ScalarKind,
+    /// Largest newly authored value that remains inline.
+    pub inline_up_to: u32,
+    /// Maximum ordered patch count before synchronous consolidation.
+    pub max_tail_entries: u16,
+    /// Maximum canonical patch bytes before synchronous consolidation.
+    pub max_tail_bytes: u32,
+    /// Version of the immutable tree and chunking profile.
+    pub tree_format: u16,
+}
+
+impl AdaptiveScalarSchema {
+    /// Built-in alpha defaults for one logical kind.
+    pub fn built_in(kind: ScalarKind) -> Self {
+        Self {
+            kind,
+            inline_up_to: 8 * 1024,
+            max_tail_entries: 64,
+            max_tail_bytes: 16 * 1024,
+            tree_format: 1,
+        }
+    }
+
+    /// Runtime tail bounds declared by this schema.
+    pub fn tail_bounds(&self) -> TailBounds {
+        TailBounds {
+            max_entries: usize::from(self.max_tail_entries),
+            max_encoded_bytes: usize::try_from(self.max_tail_bytes)
+                .expect("u32 tail bound fits usize on supported targets"),
+        }
+    }
 }
 
 /// Immutable query projection over one adaptive scalar.
@@ -304,6 +386,139 @@ pub enum ScalarEdit {
     Json(serde_json::Value),
 }
 
+/// Origin of one semantic JSON change in a three-way merge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JsonSide {
+    /// First candidate.
+    A,
+    /// Second candidate.
+    B,
+}
+
+/// One semantic, side-attributed JSON replacement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttributedJsonChange {
+    /// Candidate that authored the change.
+    pub side: JsonSide,
+    /// RFC 6901 pointer. The empty pointer denotes the document root.
+    pub pointer: String,
+    /// Base value, or absence for an insertion.
+    pub before: Option<serde_json::Value>,
+    /// Candidate value, or absence for a deletion.
+    pub after: Option<serde_json::Value>,
+}
+
+/// Conservative semantic analysis delivered to a JSON merge strategy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JsonMergeAnalysis {
+    /// Side-attributed changes whose paths do not overlap incompatibly.
+    pub independent: Vec<AttributedJsonChange>,
+    /// Pairs of overlapping or disagreeing candidate changes.
+    pub conflicts: Vec<(AttributedJsonChange, AttributedJsonChange)>,
+}
+
+/// Parse base and candidate JSON bytes and compute a conservative semantic,
+/// side-attributed three-way change analysis.
+pub fn analyze_json_merge(
+    base: &[u8],
+    side_a: &[u8],
+    side_b: &[u8],
+) -> Result<JsonMergeAnalysis, ContentError> {
+    let base = parse_json(base)?;
+    let side_a = parse_json(side_a)?;
+    let side_b = parse_json(side_b)?;
+    let mut changes_a = Vec::new();
+    let mut changes_b = Vec::new();
+    collect_json_changes("", &base, &side_a, JsonSide::A, &mut changes_a);
+    collect_json_changes("", &base, &side_b, JsonSide::B, &mut changes_b);
+
+    let mut conflicts = Vec::new();
+    let mut conflicted_a = vec![false; changes_a.len()];
+    let mut conflicted_b = vec![false; changes_b.len()];
+    for (a_index, a) in changes_a.iter().enumerate() {
+        for (b_index, b) in changes_b.iter().enumerate() {
+            if json_paths_overlap(&a.pointer, &b.pointer) && a.after != b.after {
+                conflicted_a[a_index] = true;
+                conflicted_b[b_index] = true;
+                conflicts.push((a.clone(), b.clone()));
+            }
+        }
+    }
+    let independent = changes_a
+        .into_iter()
+        .zip(conflicted_a)
+        .chain(changes_b.into_iter().zip(conflicted_b))
+        .filter_map(|(change, conflicted)| (!conflicted).then_some(change))
+        .collect();
+    Ok(JsonMergeAnalysis {
+        independent,
+        conflicts,
+    })
+}
+
+fn parse_json(bytes: &[u8]) -> Result<serde_json::Value, ContentError> {
+    serde_json::from_slice(bytes).map_err(|error| ContentError::InvalidJson(error.to_string()))
+}
+
+fn collect_json_changes(
+    pointer: &str,
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+    side: JsonSide,
+    out: &mut Vec<AttributedJsonChange>,
+) {
+    if before == after {
+        return;
+    }
+    match (before, after) {
+        (serde_json::Value::Object(before), serde_json::Value::Object(after)) => {
+            let keys = before
+                .keys()
+                .chain(after.keys())
+                .collect::<std::collections::BTreeSet<_>>();
+            for key in keys {
+                let child = format!("{pointer}/{}", escape_json_pointer(key));
+                match (before.get(key), after.get(key)) {
+                    (Some(before), Some(after)) => {
+                        collect_json_changes(&child, before, after, side, out)
+                    }
+                    (before, after) => out.push(AttributedJsonChange {
+                        side,
+                        pointer: child,
+                        before: before.cloned(),
+                        after: after.cloned(),
+                    }),
+                }
+            }
+        }
+        // Without persistent element identity, arrays are intentionally one
+        // semantic replacement. Merge strategies may inspect both values and
+        // resolve them, but core does not invent move/position intent.
+        _ => out.push(AttributedJsonChange {
+            side,
+            pointer: pointer.to_owned(),
+            before: Some(before.clone()),
+            after: Some(after.clone()),
+        }),
+    }
+}
+
+fn escape_json_pointer(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+fn json_paths_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || left.is_empty()
+        || right.is_empty()
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 impl ScalarKind {
     /// Validate one complete materialized value.
     pub fn validate(self, bytes: &[u8]) -> Result<(), ContentError> {
@@ -320,6 +535,32 @@ impl ScalarKind {
             }
         }
     }
+
+    /// Convert one existing logical Groove scalar to its canonical source
+    /// bytes before adaptive physical encoding.
+    pub fn logical_bytes(self, value: &GrooveValue) -> Result<Vec<u8>, ContentError> {
+        match (self, value) {
+            (Self::Bytes, GrooveValue::Bytes(bytes)) => Ok(bytes.clone()),
+            (Self::String | Self::Json, GrooveValue::String(text)) => {
+                let bytes = text.as_bytes().to_vec();
+                self.validate(&bytes)?;
+                Ok(bytes)
+            }
+            _ => Err(ContentError::LogicalTypeMismatch),
+        }
+    }
+
+    /// Convert complete materialized bytes back to the existing logical Groove
+    /// scalar consumed by queries, policies, indices, and bindings.
+    pub fn logical_value(self, bytes: Vec<u8>) -> Result<GrooveValue, ContentError> {
+        self.validate(&bytes)?;
+        match self {
+            Self::Bytes => Ok(GrooveValue::Bytes(bytes)),
+            Self::String | Self::Json => String::from_utf8(bytes)
+                .map(GrooveValue::String)
+                .map_err(|_| ContentError::InvalidUtf8),
+        }
+    }
 }
 
 /// Materialization or immutable-integrity failure.
@@ -331,6 +572,15 @@ pub enum ContentError {
     /// Chunk parameters violate format bounds.
     #[error("invalid content chunking profile")]
     InvalidChunkingProfile,
+    /// Adaptive scalar cell envelope is unknown.
+    #[error("unknown adaptive scalar cell format")]
+    UnknownCellFormat,
+    /// Adaptive scalar cell payload is malformed.
+    #[error("malformed adaptive scalar cell: {0}")]
+    MalformedCell(String),
+    /// Ordered key/value persistence failed.
+    #[error("adaptive content storage failed: {0}")]
+    Storage(String),
     /// An immutable identity was observed with different bytes.
     #[error("immutable content collision for {0:?}")]
     ImmutableCollision(ContentId),
@@ -371,6 +621,9 @@ pub enum ContentError {
     /// An update operation does not apply to the logical scalar kind.
     #[error("edit operation does not apply to this scalar kind")]
     InvalidEdit,
+    /// A Groove value does not match the adaptive column's logical scalar.
+    #[error("logical value does not match adaptive scalar kind")]
+    LogicalTypeMismatch,
     /// A text scalar position exceeds the string.
     #[error("text scalar offset {offset} exceeds scalar length {scalar_len}")]
     ScalarOffsetOutOfBounds {
@@ -580,6 +833,27 @@ impl ProllyTree {
 }
 
 impl AdaptiveScalar {
+    /// Encode the complete atomic physical cell for ordinary Jazz storage and
+    /// wire transport.
+    pub fn encode_cell(&self) -> Result<Vec<u8>, ContentError> {
+        let payload = postcard::to_allocvec(self)
+            .map_err(|error| ContentError::MalformedCell(error.to_string()))?;
+        let mut encoded = Vec::with_capacity(CELL_ENVELOPE.len() + payload.len());
+        encoded.extend_from_slice(CELL_ENVELOPE);
+        encoded.extend_from_slice(&payload);
+        Ok(encoded)
+    }
+
+    /// Decode one exact alpha physical cell. There is deliberately no legacy
+    /// or compatibility fallback.
+    pub fn decode_cell(encoded: &[u8]) -> Result<Self, ContentError> {
+        let payload = encoded
+            .strip_prefix(CELL_ENVELOPE)
+            .ok_or(ContentError::UnknownCellFormat)?;
+        postcard::from_bytes(payload)
+            .map_err(|error| ContentError::MalformedCell(error.to_string()))
+    }
+
     /// Create an inline scalar after logical validation.
     pub fn inline(kind: ScalarKind, bytes: impl Into<Vec<u8>>) -> Result<Self, ContentError> {
         let bytes = bytes.into();
@@ -620,8 +894,7 @@ impl AdaptiveScalar {
         let bytes = match self {
             Self::Inline(bytes) => bytes.clone(),
             Self::Large(large) => {
-                let base = tree.materialize(domain, large.root, large.root_byte_len, store)?;
-                apply_patches(&base, &large.edit_tail)?
+                materialize_large_range(large, domain, tree, store, 0, patched_length(large)?)?
             }
         };
         kind.validate(&bytes)?;
@@ -637,12 +910,19 @@ impl AdaptiveScalar {
         tree: ProllyTree,
         store: &S,
     ) -> Result<ScalarSelectionValue, ContentError> {
+        if let (ScalarKind::Bytes, ScalarSelection::ByteRange { offset, len }) = (kind, selection) {
+            let selected = match self {
+                Self::Inline(bytes) => checked_slice(bytes, *offset, *len)?.to_vec(),
+                Self::Large(large) => {
+                    materialize_large_range(large, domain, tree, store, *offset, *len)?
+                }
+            };
+            return Ok(ScalarSelectionValue::Bytes(selected));
+        }
         let bytes = self.materialize(kind, domain, tree, store)?;
         match (kind, selection) {
             (ScalarKind::Bytes, ScalarSelection::Value) => Ok(ScalarSelectionValue::Bytes(bytes)),
-            (ScalarKind::Bytes, ScalarSelection::ByteRange { offset, len }) => Ok(
-                ScalarSelectionValue::Bytes(checked_slice(&bytes, *offset, *len)?.to_vec()),
-            ),
+            (ScalarKind::Bytes, ScalarSelection::ByteRange { .. }) => unreachable!(),
             (ScalarKind::String, ScalarSelection::Value) => Ok(ScalarSelectionValue::String(
                 String::from_utf8(bytes).map_err(|_| ContentError::InvalidUtf8)?,
             )),
@@ -753,6 +1033,186 @@ impl AdaptiveScalar {
             }
         }
     }
+}
+
+#[derive(Clone, Debug)]
+enum MaterialPiece {
+    Root { offset: u64, len: u64 },
+    Insert(Vec<u8>),
+}
+
+impl MaterialPiece {
+    fn len(&self) -> Result<u64, ContentError> {
+        match self {
+            Self::Root { len, .. } => Ok(*len),
+            Self::Insert(bytes) => {
+                u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)
+            }
+        }
+    }
+
+    fn split(self, at: u64) -> Result<(Self, Self), ContentError> {
+        match self {
+            Self::Root { offset, len } => Ok((
+                Self::Root { offset, len: at },
+                Self::Root {
+                    offset: offset.checked_add(at).ok_or(ContentError::LengthOverflow)?,
+                    len: len.checked_sub(at).ok_or(ContentError::LengthOverflow)?,
+                },
+            )),
+            Self::Insert(bytes) => {
+                let at = usize::try_from(at).map_err(|_| ContentError::LengthOverflow)?;
+                Ok((
+                    Self::Insert(bytes[..at].to_vec()),
+                    Self::Insert(bytes[at..].to_vec()),
+                ))
+            }
+        }
+    }
+}
+
+fn patched_length(large: &LargeScalar) -> Result<u64, ContentError> {
+    large
+        .edit_tail
+        .iter()
+        .try_fold(large.root_byte_len, |len, patch| {
+            let end = patch
+                .offset
+                .checked_add(patch.delete_len)
+                .ok_or(ContentError::LengthOverflow)?;
+            if end > len {
+                return Err(ContentError::PatchOutOfBounds {
+                    offset: patch.offset,
+                    end,
+                    value_len: len,
+                });
+            }
+            len.checked_sub(patch.delete_len)
+                .and_then(|len| len.checked_add(u64::try_from(patch.insert.len()).ok()?))
+                .ok_or(ContentError::LengthOverflow)
+        })
+}
+
+fn material_pieces(large: &LargeScalar) -> Result<Vec<MaterialPiece>, ContentError> {
+    let mut pieces = vec![MaterialPiece::Root {
+        offset: 0,
+        len: large.root_byte_len,
+    }];
+    for patch in &large.edit_tail {
+        let current_len = pieces.iter().try_fold(0_u64, |sum, piece| {
+            sum.checked_add(piece.len()?)
+                .ok_or(ContentError::LengthOverflow)
+        })?;
+        let end = patch
+            .offset
+            .checked_add(patch.delete_len)
+            .ok_or(ContentError::LengthOverflow)?;
+        if end > current_len {
+            return Err(ContentError::PatchOutOfBounds {
+                offset: patch.offset,
+                end,
+                value_len: current_len,
+            });
+        }
+        let start_index = split_pieces_at(&mut pieces, patch.offset)?;
+        let end_index = split_pieces_at(&mut pieces, end)?;
+        let replacement = (!patch.insert.is_empty())
+            .then(|| MaterialPiece::Insert(patch.insert.clone()))
+            .into_iter();
+        pieces.splice(start_index..end_index, replacement);
+    }
+    Ok(pieces)
+}
+
+fn split_pieces_at(pieces: &mut Vec<MaterialPiece>, at: u64) -> Result<usize, ContentError> {
+    let mut cursor = 0_u64;
+    for index in 0..pieces.len() {
+        let len = pieces[index].len()?;
+        let end = cursor
+            .checked_add(len)
+            .ok_or(ContentError::LengthOverflow)?;
+        if at == cursor {
+            return Ok(index);
+        }
+        if at < end {
+            let piece = pieces.remove(index);
+            let (left, right) = piece.split(at - cursor)?;
+            pieces.insert(index, right);
+            pieces.insert(index, left);
+            return Ok(index + 1);
+        }
+        cursor = end;
+    }
+    if at == cursor {
+        Ok(pieces.len())
+    } else {
+        Err(ContentError::PatchOutOfBounds {
+            offset: at,
+            end: at,
+            value_len: cursor,
+        })
+    }
+}
+
+fn materialize_large_range<S: ImmutableContentStore>(
+    large: &LargeScalar,
+    domain: &ContentDomain,
+    tree: ProllyTree,
+    store: &S,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, ContentError> {
+    let logical_len = patched_length(large)?;
+    let end = offset
+        .checked_add(len)
+        .ok_or(ContentError::LengthOverflow)?;
+    if end > logical_len {
+        return Err(ContentError::PatchOutOfBounds {
+            offset,
+            end,
+            value_len: logical_len,
+        });
+    }
+    let mut out =
+        Vec::with_capacity(usize::try_from(len).map_err(|_| ContentError::LengthOverflow)?);
+    let mut cursor = 0_u64;
+    for piece in material_pieces(large)? {
+        let piece_len = piece.len()?;
+        let piece_end = cursor
+            .checked_add(piece_len)
+            .ok_or(ContentError::LengthOverflow)?;
+        let overlap_start = offset.max(cursor);
+        let overlap_end = end.min(piece_end);
+        if overlap_start < overlap_end {
+            let within = overlap_start - cursor;
+            let overlap_len = overlap_end - overlap_start;
+            match piece {
+                MaterialPiece::Root {
+                    offset: root_offset,
+                    ..
+                } => out.extend(
+                    tree.read_range(
+                        domain,
+                        large.root,
+                        large.root_byte_len,
+                        root_offset
+                            .checked_add(within)
+                            .ok_or(ContentError::LengthOverflow)?,
+                        overlap_len,
+                        store,
+                    )?,
+                ),
+                MaterialPiece::Insert(bytes) => {
+                    out.extend_from_slice(checked_slice(&bytes, within, overlap_len)?)
+                }
+            }
+        }
+        cursor = piece_end;
+        if cursor >= end {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 fn checked_slice(bytes: &[u8], offset: u64, len: u64) -> Result<&[u8], ContentError> {
@@ -1033,6 +1493,22 @@ mod tests {
         ContentDomain::new(b"test-domain".to_vec()).unwrap()
     }
 
+    fn collect_leaf_ids(
+        tree: ProllyTree,
+        store: &MemoryContentStore,
+        id: ContentId,
+        out: &mut Vec<ContentId>,
+    ) {
+        match tree.load_object(&domain(), id, store).unwrap() {
+            ContentObject::Leaf(_) => out.push(id),
+            ContentObject::Branch(children) => {
+                for child in children {
+                    collect_leaf_ids(tree, store, child.id, out);
+                }
+            }
+        }
+    }
+
     #[test]
     fn tree_is_history_independent_and_ranges_are_lazy_values() {
         let tree = ProllyTree::new(tiny_profile()).unwrap();
@@ -1047,6 +1523,50 @@ mod tests {
                 .unwrap(),
             bytes[997..1208]
         );
+    }
+
+    #[test]
+    fn patched_range_does_not_load_unrelated_leaf_payloads() {
+        let tree = ProllyTree::new(tiny_profile()).unwrap();
+        let mut store = MemoryContentStore::default();
+        let bytes = (0..=255).cycle().take(4096).collect::<Vec<_>>();
+        let value =
+            AdaptiveScalar::create(ScalarKind::Bytes, &domain(), bytes, 4, tree, &mut store)
+                .unwrap()
+                .apply_edit(
+                    ScalarKind::Bytes,
+                    &domain(),
+                    BytePatch::insert(0, b"prefix"),
+                    4,
+                    TailBounds::default(),
+                    tree,
+                    &mut store,
+                )
+                .unwrap();
+        let AdaptiveScalar::Large(large) = &value else {
+            panic!("value must be large")
+        };
+        let mut leaves = Vec::new();
+        collect_leaf_ids(tree, &store, large.root, &mut leaves);
+        assert!(leaves.len() > 2);
+        store.objects.remove(leaves.last().unwrap());
+
+        assert_eq!(
+            value
+                .select(
+                    ScalarKind::Bytes,
+                    &ScalarSelection::ByteRange { offset: 0, len: 6 },
+                    &domain(),
+                    tree,
+                    &store,
+                )
+                .unwrap(),
+            ScalarSelectionValue::Bytes(b"prefix".to_vec())
+        );
+        assert!(matches!(
+            value.materialize(ScalarKind::Bytes, &domain(), tree, &store),
+            Err(ContentError::MissingObject(_))
+        ));
     }
 
     #[test]
@@ -1232,6 +1752,70 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&next).unwrap(),
             serde_json::json!({ "profile": { "name": "new" }, "stable": 1 })
+        );
+    }
+
+    #[test]
+    fn json_merge_analysis_attributes_independent_changes_and_conflicts() {
+        let independent = analyze_json_merge(
+            br#"{"name":"old","profile":{"city":"A"}}"#,
+            br#"{"name":"alice","profile":{"city":"A"}}"#,
+            br#"{"name":"old","profile":{"city":"B"}}"#,
+        )
+        .unwrap();
+        assert!(independent.conflicts.is_empty());
+        assert_eq!(independent.independent.len(), 2);
+        assert!(
+            independent
+                .independent
+                .iter()
+                .any(|change| { change.side == JsonSide::A && change.pointer == "/name" })
+        );
+        assert!(
+            independent
+                .independent
+                .iter()
+                .any(|change| { change.side == JsonSide::B && change.pointer == "/profile/city" })
+        );
+
+        let conflict = analyze_json_merge(
+            br#"{"name":"old"}"#,
+            br#"{"name":"alice"}"#,
+            br#"{"name":"bob"}"#,
+        )
+        .unwrap();
+        assert_eq!(conflict.conflicts.len(), 1);
+        assert!(conflict.independent.is_empty());
+    }
+
+    #[test]
+    fn atomic_cell_round_trips_without_a_legacy_fallback() {
+        let cell = AdaptiveScalar::Large(LargeScalar {
+            root: ContentId([7; 32]),
+            root_byte_len: 42,
+            edit_tail: vec![BytePatch::insert(4, b"next")],
+        });
+        let encoded = cell.encode_cell().unwrap();
+        assert_eq!(AdaptiveScalar::decode_cell(&encoded).unwrap(), cell);
+        assert_eq!(
+            AdaptiveScalar::decode_cell(&encoded[CELL_ENVELOPE.len()..]),
+            Err(ContentError::UnknownCellFormat)
+        );
+    }
+
+    #[test]
+    fn ordered_kv_adapter_enforces_absent_or_identical_objects() {
+        use groove::storage::MemoryStorage;
+
+        let storage = MemoryStorage::new(&[CONTENT_OBJECTS_CF]);
+        let mut store = KvContentStore::new(&storage);
+        let id = ContentId([3; 32]);
+        store.put_if_absent_or_identical(id, b"same").unwrap();
+        store.put_if_absent_or_identical(id, b"same").unwrap();
+        assert_eq!(store.get(id).unwrap(), Some(b"same".to_vec()));
+        assert_eq!(
+            store.put_if_absent_or_identical(id, b"different"),
+            Err(ContentError::ImmutableCollision(id))
         );
     }
 }

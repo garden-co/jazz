@@ -491,7 +491,8 @@ impl RuntimeSchema {
                 .chain(std::iter::once("jazz_physical_history"))
                 .chain(std::iter::once("jazz_physical_register"))
                 .chain(std::iter::once("jazz_physical_global_current"))
-                .chain(std::iter::once("jazz_physical_ahead_current")),
+                .chain(std::iter::once("jazz_physical_ahead_current"))
+                .chain(std::iter::once(crate::adaptive_content::CONTENT_OBJECTS_CF)),
         )
     }
 
@@ -655,6 +656,10 @@ pub struct ColumnSchema {
     /// Literal value used when an insert omits this column.
     #[serde(default)]
     pub default: Option<Value>,
+    /// Built-in adaptive physical storage for logical string/bytes/JSON
+    /// scalars. This changes storage and projection, never the logical type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_scalar: Option<crate::adaptive_content::AdaptiveScalarSchema>,
 }
 
 impl ColumnSchema {
@@ -664,6 +669,7 @@ impl ColumnSchema {
             name: name.into(),
             column_type,
             default: None,
+            adaptive_scalar: None,
         }
     }
 
@@ -680,6 +686,7 @@ impl From<groove::schema::ColumnSchema> for ColumnSchema {
             name: column.name,
             column_type: column.column_type,
             default: None,
+            adaptive_scalar: None,
         }
     }
 }
