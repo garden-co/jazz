@@ -31,9 +31,6 @@ export interface BrowserWorkerConnection {
   disconnect(): Promise<void>;
   reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   deleteStorage(): Promise<void>;
-  /** @internal Test-only crash simulation for failover reconciliation coverage. */
-  simulateCrash(): Promise<void>;
-  simulatePendingAuthConfirmation(): Promise<void>;
   shutdown(): Promise<void>;
 }
 

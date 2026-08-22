@@ -20,22 +20,9 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Generate a unique dbName to isolate OPFS state between tests. */
+/** Generate a unique dbName to isolate persistent browser state between tests. */
 export function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/** Abruptly terminate a Db's OPFS worker without running its normal close path. */
-export function simulateCrash(db: Db): void {
-  const role = (db as any).connection?.activeRoleBridge;
-  const bridge = role?.workerBridge;
-  const worker = bridge?.worker as Worker | undefined;
-  if (!bridge || !worker) {
-    throw new Error("persistent browser worker is unavailable");
-  }
-  worker.terminate();
-  // Prevent later test cleanup from trying to exchange messages with the dead worker.
-  bridge.closed = true;
 }
 
 // ---------------------------------------------------------------------------

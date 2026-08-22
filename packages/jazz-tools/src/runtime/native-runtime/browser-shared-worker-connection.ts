@@ -128,12 +128,4 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     await this.ready();
     await this.connection?.deleteStorage();
   }
-
-  async simulateCrash(): Promise<void> {
-    throw new Error("Shared browser runtime crash simulation is not implemented yet");
-  }
-
-  async simulatePendingAuthConfirmation(): Promise<void> {
-    throw new Error("Shared browser runtime auth simulation is not implemented yet");
-  }
 }
