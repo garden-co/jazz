@@ -82,6 +82,33 @@ afterEach(async () => {
 });
 
 describe("alpha public package flow", () => {
+  it("isolates multiple persistent databases hosted by the same SharedWorker", async () => {
+    const first = ctx.track(
+      await createDb({
+        appId: uniqueDbName("alpha-shared-worker-first-app"),
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName: uniqueDbName("alpha-shared-worker-first-db") },
+      }),
+    );
+    const second = ctx.track(
+      await createDb({
+        appId: uniqueDbName("alpha-shared-worker-second-app"),
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName: uniqueDbName("alpha-shared-worker-second-db") },
+      }),
+    );
+
+    await first
+      .insert(app.todos, { title: "first", done: false, list: "isolated" })
+      .wait({ tier: "local" });
+    await second
+      .insert(app.todos, { title: "second", done: false, list: "isolated" })
+      .wait({ tier: "local" });
+
+    expect((await first.all(app.todos)).map((todo) => todo.title)).toEqual(["first"]);
+    expect((await second.all(app.todos)).map((todo) => todo.title)).toEqual(["second"]);
+  });
+
   it("opens public createDb with persistent core locally, then runs todo CRUD and subscriptions", async () => {
     const appId = uniqueDbName("alpha-public-local-flow");
     const persistentDbName = uniqueDbName("alpha-public-local-opfs");

@@ -24,6 +24,7 @@ type SharedWorkerGlobal = typeof globalThis & {
 
 type TabPeer = {
   tabId: string;
+  context: RuntimeContext;
   port: MessagePort;
   pump: BrowserWorkerTransportPump | null;
   subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]> | null;
@@ -31,15 +32,20 @@ type TabPeer = {
   onMessageError: () => void;
 };
 
+type RuntimeContext = {
+  key: string;
+  fingerprint: string;
+  options: BrowserWorkerInitOptions;
+  peers: Map<string, TabPeer>;
+  runtime: NativeRuntimeAdapter | null;
+  initialize: Promise<void>;
+  pageStore: IndexedDbPageStore | null;
+  disposeTelemetry: (() => void) | null;
+};
+
 const workerGlobal = globalThis as SharedWorkerGlobal;
-const peers = new Map<string, TabPeer>();
-let fingerprint: string | null = null;
-let initPromise: Promise<void> | null = null;
-let initOptions: BrowserWorkerInitOptions | null = null;
-let wasmModule: WasmModule | null = null;
-let runtime: NativeRuntimeAdapter | null = null;
-let pageStore: IndexedDbPageStore | null = null;
-let disposeTelemetry: (() => void) | null = null;
+const contexts = new Map<string, RuntimeContext>();
+let wasmModulePromise: Promise<WasmModule> | null = null;
 
 workerGlobal.onconnect = (event) => {
   const port = event.ports[0];
@@ -59,39 +65,61 @@ async function connectTab(
   message: BrowserSharedWorkerConnectRequest,
 ): Promise<void> {
   try {
-    if (fingerprint !== null && fingerprint !== message.fingerprint) {
+    const key = runtimeKey(message.options);
+    let context = contexts.get(key);
+    if (context && context.fingerprint !== message.fingerprint) {
       throw new Error("incompatible persistent browser configuration");
     }
-    if (!initPromise) {
-      fingerprint = message.fingerprint;
-      initOptions = message.options;
-      initPromise = initialize(message.options);
+    if (!context) {
+      context = createContext(key, message.fingerprint, message.options);
+      contexts.set(key, context);
     }
-    await initPromise;
+    await context.initialize;
     post(port, { type: "runtime-ready" });
-    attachTab(message.tabId, port);
+    attachTab(context, message.tabId, port);
   } catch (error) {
     post(port, { type: "runtime-error", message: asError(error).message });
     port.close();
   }
 }
 
-async function initialize(options: BrowserWorkerInitOptions): Promise<void> {
+function createContext(
+  key: string,
+  fingerprint: string,
+  options: BrowserWorkerInitOptions,
+): RuntimeContext {
+  const context: RuntimeContext = {
+    key,
+    fingerprint,
+    options,
+    peers: new Map(),
+    runtime: null,
+    pageStore: null,
+    disposeTelemetry: null,
+    initialize: Promise.resolve(),
+  };
+  context.initialize = initialize(context);
+  return context;
+}
+
+async function initialize(context: RuntimeContext): Promise<void> {
+  const { options } = context;
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = options.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
-  wasmModule = await loadWasmModule(options.runtimeSources);
-  disposeTelemetry = installWasmTelemetry({
+  wasmModulePromise ??= loadWasmModule(options.runtimeSources);
+  const wasmModule = await wasmModulePromise;
+  context.disposeTelemetry = installWasmTelemetry({
     wasmModule,
     collectorUrl: options.telemetryCollectorUrl,
     appId: options.appId,
     runtimeThread: "worker",
   });
-  pageStore = await IndexedDbPageStore.open(options.dbName);
+  context.pageStore = await IndexedDbPageStore.open(options.dbName);
   const db = await wasmModule.WasmDb.openBrowser(
-    pageStore,
+    context.pageStore,
     encodeSchema(options.schema),
     openConfig(options.node, options.author, 1, false, options.initialSyncFlushEvery),
   );
-  runtime = NativeRuntimeAdapter.fromDb(
+  context.runtime = NativeRuntimeAdapter.fromDb(
     db as never,
     options.schema,
     options.node,
@@ -99,25 +127,33 @@ async function initialize(options: BrowserWorkerInitOptions): Promise<void> {
     1,
     false,
   );
-  runtime.onAuthFailure((reason) => broadcast({ type: "auth-failure", reason }));
-  if (options.serverUrl) runtime.connect(options.serverUrl, options.authJson);
+  context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
+  if (options.serverUrl) context.runtime.connect(options.serverUrl, options.authJson);
 }
 
-function attachTab(tabId: string, port: MessagePort): void {
-  closeTab(tabId);
+function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): void {
+  closeTab(context, tabId);
   let peer!: TabPeer;
   const onMessage = (event: MessageEvent<BrowserFollowerPortRequest>) => {
     void handleTabMessage(peer, event.data);
   };
-  const onMessageError = () => closeTab(tabId);
-  peer = { tabId, port, pump: null, subscriber: null, onMessage, onMessageError };
-  peers.set(tabId, peer);
+  const onMessageError = () => closeTab(context, tabId);
+  peer = {
+    tabId,
+    context,
+    port,
+    pump: null,
+    subscriber: null,
+    onMessage,
+    onMessageError,
+  };
+  context.peers.set(tabId, peer);
   port.addEventListener("message", onMessage);
   port.addEventListener("messageerror", onMessageError);
 }
 
 async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortRequest): Promise<void> {
-  if (peers.get(peer.tabId) !== peer) return;
+  if (peer.context.peers.get(peer.tabId) !== peer) return;
   if (message.type === "frames") {
     if (!peer.pump) {
       failPeer(peer, new Error("Browser tab sent frames before initializing session claims"));
@@ -127,27 +163,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     return;
   }
   if (message.type === "close") {
-    closeTab(peer.tabId);
+    closeTab(peer.context, peer.tabId);
     return;
   }
 
   try {
-    const activeRuntime = requireRuntime();
+    const activeRuntime = requireRuntime(peer.context);
     if (message.type === "init") {
       if (peer.pump || peer.subscriber) throw new Error("Browser tab is already initialized");
-      peer.subscriber = activeRuntime.acceptPeer(message.sessionClaims);
-      peer.pump = new BrowserWorkerTransportPump(
-        activeRuntime,
-        peer.subscriber,
-        (frames) => {
-          const copies = transferableFrames(frames);
-          peer.port.postMessage(
-            { type: "frames", frames: copies } satisfies BrowserFollowerPortEvent,
-            copies.map((frame) => frame.buffer),
-          );
-        },
-        (error) => failPeer(peer, asError(error)),
-      );
+      attachPeerTransport(peer, activeRuntime, message.sessionClaims);
       result(peer, message.id);
       return;
     }
@@ -155,7 +179,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       if (!peer.subscriber) throw new Error("Browser tab is not initialized");
       await peer.subscriber.updateAuthenticatedClaims?.(message.sessionClaims);
       await activeRuntime.updateAuth(message.authJson);
-      broadcast({ type: "auth-restored" });
+      broadcast(peer.context, { type: "auth-restored" });
       return;
     }
     if (message.type === "disconnect") {
@@ -164,7 +188,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       return;
     }
     if (message.type === "reconnect") {
-      const serverUrl = initOptions?.serverUrl;
+      const serverUrl = peer.context.options.serverUrl;
       if (!serverUrl) throw new Error("Browser runtime reconnect requires a serverUrl");
       await peer.subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
       activeRuntime.connect(serverUrl, message.authJson);
@@ -185,13 +209,13 @@ function result(peer: TabPeer, id: number, error?: Error): void {
 
 function failPeer(peer: TabPeer, error: Error): void {
   post(peer.port, { type: "error", message: error.message });
-  closeTab(peer.tabId);
+  closeTab(peer.context, peer.tabId);
 }
 
-function closeTab(tabId: string): void {
-  const peer = peers.get(tabId);
+function closeTab(context: RuntimeContext, tabId: string): void {
+  const peer = context.peers.get(tabId);
   if (!peer) return;
-  peers.delete(tabId);
+  context.peers.delete(tabId);
   peer.port.removeEventListener("message", peer.onMessage);
   peer.port.removeEventListener("messageerror", peer.onMessageError);
   peer.pump?.close();
@@ -199,13 +223,37 @@ function closeTab(tabId: string): void {
   peer.port.close();
 }
 
-function broadcast(event: BrowserFollowerPortEvent): void {
-  for (const peer of peers.values()) post(peer.port, event);
+function broadcast(context: RuntimeContext, event: BrowserFollowerPortEvent): void {
+  for (const peer of context.peers.values()) post(peer.port, event);
 }
 
-function requireRuntime(): NativeRuntimeAdapter {
-  if (!runtime) throw new Error("Shared browser runtime is closed");
-  return runtime;
+function requireRuntime(context: RuntimeContext): NativeRuntimeAdapter {
+  if (!context.runtime) throw new Error("Shared browser runtime is closed");
+  return context.runtime;
+}
+
+function attachPeerTransport(
+  peer: TabPeer,
+  activeRuntime: NativeRuntimeAdapter,
+  sessionClaims: Record<string, unknown>,
+): void {
+  peer.subscriber = activeRuntime.acceptPeer(sessionClaims);
+  peer.pump = new BrowserWorkerTransportPump(
+    activeRuntime,
+    peer.subscriber,
+    (frames) => {
+      const copies = transferableFrames(frames);
+      peer.port.postMessage(
+        { type: "frames", frames: copies } satisfies BrowserFollowerPortEvent,
+        copies.map((frame) => frame.buffer),
+      );
+    },
+    (error) => failPeer(peer, asError(error)),
+  );
+}
+
+function runtimeKey(options: BrowserWorkerInitOptions): string {
+  return JSON.stringify([options.appId, options.dbName]);
 }
 
 function post(
@@ -218,5 +266,3 @@ function post(
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
-
-void disposeTelemetry;

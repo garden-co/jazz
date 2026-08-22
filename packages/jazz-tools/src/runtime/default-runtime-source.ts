@@ -24,6 +24,7 @@ import type { WasmSchema } from "../drivers/types.js";
 import { httpUrlToWs } from "./url.js";
 import { authorBytesForSubject, isUsableSubject } from "./author-id.js";
 import { createBrokerFingerprint } from "./connection-manager/browser-broker-utils.js";
+import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -182,7 +183,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
-      createBrokerFingerprint(config, dbName),
+      createBrokerFingerprint(config, dbName, getRuntimeSchemaCacheKey(schema)),
       { onAuthFailure, onAuthRestored, onFailure },
     );
   }

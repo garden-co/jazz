@@ -99,7 +99,11 @@ function resolveBrokerAuthClass(config: DbConfig): string {
   return `${session.authMode}:${session.user_id}`;
 }
 
-export function createBrokerFingerprint(config: DbConfig, primaryDbName: string): string {
+export function createBrokerFingerprint(
+  config: DbConfig,
+  primaryDbName: string,
+  schemaHash: string,
+): string {
   const driver = resolveStorageDriver(config.driver);
   return createBrowserBrokerFingerprint({
     appId: config.appId,
@@ -108,7 +112,7 @@ export function createBrokerFingerprint(config: DbConfig, primaryDbName: string)
       driver.type === "persistent" ? (driver.dbName ?? primaryDbName) : primaryDbName,
     env: config.env ?? "dev",
     serverUrl: config.serverUrl ?? null,
-    schemaHash: null,
+    schemaHash,
     authClass: resolveBrokerAuthClass(config),
     // Key *only* on the resolved broker worker URL, not the rest of the raw
     // config.runtimeSources shape: baseUrl/workerUrl/wasmUrl/wasmModule/
