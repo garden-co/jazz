@@ -36,6 +36,7 @@ export type BrowserFollowerPortRequest =
   | { type: "wait-server"; id: number }
   | { type: "disconnect"; id: number }
   | { type: "flush-local"; id: number }
+  | { type: "flush-local-observed" }
   | { type: "prepare-storage-reset"; id: number }
   | { type: "finish-storage-reset"; id: number }
   | { type: "abort-storage-reset"; id: number }

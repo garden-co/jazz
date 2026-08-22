@@ -62,8 +62,9 @@ export class IndexedDbPageStore {
   async metadata(): Promise<IndexedDbBtreeMetadata | null> {
     this.assertValid();
     const tx = this.db.transaction(METADATA_STORE, "readonly");
+    const done = transactionDone(tx);
     const value = await requestResult(tx.objectStore(METADATA_STORE).get(CURRENT_METADATA_KEY));
-    await transactionDone(tx);
+    await done;
     if (value === undefined) return null;
     assertMetadata(value);
     return value;
@@ -73,8 +74,9 @@ export class IndexedDbPageStore {
     this.assertValid();
     assertPageId(pageId);
     const tx = this.db.transaction(PAGES_STORE, "readonly");
+    const done = transactionDone(tx);
     const value = await requestResult(tx.objectStore(PAGES_STORE).get(pageId));
-    await transactionDone(tx);
+    await done;
     if (value === undefined) return null;
     if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) {
       throw new Error(`IndexedDB B-tree page ${pageId} is not binary data`);
@@ -89,6 +91,7 @@ export class IndexedDbPageStore {
   async commit(commit: IndexedDbPageCommit): Promise<IndexedDbBtreeMetadata> {
     this.assertValid();
     const tx = relaxedReadWriteTransaction(this.db, [PAGES_STORE, METADATA_STORE]);
+    const done = transactionDone(tx);
     const pages = tx.objectStore(PAGES_STORE);
     const metadataStore = tx.objectStore(METADATA_STORE);
     const currentValue = await requestResult(metadataStore.get(CURRENT_METADATA_KEY));
@@ -96,7 +99,7 @@ export class IndexedDbPageStore {
 
     if (currentGeneration !== commit.expectedGeneration) {
       tx.abort();
-      await transactionDone(tx).catch(() => undefined);
+      await done.catch(() => undefined);
       throw new Error(
         `IndexedDB B-tree generation changed: expected ${commit.expectedGeneration}, found ${currentGeneration}`,
       );
@@ -118,7 +121,7 @@ export class IndexedDbPageStore {
     };
     assertMetadata(metadata);
     metadataStore.put(metadata, CURRENT_METADATA_KEY);
-    await transactionDone(tx);
+    await done;
     return metadata;
   }
 
@@ -155,9 +158,10 @@ export class IndexedDbPageStore {
   async clear(): Promise<void> {
     this.assertValid();
     const tx = relaxedReadWriteTransaction(this.db, [PAGES_STORE, METADATA_STORE]);
+    const done = transactionDone(tx);
     tx.objectStore(PAGES_STORE).clear();
     tx.objectStore(METADATA_STORE).clear();
-    await transactionDone(tx);
+    await done;
   }
 
   static async destroy(name: string): Promise<void> {

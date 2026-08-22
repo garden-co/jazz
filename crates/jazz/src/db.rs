@@ -720,6 +720,8 @@ struct CoverageGroup {
     shape: ValidatedQuery,
     binding: Binding,
     subscribers: BTreeSet<SubscriptionKey>,
+    pending_initial_subscribers: BTreeSet<SubscriptionKey>,
+    initialized: bool,
     upstream_subscription: SubscriptionKey,
     upstream_opts: RegisterShapeOptions,
     awaiting_upstream_settlement: bool,

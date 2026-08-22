@@ -37,6 +37,7 @@ type TabPeer = {
   subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]> | null;
   pendingFrames: Uint8Array[];
   flushedLocal: boolean;
+  flushRequestId: number | null;
   onMessage: (event: MessageEvent<BrowserFollowerPortRequest>) => void;
   onMessageError: () => void;
 };
@@ -200,6 +201,7 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
     subscriber: null,
     pendingFrames: [],
     flushedLocal: false,
+    flushRequestId: null,
     onMessage,
     onMessageError,
   };
@@ -225,13 +227,21 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
   if (message.type === "close") {
     if (message.id !== undefined) result(peer, message.id);
     if (peer.context.peers.size === 1 && peer.flushedLocal) {
-      releaseIdleContext(peer.context);
+      await releaseIdleContext(peer.context);
     }
     closeTab(peer.context, peer.tabId);
     return;
   }
   if (message.type === "storage-reset-observed") {
     observeStorageReset(peer, message.resetId);
+    return;
+  }
+  if (message.type === "flush-local-observed") {
+    const requestId = peer.flushRequestId;
+    if (requestId === null) return;
+    peer.flushRequestId = null;
+    peer.flushedLocal = true;
+    result(peer, requestId);
     return;
   }
   if (message.type === "open-inspector-control") {
@@ -292,10 +302,12 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       return;
     }
     if (message.type === "flush-local") {
-      await peer.pump?.flush();
-      await activeRuntime.flushLocalSettlements();
-      peer.flushedLocal = true;
-      result(peer, message.id);
+      if (peer.flushRequestId !== null) {
+        result(peer, message.id, new Error("Browser tab already has a local flush in progress"));
+        return;
+      }
+      peer.flushRequestId = message.id;
+      drainFlushReceipts(peer, message.id);
       return;
     }
     if (message.type === "reconnect") {
@@ -433,14 +445,14 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
   contexts.delete(context.key);
 }
 
-function releaseIdleContext(context: RuntimeContext): void {
+async function releaseIdleContext(context: RuntimeContext): Promise<void> {
   if (contexts.get(context.key) === context) contexts.delete(context.key);
   for (const peer of context.peers.values()) {
     peer.pump = null;
     peer.subscriber = null;
     peer.pendingFrames.length = 0;
   }
-  context.runtime?.discard();
+  await context.runtime?.close();
   context.runtime = null;
   context.pageStore?.close();
   context.pageStore = null;
@@ -512,6 +524,12 @@ function attachPeerTransport(
     (error) => failPeer(peer, asError(error)),
   );
   return peer.pump;
+}
+
+function drainFlushReceipts(peer: TabPeer, requestId: number): void {
+  if (peer.flushRequestId !== requestId || peer.context.peers.get(peer.tabId) !== peer) return;
+  peer.pump?.drainOutboundFrames();
+  setTimeout(() => drainFlushReceipts(peer, requestId), 0);
 }
 
 function runtimeKey(options: BrowserWorkerInitOptions): string {

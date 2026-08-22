@@ -76,6 +76,12 @@ export class BrowserWorkerTransportPump {
     await new Promise<void>((resolve) => this.flushWaiters.add({ target, resolve }));
   }
 
+  drainOutboundFrames(): void {
+    if (this.closed) return;
+    const frames = normalizeTransportFrames(this.transport.recvWireFrames());
+    if (frames.length > 0) this.sendFrames(frames);
+  }
+
   private async pump(): Promise<void> {
     if (this.closed || this.running) return;
     this.running = true;
@@ -95,7 +101,7 @@ export class BrowserWorkerTransportPump {
     } finally {
       this.running = false;
       this.completedGeneration = Math.max(this.completedGeneration, generation);
-      for (const waiter of [...this.flushWaiters]) {
+      for (const waiter of this.flushWaiters) {
         if (waiter.target > this.completedGeneration) continue;
         this.flushWaiters.delete(waiter);
         waiter.resolve();

@@ -87,14 +87,18 @@ type NativeDb = {
   attachExclusiveTx?(openBatchId: string): Tx;
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
-  allRelationQuery?(queryJson: string, opts: unknown): Uint8Array;
-  allRelationQueryForIdentity?(queryJson: string, author: Uint8Array, opts: unknown): Uint8Array;
-  allRelationSnapshot?(query: PreparedQuery, opts: unknown): Uint8Array;
+  allRelationQuery?(queryJson: string, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  allRelationQueryForIdentity?(
+    queryJson: string,
+    author: Uint8Array,
+    opts: unknown,
+  ): Uint8Array | Promise<Uint8Array>;
+  allRelationSnapshot?(query: PreparedQuery, opts: unknown): Uint8Array | Promise<Uint8Array>;
   allRelationSnapshotForIdentity?(
     query: PreparedQuery,
     author: Uint8Array,
     opts: unknown,
-  ): Uint8Array;
+  ): Uint8Array | Promise<Uint8Array>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
@@ -1093,7 +1097,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     const batchId = recordWrite(write, this.writes);
-    this.trackLocalSettlement(batchId);
+    if (this.nonDurableClient) this.trackLocalSettlement(batchId);
     return batchId;
   }
 
@@ -1171,7 +1175,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!this.db.allRelationQueryForIdentity) {
           throw new Error("Native runtime does not support trusted-serving relation queries");
         }
-        const payload = this.db.allRelationQueryForIdentity(
+        const payload = await this.db.allRelationQueryForIdentity(
           coreQueryJson,
           session?.identity ?? this.peerIdentity,
           opts,
@@ -1181,7 +1185,7 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!this.db.allRelationQuery) {
         throw new Error("Native runtime does not support relation queries");
       }
-      const payload = this.db.allRelationQuery(coreQueryJson, opts);
+      const payload = await this.db.allRelationQuery(coreQueryJson, opts);
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
@@ -1194,7 +1198,7 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!this.db.allRelationSnapshotForIdentity) {
             throw new Error("Native runtime does not support trusted-serving relation snapshots");
           }
-          const payload = this.db.allRelationSnapshotForIdentity(
+          const payload = await this.db.allRelationSnapshotForIdentity(
             query,
             session?.identity ?? this.peerIdentity,
             opts,
@@ -1208,7 +1212,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!this.db.allRelationSnapshot) {
           throw new Error("Native runtime does not support relation snapshots");
         }
-        const payload = this.db.allRelationSnapshot(query, opts);
+        const payload = await this.db.allRelationSnapshot(query, opts);
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
@@ -1413,7 +1417,7 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
-  disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
+  async disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     this.serverConnectionGeneration += 1;
     this.serverCarrier?.close();
@@ -1426,14 +1430,19 @@ export class NativeRuntimeAdapter implements Runtime {
       this.clearServerTransportErrorWaiters();
     }
     this.resolveServerTransportWorkWaiters();
-    this.serverTransport?.close();
+    const transport = this.serverTransport;
     this.serverTransport = null;
     this.serverEndpointUrl = null;
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
     this.serverPumpAgain = false;
-    return Promise.resolve();
+    // Db::tick borrows peer connections across its async evaluator pass.
+    // Detaching the transport while that borrow is live panics on WASM's
+    // single-threaded RefCell mutex. Remove it from new work immediately, then
+    // perform the physical detach once the owning tick has released the borrow.
+    await this.coreTickCompletion?.catch(() => undefined);
+    transport?.close();
   }
 
   updateAuth(authJson: string): Promise<void> | void {
@@ -1488,6 +1497,7 @@ export class NativeRuntimeAdapter implements Runtime {
     write: Write,
   ): InsertResult {
     const batchId = recordWrite(write, this.writes);
+    if (this.nonDurableClient) this.trackLocalSettlement(batchId);
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
@@ -1497,6 +1507,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private finishMutation(write: Write): MutationResult {
     const batchId = recordWrite(write, this.writes);
+    if (this.nonDurableClient) this.trackLocalSettlement(batchId);
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
@@ -4193,6 +4204,30 @@ export function applySubscriptionDeltaWithWireDelta(
       outputColumns,
       terminalOperations,
     );
+  const wireIndexByKey = new Map(rowIndexByKey);
+  // Relation storage order is not public terminal order. An authoritative
+  // echo can replace an already-visible occurrence without emitting a
+  // terminal edit; keep that occurrence in its current public slot. Actual
+  // Insert/Move terminal operations are applied by SubscriptionManager after
+  // the payload update.
+  const removedIndices = removedEntries
+    .map((entry) => entry.index)
+    .sort((left, right) => left - right);
+  for (const row of addedRows.concat(updatedRows)) {
+    const key = rowStateKey(row);
+    const currentIndex = currentIndexByKey.get(key);
+    if (currentIndex !== undefined) {
+      let low = 0;
+      let high = removedIndices.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (removedIndices[middle]! < currentIndex) low = middle + 1;
+        else high = middle;
+      }
+      const precedingRemovals = low;
+      wireIndexByKey.set(key, currentIndex - precedingRemovals);
+    }
+  }
   return {
     rows,
     rowIndexByKey,
@@ -4201,7 +4236,7 @@ export function applySubscriptionDeltaWithWireDelta(
         subscriptionOutputRows(addedRows, outputColumns),
         subscriptionOutputRows(updatedRows, outputColumns),
         subscriptionOutputRemovals(removedEntries, outputColumns),
-        rowIndexByKey,
+        wireIndexByKey,
         schema,
         outputColumns,
       ),

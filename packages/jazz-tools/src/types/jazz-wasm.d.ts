@@ -86,8 +86,12 @@ declare module "jazz-wasm" {
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
-    allRelationQuery(queryJson: string, opts: unknown): Uint8Array;
-    allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts: unknown): Uint8Array;
+    allRelationQuery(queryJson: string, opts: unknown): Promise<Uint8Array>;
+    allRelationQueryForIdentity(
+      queryJson: string,
+      author: Uint8Array,
+      opts: unknown,
+    ): Promise<Uint8Array>;
     attachQuery(query: WasmPreparedQuery, opts: unknown): QueryAttachment;
     attachQueryForIdentity(
       query: WasmPreparedQuery,

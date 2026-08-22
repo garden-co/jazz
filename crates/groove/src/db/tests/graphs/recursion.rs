@@ -1,6 +1,53 @@
 //! Recursive closure, retraction, and convergence.
 
 use super::*;
+use crate::storage::IdbStorage;
+use idb_tree::{BoxFuture, Commit, Metadata, PageStore};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
+
+#[derive(Clone, Default)]
+struct YieldingPageStore(idb_tree::MemoryPageStore);
+
+impl PageStore for YieldingPageStore {
+    fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>> {
+        Box::pin(async move {
+            YieldOnce(false).await;
+            self.0.load_metadata().await
+        })
+    }
+
+    fn read_page(&self, page_id: u64) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>> {
+        Box::pin(async move {
+            YieldOnce(false).await;
+            self.0.read_page(page_id).await
+        })
+    }
+
+    fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
+        Box::pin(async move {
+            YieldOnce(false).await;
+            self.0.commit(commit).await
+        })
+    }
+}
+
+struct YieldOnce(bool);
+
+impl Future for YieldOnce {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        if self.0 {
+            Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
 
 #[futures_test::test]
 async fn deep_recursive_step_evaluates_with_constant_stack() {
@@ -69,6 +116,39 @@ async fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
             (vec![Value::U64(3), Value::U64(4)], 1),
         ]
     );
+}
+
+#[futures_test::test]
+async fn recursive_graph_subscriptions_settle_with_async_idb_tree_storage() {
+    let page_store = YieldingPageStore::default();
+    let storage = IdbStorage::open(page_store.clone(), &["edges"])
+        .await
+        .unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    insert_edge(&mut batch, 3, 3, 4);
+    database.commit_batch(batch).await.unwrap();
+    let mut values = expect_recv_vals(&subscription_id);
+    sort_pairs_by_value(&mut values);
+    assert_eq!(values.len(), 6);
+
+    drop(database);
+    let storage = IdbStorage::open(page_store, &["edges"]).await.unwrap();
+    let mut reopened = Database::new(edges_schema(), storage).await.unwrap();
+    let reopened_subscription = reopened
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
+    let mut reopened_values = expect_recv_vals(&reopened_subscription);
+    sort_pairs_by_value(&mut reopened_values);
+    assert_eq!(reopened_values.len(), 6);
 }
 
 #[futures_test::test]

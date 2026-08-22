@@ -723,42 +723,42 @@ impl WasmDbInner {
         with_wasm_db!(self, |db| block_on(db.commit_mergeable_handle(tx_id)))
     }
 
-    fn all_relation_snapshot(
+    async fn all_relation_snapshot(
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(db.all_relation_snapshot(query, opts)))
+        with_wasm_db!(self, |db| db.all_relation_snapshot(query, opts).await)
     }
 
-    fn all_relation_snapshot_for_identity(
+    async fn all_relation_snapshot_for_identity(
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.all_relation_snapshot_for_identity(query, opts, author)
-        ))
+        with_wasm_db!(self, |db| db
+            .all_relation_snapshot_for_identity(query, opts, author)
+            .await)
     }
 
-    fn all_relation_query(
+    async fn all_relation_query(
         &self,
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(db.all_relation_query(query, opts)))
+        with_wasm_db!(self, |db| db.all_relation_query(query, opts).await)
     }
 
-    fn all_relation_query_for_identity(
+    async fn all_relation_query_for_identity(
         &self,
         query: &RelationQuery,
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.all_relation_query_for_identity(query, opts, author)
-        ))
+        with_wasm_db!(self, |db| db
+            .all_relation_query_for_identity(query, opts, author)
+            .await)
     }
 
     fn set_identity_claims(&self, author: AuthorId, claims: BTreeMap<String, Value>) {
@@ -1775,7 +1775,7 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = allRelationQuery)]
-    pub fn all_relation_query(
+    pub async fn all_relation_query(
         &self,
         query_json: String,
         opts: JsValue,
@@ -1785,12 +1785,13 @@ impl WasmDb {
         let snapshot = self
             .inner
             .all_relation_query(&query, opts)
+            .await
             .map_err(to_js_error)?;
         encode_rows(&snapshot.rows).map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = allRelationQueryForIdentity)]
-    pub fn all_relation_query_for_identity(
+    pub async fn all_relation_query_for_identity(
         &self,
         query_json: String,
         author: Vec<u8>,
@@ -1802,12 +1803,13 @@ impl WasmDb {
         let snapshot = self
             .inner
             .all_relation_query_for_identity(&query, opts, author)
+            .await
             .map_err(to_js_error)?;
         encode_rows(&snapshot.rows).map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = allRelationSnapshot)]
-    pub fn all_relation_snapshot(
+    pub async fn all_relation_snapshot(
         &self,
         query: &WasmPreparedQuery,
         opts: JsValue,
@@ -1816,12 +1818,13 @@ impl WasmDb {
         let snapshot = self
             .inner
             .all_relation_snapshot(&query.inner, opts)
+            .await
             .map_err(to_js_error)?;
         encode_relation_snapshot(&snapshot).map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = allRelationSnapshotForIdentity)]
-    pub fn all_relation_snapshot_for_identity(
+    pub async fn all_relation_snapshot_for_identity(
         &self,
         query: &WasmPreparedQuery,
         author: Vec<u8>,
@@ -1832,6 +1835,7 @@ impl WasmDb {
         let snapshot = self
             .inner
             .all_relation_snapshot_for_identity(&query.inner, opts, author)
+            .await
             .map_err(to_js_error)?;
         encode_relation_snapshot(&snapshot).map_err(to_js_error)
     }
@@ -2436,7 +2440,6 @@ impl WasmDb {
             updated_at_ms.map(|value| value as u64),
         )
     }
-
     #[wasm_bindgen(js_name = tick)]
     pub async fn tick(&self) -> Result<(), JsValue> {
         self.inner.tick().await.map_err(to_js_error)

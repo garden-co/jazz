@@ -50,4 +50,16 @@ describe("BrowserWorkerTransportPump", () => {
     await Promise.resolve();
     expect(sendFrames).not.toHaveBeenCalled();
   });
+
+  it("drains a durability receipt while the evaluator tick remains suspended", async () => {
+    const receipt = Uint8Array.from([4, 2]);
+    const sendFrames = vi.fn();
+    const peer = transport({ recvWireFrames: () => [receipt] });
+    const pump = new BrowserWorkerTransportPump(runtime(peer), peer, sendFrames, vi.fn());
+
+    pump.drainOutboundFrames();
+
+    expect(sendFrames).toHaveBeenCalledWith([receipt]);
+    pump.close();
+  });
 });

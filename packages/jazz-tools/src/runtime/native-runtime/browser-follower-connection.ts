@@ -147,7 +147,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   async flushLocal(): Promise<void> {
     await this.ready();
     await this.pump.flush();
-    await this.request({ type: "flush-local" });
+    const workerBarrier = this.request({ type: "flush-local" });
+    await this.runtime.flushLocalSettlements();
+    this.port.postMessage({ type: "flush-local-observed" } satisfies BrowserFollowerPortRequest);
+    await workerBarrier;
   }
 
   detachForReconnect(): void {
