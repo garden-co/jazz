@@ -24,6 +24,7 @@
     "ios",
     "cpp",
     "JazzRnFramework.xcframework",
+    "app.plugin.js",
     "*.podspec",
     "react-native.config.js",
     "!ios/build",
@@ -45,6 +46,7 @@
       "source": "./src/index.tsx",
       "default": "./lib/module/index.js"
     },
+    "./app.plugin": "./app.plugin.js",
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -61,6 +63,7 @@
     "build": "pnpm build:rn",
     "build:rn:android": "pnpm ubrn:android",
     "build:rn:ios": "pnpm ubrn:ios",
+    "verify:native-artifacts": "node scripts/verify-native-artifacts.mjs",
     "test": "jest",
     "typecheck": "tsc",
     "lint": "eslint \"**/*.{js,ts,tsx}\"",
@@ -96,8 +99,14 @@
     "typescript": "catalog:default"
   },
   "peerDependencies": {
+    "expo": ">=54",
     "react": "*",
     "react-native": "*"
+  },
+  "peerDependenciesMeta": {
+    "expo": {
+      "optional": true
+    }
   },
   "commitlint": {
     "extends": [
