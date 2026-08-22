@@ -13,6 +13,7 @@ Invariant digest:
 - `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the Database...
 - `INV-STORAGE-1`: `OrderedKvStorage` implementations MUST return scan results in lexicographic key order and `scan_range`/`range` MUST include keys `>= start` and exclude keys `>= end`.
 - `INV-STORAGE-2`: `OrderedKvStorage::scan_prefix`/`prefix` MUST return exactly keys beginning with the supplied byte prefix in lexicographic key order, including prefixes whose finite upper bound cannot be computed.
+- `INV-STORAGE-29`: An explicit ordered scan request's finite item bound MUST cap the complete cursor result in the requested direction; adapters MUST stop reading beyond that bound rather than treating it as a caller-side collection hint.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -89,9 +90,11 @@ choice, not part of the portable storage contract.
 The storage layer supplies exactly the ordered byte map groove needs. It is
 partitioned into named column families and exposes a small set of operations
 (`OrderedKvStorage` in the reference implementation): point `get`, `set`, and
-`delete`; forward range scans over `start..end`; prefix scans in forward and
-reverse order; a last-with-prefix helper; and atomic batch writes through
-`write_many`.
+`delete`; explicit ordered scan requests over a prefix or half-open range in
+either direction; a last-with-prefix helper; and atomic batch writes through
+`write_many`. A request may carry a finite item bound. It is a backend contract,
+not a caller-side collection hint: the complete cursor yields no more than that
+many rows and an adapter stops traversal/hydration at that boundary.
 
 Higher layers do not treat that byte map as their public storage abstraction.
 They work through **record stores**, which are typed storage units described by
@@ -115,7 +118,9 @@ roll back in-process state or retry the same batch.
 
 _Further invariants._ `INV-STORAGE-2` — `scan_prefix` returns exactly the keys
 with the given byte prefix, in order, including prefixes with no finite upper
-bound. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
+bound. `INV-STORAGE-29` — an explicit scan limit applies across all cursor
+batches and stops physical traversal rather than merely truncating a materialized
+result. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
 data while adding newly requested families.
 
 **Implementation-status note.** The shared storage conformance tests exercise

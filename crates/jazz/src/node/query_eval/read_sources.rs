@@ -27,7 +27,13 @@ pub(super) struct CurrentSourceGraph {
 #[derive(Clone, Debug)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
-    Index { column: String, prefix: Vec<Value> },
+    Index {
+        column: String,
+        prefix: Vec<Value>,
+        /// A proved physical source cap for an ordinary one-shot read. This is
+        /// never selected by policy compilation or subscriptions.
+        source_limit: Option<usize>,
+    },
 }
 
 impl<S> SourceGraphPreparer for JazzSourceGraphPreparer<'_, S>
@@ -1355,7 +1361,11 @@ where
                     table, tier, prefix,
                 )))
             }
-            CurrentAccessPath::Index { column, prefix } => {
+            CurrentAccessPath::Index {
+                column,
+                prefix,
+                source_limit,
+            } => {
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
@@ -1367,6 +1377,7 @@ where
                         self.read_view.read_schema,
                         &column,
                         &prefix,
+                        source_limit,
                         &projection_target,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
@@ -1651,7 +1662,11 @@ where
                             source_resolution_error(request, SourceGap::SchemaProjection)
                         })?
                 }
-                Some(CurrentAccessPath::Index { column, prefix }) => {
+                Some(CurrentAccessPath::Index {
+                    column,
+                    prefix,
+                    source_limit,
+                }) => {
                     self.node.query_engine_read_metrics.source_index_probes += 1;
                     self.node
                         .physical_global_current_source_for_index_scan(
@@ -1659,6 +1674,7 @@ where
                             self.read_view.read_schema,
                             &column,
                             &prefix,
+                            source_limit,
                             &projection_target,
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
@@ -1733,7 +1749,11 @@ where
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
-            Some(CurrentAccessPath::Index { column, prefix }) if tier == DurabilityTier::Global => {
+            Some(CurrentAccessPath::Index {
+                column,
+                prefix,
+                source_limit,
+            }) if tier == DurabilityTier::Global => {
                 // A Global index already selects from the canonical settled
                 // winner relation. Project those raw physical rows first, then
                 // apply the compatibility boundary below.
@@ -1744,6 +1764,7 @@ where
                         self.read_view.read_schema,
                         column,
                         prefix,
+                        *source_limit,
                         &projection_target,
                         raw_global_output.clone(),
                     )
@@ -2942,6 +2963,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        source_limit: Option<usize>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
         self.physical_global_current_source_for_index_scan_with_output(
@@ -2949,6 +2971,7 @@ where
             schema_version,
             column,
             prefix,
+            source_limit,
             projection_target,
             table.global_current_storage_tables()[0].record_schema(),
         )
@@ -2960,6 +2983,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        source_limit: Option<usize>,
         projection_target: &str,
         _output: RecordDescriptor,
     ) -> Result<GraphBuilder, Error> {
@@ -2983,7 +3007,15 @@ where
             storage_table,
             physical_current_index_name(column_id),
             projection_target,
-            StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect()),
+            match source_limit {
+                Some(max_items) => StaticScanSpec::PrefixLimit {
+                    prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
+                    max_items,
+                },
+                None => {
+                    StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
+                }
+            },
         ))
     }
 }

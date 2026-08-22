@@ -49,14 +49,24 @@ impl NodeState {
         input: &IndexSourceOp,
     ) -> Result<Option<super::evaluation_session::StorageRequestKey>, IvmRuntimeError> {
         if input.row_projection.is_some() {
+            let max_items = scan_max_items(input.scan.as_ref());
             return Ok(Some(
                 match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
                 {
                     StaticScanBounds::Prefix(prefix) => {
-                        super::evaluation_session::StorageRequestKey::IndexedRowsPrefix {
-                            table: input.table.clone(),
-                            index: input.index.clone(),
-                            prefix,
+                        if let Some(max_items) = max_items {
+                            super::evaluation_session::StorageRequestKey::IndexedRowsPrefixLimit {
+                                table: input.table.clone(),
+                                index: input.index.clone(),
+                                prefix,
+                                max_items,
+                            }
+                        } else {
+                            super::evaluation_session::StorageRequestKey::IndexedRowsPrefix {
+                                table: input.table.clone(),
+                                index: input.index.clone(),
+                                prefix,
+                            }
                         }
                     }
                     StaticScanBounds::Range { start, end } => {

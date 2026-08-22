@@ -45,6 +45,70 @@ pub type ColumnFamilyName = str;
 pub type Key = [u8];
 pub type Value = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
+
+/// The key interval for an ordered scan.
+///
+/// `Prefix` includes every key beginning with the supplied bytes. `Range` is
+/// half-open (`start <= key < end`). Keeping this as data rather than a family
+/// of methods makes it possible to carry scan semantics, notably a hard item
+/// bound, through layouts and storage adapters without inventing a new API for
+/// each combination.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ScanBounds {
+    Prefix(Vec<u8>),
+    Range { start: Vec<u8>, end: Vec<u8> },
+}
+
+/// Canonical key order for an ordered scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ScanDirection {
+    Forward,
+    Reverse,
+}
+
+/// A complete ordered scan request.
+///
+/// `max_items` is a semantic bound, not a batching preference: a successful
+/// cursor may yield at most this many logical entries in total. Backends should
+/// stop traversal at that boundary; callers must not use it until lowering has
+/// proved that no later operator can discard or reorder a candidate.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ScanRequest {
+    pub cf: String,
+    pub bounds: ScanBounds,
+    pub direction: ScanDirection,
+    pub max_items: Option<usize>,
+}
+
+impl ScanRequest {
+    pub fn prefix(cf: String, prefix: Vec<u8>) -> Self {
+        Self {
+            cf,
+            bounds: ScanBounds::Prefix(prefix),
+            direction: ScanDirection::Forward,
+            max_items: None,
+        }
+    }
+
+    pub fn range(cf: String, start: Vec<u8>, end: Vec<u8>) -> Self {
+        Self {
+            cf,
+            bounds: ScanBounds::Range { start, end },
+            direction: ScanDirection::Forward,
+            max_items: None,
+        }
+    }
+
+    pub fn with_max_items(mut self, max_items: usize) -> Self {
+        self.max_items = Some(max_items);
+        self
+    }
+
+    pub fn reversed(mut self) -> Self {
+        self.direction = ScanDirection::Reverse;
+        self
+    }
+}
 /// Object-safe future returned by ordered storage operations.
 ///
 /// Storage is permitted to be executor-local (notably in browsers), so this
@@ -107,6 +171,14 @@ impl<'a> OwnedStorage<'a> {
             collect_scan(scan).await
         })
     }
+
+    pub(crate) fn scan(
+        &self,
+        request: ScanRequest,
+    ) -> StorageFuture<'a, Result<Vec<KeyValue>, Error>> {
+        let storage = Rc::clone(&self.0);
+        Box::pin(async move { collect_scan(storage.scan(request).await?).await })
+    }
 }
 
 /// Owned, executor-local cursor over an ordered scan.
@@ -117,12 +189,38 @@ pub trait StorageCursor {
     fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>>;
 }
 
-pub(crate) struct ReadyStorageCursor {
+pub struct ReadyStorageCursor {
     values: std::vec::IntoIter<KeyValue>,
 }
 
+/// Enforces a request bound across cursor batches. This is primarily useful
+/// for delegating wrappers; physical adapters should additionally use the
+/// bound to stop their own iteration before decoding surplus entries.
+struct BoundedStorageCursor<'a> {
+    inner: StorageScan<'a>,
+    remaining: usize,
+}
+
+impl StorageCursor for BoundedStorageCursor<'_> {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+        Box::pin(async move {
+            if self.remaining == 0 {
+                return Ok(None);
+            }
+            let Some(mut batch) = self.inner.next_batch().await? else {
+                return Ok(None);
+            };
+            if batch.len() > self.remaining {
+                batch.truncate(self.remaining);
+            }
+            self.remaining -= batch.len();
+            Ok((!batch.is_empty()).then_some(batch))
+        })
+    }
+}
+
 impl ReadyStorageCursor {
-    pub(crate) fn new(values: Vec<KeyValue>) -> Self {
+    pub fn new(values: Vec<KeyValue>) -> Self {
         Self {
             values: values.into_iter(),
         }
@@ -138,7 +236,7 @@ impl StorageCursor for ReadyStorageCursor {
     }
 }
 
-async fn collect_scan(mut scan: StorageScan<'_>) -> Result<Vec<KeyValue>, Error> {
+pub async fn collect_scan(mut scan: StorageScan<'_>) -> Result<Vec<KeyValue>, Error> {
     let mut values = Vec::new();
     while let Some(batch) = scan.next_batch().await? {
         values.extend(batch);
@@ -356,6 +454,51 @@ pub trait OrderedKvStorage {
     ) -> StorageFuture<'_, Result<Option<u64>, Error>> {
         Box::pin(async { Ok(None) })
     }
+
+    /// Begin one explicit ordered scan. New callers should use this method.
+    ///
+    /// The legacy-shaped helpers below remain as thin convenience methods while
+    /// adapters migrate; they deliberately delegate to this single semantic
+    /// request rather than growing a parallel family of bounded APIs.
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            let ScanRequest {
+                cf,
+                bounds,
+                direction,
+                max_items,
+            } = request;
+            if max_items == Some(0) {
+                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
+            }
+            let scan = match (bounds, direction) {
+                (ScanBounds::Prefix(prefix), ScanDirection::Forward) => {
+                    self.scan_prefix(cf, prefix).await?
+                }
+                (ScanBounds::Prefix(prefix), ScanDirection::Reverse) => {
+                    self.scan_prefix_reverse(cf, prefix).await?
+                }
+                (ScanBounds::Range { start, end }, ScanDirection::Forward) => {
+                    self.scan_range(cf, start, end).await?
+                }
+                // Range scans had no reverse legacy method. The default keeps
+                // correctness during adapter migration; native adapters can
+                // override `scan` with a reverse iterator.
+                (ScanBounds::Range { start, end }, ScanDirection::Reverse) => {
+                    let mut values = collect_scan(self.scan_range(cf, start, end).await?).await?;
+                    values.reverse();
+                    Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>
+                }
+            };
+            Ok(match max_items {
+                Some(remaining) => Box::new(BoundedStorageCursor {
+                    inner: scan,
+                    remaining,
+                }) as StorageScan<'_>,
+                None => scan,
+            })
+        })
+    }
     fn scan_range(
         &self,
         cf: String,
@@ -439,6 +582,10 @@ impl<S> OrderedKvStorage for Rc<S>
 where
     S: OrderedKvStorage,
 {
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.as_ref().scan(request)
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         self.as_ref().get(cf, key)
     }
@@ -525,6 +672,10 @@ impl<S> OrderedKvStorage for &S
 where
     S: OrderedKvStorage,
 {
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        S::scan(*self, request)
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         S::get(*self, cf, key)
     }
@@ -889,6 +1040,45 @@ impl OrderedKvStorage for LayoutStorage {
         self.inner.flush_write_boundary()
     }
 
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        let ScanRequest {
+            cf,
+            bounds,
+            direction,
+            max_items,
+        } = request;
+        let (physical_cf, physical_bounds, strip_len) = match bounds {
+            ScanBounds::Prefix(prefix) => {
+                let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
+                (physical_cf, ScanBounds::Prefix(physical_prefix), strip_len)
+            }
+            ScanBounds::Range { start, end } => {
+                let (physical_cf, physical_start, strip_len) = self.physical_prefix(&cf, &start);
+                let (_, physical_end, _) = self.physical_prefix(&cf, &end);
+                (
+                    physical_cf,
+                    ScanBounds::Range {
+                        start: physical_start,
+                        end: physical_end,
+                    },
+                    strip_len,
+                )
+            }
+        };
+        Box::pin(async move {
+            let inner = self
+                .inner
+                .scan(ScanRequest {
+                    cf: physical_cf,
+                    bounds: physical_bounds,
+                    direction,
+                    max_items,
+                })
+                .await?;
+            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
+        })
+    }
+
     fn scan_range(
         &self,
         cf: String,
@@ -1058,6 +1248,10 @@ impl BoxedStorage {
 }
 
 impl OrderedKvStorage for BoxedStorage {
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.inner.scan(request)
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         self.inner.get(cf, key)
     }
@@ -2692,6 +2886,71 @@ mod tests {
                 .await?,
         )
         .await
+    }
+
+    // This is deliberately an internal contract test: ordered scans are the
+    // storage seam below every public query, and no application-level API can
+    // observe whether a backend obeys the hard cursor bound.
+    #[futures_test::test]
+    async fn explicit_scan_request_preserves_bounds_direction_and_hard_limit() {
+        let storage = MemoryStorage::new(&["records"]);
+        for key in [
+            b"a/1".as_slice(),
+            b"a/2".as_slice(),
+            b"a/3".as_slice(),
+            b"b/1".as_slice(),
+        ] {
+            storage
+                .set("records".into(), key.to_vec(), key.to_vec())
+                .await
+                .unwrap();
+        }
+
+        let forward = collect_scan(
+            storage
+                .scan(ScanRequest::prefix("records".into(), b"a/".to_vec()).with_max_items(2))
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            forward
+                .iter()
+                .map(|(key, _)| key.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"a/1".as_slice(), b"a/2".as_slice()]
+        );
+
+        let reverse = collect_scan(
+            storage
+                .scan(
+                    ScanRequest::range("records".into(), b"a/1".to_vec(), b"b".to_vec())
+                        .reversed()
+                        .with_max_items(2),
+                )
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reverse
+                .iter()
+                .map(|(key, _)| key.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"a/3".as_slice(), b"a/2".as_slice()]
+        );
+
+        let empty = collect_scan(
+            storage
+                .scan(ScanRequest::prefix("records".into(), Vec::new()).with_max_items(0))
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(empty.is_empty());
     }
 
     fn complex_record_descriptor_and_values() -> (RecordDescriptor, Vec<Value>) {

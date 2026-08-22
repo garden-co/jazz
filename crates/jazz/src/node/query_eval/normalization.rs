@@ -308,6 +308,7 @@ pub(super) fn select_current_access_path(
             return Some(CurrentAccessPath::Index {
                 column,
                 prefix: vec![Value::Nullable(Some(Box::new(value)))],
+                source_limit: None,
             });
         }
     }

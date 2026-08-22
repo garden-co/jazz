@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ColumnFamilyName, Error, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
-    ReopenableStorage, StorageFuture, StorageScan, Value, apply_storage_delta, key_codec,
+    ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value,
+    apply_storage_delta, key_codec,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
@@ -133,6 +134,58 @@ impl OrderedKvStorage for MemoryStorage {
             let values = inner.get_mut(&cf).ok_or(Error::ColumnFamilyNotFound(cf))?;
             values.remove(&key);
             Ok(())
+        })
+    }
+
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            if request.max_items == Some(0) {
+                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
+            }
+            let max_items = request.max_items.unwrap_or(usize::MAX);
+            let ScanRequest {
+                cf,
+                bounds,
+                direction,
+                ..
+            } = request;
+            let values = self.with_cf(&cf, |values| match (bounds, direction) {
+                (ScanBounds::Prefix(prefix), ScanDirection::Forward) => values
+                    .range(prefix.clone()..)
+                    .take_while(|(key, _)| key.starts_with(&prefix))
+                    .take(max_items)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                (ScanBounds::Prefix(prefix), ScanDirection::Reverse) => {
+                    if let Some(upper) = key_codec::prefix_upper_bound(&prefix) {
+                        values
+                            .range(prefix..upper)
+                            .rev()
+                            .take(max_items)
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect()
+                    } else {
+                        values
+                            .range(prefix..)
+                            .rev()
+                            .take(max_items)
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect()
+                    }
+                }
+                (ScanBounds::Range { start, end }, ScanDirection::Forward) => values
+                    .range(start..end)
+                    .take(max_items)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                (ScanBounds::Range { start, end }, ScanDirection::Reverse) => values
+                    .range(start..end)
+                    .rev()
+                    .take(max_items)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            })?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
         })
     }
 

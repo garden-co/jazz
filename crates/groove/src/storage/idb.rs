@@ -8,7 +8,8 @@ use idb_tree::{IdbTree, Options, PageStore, WriteOperation};
 
 use super::{
     ColumnFamilyName, Error, Key, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
-    StorageFuture, StorageScan, Value, apply_storage_delta, key_codec,
+    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, apply_storage_delta,
+    key_codec,
 };
 
 #[derive(Clone)]
@@ -110,6 +111,36 @@ where
         Box::pin(async move {
             self.tree.flush().await?;
             Ok(())
+        })
+    }
+
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            if request.max_items == Some(0) {
+                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
+            }
+            let ScanRequest {
+                cf,
+                bounds,
+                direction,
+                max_items,
+            } = request;
+            let (start, end) = match bounds {
+                ScanBounds::Range { start, end } => {
+                    (self.encoded_key(&cf, &start)?, self.encoded_key(&cf, &end)?)
+                }
+                ScanBounds::Prefix(prefix) => {
+                    let start = self.encoded_key(&cf, &prefix)?;
+                    let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xff]);
+                    (start, end)
+                }
+            };
+            let limit = max_items.unwrap_or(usize::MAX);
+            let rows = match direction {
+                ScanDirection::Forward => self.tree.range_limit(&start, &end, limit).await?,
+                ScanDirection::Reverse => self.tree.range_reverse(&start, &end, limit).await?,
+            };
+            Ok(Box::new(ReadyStorageCursor::new(Self::decode_rows(rows)?)) as StorageScan<'_>)
         })
     }
 
