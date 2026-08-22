@@ -180,7 +180,7 @@ impl PeerState {
                     continue;
                 }
                 let (cut, progress) = if self
-                    .subscriptions
+                    .publication_states
                     .get(&subscription)
                     .is_some_and(|state| state.maintained_subscription_view.is_some())
                 {
@@ -289,7 +289,7 @@ impl PeerState {
                     continue;
                 }
                 if self
-                    .subscriptions
+                    .publication_states
                     .get(&subscription)
                     .is_some_and(|state| state.maintained_subscription_view.is_some())
                 {
@@ -423,7 +423,7 @@ impl PeerState {
 
     fn refresh_maintained_subscription_view_footprint(&mut self, subscription: SubscriptionKey) {
         self.metrics.maintained_subscription_view.footprint = self
-            .subscriptions
+            .publication_states
             .get(&subscription)
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .map(|maintained| maintained.maintained.footprint())
@@ -444,7 +444,7 @@ impl PeerState {
         else {
             return;
         };
-        let state = self.subscriptions.entry(*subscription).or_default();
+        let state = self.publication_states.entry(*subscription).or_default();
         if *reset_result_set {
             state.result_member_set.clear();
             state.program_fact_set.clear();

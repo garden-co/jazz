@@ -312,13 +312,49 @@ enum WasmTransportInner {
     },
 }
 
-impl WasmTransportInner {
-    async fn tick(&self) -> Result<u32, JsValue> {
+impl Clone for WasmTransportInner {
+    fn clone(&self) -> Self {
         match self {
-            Self::Memory { connection, .. } => tick_connection(connection).await,
+            Self::Memory { db, connection } => Self::Memory {
+                db: Rc::clone(db),
+                connection: connection.clone(),
+            },
             #[cfg(target_arch = "wasm32")]
-            Self::Browser { connection, .. } => tick_connection(connection).await,
+            Self::Browser { db, connection } => Self::Browser {
+                db: Rc::clone(db),
+                connection: connection.clone(),
+            },
         }
+    }
+}
+
+impl WasmTransportInner {
+    async fn tick(self) -> Result<u32, JsValue> {
+        match self {
+            Self::Memory { connection, .. } => tick_connection(&connection).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser { connection, .. } => tick_connection(&connection).await,
+        }
+    }
+
+    async fn update_authenticated_claims(
+        self,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<(), JsValue> {
+        match self {
+            Self::Memory { connection, .. } => connection
+                .ok_or_else(|| JsValue::from_str("subscriber transport is closed"))?
+                .lock()
+                .await
+                .update_authenticated_session_claims(claims),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser { connection, .. } => connection
+                .ok_or_else(|| JsValue::from_str("subscriber transport is closed"))?
+                .lock()
+                .await
+                .update_authenticated_session_claims(claims),
+        }
+        Ok(())
     }
 
     fn close(&mut self) -> bool {
@@ -344,6 +380,7 @@ impl WasmTransportInner {
 struct WasmWireQueues {
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    outbound_scheduler: Rc<RefCell<Option<js_sys::Function>>>,
 }
 
 struct WasmWireTransport {
@@ -369,6 +406,10 @@ impl TickScheduler for WasmTickScheduler {
 impl WireTransport for WasmWireTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
         self.queues.outbound.borrow_mut().push_back(frame);
+        let scheduler = self.queues.outbound_scheduler.borrow().clone();
+        if let Some(scheduler) = scheduler {
+            let _ = scheduler.call0(&JsValue::NULL);
+        }
         Ok(())
     }
 
@@ -1775,69 +1816,79 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = allRelationQuery)]
-    pub async fn all_relation_query(
+    pub fn all_relation_query(
         &self,
         query_json: String,
         opts: JsValue,
-    ) -> Result<Vec<u8>, JsValue> {
+    ) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.inner.clone();
         let opts = read_opts_from_js(opts)?;
         let query = relation_query_from_json(&query_json)?;
-        let snapshot = self
-            .inner
-            .all_relation_query(&query, opts)
-            .await
-            .map_err(to_js_error)?;
-        encode_rows(&snapshot.rows).map_err(to_js_error)
+        Ok(future_to_promise(async move {
+            let snapshot = inner
+                .all_relation_query(&query, opts)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_rows(&snapshot.rows).map_err(to_js_error)?)
+        }))
     }
 
     #[wasm_bindgen(js_name = allRelationQueryForIdentity)]
-    pub async fn all_relation_query_for_identity(
+    pub fn all_relation_query_for_identity(
         &self,
         query_json: String,
         author: Vec<u8>,
         opts: JsValue,
-    ) -> Result<Vec<u8>, JsValue> {
+    ) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.inner.clone();
         let opts = read_opts_from_js(opts)?;
         let author = author_id_from_bytes(&author)?;
         let query = relation_query_from_json(&query_json)?;
-        let snapshot = self
-            .inner
-            .all_relation_query_for_identity(&query, opts, author)
-            .await
-            .map_err(to_js_error)?;
-        encode_rows(&snapshot.rows).map_err(to_js_error)
+        Ok(future_to_promise(async move {
+            let snapshot = inner
+                .all_relation_query_for_identity(&query, opts, author)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_rows(&snapshot.rows).map_err(to_js_error)?)
+        }))
     }
 
     #[wasm_bindgen(js_name = allRelationSnapshot)]
-    pub async fn all_relation_snapshot(
+    pub fn all_relation_snapshot(
         &self,
         query: &WasmPreparedQuery,
         opts: JsValue,
-    ) -> Result<Vec<u8>, JsValue> {
+    ) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.inner.clone();
         let opts = read_opts_from_js(opts)?;
-        let snapshot = self
-            .inner
-            .all_relation_snapshot(&query.inner, opts)
-            .await
-            .map_err(to_js_error)?;
-        encode_relation_snapshot(&snapshot).map_err(to_js_error)
+        let query = query.inner.clone();
+        Ok(future_to_promise(async move {
+            let snapshot = inner
+                .all_relation_snapshot(&query, opts)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
+        }))
     }
 
     #[wasm_bindgen(js_name = allRelationSnapshotForIdentity)]
-    pub async fn all_relation_snapshot_for_identity(
+    pub fn all_relation_snapshot_for_identity(
         &self,
         query: &WasmPreparedQuery,
         author: Vec<u8>,
         opts: JsValue,
-    ) -> Result<Vec<u8>, JsValue> {
+    ) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.inner.clone();
         let opts = read_opts_from_js(opts)?;
         let author = author_id_from_bytes(&author)?;
-        let snapshot = self
-            .inner
-            .all_relation_snapshot_for_identity(&query.inner, opts, author)
-            .await
-            .map_err(to_js_error)?;
-        encode_relation_snapshot(&snapshot).map_err(to_js_error)
+        let query = query.inner.clone();
+        Ok(future_to_promise(async move {
+            let snapshot = inner
+                .all_relation_snapshot_for_identity(&query, opts, author)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
+        }))
     }
 
     #[wasm_bindgen(js_name = subscribe)]
@@ -2441,8 +2492,12 @@ impl WasmDb {
         )
     }
     #[wasm_bindgen(js_name = tick)]
-    pub async fn tick(&self) -> Result<(), JsValue> {
-        self.inner.tick().await.map_err(to_js_error)
+    pub fn tick(&self) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            inner.tick().await.map_err(to_js_error)?;
+            Ok(JsValue::UNDEFINED)
+        })
     }
 
     /// Configure this runtime as the optimistic in-memory side of a browser
@@ -2498,7 +2553,7 @@ impl WasmDb {
     /// browser never asserts an authority endpoint itself; this context binds
     /// the authority advertised by the authenticated server response.
     #[wasm_bindgen(js_name = connectUpstreamWithSession)]
-    pub async fn connect_upstream_with_session(
+    pub fn connect_upstream_with_session(
         &self,
         protocol_version: u16,
         features: u32,
@@ -2506,7 +2561,8 @@ impl WasmDb {
         remote_epoch: u64,
         local_node: Vec<u8>,
         local_epoch: u64,
-    ) -> Result<WasmTransport, JsValue> {
+    ) -> Result<js_sys::Promise, JsValue> {
+        let db_inner = self.inner.clone();
         let remote_node: [u8; 16] = remote_node
             .try_into()
             .map_err(|_| JsValue::from_str("server hello authority node must be 16 bytes"))?;
@@ -2535,23 +2591,26 @@ impl WasmDb {
             None,
             Some(session_context),
         ));
-        let inner = match &self.inner {
-            WasmDbInner::Memory(db) => WasmTransportInner::Memory {
-                db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport).await),
-            },
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => WasmTransportInner::Browser {
-                db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport).await),
-            },
-            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-        };
-        Ok(WasmTransport {
-            inner,
-            queues,
-            subscriber_identity: None,
-        })
+        Ok(future_to_promise(async move {
+            let inner = match &db_inner {
+                WasmDbInner::Memory(db) => WasmTransportInner::Memory {
+                    db: Rc::clone(db),
+                    connection: Some(db.connect_upstream(transport).await),
+                },
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => WasmTransportInner::Browser {
+                    db: Rc::clone(db),
+                    connection: Some(db.connect_upstream(transport).await),
+                },
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            };
+            Ok(WasmTransport {
+                inner,
+                queues,
+                subscriber_identity: None,
+            }
+            .into())
+        }))
     }
 
     #[wasm_bindgen(js_name = acceptSubscriber)]
@@ -2652,50 +2711,43 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = close)]
-    pub async fn close(&mut self) -> Result<bool, JsValue> {
+    pub fn close(&mut self) -> js_sys::Promise {
         let inner = std::mem::replace(&mut self.inner, WasmDbInner::Closed);
-        if !self.owns_runtime {
-            return Ok(!matches!(inner, WasmDbInner::Closed));
-        }
-        match inner {
-            WasmDbInner::Memory(db) => {
-                db.close().await.map_err(to_js_error)?;
-                Ok(true)
+        let owns_runtime = self.owns_runtime;
+        future_to_promise(async move {
+            if !owns_runtime {
+                return Ok(JsValue::from_bool(!matches!(inner, WasmDbInner::Closed)));
             }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => {
-                db.close().await.map_err(to_js_error)?;
-                Ok(true)
-            }
-            WasmDbInner::Closed => Ok(false),
-        }
+            let closed = match inner {
+                WasmDbInner::Memory(db) => {
+                    db.close().await.map_err(to_js_error)?;
+                    true
+                }
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => {
+                    db.close().await.map_err(to_js_error)?;
+                    true
+                }
+                WasmDbInner::Closed => false,
+            };
+            Ok(JsValue::from_bool(closed))
+        })
     }
 }
 
 #[wasm_bindgen]
 impl WasmTransport {
     #[wasm_bindgen(js_name = updateAuthenticatedClaims)]
-    pub async fn update_authenticated_claims(&self, claims: JsValue) -> Result<(), JsValue> {
+    pub fn update_authenticated_claims(&self, claims: JsValue) -> Result<js_sys::Promise, JsValue> {
         let identity = self
             .subscriber_identity
             .ok_or_else(|| JsValue::from_str("transport is not a subscriber link"))?;
         let claims = claims_from_js(identity, claims)?;
-        match &self.inner {
-            WasmTransportInner::Memory { connection, .. } => connection
-                .as_ref()
-                .ok_or_else(|| JsValue::from_str("subscriber transport is closed"))?
-                .lock()
-                .await
-                .update_authenticated_session_claims(claims),
-            #[cfg(target_arch = "wasm32")]
-            WasmTransportInner::Browser { connection, .. } => connection
-                .as_ref()
-                .ok_or_else(|| JsValue::from_str("subscriber transport is closed"))?
-                .lock()
-                .await
-                .update_authenticated_session_claims(claims),
-        }
-        Ok(())
+        let inner = self.inner.clone();
+        Ok(future_to_promise(async move {
+            inner.update_authenticated_claims(claims).await?;
+            Ok(JsValue::UNDEFINED)
+        }))
     }
 
     #[wasm_bindgen(js_name = sendWireFrame)]
@@ -2721,9 +2773,23 @@ impl WasmTransport {
         frames
     }
 
+    #[wasm_bindgen(js_name = setOutboundScheduler)]
+    pub fn set_outbound_scheduler(&self, callback: js_sys::Function) {
+        *self.queues.outbound_scheduler.borrow_mut() = Some(callback);
+    }
+
+    #[wasm_bindgen(js_name = clearOutboundScheduler)]
+    pub fn clear_outbound_scheduler(&self) {
+        self.queues.outbound_scheduler.borrow_mut().take();
+    }
+
     #[wasm_bindgen(js_name = tick)]
-    pub async fn tick(&self) -> Result<u32, JsValue> {
-        self.inner.tick().await
+    pub fn tick(&self) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let work = inner.tick().await?;
+            Ok(JsValue::from_f64(work as f64))
+        })
     }
 
     #[wasm_bindgen(js_name = close)]
@@ -3599,6 +3665,10 @@ fn call_controller_method(
 
 fn to_js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+fn bytes_to_js(bytes: Vec<u8>) -> Result<JsValue, JsValue> {
+    Ok(js_sys::Uint8Array::from(bytes.as_slice()).into())
 }
 
 fn unknown_transaction_kind_message(kind: &str) -> String {

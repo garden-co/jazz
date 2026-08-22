@@ -139,6 +139,7 @@ export interface SubscriptionDeltaEvent {
   type: 'delta'
   reset: boolean
   delta: Uint8Array
+  orderedSuffixStart?: number
   terminalOperations: Array<SubscriptionTerminalOperation>
   terminalLayouts: Array<SubscriptionTerminalLayout>
   settled: boolean

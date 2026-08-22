@@ -166,7 +166,7 @@ async fn new_subscriber_uses_current_state_not_stale_hydrated_accumulated() {
     let _empty_initial = s1.recv().unwrap();
     let _s1_tick_one = s1.recv().unwrap();
 
-    db.unsubscribe(s1.id()).await;
+    db.unsubscribe(s1.id());
 
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);

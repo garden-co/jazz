@@ -3,6 +3,7 @@ use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
 };
 use crate::storage::{RecordStore, TestBtreeStorage};
+use std::rc::Rc;
 
 #[futures_test::test]
 async fn terminal_collect_canonicalization_emits_net_remove_before_net_insert() {
@@ -535,14 +536,17 @@ fn recursive_reach_from_with_union_step_graph(src: u64) -> GraphBuilder {
     GraphBuilder::recursive(seed, step, "frontier", 16)
 }
 
-async fn assert_auto_family_matches_direct_with_prepared_count(
+async fn assert_auto_family_matches_direct_with_prepared_count<S1, S2>(
     schema: DatabaseSchema,
     families: &[GraphBuilder],
     table_deltas: Vec<TableDelta>,
-    storage_familied: &impl OrderedKvStorage,
-    storage_direct: &impl OrderedKvStorage,
+    storage_familied: Rc<S1>,
+    storage_direct: Rc<S2>,
     expected_prepared_shapes: usize,
-) {
+) where
+    S1: OrderedKvStorage + 'static,
+    S2: OrderedKvStorage + 'static,
+{
     let mut familied = IvmRuntime::new(schema.clone()).unwrap();
     let mut direct = IvmRuntime::new(schema).unwrap();
     direct.set_auto_direct_family_enabled(false);
@@ -552,13 +556,13 @@ async fn assert_auto_family_matches_direct_with_prepared_count(
     for graph in families.iter().cloned() {
         familied_subscriptions.push(
             familied
-                .subscribe_one_sink(graph.clone(), storage_familied)
+                .subscribe_one_sink(graph.clone(), &storage_familied)
                 .await
                 .unwrap(),
         );
         direct_subscriptions.push(
             direct
-                .subscribe_one_sink(graph, storage_direct)
+                .subscribe_one_sink(graph, &storage_direct)
                 .await
                 .unwrap(),
         );
@@ -576,11 +580,11 @@ async fn assert_auto_family_matches_direct_with_prepared_count(
     }
 
     familied
-        .tick(table_deltas.clone(), storage_familied)
+        .tick(table_deltas.clone(), &storage_familied)
         .await
         .expect("familied tick");
     direct
-        .tick(table_deltas, storage_direct)
+        .tick(table_deltas, &storage_direct)
         .await
         .expect("direct tick");
     for (familied_subscription, direct_subscription) in familied_subscriptions
@@ -600,13 +604,16 @@ async fn assert_auto_family_matches_direct_with_prepared_count(
     }
 }
 
-async fn assert_auto_family_matches_direct(
+async fn assert_auto_family_matches_direct<S1, S2>(
     schema: DatabaseSchema,
     families: &[GraphBuilder],
     table_deltas: Vec<TableDelta>,
-    storage_familied: &impl OrderedKvStorage,
-    storage_direct: &impl OrderedKvStorage,
-) {
+    storage_familied: Rc<S1>,
+    storage_direct: Rc<S2>,
+) where
+    S1: OrderedKvStorage + 'static,
+    S2: OrderedKvStorage + 'static,
+{
     assert_auto_family_matches_direct_with_prepared_count(
         schema,
         families,
@@ -622,7 +629,7 @@ async fn assert_auto_family_matches_direct(
 async fn direct_literal_subscriptions_share_auto_family_and_keep_direct_output() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-    let storage = crate::storage::MemoryStorage::new(&["albums"]);
+    let storage = Rc::new(crate::storage::MemoryStorage::new(&["albums"]));
     let first = runtime
         .subscribe_one_sink(
             GraphBuilder::table("albums")
@@ -699,7 +706,7 @@ async fn direct_literal_subscriptions_share_auto_family_and_keep_direct_output()
 async fn hydration_memo_survives_empty_ticks_without_replaying_deltas() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-    let storage = crate::storage::MemoryStorage::new(&["albums"]);
+    let storage = Rc::new(crate::storage::MemoryStorage::new(&["albums"]));
     let subscription = runtime
         .subscribe_one_sink(GraphBuilder::table("albums"), &storage)
         .await
@@ -770,8 +777,9 @@ async fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = Rc::new(
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap(),
+    );
     let albums = schema.table("albums").unwrap().record_schema();
     write_two_album_rows(&storage, &albums).await;
 
@@ -818,8 +826,9 @@ async fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = Rc::new(
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap(),
+    );
     let albums = schema.table("albums").unwrap().record_schema();
     write_two_album_rows(&storage, &albums).await;
 
@@ -856,7 +865,7 @@ async fn pending_subscription_drains_match_unbounded_when_eval_memo_is_evicted_b
 
     let run = async |evict_before_drain: bool| {
         let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-        let storage = crate::storage::MemoryStorage::new(&["albums"]);
+        let storage = Rc::new(crate::storage::MemoryStorage::new(&["albums"]));
         let subscription = runtime
             .subscribe_one_sink(GraphBuilder::table("albums"), &storage)
             .await
@@ -938,7 +947,7 @@ async fn memo_context_digest_distinguishes_frontier_binding_values() {
 async fn project_emits_copied_literal_and_null_columns() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-    let storage = crate::storage::MemoryStorage::new(&["albums"]);
+    let storage = Rc::new(crate::storage::MemoryStorage::new(&["albums"]));
     let subscription = runtime
         .subscribe_one_sink(
             GraphBuilder::table("albums").project_fields([
@@ -1027,7 +1036,7 @@ async fn project_emits_copied_literal_and_null_columns() {
 async fn project_typed_literal_preserves_nested_nullable_null_type() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-    let storage = crate::storage::MemoryStorage::new(&["albums"]);
+    let storage = Rc::new(crate::storage::MemoryStorage::new(&["albums"]));
     let subscription = runtime
         .subscribe_one_sink(
             GraphBuilder::table("albums").project_fields([
@@ -1080,7 +1089,7 @@ async fn project_typed_literal_preserves_nested_nullable_null_type() {
 async fn cold_project_hydration_materializes_literal_and_typed_null_columns() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-    let storage = crate::storage::MemoryStorage::new(&["albums"]);
+    let storage = Rc::new(crate::storage::MemoryStorage::new(&["albums"]));
     let albums = schema.table("albums").unwrap().record_schema();
     let store = RecordStore::new(&storage, "albums", &albums);
     let first = albums
@@ -1146,7 +1155,7 @@ async fn cold_project_hydration_materializes_literal_and_typed_null_columns() {
 async fn pure_copy_project_lowers_with_full_fast_mapping() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
-    let storage = crate::storage::MemoryStorage::new(&["albums"]);
+    let storage = Rc::new(crate::storage::MemoryStorage::new(&["albums"]));
     let subscription = runtime
         .subscribe_one_sink(
             GraphBuilder::table("albums").project(["id", "title"]),
@@ -1180,7 +1189,7 @@ async fn auto_family_hidden_field_does_not_collide_with_user_column() {
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-    let storage = crate::storage::MemoryStorage::new(&["records"]);
+    let storage = Rc::new(crate::storage::MemoryStorage::new(&["records"]));
     let first = runtime
         .subscribe_one_sink(
             GraphBuilder::table("records")
@@ -1354,8 +1363,8 @@ async fn auto_family_multi_join_is_byte_identical_to_direct_path() {
         schema,
         &[graph(7), graph(8)],
         deltas,
-        &familied_storage,
-        &direct_storage,
+        Rc::new(familied_storage),
+        Rc::new(direct_storage),
     )
     .await;
 }
@@ -1398,8 +1407,8 @@ async fn auto_family_recursive_shape_falls_back_to_byte_identical_direct_path() 
         schema,
         &[recursive_reach_from_graph(1), recursive_reach_from_graph(9)],
         deltas,
-        &familied_storage,
-        &direct_storage,
+        Rc::new(familied_storage),
+        Rc::new(direct_storage),
         0,
     )
     .await;
@@ -1460,8 +1469,8 @@ async fn auto_family_arg_max_by_shape_is_byte_identical_to_direct_path() {
         schema,
         &[graph(1), graph(2)],
         deltas,
-        &familied_storage,
-        &direct_storage,
+        Rc::new(familied_storage),
+        Rc::new(direct_storage),
     )
     .await;
 }
@@ -1470,7 +1479,7 @@ async fn auto_family_arg_max_by_shape_is_byte_identical_to_direct_path() {
 async fn auto_family_excluded_recursive_shape_falls_back_to_direct_path() {
     let schema = edges_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
-    let storage = crate::storage::MemoryStorage::new(&["edges"]);
+    let storage = Rc::new(crate::storage::MemoryStorage::new(&["edges"]));
     let first = runtime
         .subscribe_one_sink(recursive_reach_from_with_union_step_graph(1), &storage)
         .await
@@ -1506,8 +1515,9 @@ async fn subscription_retainers_keep_output_ancestors_alive() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = Rc::new(
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap(),
+    );
     let subscription = runtime
         .subscribe_one_sink(
             GraphBuilder::table("albums")
@@ -1530,7 +1540,7 @@ async fn deep_retained_only_graph_ticks_through_the_dependency_queue() {
     let schema = albums_schema();
     let albums = schema.table("albums").unwrap().record_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
-    let storage = crate::storage::MemoryStorage::new(&["albums"]);
+    let storage = Rc::new(crate::storage::MemoryStorage::new(&["albums"]));
     let mut graph = GraphBuilder::table("albums");
     for _ in 0..64 {
         graph = graph.filter(PredicateExpr::gt("id", Value::U64(0)));
@@ -1565,8 +1575,9 @@ async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = Rc::new(
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap(),
+    );
     let subscription = runtime
         .subscribe_one_sink(GraphBuilder::table("albums"), &storage)
         .await
@@ -1593,8 +1604,9 @@ async fn identical_subscriptions_share_one_node_with_multiple_retainers() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = Rc::new(
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap(),
+    );
     let graph = || {
         GraphBuilder::table("albums")
             .filter(PredicateExpr::gt("id", Value::U64(10)))
@@ -1652,7 +1664,7 @@ async fn durable_schema_nodes_are_runtime_retainer_roots() {
 #[futures_test::test]
 async fn unsupported_query_operator_variants_are_not_executable() {
     let schema = albums_schema();
-    let storage = crate::storage::MemoryStorage::new(&["albums"]);
+    let storage = Rc::new(crate::storage::MemoryStorage::new(&["albums"]));
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let input = runtime
         .add_dedup_graph(&GraphBuilder::table("albums"))
@@ -1723,11 +1735,13 @@ async fn similar_join_subscriptions_share_context_independent_base_arrangements(
     let schema = albums_artists_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = Rc::new(
+        TestBtreeStorage::open(
+            temp_dir.path().join("groove-test.btree"),
+            &["albums", "artists"],
+        )
+        .unwrap(),
+    );
     let first = runtime
         .subscribe_one_sink(
             GraphBuilder::join(
@@ -1852,8 +1866,9 @@ async fn recursive_recompute_reuses_graph_nodes_without_persisting_contextual_ch
     let schema = edges_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = Rc::new(
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap(),
+    );
     let first = runtime
         .subscribe_one_sink(recursive_reach_graph(), &storage)
         .await

@@ -42,7 +42,11 @@ export function createBrowserWorkerFingerprint(
 
 /** Stable, non-secret namespace for one browser authentication session. */
 export function createBrowserAuthSessionKey(config: DbConfig): string {
-  const value = resolveAuthClass(config);
+  // Authentication sessions are scoped to a Jazz app/environment. Two apps
+  // may both be anonymous (or use the same subject string) without sharing a
+  // relay, storage lifecycle, WebSocket, or evaluator. Tabs in the same app
+  // and auth session still resolve to one SharedWorker.
+  const value = `${config.appId}:${config.env ?? "dev"}:${resolveAuthClass(config)}`;
   let hash = 0x811c9dc5;
   let output = "";
   for (let round = 0; round < 4; round += 1) {

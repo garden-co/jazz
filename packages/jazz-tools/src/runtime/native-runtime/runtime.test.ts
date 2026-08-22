@@ -460,7 +460,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(firstDelta.row.values[0]).toEqual({ type: "Text", value: "settled row" });
   });
 
-  it("preserves terminal operations while settle-gating global subscriptions", () => {
+  it("does not replay deferred terminal history over a settle-gated canonical rebuild", () => {
     const key = [10, ...uuidBytes("00000000-0000-0000-0000-000000000123")];
     const terminalOperations = [{ root_key: key, path: [], edit: { Move: { key, index: 0 } } }];
     const events = [
@@ -501,7 +501,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.executeSubscription(handle, updates);
 
     expect(updates).toHaveBeenCalledTimes(1);
-    expect(updates.mock.calls[0]![0].terminalOperations).toEqual(terminalOperations);
+    expect(updates.mock.calls[0]![0].terminalOperations).toBeUndefined();
   });
 
   it("uses the caller-supplied table for update and delete", () => {
@@ -2317,6 +2317,63 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("waits for suspended evaluation before probing one-shot query coverage", async () => {
+    let releaseTick!: () => void;
+    let reportTickStarted!: () => void;
+    const tickStarted = new Promise<void>((resolve) => {
+      reportTickStarted = resolve;
+    });
+    const tickGate = new Promise<void>((resolve) => {
+      releaseTick = resolve;
+    });
+    let nodeBorrowed = false;
+    let coverageProbeCalls = 0;
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            connectUpstream: () => transport,
+            prepareQuery: () => ({}),
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => {
+              expect(nodeBorrowed).toBe(false);
+              coverageProbeCalls += 1;
+              return true;
+            },
+            detachQuery: () => undefined,
+            tick: async () => {
+              nodeBorrowed = true;
+              reportTickStarted();
+              await tickGate;
+              nodeBorrowed = false;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    runtime.connectUpstreamPeer();
+
+    const progress = runtime.progressPeerTransport();
+    await tickStarted;
+    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    await Promise.resolve();
+    expect(coverageProbeCalls).toBe(0);
+
+    releaseTick();
+    await progress;
+    await expect(query).resolves.toEqual([]);
+    expect(coverageProbeCalls).toBe(1);
+  });
+
   it("rejects pending edge reads when the websocket transport errors during coverage wait", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -3533,7 +3590,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     ordinary.close();
   });
 
-  it("preserves terminal operations through settle-gated packed Gather reset delivery", () => {
+  it("publishes one canonical reset instead of replaying settle-gated packed Gather history", () => {
     const rowId = uuidBytes("00000000-0000-0000-0000-000000000501");
     const key = [10, ...rowId];
     const terminalOperations = [{ root_key: key, path: [], edit: { Move: { key, index: 0 } } }];
@@ -3560,7 +3617,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(deltas).toHaveLength(1);
     expect(deltas[0]!.reset).toBe(true);
-    expect(deltas[0]!.terminalOperations).toEqual(terminalOperations);
+    expect(deltas[0]!.terminalOperations).toBeUndefined();
     runtime.close();
   });
 
@@ -3831,6 +3888,47 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
     ]);
     runtime.close();
+  });
+
+  it("coerces UUID provenance authors into public text subscription frames", () => {
+    const schema = {
+      notes: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "note", column_type: { type: "Text" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const publicColumns = [
+      ...schema.notes.columns,
+      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
+    ] as const;
+    const nativeDelta = readNativeSubscriptionDelta(
+      new PostcardReader(
+        encodeUserWrappedSubscriptionDelta({
+          table: "notes",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000321"),
+          title: "public title",
+          note: "public note",
+        }),
+      ),
+    );
+
+    const applied = applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+      rootTable: "notes",
+      rootColumns: publicColumns,
+    });
+
+    const [change] = decodeNativeDelta(applied.wireDelta, publicColumns);
+    expect(change?.kind).toBe(0);
+    if (!change || change.kind !== 0) throw new Error("expected inserted row");
+    expect(change.row.values).toEqual([
+      { type: "Text", value: "public title" },
+      { type: "Text", value: "public note" },
+      { type: "Text", value: "00000000-0000-0000-0000-0000000000aa" },
+      { type: "Timestamp", value: 123_000 },
+    ]);
   });
 
   it("encodes range id comparisons into prepared native queries", async () => {
@@ -5096,6 +5194,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
     { name: "row_uuid", valueType: { tag: 10 } },
     { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
     { name: "user_note", valueType: { tag: 14, inner: { tag: 14, inner: { tag: 8 } } } },
+    { name: "$createdBy", valueType: { tag: 10 } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
   const delta = new PostcardWriter();
@@ -5110,6 +5209,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
           row.rowId,
           presentBytes(new TextEncoder().encode(row.title)),
           presentBytes(presentBytes(new TextEncoder().encode(row.note))),
+          uuidBytes("00000000-0000-0000-0000-0000000000aa"),
           u64Bytes(123),
         ]),
       );

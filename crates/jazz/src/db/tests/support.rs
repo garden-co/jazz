@@ -15,6 +15,46 @@ pub(super) fn try_recv_subscriber_payload(transport: &mut dyn Transport) -> Opti
     }
 }
 
+/// Drive a raw subscriber connection across storage wakeups until it emits a
+/// protocol payload. A connection tick may install a query whose hydration
+/// suspends; the storage wake schedules the continuation rather than forcing
+/// that potentially slow read into the registration tick.
+pub(super) fn drive_subscriber_until_payload<S>(
+    subscriber: &Rc<LocalMutex<PeerConnection<S>>>,
+    transport: &mut dyn Transport,
+) -> SyncMessage
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    drive_subscriber_until_payloads(subscriber, transport, 1)
+        .pop()
+        .expect("one requested subscriber payload")
+}
+
+pub(super) fn drive_subscriber_until_payloads<S>(
+    subscriber: &Rc<LocalMutex<PeerConnection<S>>>,
+    transport: &mut dyn Transport,
+    count: usize,
+) -> Vec<SyncMessage>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let mut messages = Vec::with_capacity(count);
+    for _ in 0..32 {
+        while let Some(message) = try_recv_subscriber_payload(transport) {
+            messages.push(message);
+            if messages.len() == count {
+                return messages;
+            }
+        }
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    panic!(
+        "subscriber emitted only {} of {count} payloads after 32 scheduled progress turns",
+        messages.len()
+    )
+}
+
 pub(super) struct BackpressureOnceTransport {
     pub(super) outbound: Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
     pub(super) failed: bool,

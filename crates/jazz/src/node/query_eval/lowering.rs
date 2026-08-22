@@ -589,7 +589,7 @@ where
                 .into_iter()
                 .map(|terminal| (terminal.sink, terminal.graph))
                 .collect();
-            return self.database.subscribe(sinks).await.map_err(Error::Groove);
+            return self.database.subscribe(sinks).map_err(Error::Groove);
         }
         let param_names = params
             .iter()

@@ -461,7 +461,7 @@ where
             if let Some((runtime_token, subscription_id)) = local_cleanup_handle.get()
                 && node.groove_runtime_token() == runtime_token
             {
-                super::block_on(node.unsubscribe_groove_subscription(subscription_id));
+                node.unsubscribe_groove_subscription(subscription_id);
             }
         }));
         let mut maintained_subscription = Some(subscription);

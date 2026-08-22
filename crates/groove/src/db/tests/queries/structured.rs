@@ -188,13 +188,18 @@ async fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
     batch.insert("history", history_values(1, 20, 7, "ambiguous"));
     database.commit_batch(batch).await.unwrap();
 
+    let subscription = database
+        .subscribe_one_sink(history_collect_by_expand(0, 3))
+        .await
+        .unwrap();
+    let event = std::future::poll_fn(|cx| subscription.poll_next_event(cx)).await;
     assert!(matches!(
-        database
-            .subscribe_one_sink(history_collect_by_expand(0, 3))
-            .await,
-        Err(Error::IvmRuntime(
-            IvmRuntimeError::DuplicateCollectByOccurrenceId
-        ))
+        event,
+        SubscriptionEvent::Error(error)
+            if matches!(
+                error.source_error(),
+                Some(IvmRuntimeError::DuplicateCollectByOccurrenceId)
+            )
     ));
 }
 
@@ -272,7 +277,6 @@ async fn collect_by_multisink_emits_descendant_terminal_operations() {
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe([("rows", history_collect_by(2))])
-        .await
         .unwrap();
     let initial = subscription.recv().unwrap();
     assert!(initial.terminal_sinks.is_empty());

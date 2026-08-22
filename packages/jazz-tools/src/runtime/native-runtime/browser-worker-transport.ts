@@ -4,6 +4,7 @@ export interface PeerTransportRuntime {
   onPeerTransportWork(listener: () => void): () => void;
   notifyPeerTransportActivity?(): void;
   progressPeerTransport(): Promise<void>;
+  retirePeerTransport(transport: Transport): Promise<void>;
 }
 
 export class BrowserWorkerTransportPump {
@@ -11,11 +12,11 @@ export class BrowserWorkerTransportPump {
   private running = false;
   private runAgain = false;
   private closed = false;
+  private outboundDrainScheduled = false;
   private requestedGeneration = 0;
   private completedGeneration = 0;
   private readonly flushWaiters = new Set<{ target: number; resolve: () => void }>();
   private readonly removeWorkListener: () => void;
-
   constructor(
     private readonly runtime: PeerTransportRuntime,
     private readonly transport: Transport,
@@ -26,6 +27,7 @@ export class BrowserWorkerTransportPump {
     // transport immediately after the pass it requested, so that notification
     // must not recursively request another identical pass.
     this.removeWorkListener = runtime.onPeerTransportWork(() => this.schedule(false));
+    this.transport.setOutboundScheduler?.(() => this.scheduleOutboundDrain());
     this.schedule(true);
   }
 
@@ -63,7 +65,8 @@ export class BrowserWorkerTransportPump {
     if (this.closed) return;
     this.closed = true;
     this.removeWorkListener();
-    this.transport.close();
+    this.transport.clearOutboundScheduler?.();
+    void this.runtime.retirePeerTransport(this.transport).catch(this.onError);
     for (const waiter of this.flushWaiters) waiter.resolve();
     this.flushWaiters.clear();
   }
@@ -82,22 +85,24 @@ export class BrowserWorkerTransportPump {
     if (frames.length > 0) this.sendFrames(frames);
   }
 
+  private scheduleOutboundDrain(): void {
+    if (this.closed || this.outboundDrainScheduled) return;
+    this.outboundDrainScheduled = true;
+    queueMicrotask(() => {
+      this.outboundDrainScheduled = false;
+      if (!this.closed) this.drainOutboundFrames();
+    });
+  }
+
   private async pump(): Promise<void> {
     if (this.closed || this.running) return;
     this.running = true;
     const generation = this.requestedGeneration;
-    let exhausted = true;
     try {
-      for (let round = 0; round < 32; round += 1) {
-        await this.runtime.progressPeerTransport();
-        if (this.closed) return;
-        const frames = normalizeTransportFrames(this.transport.recvWireFrames());
-        if (frames.length > 0) this.sendFrames(frames);
-        if (frames.length === 0) {
-          exhausted = false;
-          break;
-        }
-      }
+      this.drainOutboundFrames();
+      await this.runtime.progressPeerTransport();
+      if (this.closed) return;
+      this.drainOutboundFrames();
     } finally {
       this.running = false;
       this.completedGeneration = Math.max(this.completedGeneration, generation);
@@ -111,8 +116,6 @@ export class BrowserWorkerTransportPump {
     if (this.runAgain) {
       this.runAgain = false;
       this.schedule();
-    } else if (exhausted) {
-      setTimeout(() => this.schedule(), 0);
     }
   }
 }

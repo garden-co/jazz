@@ -159,7 +159,7 @@ async fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts()
     assert_eq!(first_delta, second_delta);
     assert_eq!(first_delta[0].1, 1);
 
-    assert!(database.unsubscribe(first.id()).await);
+    assert!(database.unsubscribe(first.id()));
     assert!(second.try_recv().is_err());
 
     let mut batch = database.open_batch();
@@ -652,6 +652,7 @@ async fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe()
         .bind_shape_one_sink(first_id, &[Value::U64(7)])
         .await
         .unwrap();
+    database.drive_progress().await.unwrap();
     assert!(matches!(
         database.retire_prepared_shape(first_id),
         Err(Error::IvmRuntime(IvmRuntimeError::PreparedShapeHasActiveBindings(id))) if id == first_id
@@ -667,7 +668,7 @@ async fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe()
             1,
         )]
     );
-    database.unsubscribe(first_subscription.id()).await;
+    database.unsubscribe(first_subscription.id());
     database.retire_prepared_shape(first_id).unwrap();
 
     assert!(matches!(
@@ -678,6 +679,7 @@ async fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe()
         .bind_shape_one_sink(second_id, &[Value::U64(7)])
         .await
         .expect("retiring a sibling must preserve its shared binding source");
+    database.drive_progress().await.unwrap();
     assert_eq!(
         expect_try_recv_vals(&second_subscription),
         vec![(
@@ -689,7 +691,7 @@ async fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe()
             1,
         )]
     );
-    database.unsubscribe(second_subscription.id()).await;
+    database.unsubscribe(second_subscription.id());
     database.retire_prepared_shape(second_id).unwrap();
 
     assert!(matches!(
@@ -1006,7 +1008,7 @@ async fn duplicate_join_subscriptions_share_state_without_double_applying_deltas
         )]
     );
 
-    assert!(database.unsubscribe(first.id()).await);
-    assert!(database.unsubscribe(second.id()).await);
+    assert!(database.unsubscribe(first.id()));
+    assert!(database.unsubscribe(second.id()));
     assert!(database.ivm_runtime.retained_node_ids().is_empty());
 }

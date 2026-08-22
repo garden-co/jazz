@@ -117,7 +117,6 @@ pub(super) struct PeerSubscriptionState {
     pub(super) maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
     pub(super) prepared_query: Option<CachedPeerQueryPlan>,
     pub(super) groove_runtime_token: Option<u64>,
-    pub(super) known_state: Option<KnownStateDeclaration>,
     pub(super) authorization_progress: u64,
     pub(super) has_served_authorization_progress: bool,
 }
@@ -152,6 +151,7 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
     pub(super) tables: BTreeMap<String, TableSchema>,
+    pub(super) initial_received: bool,
 }
 
 pub(super) struct MaintainedRehydrateRequest<'a> {

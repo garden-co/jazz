@@ -65,7 +65,6 @@ export async function openAggregatedBrowserInspectorControlPort(
         return;
       }
       if (message.type === "list-contexts") {
-        routes.clear();
         const lists = await Promise.all(
           controls.map(async (control) => ({
             control,
@@ -76,13 +75,16 @@ export async function openAggregatedBrowserInspectorControlPort(
           })),
         );
         const contexts: BrowserInspectorContext[] = [];
+        const nextRoutes = new Map<string, { port: MessagePort; contextKey: string }>();
         for (const { control, event: response } of lists) {
           for (const context of response.contexts) {
             const key = `${control.id}:${context.key}`;
-            routes.set(key, { port: control.port, contextKey: context.key });
+            nextRoutes.set(key, { port: control.port, contextKey: context.key });
             contexts.push({ ...context, key });
           }
         }
+        routes.clear();
+        for (const [key, route] of nextRoutes) routes.set(key, route);
         port.postMessage({ type: "contexts", id: message.id, contexts });
         return;
       }

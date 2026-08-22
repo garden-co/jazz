@@ -832,7 +832,7 @@ where
             PeerState::relay()
         } else {
             match trust {
-                CommitUnitTrust::TrustedBackend => {
+                CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
                     PeerState::edge_client_with_permission_identity(identity, AuthorId::SYSTEM)
                 }
                 CommitUnitTrust::Session => PeerState::client_link(identity),
@@ -1237,7 +1237,7 @@ where
         .await
         .take_pending_authoritative_reset_binding_views();
     let mut consumed_authoritative_resets = BTreeSet::new();
-    node.lock().await.drive_query_runtime().await?;
+    node.lock().await.drive_ready_query_runtime().await?;
     let live_subscriptions = subscriptions.borrow().clone();
     for weak in &live_subscriptions {
         let Some(state) = weak.upgrade() else {
@@ -1297,8 +1297,7 @@ where
             if let Some(subscription_id) = stale_subscription_id {
                 node.lock()
                     .await
-                    .unsubscribe_groove_subscription(subscription_id)
-                    .await;
+                    .unsubscribe_groove_subscription(subscription_id);
             }
             let (shape, binding, prepared_plan) = node
                 .lock()
@@ -1744,8 +1743,7 @@ where
                 let replacement_subscription_id = replacement.subscription_id();
                 node.lock()
                     .await
-                    .unsubscribe_groove_subscription(stale_subscription_id)
-                    .await;
+                    .unsubscribe_groove_subscription(stale_subscription_id);
                 *maintained = replacement;
                 refresh
                     .local_subscription_cleanup

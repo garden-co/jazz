@@ -4,6 +4,7 @@ use super::*;
 use crate::storage::OwnedStorage;
 use std::rc::Rc;
 use std::sync::Mutex;
+use std::task::{Context, Poll, Waker};
 
 /// Stable handle returned to callers for subscription management.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -276,7 +277,7 @@ impl MultisinkDeltas {
 #[derive(Debug)]
 pub struct MultisinkSubscription {
     pub(super) id: SubscriptionId,
-    pub(super) initial: Mutex<Option<MultisinkDeltas>>,
+    pub(super) initial: Arc<Mutex<Option<MultisinkDeltas>>>,
     pub(super) receiver: Receiver<Result<QueuedMultisinkDeltas, SubscriptionError>>,
     pub(super) waiter: Arc<Mutex<Option<std::task::Waker>>>,
     pub(super) _receiver_liveness: Arc<()>,
@@ -1849,11 +1850,14 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
 }
 
 impl IvmRuntime {
-    pub async fn subscribe_one_sink(
+    pub async fn subscribe_one_sink<S>(
         &mut self,
         graph: GraphBuilder,
-        storage: &impl OrderedKvStorage,
-    ) -> Result<Subscription, IvmRuntimeError> {
+        storage: &Rc<S>,
+    ) -> Result<Subscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
         }
@@ -1870,7 +1874,7 @@ impl IvmRuntime {
                         plan.shape.clone(),
                         plan.binding_descriptor,
                         [plan.binding_field.clone()],
-                        storage,
+                        storage.as_ref(),
                     )
                     .await?;
                 if let Some(state) = self.prepared_shapes.get_mut(&shape.id()) {
@@ -1883,40 +1887,52 @@ impl IvmRuntime {
                     .insert(plan.key.clone(), shape.id());
                 shape.id()
             };
-            return self
-                .bind_shape_one_sink(shape_id, &[plan.binding_value], storage)
-                .await;
+            return self.bind_shape_one_sink(shape_id, &[plan.binding_value], storage);
         }
-        let multisink = self.subscribe([(DEFAULT_SINK, graph)], storage).await?;
-        self.single_sink_subscription(multisink, DEFAULT_SINK)
+        let multisink = self.subscribe_staged(vec![(DEFAULT_SINK.to_owned(), graph)], storage)?;
+        let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
+        self.poll_ready_subscription_work_now()?;
+        Ok(subscription)
     }
 
-    pub async fn subscribe<I, K, S>(
+    pub fn subscribe<I, K, S>(
         &mut self,
         sinks: I,
-        storage: &S,
+        storage: &Rc<S>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + 'static,
     {
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
-        self.subscribe_staged(sinks, storage).await
+        let subscription = self.subscribe_staged(sinks, storage)?;
+        self.poll_ready_subscription_work_now()?;
+        Ok(subscription)
     }
 
-    async fn subscribe_staged<S>(
+    /// Publish all subscription work that can complete from resident inputs
+    /// before returning control to the caller. Cold inputs remain queued for
+    /// the runtime owner to resume when storage wakes them.
+    fn poll_ready_subscription_work_now(&mut self) -> Result<(), IvmRuntimeError> {
+        let mut cx = Context::from_waker(Waker::noop());
+        match self.poll_pending_incremental(&mut cx) {
+            Poll::Ready(result) => result,
+            Poll::Pending => Ok(()),
+        }
+    }
+
+    fn subscribe_staged<S>(
         &mut self,
         sinks: Vec<(String, GraphBuilder)>,
-        storage: &S,
+        storage: &Rc<S>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + 'static,
     {
-        self.flush_pending_binding_retractions(storage).await?;
         if sinks.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
         }
@@ -1946,7 +1962,7 @@ impl IvmRuntime {
         // cancelled or fails. On success, adding the subscription retainers
         // before releasing the guard atomically promotes those additions into
         // live graph state without cloning unrelated runtime state.
-        let (outputs, initial) = {
+        let outputs = {
             let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
             let runtime = install.runtime();
             runtime.logical_nodes_requested += sinks
@@ -1958,14 +1974,11 @@ impl IvmRuntime {
                 let compiled = runtime.add_dedup_graph(&graph)?;
                 outputs.insert(sink, compiled);
             }
-            let initial = runtime
-                .hydration_snapshots_for_subscription(&outputs, storage)
-                .await?;
             for output in outputs.values() {
                 runtime.retain_as_subscription(subscription_id, output.node);
             }
             install.commit();
-            (outputs, initial)
+            outputs
         };
         self.multisink_subscriptions.insert(
             subscription_id,
@@ -1978,9 +1991,18 @@ impl IvmRuntime {
             },
         );
         self.index_subscription_outputs(subscription_id, &outputs);
+        let initial = Arc::new(Mutex::new(None));
+        self.enqueue_subscription_hydration(
+            subscription_id,
+            outputs,
+            OwnedStorage::new(Rc::clone(storage)),
+            None,
+            None,
+            Arc::clone(&initial),
+        )?;
         Ok(MultisinkSubscription {
             id: subscription_id,
-            initial: Mutex::new(Some(initial)),
+            initial,
             receiver,
             waiter,
             _receiver_liveness: receiver_liveness,
@@ -2082,44 +2104,48 @@ impl IvmRuntime {
         Ok(PreparedShape { id: shape_id })
     }
 
-    pub async fn bind_shape<S>(
+    pub fn bind_shape<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
-        storage: &S,
+        storage: &Rc<S>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + 'static,
     {
         self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
-            .await
     }
 
-    async fn bind_shape_with_public_fields<S>(
+    fn bind_shape_with_public_fields<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
         public_fields: BTreeMap<String, Vec<String>>,
-        storage: &S,
+        storage: &Rc<S>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + 'static,
     {
-        self.bind_shape_with_public_fields_staged(shape_id, binding_values, public_fields, storage)
-            .await
+        let subscription = self.bind_shape_with_public_fields_staged(
+            shape_id,
+            binding_values,
+            public_fields,
+            storage,
+        )?;
+        self.poll_ready_subscription_work_now()?;
+        Ok(subscription)
     }
 
-    async fn bind_shape_with_public_fields_staged<S>(
+    fn bind_shape_with_public_fields_staged<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
         public_fields: BTreeMap<String, Vec<String>>,
-        storage: &S,
+        storage: &Rc<S>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + 'static,
     {
-        self.flush_pending_binding_retractions(storage).await?;
         let shape = self
             .prepared_shapes
             .get(&shape_id)
@@ -2128,7 +2154,7 @@ impl IvmRuntime {
         let binding_record = shape.binding_descriptor.create(binding_values)?;
         let binding_key = BindingKey(binding_record);
         let subscription_id = self.next_subscription_id();
-        let (outputs, initial) = {
+        let (outputs, binding_snapshots) = {
             let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
             let runtime = install.runtime();
             runtime.logical_nodes_requested += shape
@@ -2146,22 +2172,37 @@ impl IvmRuntime {
                 let output = runtime.add_dedup_graph(&graph)?;
                 outputs.insert(sink.clone(), output);
             }
+            let binding_shape = runtime.binding_source_shape_name(shape_id)?;
+            let cancelled_retraction =
+                runtime.cancel_pending_binding_retraction(&binding_shape, &binding_key);
             let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
-            let initial = runtime
-                .hydration_snapshots_for_subscription_with_binding(
-                    &outputs,
-                    storage,
-                    &binding_delta,
-                )
-                .await?;
+            let mut binding_snapshots = runtime.binding_snapshot_deltas();
+            let snapshot = binding_snapshots
+                .entry(binding_delta.shape.clone())
+                .or_insert_with(|| RecordDeltas {
+                    descriptor: binding_delta.descriptor,
+                    deltas: Vec::new(),
+                });
+            for delta in &binding_delta.deltas {
+                if delta.weight > 0
+                    && !snapshot
+                        .deltas
+                        .iter()
+                        .any(|existing| existing.record == delta.record)
+                {
+                    snapshot.deltas.push(delta.clone());
+                }
+            }
             let installed_delta = runtime.add_binding_ref(shape_id, binding_key.clone())?;
             debug_assert_eq!(installed_delta.deltas, binding_delta.deltas);
-            runtime.bump_input_frontiers(&[], std::slice::from_ref(&installed_delta));
+            if !cancelled_retraction {
+                runtime.bump_input_frontiers(&[], std::slice::from_ref(&installed_delta));
+            }
             for output in outputs.values() {
                 runtime.retain_as_subscription(subscription_id, output.node);
             }
             install.commit();
-            (outputs, initial)
+            (outputs, binding_snapshots)
         };
         let (sender, receiver) = mpsc::channel();
         let waiter = Arc::new(Mutex::new(None));
@@ -2184,9 +2225,18 @@ impl IvmRuntime {
             },
         );
         self.index_subscription_outputs(subscription_id, &outputs);
+        let initial = Arc::new(Mutex::new(None));
+        self.enqueue_subscription_hydration(
+            subscription_id,
+            outputs,
+            OwnedStorage::new(Rc::clone(storage)),
+            Some(binding_snapshots),
+            Some(&shape.shape),
+            Arc::clone(&initial),
+        )?;
         Ok(MultisinkSubscription {
             id: subscription_id,
-            initial: Mutex::new(Some(initial)),
+            initial,
             receiver,
             waiter,
             _receiver_liveness: receiver_liveness,
@@ -2268,28 +2318,35 @@ impl IvmRuntime {
         .await
     }
 
-    pub async fn bind_shape_one_sink<S>(
+    pub fn bind_shape_one_sink<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
-        storage: &S,
+        storage: &Rc<S>,
     ) -> Result<Subscription, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + 'static,
     {
-        let multisink = self.bind_shape(shape_id, binding_values, storage).await?;
-        self.single_sink_subscription(multisink, DEFAULT_SINK)
+        let multisink = self.bind_shape_with_public_fields_staged(
+            shape_id,
+            binding_values,
+            BTreeMap::new(),
+            storage,
+        )?;
+        let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
+        self.poll_ready_subscription_work_now()?;
+        Ok(subscription)
     }
 
-    pub(crate) async fn bind_shape_one_sink_with_output<S>(
+    pub(crate) fn bind_shape_one_sink_with_output<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
         public_output: RecordDescriptor,
-        storage: &S,
+        storage: &Rc<S>,
     ) -> Result<Subscription, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + 'static,
     {
         validate_public_output_for_shape(
             self.prepared_shapes
@@ -2299,15 +2356,15 @@ impl IvmRuntime {
             &public_output,
         )?;
         let public_fields = descriptor_field_names(&public_output)?;
-        let multisink = self
-            .bind_shape_with_public_fields(
-                shape_id,
-                binding_values,
-                [(DEFAULT_SINK.to_owned(), public_fields)].into(),
-                storage,
-            )
-            .await?;
-        self.single_sink_subscription(multisink, DEFAULT_SINK)
+        let multisink = self.bind_shape_with_public_fields_staged(
+            shape_id,
+            binding_values,
+            [(DEFAULT_SINK.to_owned(), public_fields)].into(),
+            storage,
+        )?;
+        let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
+        self.poll_ready_subscription_work_now()?;
+        Ok(subscription)
     }
 
     fn index_subscription_outputs(
@@ -2737,6 +2794,26 @@ impl IvmRuntime {
     ) -> Result<BindingDelta, IvmRuntimeError> {
         let shape = self.binding_source_shape_name(shape_id)?;
         self.add_binding_ref_for_shape(&shape, binding)
+    }
+
+    /// Reacquiring the last reference before its queued retraction is
+    /// evaluated leaves the evaluator's binding resident. Cancel that
+    /// lifecycle transition instead of emitting a redundant remove/add pair.
+    fn cancel_pending_binding_retraction(&mut self, shape: &str, binding: &BindingKey) -> bool {
+        let mut cancelled = false;
+        for pending in &mut self.pending_binding_retractions {
+            if pending.shape != shape {
+                continue;
+            }
+            pending.deltas.retain(|delta| {
+                let matches = delta.weight < 0 && delta.record.as_ref() == binding.0.as_slice();
+                cancelled |= matches;
+                !matches
+            });
+        }
+        self.pending_binding_retractions
+            .retain(|pending| !pending.deltas.is_empty());
+        cancelled
     }
 
     fn provisional_binding_delta(

@@ -182,7 +182,7 @@ async fn ws_admission(
         return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
-            trust: CommitUnitTrust::TrustedBackend,
+            trust: CommitUnitTrust::TrustedAdmin,
             credential: WebSocketCredential::Admin,
         });
     }

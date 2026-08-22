@@ -1453,7 +1453,18 @@ async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
  *
  * Exported so that `createDb()` can pre-load the module for sync mutations.
  */
-export async function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
+let wasmInitializationTail: Promise<void> = Promise.resolve();
+
+export function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
+  const initialization = wasmInitializationTail.then(() => initializeWasmModule(runtime));
+  wasmInitializationTail = initialization.then(
+    () => undefined,
+    () => undefined,
+  );
+  return initialization;
+}
+
+async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
   const wasmModule: any = await import("jazz-wasm");
   const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);

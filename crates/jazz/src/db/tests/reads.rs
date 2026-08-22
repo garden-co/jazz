@@ -1085,9 +1085,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         }))
         .unwrap();
 
-    subscriber.borrow_mut().tick().unwrap();
-    let message = try_recv_subscriber_payload(client_transport.as_mut())
-        .expect("expected include subscription view update");
+    let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
     let SyncMessage::ViewUpdate {
         subscription: served,
         result_member_adds,
@@ -1116,9 +1114,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         }))
         .unwrap();
 
-    subscriber.borrow_mut().tick().unwrap();
-    let message = try_recv_subscriber_payload(client_transport.as_mut())
-        .expect("expected reopened include subscription view update");
+    let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
     let SyncMessage::ViewUpdate {
         subscription: served,
         result_member_adds,

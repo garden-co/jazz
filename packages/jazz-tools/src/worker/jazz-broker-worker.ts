@@ -27,6 +27,7 @@ const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 type SharedWorkerGlobal = typeof globalThis & {
   onconnect: ((event: MessageEvent & { ports: MessagePort[] }) => void) | null;
+  close(): void;
 };
 
 type TabPeer = {
@@ -38,6 +39,8 @@ type TabPeer = {
   pendingFrames: Uint8Array[];
   flushedLocal: boolean;
   flushRequestId: number | null;
+  flushPumpComplete: boolean;
+  flushObserved: boolean;
   onMessage: (event: MessageEvent<BrowserFollowerPortRequest>) => void;
   onMessageError: () => void;
 };
@@ -49,6 +52,8 @@ type RuntimeContext = {
   peers: Map<string, TabPeer>;
   runtime: NativeRuntimeAdapter | null;
   initialize: Promise<void>;
+  closing: Promise<void> | null;
+  idleReleaseTimer: ReturnType<typeof setTimeout> | null;
   pageStore: IndexedDbPageStore | null;
   disposeTelemetry: (() => void) | null;
   resetBarrier: { id: number; pending: Set<string>; resolve: () => void } | null;
@@ -73,6 +78,7 @@ workerGlobal.onconnect = (event) => {
     const message = messageEvent.data;
     if (message?.type !== "connect-runtime") return;
     port.removeEventListener("message", onBootstrapMessage);
+    post(port, { type: "worker-alive" });
     void connectTab(port, message);
   };
   port.addEventListener("message", onBootstrapMessage);
@@ -86,6 +92,14 @@ async function connectTab(
   try {
     const key = runtimeKey(message.options);
     let context = contexts.get(key);
+    if (context?.idleReleaseTimer) {
+      clearTimeout(context.idleReleaseTimer);
+      context.idleReleaseTimer = null;
+    }
+    if (context?.closing) {
+      await context.closing;
+      context = contexts.get(key);
+    }
     if (context && context.fingerprint !== message.fingerprint) {
       throw new Error("incompatible persistent browser configuration");
     }
@@ -93,8 +107,8 @@ async function connectTab(
       context = createContext(key, message.fingerprint, message.options);
       contexts.set(key, context);
     }
-    configureServer(context, message.options);
     await context.initialize;
+    await configureServer(context, message.options);
     attachTab(context, message.tabId, port);
     post(port, { type: "runtime-ready" });
   } catch (error) {
@@ -124,6 +138,8 @@ function createContext(
     serverConnectionStarted: false,
     pendingMutationErrors: new Map(),
     initialize: Promise.resolve(),
+    closing: null,
+    idleReleaseTimer: null,
   };
   const initializeContext = contextInitializationTail.then(() => initialize(context));
   contextInitializationTail = initializeContext.catch(() => undefined);
@@ -160,19 +176,27 @@ async function initialize(context: RuntimeContext): Promise<void> {
   );
   context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
   context.runtime.onMutationError((event) => {
-    if (context.peers.size === 0) {
-      context.pendingMutationErrors.set(event.transaction.transactionId, event);
-      return;
-    }
+    context.pendingMutationErrors.set(event.transaction.transactionId, event);
     broadcast(context, { type: "mutation-error", event });
   });
 }
 
-function configureServer(context: RuntimeContext, options: BrowserWorkerInitOptions): void {
-  const requestedUrl = options.serverUrl;
-  if (!requestedUrl) return;
-  if (context.serverUrl && context.serverUrl !== requestedUrl) {
+async function configureServer(
+  context: RuntimeContext,
+  options: BrowserWorkerInitOptions,
+): Promise<void> {
+  const requestedUrl = options.serverUrl ?? null;
+  if (context.serverUrl === requestedUrl) {
+    context.serverAuthJson = options.authJson;
+    if (context.serverConnectionStarted) await requireRuntime(context).updateAuth(options.authJson);
+    return;
+  }
+  if (context.peers.size > 0) {
     throw new Error("incompatible persistent browser server configuration");
+  }
+  if (context.serverConnectionStarted) {
+    await requireRuntime(context).disconnect({ rejectWaiters: false });
+    context.serverConnectionStarted = false;
   }
   context.serverUrl = requestedUrl;
   context.serverAuthJson = options.authJson;
@@ -202,6 +226,8 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
     pendingFrames: [],
     flushedLocal: false,
     flushRequestId: null,
+    flushPumpComplete: false,
+    flushObserved: false,
     onMessage,
     onMessageError,
   };
@@ -225,11 +251,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     return;
   }
   if (message.type === "close") {
+    const releaseWhenIdle = peer.context.peers.size === 1 && message.releaseContext;
     if (message.id !== undefined) result(peer, message.id);
-    if (peer.context.peers.size === 1 && peer.flushedLocal) {
-      await releaseIdleContext(peer.context);
-    }
     closeTab(peer.context, peer.tabId);
+    if (releaseWhenIdle) scheduleIdleContextRelease(peer.context);
     return;
   }
   if (message.type === "storage-reset-observed") {
@@ -237,11 +262,8 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     return;
   }
   if (message.type === "flush-local-observed") {
-    const requestId = peer.flushRequestId;
-    if (requestId === null) return;
-    peer.flushRequestId = null;
-    peer.flushedLocal = true;
-    result(peer, requestId);
+    peer.flushObserved = true;
+    completeLocalFlush(peer);
     return;
   }
   if (message.type === "open-inspector-control") {
@@ -270,11 +292,12 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     const activeRuntime = requireRuntime(peer.context);
     if (message.type === "init") {
       if (peer.pump || peer.subscriber) throw new Error("Browser tab is already initialized");
-      // Peer installation is synchronous once the shared evaluator is idle.
-      // If hydration currently owns node state, join that evaluator pass first
-      // so attachment cannot use a binding-time borrow during evaluation.
-      await activeRuntime.progressPeerTransport();
-      const pump = attachPeerTransport(peer, activeRuntime, message.sessionClaims);
+      // Peer admission mutates the connection registry. A running evaluator
+      // may hold that registry across storage suspension, so install only at
+      // the owner-wide evaluator boundary. Storage progress is independent of
+      // this new peer and therefore continues while admission waits.
+      const subscriber = await activeRuntime.acceptPeerWhenIdle(message.sessionClaims);
+      const pump = attachPeerTransport(peer, activeRuntime, subscriber);
       if (peer.pendingFrames.length > 0) {
         const pending = peer.pendingFrames.splice(0);
         pump.receive(pending);
@@ -283,7 +306,6 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       for (const event of peer.context.pendingMutationErrors.values()) {
         post(peer.port, { type: "mutation-error", event });
       }
-      peer.context.pendingMutationErrors.clear();
       result(peer, message.id);
       return;
     }
@@ -307,7 +329,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         return;
       }
       peer.flushRequestId = message.id;
-      drainFlushReceipts(peer, message.id);
+      peer.flushPumpComplete = false;
+      peer.flushObserved = false;
+      peer.pump?.drainOutboundFrames();
+      // The page-side pump barrier only proves delivery into this worker.
+      // Drive the durable owner through the work those frames scheduled before
+      // allowing the page to treat its local receipt as flush-complete.
+      await activeRuntime.flushDurableWork();
+      peer.flushPumpComplete = true;
+      completeLocalFlush(peer);
       return;
     }
     if (message.type === "reconnect") {
@@ -412,7 +442,10 @@ function closeTab(context: RuntimeContext, tabId: string): void {
 function detachPeerRuntime(peer: TabPeer): void {
   peer.pump?.close();
   peer.pump = null;
-  peer.subscriber?.free?.();
+  // The pump exclusively owns logical closure of the WASM transport receiver
+  // and defers it until an in-flight evaluator pass has unwound. Do not call
+  // `free()` here: Rust futures may retain the wasm-bindgen wrapper beyond the
+  // visible peer lifetime, so its registered finalizer owns physical release.
   peer.subscriber = null;
   peer.pendingFrames.length = 0;
 }
@@ -446,18 +479,38 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
 }
 
 async function releaseIdleContext(context: RuntimeContext): Promise<void> {
-  if (contexts.get(context.key) === context) contexts.delete(context.key);
-  for (const peer of context.peers.values()) {
-    peer.pump = null;
-    peer.subscriber = null;
-    peer.pendingFrames.length = 0;
+  if (!context.closing) {
+    context.closing = (async () => {
+      for (const peer of context.peers.values()) {
+        peer.pump?.close();
+        peer.pump = null;
+        peer.subscriber = null;
+        peer.pendingFrames.length = 0;
+      }
+      // The last peer's flush barrier already drained evaluator persistence.
+      // Do not retain a graceful close future after every page has gone: a
+      // suspended cold/query lifecycle cannot add durability at this point.
+      context.runtime?.discard();
+      context.runtime = null;
+      context.pageStore?.close();
+      context.pageStore = null;
+      context.disposeTelemetry?.();
+      context.disposeTelemetry = null;
+      if (contexts.get(context.key) === context) contexts.delete(context.key);
+    })();
   }
-  await context.runtime?.close();
-  context.runtime = null;
-  context.pageStore?.close();
-  context.pageStore = null;
-  context.disposeTelemetry?.();
-  context.disposeTelemetry = null;
+  await context.closing;
+}
+
+function scheduleIdleContextRelease(context: RuntimeContext): void {
+  if (context.idleReleaseTimer) clearTimeout(context.idleReleaseTimer);
+  context.idleReleaseTimer = setTimeout(() => {
+    context.idleReleaseTimer = null;
+    if (context.peers.size !== 0) return;
+    void releaseIdleContext(context).then(() => {
+      if (contexts.size === 0) workerGlobal.close();
+    });
+  }, 50);
 }
 
 function closeContextPeers(context: RuntimeContext): void {
@@ -508,12 +561,12 @@ function acknowledgeReset(context: RuntimeContext, tabId: string): void {
 function attachPeerTransport(
   peer: TabPeer,
   activeRuntime: NativeRuntimeAdapter,
-  sessionClaims: Record<string, unknown>,
+  subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]>,
 ): BrowserWorkerTransportPump {
-  peer.subscriber = activeRuntime.acceptPeer(sessionClaims);
+  peer.subscriber = subscriber;
   peer.pump = new BrowserWorkerTransportPump(
     activeRuntime,
-    peer.subscriber,
+    subscriber,
     (frames) => {
       const copies = transferableFrames(frames);
       peer.port.postMessage(
@@ -526,10 +579,12 @@ function attachPeerTransport(
   return peer.pump;
 }
 
-function drainFlushReceipts(peer: TabPeer, requestId: number): void {
-  if (peer.flushRequestId !== requestId || peer.context.peers.get(peer.tabId) !== peer) return;
-  peer.pump?.drainOutboundFrames();
-  setTimeout(() => drainFlushReceipts(peer, requestId), 0);
+function completeLocalFlush(peer: TabPeer): void {
+  const requestId = peer.flushRequestId;
+  if (requestId === null || !peer.flushPumpComplete || !peer.flushObserved) return;
+  peer.flushRequestId = null;
+  peer.flushedLocal = true;
+  result(peer, requestId);
 }
 
 function runtimeKey(options: BrowserWorkerInitOptions): string {

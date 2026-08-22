@@ -809,6 +809,29 @@ describe("SubscriptionManager", () => {
     expect(result).toEqual({ delta: [], all: [] });
   });
 
+  it("treats a missing UUID-only terminal root move as an idempotent stale patch", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [{ root_key: key, path: [], edit: { Move: { key, index: 0 } } }],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result).toEqual({ delta: [], all: [] });
+  });
+
   it("rejects mismatched terminal identities without mutating subscription state", () => {
     const manager = new SubscriptionManager<TestItem>();
     const id = "00000000-0000-4000-8000-000000000001";
@@ -1124,6 +1147,114 @@ describe("SubscriptionManager", () => {
       nativeColumns,
     );
     expect(result.all).toEqual([{ id, name: "layout", count: 9 }]);
+  });
+
+  it("binds canonical producer layout fields to public columns by name", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const manager = new SubscriptionManager<TestItem>();
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalLayouts: [
+          {
+            id: "canonical-field-order",
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
+            rootKeySlot: 0,
+            rootKeyFieldName: "row_uuid",
+            publicFields: [
+              { name: "count", descriptorFieldName: "user_count", slot: 2 },
+              { name: "name", descriptorFieldName: "user_name", slot: 1 },
+            ],
+            carrier: "CurrentRow",
+          },
+        ],
+        terminalOperations: [
+          {
+            rootLayoutId: "canonical-field-order",
+            root_key: key,
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...terminalRowData(id, "layout", 9)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result.all).toEqual([{ id, name: "layout", count: 9 }]);
+  });
+
+  it("decodes UUID provenance through reordered public text columns", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const author = "00000000-0000-4000-8000-0000000000aa";
+    const key = [10, ...uuidBytes(id)];
+    const producerColumns: ColumnDescriptor[] = [
+      { name: "$createdBy", column_type: { type: "Uuid" }, nullable: false },
+      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
+    ];
+    const publicColumns: ColumnDescriptor[] = [
+      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
+      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+    ];
+    const descriptorWriter = new PostcardWriter();
+    writeDescriptor(descriptorWriter, [
+      { name: "row_uuid", valueType: { tag: 10 } },
+      { name: "$createdBy", valueType: { tag: 10 } },
+      { name: "$createdAt", valueType: { tag: 3 } },
+    ]);
+    const value = Uint8Array.from([
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(producerColumns, [
+        { type: "Uuid", value: author },
+        { type: "Timestamp", value: 42 },
+      ]),
+    ]);
+    const result = new SubscriptionManager<WasmRow>().handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalLayouts: [
+          {
+            id: "provenance-layout",
+            rootDescriptor: [...descriptorWriter.finish()],
+            rootKeySlot: 0,
+            rootKeyFieldName: "row_uuid",
+            publicFields: [
+              { name: "$createdBy", descriptorFieldName: "$createdBy", slot: 1 },
+              { name: "$createdAt", descriptorFieldName: "$createdAt", slot: 2 },
+            ],
+            carrier: "CurrentRow",
+          },
+        ],
+        terminalOperations: [
+          {
+            rootLayoutId: "provenance-layout",
+            root_key: key,
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...value] } },
+          },
+        ],
+      },
+      (row) => row,
+      publicColumns,
+    );
+
+    expect(result.all?.[0]?.values).toEqual([
+      { type: "Timestamp", value: 42 },
+      { type: "Text", value: author },
+    ]);
   });
 
   it("decodes logical collector roots and rejects the wrong carrier kind", () => {

@@ -368,7 +368,6 @@ async fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks()
                 GraphBuilder::table("albums").project(["id", "year"]),
             ),
         ])
-        .await
         .unwrap();
 
     let initial = subscription.recv().unwrap();
@@ -420,13 +419,12 @@ async fn unsubscribing_multisink_subscription_closes_the_whole_stream() {
                 GraphBuilder::table("albums").project(["id", "year"]),
             ),
         ])
-        .await
         .unwrap();
     let initial = subscription.recv().unwrap();
     assert!(initial.get("rows").unwrap().is_empty());
     assert!(initial.get("years").unwrap().is_empty());
 
-    assert!(db.unsubscribe(subscription.id()).await);
+    assert!(db.unsubscribe(subscription.id()));
     insert_album(&mut db, 1, "Kind of Blue", 1959).await;
 
     assert!(matches!(

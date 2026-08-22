@@ -739,7 +739,7 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     );
     assert!(
         resume_bytes <= full_bytes,
-        "resume catch-up should stay bounded by the initial full response"
+        "resume catch-up should stay bounded by the initial full response: full={full_bytes}, resume={resume_bytes}"
     );
     assert_eq!(prepared_read(&client, &query).len(), 3);
     assert!(
@@ -803,7 +803,7 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     );
     assert!(
         resume_bytes <= full_bytes,
-        "byte-wire resume catch-up should stay bounded by the initial full response"
+        "byte-wire resume catch-up should stay bounded by the initial full response: full={full_bytes}, resume={resume_bytes}"
     );
     assert_eq!(prepared_read(&client, &query).len(), 3);
     assert!(

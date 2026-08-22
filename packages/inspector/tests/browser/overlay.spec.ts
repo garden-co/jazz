@@ -43,7 +43,10 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     page,
   }) => {
     const browserErrors: string[] = [];
-    page.on("pageerror", (error) => browserErrors.push(error.message));
+    page.on("pageerror", (error) => browserErrors.push(error.stack ?? error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") browserErrors.push(message.text());
+    });
     // Serve dist-embedded/ to the iframe at the path it expects. The embedded
     // build uses base "./", so embedded.html requests `./assets/*`, which
     // resolve under /__jazz/embedded/assets/* — all matched here.
@@ -63,13 +66,21 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
       }
     });
 
-    await page.goto("/tests/browser/overlay-host.html");
+    const hostResponse = await page.goto("/tests/browser/overlay-host.html");
+    expect(hostResponse?.status()).toBe(200);
 
     // Host app stands up its real Jazz client and publishes the host handle.
     await expect(page.getByText("Host ready"))
       .toBeVisible({ timeout: 20_000 })
-      .catch((error) => {
-        throw new Error(`${String(error)}\nBrowser errors: ${browserErrors.join("; ")}`);
+      .catch(async (error) => {
+        const status = await page
+          .locator("#host-status")
+          .textContent({ timeout: 1_000 })
+          .catch(() => null);
+        const html = await page.content().catch(() => "unavailable");
+        throw new Error(
+          `${String(error)}\nHost status: ${status ?? "missing"}\nHTML: ${html.slice(0, 500)}\nBrowser errors: ${browserErrors.join("; ")}`,
+        );
       });
     const registeredSessions = await page.evaluate(() => {
       const state = (globalThis as Record<PropertyKey, unknown>)[

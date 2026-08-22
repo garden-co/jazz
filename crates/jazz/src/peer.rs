@@ -58,7 +58,14 @@ pub struct PeerState {
     permission_identity: Option<AuthorId>,
     shipped_complete_tx_payloads: BTreeSet<TxId>,
     ship_complete_exclusive_payloads: bool,
-    subscriptions: BTreeMap<SubscriptionKey, PeerSubscriptionState>,
+    /// Maintained evaluator and shipped-membership state for canonical
+    /// coverage outputs and concrete downstream publications. These entries
+    /// describe what was evaluated or sent; receiver cursors live separately.
+    publication_states: BTreeMap<SubscriptionKey, PeerSubscriptionState>,
+    /// Receiver-owned cursors keyed only by the concrete usage subscription
+    /// that declared them. A shared canonical coverage output must never adopt
+    /// one subscriber's cursor.
+    downstream_known_states: BTreeMap<SubscriptionKey, KnownStateDeclaration>,
     deferred_edge_fates: BTreeMap<TxId, DeferredEdgeFate>,
     edge_scope_subscription_refs: BTreeMap<SubscriptionKey, usize>,
     idle_edge_scope_subscriptions: BTreeMap<SubscriptionKey, u64>,
@@ -77,7 +84,8 @@ impl Default for PeerState {
             permission_identity: None,
             shipped_complete_tx_payloads: BTreeSet::new(),
             ship_complete_exclusive_payloads: false,
-            subscriptions: BTreeMap::new(),
+            publication_states: BTreeMap::new(),
+            downstream_known_states: BTreeMap::new(),
             deferred_edge_fates: BTreeMap::new(),
             edge_scope_subscription_refs: BTreeMap::new(),
             idle_edge_scope_subscriptions: BTreeMap::new(),

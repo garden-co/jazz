@@ -77,8 +77,9 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     appId: input.appId,
     driver: { type: "persistent", dbName: input.dbName },
     serverUrl: input.serverUrl,
-    ...(input.localFirstSecret ? { secret: input.localFirstSecret } : {}),
-    adminSecret: input.adminSecret,
+    ...(input.localFirstSecret
+      ? { secret: input.localFirstSecret }
+      : { adminSecret: input.adminSecret }),
     logLevel: input.logLevel,
   });
 

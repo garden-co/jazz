@@ -1,7 +1,5 @@
 use super::*;
-use crate::legacy_test_future::{
-    FutureResolveExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
-};
+use crate::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
 
 use std::collections::BTreeMap;
 
@@ -159,7 +157,10 @@ fn client_fast_cursor_requires_retained_matching_authorization_progress() {
         cursor, &previous, &revoked,
     ));
 
-    let state = fresh_client.subscriptions.get_mut(&subscription).unwrap();
+    let state = fresh_client
+        .publication_states
+        .entry(subscription)
+        .or_default();
     state.authorization_progress = 0;
     state.has_served_authorization_progress = true;
     assert!(fresh_client.fast_cursor_authorization_matches(subscription, &known_state));
@@ -212,20 +213,20 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     );
     assert_eq!(result_member_adds.len(), 1);
 
-    let retained_member = fresh.subscriptions[&subscription]
+    let retained_member = fresh.publication_states[&subscription]
         .result_member_set
         .iter()
         .next()
         .unwrap()
         .clone();
     apply_contribution_add(
-        fresh.subscriptions.get_mut(&subscription).unwrap(),
+        fresh.publication_states.get_mut(&subscription).unwrap(),
         std::iter::once(&retained_member),
         &mut Vec::new(),
         &mut Vec::new(),
     );
     assert_eq!(
-        fresh.subscriptions[&subscription]
+        fresh.publication_states[&subscription]
             .member_index
             .values()
             .next()
@@ -247,7 +248,7 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     assert!(!reset_result_set, "retained matching token may resume");
     assert!(result_member_adds.is_empty());
     assert_eq!(
-        fresh.subscriptions[&subscription]
+        fresh.publication_states[&subscription]
             .member_index
             .values()
             .next()
@@ -322,7 +323,8 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
         .rehydrate_query_for_subscription_from_maintained_subscription(
             &mut core, canonical, target, &shape,
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let SyncMessage::ViewUpdate {
         reset_result_set, ..
     } = update
@@ -442,7 +444,7 @@ fn incremental_delivery_keeps_terminal_children_with_their_root() {
     ));
     peer.apply_outgoing_view_update_result_set(&update(Vec::new(), vec![child_member]));
 
-    let state = &peer.subscriptions[&subscription];
+    let state = &peer.publication_states[&subscription];
     assert_eq!(state.result_member_set, BTreeSet::from([root_member]));
     assert_eq!(state.member_index.len(), 1);
 }
@@ -503,7 +505,7 @@ fn maintained_delivery_does_not_leak_intermediate_replacement_refcounts() {
     ));
     peer.apply_outgoing_view_update_result_set(&update(Vec::new(), vec![tx12]));
 
-    let state = &peer.subscriptions[&subscription];
+    let state = &peer.publication_states[&subscription];
     assert!(state.result_member_set.is_empty());
     assert!(state.member_index.is_empty());
 }
@@ -554,10 +556,10 @@ fn maintained_delivery_rekeys_delta_and_reset_by_output_occurrence() {
     ));
 
     assert_eq!(
-        peer.subscriptions[&subscription].result_member_set,
+        peer.publication_states[&subscription].result_member_set,
         BTreeSet::from([replacement, second])
     );
-    assert_eq!(peer.subscriptions[&subscription].member_index.len(), 2);
+    assert_eq!(peer.publication_states[&subscription].member_index.len(), 2);
 }
 
 fn current_row_pair(row: crate::node::CurrentRow) -> (RowUuid, BTreeMap<String, Value>) {
@@ -806,7 +808,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
         .expect("write support must register one policy subscription");
     assert!(
         !wrong_subject_peer
-            .subscriptions
+            .publication_states
             .get(&bound_subscription)
             .expect("bound support subscription state")
             .result_member_set
@@ -1135,7 +1137,7 @@ fn non_global_peer_query_subscriptions_use_maintained_path() {
     peer.rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
         .unwrap();
     assert!(
-        peer.subscriptions
+        peer.publication_states
             .get(&subscription)
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .is_some()
@@ -1148,7 +1150,7 @@ fn row_result_set(
     peer: &PeerState,
     subscription: SubscriptionKey,
 ) -> Option<BTreeSet<ResultRowEntry>> {
-    peer.subscriptions.get(&subscription).map(|state| {
+    peer.publication_states.get(&subscription).map(|state| {
         state
             .result_member_set
             .iter()
@@ -1161,7 +1163,7 @@ fn maintained_subscription_id(
     peer: &PeerState,
     subscription: SubscriptionKey,
 ) -> Option<groove::ivm::SubscriptionId> {
-    peer.subscriptions
+    peer.publication_states
         .get(&subscription)
         .and_then(|state| state.maintained_subscription_view.as_ref())
         .map(|maintained| maintained.subscription.id())
@@ -2648,7 +2650,7 @@ fn maintained_subscription_view_forget_with_node_unsubscribes_and_drops_state() 
     assert!(peer.forget_subscription_with_node(&mut core, subscription));
     assert!(maintained_subscription_id(&peer, subscription).is_none());
     assert!(row_result_set(&peer, subscription).is_none());
-    assert!(!core.unsubscribe_groove_subscription(maintained_id).resolve());
+    assert!(!core.unsubscribe_groove_subscription(maintained_id));
 
     let stale_tick = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
@@ -2688,7 +2690,7 @@ fn maintained_subscription_view_forget_query_binding_with_node_unsubscribes() {
 
     assert!(peer.forget_query_binding_with_node(&mut core, &shape, &binding));
     assert!(maintained_subscription_id(&peer, subscription).is_none());
-    assert!(!core.unsubscribe_groove_subscription(maintained_id).resolve());
+    assert!(!core.unsubscribe_groove_subscription(maintained_id));
 }
 
 #[test]
@@ -3457,7 +3459,7 @@ fn maintained_subscription_view_rehydrate_replaces_subscription_and_fresh_indexe
     let new_id = maintained_subscription_id(&peer, subscription)
         .expect("replacement maintained subscription missing");
     assert_ne!(old_id, new_id);
-    assert!(!core.unsubscribe_groove_subscription(old_id).resolve());
+    assert!(!core.unsubscribe_groove_subscription(old_id));
     let SyncMessage::ViewUpdate {
         reset_result_set, ..
     } = &rehydrate

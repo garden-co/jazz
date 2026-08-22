@@ -22,7 +22,7 @@ type BrowserFollowerPortRpcRequest =
   | { type: "wait-server" }
   | { type: "disconnect" }
   | { type: "flush-local" }
-  | { type: "close" }
+  | { type: "close"; releaseContext?: boolean }
   | { type: "prepare-storage-reset" }
   | { type: "finish-storage-reset" }
   | { type: "abort-storage-reset" }
@@ -138,9 +138,9 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       .catch((error: unknown) => this.fail(asError(error)));
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(releaseContext = false): Promise<void> {
     if (this.closed) return;
-    await this.request({ type: "close" });
+    await this.request({ type: "close", releaseContext });
     this.dispose(new Error("Browser follower connection is closed"));
   }
 

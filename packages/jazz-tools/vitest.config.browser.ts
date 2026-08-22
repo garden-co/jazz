@@ -76,7 +76,10 @@ export default defineConfig({
     // Browser-backed files share Chromium CPU and main-thread transport work.
     // Keep concurrency below the host CPU count so worker round trips are not
     // starved when CI runs the Node/Turbo suite alongside this suite.
-    maxWorkers: 4,
+    // WebKit gives each browser file its own heavyweight WPE/WASM process.
+    // Four concurrent files exceed practical memory pressure before exercising
+    // product concurrency; the multi-tab suites below provide that coverage.
+    maxWorkers: browserName === "webkit" ? 1 : 4,
     browser: {
       enabled: true,
       provider: playwright(),

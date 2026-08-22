@@ -26,6 +26,7 @@ export interface BrowserSharedWorkerConnectRequest {
 }
 
 export type BrowserSharedWorkerConnectResponse =
+  | { type: "worker-alive" }
   | { type: "runtime-ready" }
   | { type: "runtime-error"; message: string };
 
@@ -48,7 +49,7 @@ export type BrowserFollowerPortRequest =
       authJson: string;
       sessionClaims: Record<string, unknown>;
     }
-  | { type: "close"; id?: number };
+  | { type: "close"; id?: number; releaseContext?: boolean };
 
 export interface BrowserInspectorContext {
   key: string;

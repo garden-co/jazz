@@ -6,9 +6,12 @@ use std::rc::Rc;
 
 mod common;
 
-use jazz::db::{Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEvent, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEvent, TickScheduler, TickUrgency,
+    block_on,
+};
 use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -29,6 +32,15 @@ trait FutureResultExpectExt<T, E>: Future<Output = Result<T, E>> + Sized {
 }
 
 impl<F, T, E> FutureResultExpectExt<T, E> for F where F: Future<Output = Result<T, E>> {}
+
+#[derive(Default)]
+struct CountingScheduler(Cell<usize>);
+
+impl TickScheduler for CountingScheduler {
+    fn schedule_tick(&self, _urgency: TickUrgency) {
+        self.0.set(self.0.get() + 1);
+    }
+}
 
 fn schema() -> JazzSchema {
     compile_schema(
@@ -61,6 +73,23 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<TestStorage> {
     block_on(Db::open(DbConfig::new(
         schema.clone(),
         TestStorage::new(&refs),
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author,
+        },
+    )))
+    .expect("open database")
+}
+
+fn open_db_with_storage(
+    node: u8,
+    author: AuthorId,
+    schema: &JazzSchema,
+    storage: TestStorage,
+) -> Db<TestStorage> {
+    block_on(Db::open(DbConfig::new(
+        schema.clone(),
+        storage,
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,
@@ -488,6 +517,134 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
         !events
             .iter()
             .any(|event| matches!(event, SubscriptionEvent::Rejected { .. }))
+    );
+}
+
+/// A freshly reopened persistent worker must hydrate a downstream Local
+/// subscription without requiring an unrelated one-shot query to warm its
+/// resident view first.
+#[test]
+fn reopened_browser_worker_hydrates_local_subscription_without_query_warmup() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xaa; 16]);
+    let storage = tempfile::tempdir().expect("worker temp dir");
+
+    let first_worker = open_persistent_worker(storage.path(), 0x2b, &schema);
+    first_worker
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("persisted before worker restart".to_owned()),
+            )]),
+        )
+        .expect("seed worker-local todo");
+    first_worker.tick().expect("persist worker-local todo");
+    drop(first_worker);
+
+    let worker = open_persistent_worker(storage.path(), 0x2b, &schema);
+    let main_thread = open_db(0x1c, alice, &schema);
+    main_thread.set_non_durable_client();
+    let (main_transport, worker_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_connection = worker.accept_subscriber(worker_transport, alice);
+
+    let todos = main_thread
+        .prepare_query(&main_thread.table("todos"))
+        .expect("prepare todos query");
+    let mut subscription =
+        block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
+    assert_truthful_empty_local_opening(subscription.try_next_event());
+
+    main_thread.tick().expect("send cold subscription request");
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
+    worker.tick().expect("admit cold subscription request");
+    assert!(
+        scheduler.0.get() > 0,
+        "cold subscription admission must schedule its deferred hydration turn"
+    );
+
+    for _ in 0..8 {
+        main_thread.tick().expect("drive subscription request");
+        worker.tick().expect("drive cold worker hydration");
+        main_thread.tick().expect("apply worker subscription view");
+    }
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, .. } if added.len() == 1
+        )),
+        "reopened worker never hydrated the persisted row: {events:?}"
+    );
+}
+
+#[test]
+fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xab; 16]);
+    let durable = tempfile::tempdir().expect("worker temp dir");
+    let first_worker = open_persistent_worker(durable.path(), 0x2c, &schema);
+    for title in ["third", "first", "second"] {
+        first_worker
+            .insert(
+                "todos",
+                BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            )
+            .expect("seed worker-local todo");
+    }
+    first_worker.tick().expect("persist worker baseline");
+    drop(first_worker);
+    let worker = open_persistent_worker(durable.path(), 0x2c, &schema);
+
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let (main_storage, control) = TestStorage::controlled(&refs);
+    let main_thread = open_db_with_storage(0x1d, alice, &schema, main_storage);
+    main_thread.set_non_durable_client();
+    let (main_transport, worker_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_connection = worker.accept_subscriber(worker_transport, alice);
+
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let todos = main_thread
+        .prepare_query(
+            &main_thread
+                .table("todos")
+                .order_by("title", OrderDirection::Asc),
+        )
+        .expect("prepare todos query");
+    let mut subscription =
+        block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
+    assert_truthful_empty_local_opening(subscription.try_next_event());
+
+    main_thread.tick().expect("request worker baseline");
+    worker.tick().expect("send worker baseline");
+    main_thread
+        .tick()
+        .expect("apply worker baseline while local hydration is suspended");
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    for _ in 0..4 {
+        main_thread.tick().expect("finish main hydration");
+    }
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    let added = events
+        .iter()
+        .map(|event| match event {
+            SubscriptionEvent::Delta { added, .. } => added.len(),
+            SubscriptionEvent::Rejected { .. } | SubscriptionEvent::Closed => 0,
+        })
+        .sum::<usize>();
+    assert_eq!(added, 3, "worker baseline cardinality drifted: {events:?}");
+    assert_eq!(
+        main_thread.read(&todos).expect("read hydrated row").len(),
+        3
     );
 }
 

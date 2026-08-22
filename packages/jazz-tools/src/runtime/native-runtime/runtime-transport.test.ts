@@ -338,10 +338,85 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(dbTicks).toBe(1);
 
     releaseFirstTick();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(dbTicks).toBe(2);
+    runtime.close();
+  });
+
+  it("admits a peer only after a suspended owner-wide evaluator pass exits", async () => {
+    let releaseTick!: () => void;
+    let accepted = 0;
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            tick: () =>
+              new Promise<void>((resolve) => {
+                releaseTick = resolve;
+              }),
+            acceptSubscriber: () => {
+              accepted += 1;
+              return transport;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const progress = runtime.progressPeerTransport();
+    await Promise.resolve();
+    const admission = runtime.acceptPeerWhenIdle();
+    await Promise.resolve();
+    expect(accepted).toBe(0);
+
+    releaseTick();
+    await progress;
+    expect(await admission).toBe(transport);
+    expect(accepted).toBe(1);
+    await runtime.close();
+  });
+
+  it("yields to the host event loop when every core tick schedules more work", async () => {
+    let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let dbTicks = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+              schedulerCallback = callback;
+            },
+            tick: () => {
+              dbTicks += 1;
+              schedulerCallback?.("immediate");
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const hostTask = new Promise<void>((resolve) => setTimeout(resolve, 0));
+    schedulerCallback?.("immediate");
+    await hostTask;
+
+    expect(dbTicks).toBeGreaterThan(0);
+    expect(dbTicks).toBeLessThanOrEqual(4);
     runtime.close();
   });
 
@@ -479,6 +554,46 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transport.receivedBatches).toEqual([[first, second]]);
     expect(transport.received).toEqual([first, second]);
     expect(transport.tickCount).toBe(1);
+  });
+
+  it("runs another server pass when work is scheduled during an active pass", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    let tickCount = 0;
+    let releaseFirstTick!: () => void;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => {
+              tickCount += 1;
+              if (tickCount !== 1) return undefined;
+              return new Promise<void>((resolve) => {
+                releaseFirstTick = resolve;
+              });
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await vi.waitFor(() => expect(releaseFirstTick).toBeTypeOf("function"));
+    // A mutation or peer pass can discover server work while the previous
+    // server pass is suspended in storage. That wakeup must not be dropped.
+    (runtime as unknown as { scheduleServerPump(): void }).scheduleServerPump();
+    releaseFirstTick();
+
+    await vi.waitFor(() => expect(tickCount).toBeGreaterThanOrEqual(2));
+    await runtime.close();
   });
 });
 

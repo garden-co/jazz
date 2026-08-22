@@ -142,6 +142,7 @@ async fn run_shape_subscription_oracle(mut seed: u64) {
                         .await
                         .unwrap(),
                 );
+                database.drive_progress().await.unwrap();
                 subscription.drain();
                 assert_shape_subscription_matches_oracle(&subscription, &albums, seed, step);
                 subscriptions.push(subscription);
@@ -149,7 +150,7 @@ async fn run_shape_subscription_oracle(mut seed: u64) {
             2 if !subscriptions.is_empty() => {
                 let idx = (seed as usize) % subscriptions.len();
                 let subscription = subscriptions.swap_remove(idx);
-                assert!(database.unsubscribe(subscription.subscription.id()).await);
+                assert!(database.unsubscribe(subscription.subscription.id()));
             }
             3 if !subscriptions.is_empty() => {
                 let idx = (seed as usize) % subscriptions.len();
@@ -313,7 +314,7 @@ async fn run_graph_subscription_oracle(mut seed: u64) {
             2 if !subscriptions.is_empty() => {
                 let idx = (seed as usize) % subscriptions.len();
                 let subscription = subscriptions.swap_remove(idx);
-                assert!(database.unsubscribe(subscription.subscription.id()).await);
+                assert!(database.unsubscribe(subscription.subscription.id()));
             }
             3 => {
                 let result = database

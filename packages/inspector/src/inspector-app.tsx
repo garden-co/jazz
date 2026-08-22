@@ -17,6 +17,24 @@ import { InspectorRoutes } from "./routes";
 const HOST_POLL_INTERVAL_MS = 200;
 const HOST_POLL_TIMEOUT_MS = 15_000;
 
+function runtimeContextsEqual(
+  left: InspectorRuntimeContext[],
+  right: InspectorRuntimeContext[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((context, index) => {
+      const candidate = right[index];
+      return (
+        candidate?.key === context.key &&
+        candidate.appId === context.appId &&
+        candidate.dbName === context.dbName &&
+        JSON.stringify(candidate.schema) === JSON.stringify(context.schema)
+      );
+    })
+  );
+}
+
 class InspectorConnectionErrorBoundary extends Component<
   { children: ReactNode },
   { error: Error | null }
@@ -97,7 +115,7 @@ export function InspectorApp() {
     if (!session) return;
     const timer = setInterval(() => {
       void session.listContexts().then((next) => {
-        setContexts(next);
+        setContexts((current) => (runtimeContextsEqual(current, next) ? current : next));
         setSelectedKey((current) =>
           current && next.some((context) => context.key === current)
             ? current

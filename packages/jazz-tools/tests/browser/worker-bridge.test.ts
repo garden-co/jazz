@@ -1042,6 +1042,48 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(rowsAtEdge.some((row) => row.id === insertedTodo.id)).toBe(true);
   }, 60000);
 
+  it("preserves admin write authority through the SharedWorker relay", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "sync-admin-write-authority",
+      readOnlyPermissions,
+    );
+    const db = track(
+      await createDb({
+        appId: syncServer.appId,
+        serverUrl: syncServer.serverUrl,
+        adminSecret: syncServer.adminSecret,
+        driver: {
+          type: "persistent",
+          dbName: uniqueDbName("sync-admin-write-authority"),
+        },
+        schema: app,
+      }),
+    );
+
+    const inserted = db.insert(todos, {
+      title: `admin-write-${Date.now()}`,
+      done: false,
+    });
+    await withTimeout(inserted.wait({ tier: "edge" }), 10_000, "admin insert was rejected");
+
+    const updatedTitle = `admin-update-${Date.now()}`;
+    await withTimeout(
+      db.update(todos, inserted.value.id, { title: updatedTitle }).wait({ tier: "edge" }),
+      10_000,
+      "admin update was rejected",
+    );
+
+    const rows = await waitForTodos(
+      db,
+      (current) =>
+        current.some((row) => row.id === inserted.value.id && row.title === updatedTitle),
+      "admin update should be authoritative",
+      15_000,
+      "edge",
+    );
+    expect(rows.find((row) => row.id === inserted.value.id)?.title).toBe(updatedTitle);
+  });
+
   it("server permissions check rejects client optimistic insert - wait notification", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-wait-edge",
@@ -1943,7 +1985,17 @@ describe("SharedWorker bridge with IndexedDB", () => {
       done: index % 2 === 0,
     }));
     await Promise.all(
-      rows.map((row, index) => insertRemoteBrowserDbRow(remoteDbId, index % 3, row)),
+      rows.map((row, index) =>
+        Promise.race([
+          insertRemoteBrowserDbRow(remoteDbId, index % 3, row),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`local settlement timed out for write ${index}`)),
+              8000,
+            ),
+          ),
+        ]),
+      ),
     );
 
     await waitForCondition(
@@ -2105,7 +2157,17 @@ describe("SharedWorker bridge with IndexedDB", () => {
       done: index % 2 === 0,
     }));
     await Promise.all(
-      expected.map((row, index) => insertRemoteBrowserDbRow(remoteDbId, index % 2, row)),
+      expected.map((row, index) =>
+        Promise.race([
+          insertRemoteBrowserDbRow(remoteDbId, index % 2, row),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`local settlement timed out for write ${index}`)),
+              8000,
+            ),
+          ),
+        ]),
+      ),
     );
     await waitForCondition(
       async () => (await queryRemoteBrowserDbRows(remoteDbId, 0)).length === expected.length,
@@ -2125,27 +2187,72 @@ describe("SharedWorker bridge with IndexedDB", () => {
   });
 
   it.runIf(__JAZZ_BROWSER_SOAK__ === "1")(
-    "survives repeated concurrent writes and SharedWorker restarts without cardinality drift",
+    "survives repeated durable writes across fresh SharedWorker lifecycles",
     async () => {
+      for (let round = 0; round < 24; round += 1) {
+        const db = track(
+          await createDb({
+            appId: "test-app",
+            driver: {
+              type: "persistent",
+              dbName: uniqueDbName(`durable-lifecycle-soak-${round}`),
+            },
+          }),
+        );
+        const inserted = await db
+          .insert(todos, { title: `durable-${round}`, done: false })
+          .wait({ tier: "local" });
+        await db.update(todos, inserted.id, { done: true }).wait({ tier: "local" });
+        expect(await db.all(allTodos, { tier: "local" })).toEqual([{ ...inserted, done: true }]);
+        await db.shutdown();
+        untrack(db);
+      }
+    },
+    180_000,
+  );
+
+  it.runIf(__JAZZ_BROWSER_SOAK__ === "1")(
+    "survives randomized concurrent writes and SharedWorker restarts without cardinality drift",
+    async () => {
+      const seed = 0x5eed_1703;
+      let randomState = seed;
+      const random = () => {
+        randomState += 0x6d2b_79f5;
+        let value = randomState;
+        value = Math.imul(value ^ (value >>> 15), value | 1);
+        value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+        return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+      };
       const remoteDbId = trackRemoteBrowserDb(uniqueDbName("worker-restart-soak"));
-      await createRemoteBrowserDb({
-        id: remoteDbId,
-        appId: "test-app",
-        dbName: uniqueDbName("worker-restart-soak-store"),
-        table: "todos",
-        schemaJson: JSON.stringify(app.wasmSchema),
-        tabCount: 3,
-        initialize: true,
-      });
+      await withTimeout(
+        createRemoteBrowserDb({
+          id: remoteDbId,
+          appId: "test-app",
+          dbName: uniqueDbName("worker-restart-soak-store"),
+          table: "todos",
+          schemaJson: JSON.stringify(app.wasmSchema),
+          tabCount: 3,
+          initialize: true,
+        }),
+        20_000,
+        "Soak initial three-tab open timed out",
+      );
       const expectedTitles = new Set<string>();
       for (let round = 0; round < 12; round += 1) {
-        const writes = Array.from({ length: 6 }, (_, index) => ({
-          title: `soak-${round}-${index}-${Math.random().toString(36).slice(2)}`,
-          done: (round + index) % 2 === 0,
+        const writes = Array.from({ length: 3 + Math.floor(random() * 7) }, (_, index) => ({
+          row: {
+            title: `soak-${seed.toString(16)}-${round}-${index}-${Math.floor(random() * 1e9)}`,
+            done: random() < 0.5,
+          },
+          tabIndex: Math.floor(random() * 3),
         }));
-        writes.forEach((row) => expectedTitles.add(row.title));
-        await Promise.all(
-          writes.map((row, index) => insertRemoteBrowserDbRow(remoteDbId, index % 3, row)),
+        writes.forEach(({ row }) => expectedTitles.add(row.title));
+        await withTimeout(
+          Promise.all(
+            writes.map(({ row, tabIndex }) => insertRemoteBrowserDbRow(remoteDbId, tabIndex, row)),
+          ),
+          20_000,
+          `Soak round ${round} writes timed out`,
         );
         await waitForCondition(
           async () =>
@@ -2153,9 +2260,19 @@ describe("SharedWorker bridge with IndexedDB", () => {
           10_000,
           `Soak round ${round} should converge before restart`,
         );
-        await restartRemoteBrowserDb(remoteDbId);
-        const snapshots = await Promise.all(
-          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        try {
+          await withTimeout(
+            restartRemoteBrowserDb(remoteDbId),
+            20_000,
+            `Soak round ${round} worker restart timed out`,
+          );
+        } catch (error) {
+          throw new Error(`Soak restart failed in round ${round}`, { cause: error });
+        }
+        const snapshots = await withTimeout(
+          Promise.all([0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex))),
+          20_000,
+          `Soak round ${round} snapshots timed out`,
         );
         for (const snapshot of snapshots) {
           expect(snapshot).toHaveLength(expectedTitles.size);

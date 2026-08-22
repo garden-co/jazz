@@ -37,8 +37,13 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
-    subscriber.borrow_mut().tick().unwrap();
-    upstream.borrow_mut().tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        upstream.borrow_mut().tick().unwrap();
+        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![stale] {
+            break;
+        }
+    }
     assert_eq!(
         row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
         vec![stale]
@@ -107,7 +112,18 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         known_authorization_progress, 2,
         "the second usage site must exercise a stale authorization cursor"
     );
-    subscriber.borrow_mut().tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate { subscription, .. }
+                    if *subscription == second_subscription
+            )
+        }) {
+            break;
+        }
+    }
     server_sent.borrow_mut().extend(held_first_usage_updates);
 
     let second_update = server_sent

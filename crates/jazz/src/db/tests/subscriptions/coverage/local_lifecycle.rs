@@ -295,7 +295,7 @@ fn db_facade_schedules_immediate_tick_for_upstream_connection() {
 }
 
 #[test]
-fn upstream_inbound_application_schedules_immediate_tick() {
+fn upstream_inbound_application_completes_synchronously_or_schedules_continuation() {
     let schema = schema();
     let author = AuthorId::from_bytes([0xa1; 16]);
     let server = open_core(0x51, author, &schema);
@@ -314,9 +314,19 @@ fn upstream_inbound_application_schedules_immediate_tick() {
 
     client.tick().unwrap();
     assert!(scheduler.take().is_empty());
-    server.tick().unwrap();
-    assert!(scheduler.take().is_empty());
-    client.tick().unwrap();
-
-    assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
+    let mut scheduled = Vec::new();
+    let mut delivered = Vec::new();
+    for _ in 0..32 {
+        server.tick().unwrap();
+        client.tick().unwrap();
+        scheduled.extend(scheduler.take());
+        delivered.extend(std::iter::from_fn(|| subscription.try_next_event()));
+        if !scheduled.is_empty() || !delivered.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        !delivered.is_empty() || scheduled == vec![TickUrgency::Immediate],
+        "inbound application must either publish resident output in this turn or schedule its continuation"
+    );
 }

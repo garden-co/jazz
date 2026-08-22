@@ -146,6 +146,7 @@ async fn recursive_graph_subscriptions_settle_with_async_idb_tree_storage() {
         .subscribe_one_sink(reachability_graph(16))
         .await
         .unwrap();
+    reopened.drive_progress().await.unwrap();
     let mut reopened_values = expect_recv_vals(&reopened_subscription);
     sort_pairs_by_value(&mut reopened_values);
     assert_eq!(reopened_values.len(), 6);

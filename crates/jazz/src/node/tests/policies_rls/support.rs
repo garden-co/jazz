@@ -137,7 +137,7 @@ fn assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
     let expected_rows = core
         .query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
         .unwrap();
-    let (receiver, maintained, _terminal_schemas, transitions, _tables) = core
+    let (receiver, maintained, _terminal_schemas, transitions, _tables, _incomplete) = core
         .open_seeded_maintained_subscription_view(
             shape,
             binding,
@@ -146,7 +146,7 @@ fn assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
             &Default::default(),
         )
         .unwrap();
-    crate::db::block_on(core.unsubscribe_groove_subscription(receiver.id()));
+    core.unsubscribe_groove_subscription(receiver.id());
 
     assert_eq!(
         transitions

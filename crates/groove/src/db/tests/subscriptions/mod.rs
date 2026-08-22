@@ -639,7 +639,7 @@ async fn dropping_subscription_receiver_unsubscribes_on_next_message() {
     );
     database.commit_batch(batch).await.unwrap();
 
-    assert!(!database.unsubscribe(subscription_id).await);
+    assert!(!database.unsubscribe(subscription_id));
 }
 
 #[futures_test::test]
@@ -658,7 +658,7 @@ async fn dropped_subscription_receiver_can_be_pruned_without_a_later_message() {
 
     assert_eq!(database.prune_dropped_subscriptions().await.unwrap(), 1);
     assert_eq!(database.runtime_stats().active_subscriptions, 0);
-    assert!(!database.unsubscribe(subscription_id).await);
+    assert!(!database.unsubscribe(subscription_id));
 }
 
 #[futures_test::test]
