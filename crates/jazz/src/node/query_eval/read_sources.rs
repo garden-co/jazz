@@ -2786,7 +2786,7 @@ where
         else {
             // Complex paths deliberately retain the ordinary full-scan source.
             // In particular, we never infer an index restriction through a
-            // join, union, OR, or non-equality predicate.
+            // relational operator or an alternative branch.
             return Ok(BTreeMap::new());
         };
 
@@ -2975,8 +2975,9 @@ where
 
 /// Return only restrictions that are plainly safe to push into a physical
 /// source.  The result is intentionally conservative: this planner does not
-/// reason through relational operators or partially extract predicates.  A
-/// full normalized program still runs after the scan, so this is a physical
+/// reason through relational operators or alternative predicate branches. It
+/// may retain equality restrictions from an enclosing conjunction. A full
+/// normalized program still runs after the scan, so this is a physical
 /// candidate-selection optimization, never a second evaluator.
 fn normalized_program_equalities(
     shape: &NormalizedRowSetShape,
@@ -2994,10 +2995,7 @@ fn normalized_program_equalities(
             else {
                 return Ok(None);
             };
-            if !collect_normalized_program_equalities(predicate, binding, policy, &mut equalities)?
-            {
-                return Ok(None);
-            }
+            collect_normalized_program_equalities(predicate, binding, policy, &mut equalities)?;
             Ok(Some(equalities))
         }
         RowSetExpr::Distinct { input, .. }
@@ -3024,13 +3022,11 @@ fn collect_normalized_program_equalities(
     binding: &ProgramBinding,
     policy: &PolicyContext,
     equalities: &mut BTreeMap<SourceId, BTreeMap<String, Value>>,
-) -> Result<bool, Error> {
+) -> Result<(), Error> {
     match predicate {
         NormalizedPredicateExpr::And(predicates) => {
             for predicate in predicates {
-                if !collect_normalized_program_equalities(predicate, binding, policy, equalities)? {
-                    return Ok(false);
-                }
+                collect_normalized_program_equalities(predicate, binding, policy, equalities)?;
             }
         }
         NormalizedPredicateExpr::Compare {
@@ -3054,8 +3050,6 @@ fn collect_normalized_program_equalities(
                     .or_default()
                     .entry(field)
                     .or_insert(value);
-            } else {
-                return Ok(false);
             }
         }
         NormalizedPredicateExpr::ArrayContains { .. }
@@ -3066,11 +3060,14 @@ fn collect_normalized_program_equalities(
         | NormalizedPredicateExpr::IsNotNull(_)
         | NormalizedPredicateExpr::IsNull(_)
         | NormalizedPredicateExpr::Not(_)
-        | NormalizedPredicateExpr::Or(_)
-        | NormalizedPredicateExpr::TextContains { .. } => return Ok(false),
+        | NormalizedPredicateExpr::TextContains { .. } => {}
+        // Do not descend into a disjunction: an equality within only one
+        // branch is not a restriction on the other branch. An enclosing AND
+        // may still contribute an independent safe equality.
+        NormalizedPredicateExpr::Or(_) => {}
         NormalizedPredicateExpr::True => {}
     }
-    Ok(true)
+    Ok(())
 }
 
 fn normalized_program_equality(

@@ -406,9 +406,10 @@ range (`INV-LOWER-23`; this is what makes snapshot-qualified bases and historica
 bounded rather than gated); dry-run policy
 probes; and recursion seed hydration (`INV-LOWER-22`–`INV-LOWER-24`). The
 source resolver records a loud full-scan counter when a requested source cannot
-be represented by a sound static path. OR, non-equality, joins,
-missing/nullable claims, and non-Global reads use that fallback, not a different
-semantic evaluator. Prepared-shape steady-state probing is the later
+be represented by a sound static path. Alternative branches, predicates without
+an eligible equality, joins, missing/nullable claims, and non-Global reads use
+that fallback, not a different semantic evaluator. Prepared-shape steady-state
+probing is the later
 overlay-probe phase (groove ch. 4 §4.6).
 
 ### 14.7 Existence lowering for inherited-parent policy joins
