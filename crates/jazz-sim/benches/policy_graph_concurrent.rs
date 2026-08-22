@@ -952,11 +952,14 @@ fn run_connect_and_subscribe(
                 right_inbound: Rc::clone(&client_relay.right_inbound),
                 right_to_left: Rc::clone(&client_relay.right_to_left),
             };
-            _relay_upstream = Some(relay_node.db.connect_upstream(relay_core.left_transport));
+            _relay_upstream = Some(jazz::db::block_on(
+                relay_node.db.connect_upstream(relay_core.left_transport),
+            ));
             _core_sub = seeded
                 .core
                 .accept_subscriber(relay_core.right_transport, AuthorId::SYSTEM);
-            _client_upstream = client.db.connect_upstream(client_relay.left_transport);
+            _client_upstream =
+                jazz::db::block_on(client.db.connect_upstream(client_relay.left_transport));
             _relay_sub = Some(relay_node.db.accept_edge_subscriber_with_claims(
                 client_relay.right_transport,
                 config.identity.author(seeded),
@@ -975,7 +978,8 @@ fn run_connect_and_subscribe(
                 right_to_left: Rc::clone(&client_core.right_to_left),
             };
             _relay_upstream = None;
-            _client_upstream = client.db.connect_upstream(client_core.left_transport);
+            _client_upstream =
+                jazz::db::block_on(client.db.connect_upstream(client_core.left_transport));
             _core_sub = seeded.core.accept_edge_subscriber_with_claims(
                 client_core.right_transport,
                 config.identity.author(seeded),

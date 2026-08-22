@@ -414,10 +414,10 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
     let inbound = Rc::new(RefCell::new(VecDeque::new()));
     let (dir, db) = open_db(node(70), schema.clone());
-    let _upstream = db.connect_upstream(Box::new(QueueTransport {
+    let _upstream = block_on(db.connect_upstream(Box::new(QueueTransport {
         outbound: Rc::clone(&outbound),
         inbound: Rc::clone(&inbound),
-    }));
+    })));
     let mut edge_acceptance = Histogram::new(3).unwrap();
     let mut contents = vec![Vec::<u8>::new(); config.streams];
     for stream in 0..config.streams {
@@ -576,7 +576,7 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
     }
 
     let (client_transport, server_transport) = queue_duplex();
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, AuthorId::SYSTEM);
     let query = Query::from(STREAM_DOCS);
     let prepared = client
@@ -645,7 +645,7 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
     }
 
     let (client_transport, server_transport) = queue_duplex();
-    let _resumed_upstream = client.connect_upstream(client_transport);
+    let _resumed_upstream = block_on(client.connect_upstream(client_transport));
     let resumed = server.accept_subscriber_with_resume(server_transport, AuthorId::SYSTEM, cursor);
 
     client.tick().await.expect("client resumed subscribe tick");

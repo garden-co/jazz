@@ -1112,10 +1112,10 @@ fn open_clients(
             let (dir, db) = open_db(node(byte), schema.clone(), AuthorId::from_bytes([byte; 16]));
             let outbound = Rc::new(RefCell::new(VecDeque::new()));
             let inbound = Rc::new(RefCell::new(VecDeque::new()));
-            let upstream = db.connect_upstream(Box::new(QueueTransport {
+            let upstream = jazz::db::block_on(db.connect_upstream(Box::new(QueueTransport {
                 outbound: Rc::clone(&outbound),
                 inbound: Rc::clone(&inbound),
-            }));
+            })));
             let (edge_dir, edge) = open_node(node(base_node + 100 + idx as u8), schema.clone());
             let mut client = ClientHarness {
                 _dir: dir,

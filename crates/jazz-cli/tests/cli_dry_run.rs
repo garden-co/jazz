@@ -289,7 +289,7 @@ fn open_connected_client(
     ))
     .expect("open client db");
     let wire = QueuedWireTransport::default();
-    db.connect_upstream(Box::new(WireTransportAdapter::current(wire.clone())));
+    block_on(db.connect_upstream(Box::new(WireTransportAdapter::current(wire.clone()))));
     let socket = connect_server_ws(ws_url, subject);
     ConnectedClient { db, wire, socket }
 }
@@ -940,11 +940,13 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
 
     let reconnected_wire = QueuedWireTransport::default();
-    reader
-        .db
-        .connect_upstream(Box::new(WireTransportAdapter::current(
-            reconnected_wire.clone(),
-        )));
+    block_on(
+        reader
+            .db
+            .connect_upstream(Box::new(WireTransportAdapter::current(
+                reconnected_wire.clone(),
+            ))),
+    );
     reader.wire = reconnected_wire;
     reader.socket = connect_server_ws(&server.ws_url, subject);
     assert!(pump_websocket(&mut reader.socket, &reader.db, &reader.wire));

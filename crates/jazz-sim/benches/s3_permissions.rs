@@ -2597,7 +2597,7 @@ fn open_db_client(
     let duplex = duplex_counted();
     let bytes = Rc::clone(&duplex.server_to_client_bytes);
     let floor_bytes = Rc::clone(&duplex.server_to_client_floor_bytes);
-    let _upstream = db.connect_upstream(duplex.client_transport);
+    let _upstream = block_on(db.connect_upstream(duplex.client_transport));
     let _subscriber = core
         .server
         .accept_subscriber(duplex.server_transport, author);

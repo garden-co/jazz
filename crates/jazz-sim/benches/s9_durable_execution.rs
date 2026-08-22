@@ -1037,10 +1037,10 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
     );
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
     let inbound = Rc::new(RefCell::new(VecDeque::new()));
-    let upstream = db.connect_upstream(Box::new(QueueTransport {
+    let upstream = jazz::db::block_on(db.connect_upstream(Box::new(QueueTransport {
         outbound: Rc::clone(&outbound),
         inbound: Rc::clone(&inbound),
-    }));
+    })));
     let (edge_dir, edge) = open_node(edge_uuid, schema);
     let mut worker = WorkerHarness {
         _dir: dir,
