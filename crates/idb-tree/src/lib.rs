@@ -31,6 +31,8 @@ pub enum Error {
     PageTooLarge { page_id: PageId, page_size: usize },
     #[error("IDBTree store error: {0}")]
     Store(String),
+    #[error("an IDBTree commit is already in flight")]
+    CommitInFlight,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -66,6 +68,18 @@ pub struct IdbTree<S> {
     pages: HashMap<PageId, Page>,
     dirty: BTreeMap<PageId, Page>,
     deleted: Vec<PageId>,
+    commit_in_flight: bool,
+}
+
+#[derive(Debug)]
+pub struct PreparedCommit {
+    commit: Commit,
+}
+
+impl PreparedCommit {
+    pub fn commit(&self) -> &Commit {
+        &self.commit
+    }
 }
 
 impl<S: PageStore> IdbTree<S> {
@@ -79,6 +93,7 @@ impl<S: PageStore> IdbTree<S> {
             pages: HashMap::new(),
             dirty: BTreeMap::new(),
             deleted: Vec::new(),
+            commit_in_flight: false,
         };
         if tree.metadata.page_size != options.page_size {
             return Err(Error::InvalidOptions(format!(
@@ -213,8 +228,22 @@ impl<S: PageStore> IdbTree<S> {
     /// wrapper may swap generations before awaiting this call; the core keeps
     /// this explicit boundary small and deterministic.
     pub async fn flush(&mut self) -> Result<(), Error> {
-        if self.dirty.is_empty() && self.deleted.is_empty() {
+        let Some(prepared) = self.prepare_commit()? else {
             return Ok(());
+        };
+        let outcome = self.store.commit(prepared.commit()).await;
+        self.complete_commit(prepared, outcome)
+    }
+
+    /// Swap the active dirty generation without awaiting persistence. New
+    /// writes can immediately begin populating a fresh generation while the
+    /// returned immutable page images are committed by the caller.
+    pub fn prepare_commit(&mut self) -> Result<Option<PreparedCommit>, Error> {
+        if self.commit_in_flight {
+            return Err(Error::CommitInFlight);
+        }
+        if self.dirty.is_empty() && self.deleted.is_empty() {
+            return Ok(None);
         }
         let mut pages = Vec::with_capacity(self.dirty.len());
         for (&page_id, page) in &self.dirty {
@@ -227,20 +256,62 @@ impl<S: PageStore> IdbTree<S> {
             }
             pages.push((page_id, bytes));
         }
-        let next = self
-            .store
-            .commit(Commit {
-                expected_generation: self.metadata.generation,
-                metadata: self.metadata.clone(),
-                pages,
-                deleted_page_ids: self.deleted.clone(),
-            })
-            .await
-            .map_err(Error::Store)?;
-        self.metadata = next;
+        self.commit_in_flight = true;
+        let commit = Commit {
+            expected_generation: self.metadata.generation,
+            metadata: self.metadata.clone(),
+            pages,
+            deleted_page_ids: std::mem::take(&mut self.deleted),
+        };
         self.dirty.clear();
-        self.deleted.clear();
-        Ok(())
+        Ok(Some(PreparedCommit { commit }))
+    }
+
+    /// Reconcile an atomic commit result with writes made after
+    /// [`prepare_commit`](Self::prepare_commit). On failure, pages unchanged
+    /// since the swap are marked dirty again; newer dirty versions win.
+    pub fn complete_commit(
+        &mut self,
+        prepared: PreparedCommit,
+        outcome: Result<Metadata, String>,
+    ) -> Result<(), Error> {
+        if !self.commit_in_flight {
+            return Err(Error::InvalidPage(
+                "completed an IDBTree commit that was not in flight".to_owned(),
+            ));
+        }
+        self.commit_in_flight = false;
+        match outcome {
+            Ok(committed) => {
+                if committed.generation != prepared.commit.expected_generation + 1 {
+                    return Err(Error::Store(format!(
+                        "commit returned generation {}, expected {}",
+                        committed.generation,
+                        prepared.commit.expected_generation + 1
+                    )));
+                }
+                // Root and allocation metadata may already describe writes in
+                // the next dirty generation. Only advance its durable base.
+                self.metadata.generation = committed.generation;
+                Ok(())
+            }
+            Err(error) => {
+                for (page_id, _) in prepared.commit.pages {
+                    if self.dirty.contains_key(&page_id) {
+                        continue;
+                    }
+                    if let Some(page) = self.pages.get(&page_id) {
+                        self.dirty.insert(page_id, page.clone());
+                    }
+                }
+                for page_id in prepared.commit.deleted_page_ids {
+                    if !self.pages.contains_key(&page_id) && !self.deleted.contains(&page_id) {
+                        self.deleted.push(page_id);
+                    }
+                }
+                Err(Error::Store(error))
+            }
+        }
     }
 
     async fn load_page(&mut self, page_id: PageId) -> Result<&Page, Error> {
@@ -600,6 +671,55 @@ mod tests {
         });
     }
 
+    #[test]
+    fn writes_continue_in_a_new_generation_while_commit_is_in_flight() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let options = Options::default();
+            let mut tree = IdbTree::open(store.clone(), options).await.unwrap();
+            tree.put(b"before".to_vec(), b"one".to_vec()).await.unwrap();
+            let prepared = tree.prepare_commit().unwrap().unwrap();
+
+            tree.put(b"during".to_vec(), b"two".to_vec()).await.unwrap();
+            assert!(tree.dirty_page_count() > 0);
+            let outcome = store.commit(prepared.commit()).await;
+            tree.complete_commit(prepared, outcome).unwrap();
+            assert!(tree.dirty_page_count() > 0);
+            tree.flush().await.unwrap();
+
+            let mut reopened = IdbTree::open(store, options).await.unwrap();
+            assert_eq!(
+                reopened.get(b"before").await.unwrap(),
+                Some(b"one".to_vec())
+            );
+            assert_eq!(
+                reopened.get(b"during").await.unwrap(),
+                Some(b"two".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn failed_commit_restores_unchanged_pages_to_the_dirty_generation() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let options = Options::default();
+            let mut tree = IdbTree::open(store.clone(), options).await.unwrap();
+            tree.put(b"retry".to_vec(), b"me".to_vec()).await.unwrap();
+            let prepared = tree.prepare_commit().unwrap().unwrap();
+            assert_eq!(tree.dirty_page_count(), 0);
+            assert!(
+                tree.complete_commit(prepared, Err("injected failure".to_owned()))
+                    .is_err()
+            );
+            assert!(tree.dirty_page_count() > 0);
+
+            tree.flush().await.unwrap();
+            let mut reopened = IdbTree::open(store, options).await.unwrap();
+            assert_eq!(reopened.get(b"retry").await.unwrap(), Some(b"me".to_vec()));
+        });
+    }
+
     #[derive(Clone)]
     struct YieldingPageStore {
         inner: MemoryPageStore,
@@ -628,7 +748,7 @@ mod tests {
             })
         }
 
-        fn commit(&self, commit: Commit) -> BoxFuture<'_, Result<Metadata, String>> {
+        fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
             self.inner.commit(commit)
         }
     }

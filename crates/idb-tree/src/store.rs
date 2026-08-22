@@ -26,6 +26,7 @@ impl Metadata {
     }
 }
 
+#[derive(Debug)]
 pub struct Commit {
     pub expected_generation: u64,
     pub metadata: Metadata,
@@ -36,7 +37,7 @@ pub struct Commit {
 pub trait PageStore {
     fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>>;
     fn read_page(&self, page_id: PageId) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>>;
-    fn commit(&self, commit: Commit) -> BoxFuture<'_, Result<Metadata, String>>;
+    fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>>;
 }
 
 /// Deterministic store used by the engine contract tests. Async/failure
@@ -62,7 +63,7 @@ impl PageStore for MemoryPageStore {
         Box::pin(async move { Ok(self.inner.borrow().pages.get(&page_id).cloned()) })
     }
 
-    fn commit(&self, commit: Commit) -> BoxFuture<'_, Result<Metadata, String>> {
+    fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
         Box::pin(async move {
             let mut state = self.inner.borrow_mut();
             let generation = state
@@ -75,13 +76,13 @@ impl PageStore for MemoryPageStore {
                     commit.expected_generation
                 ));
             }
-            for (page_id, page) in commit.pages {
-                state.pages.insert(page_id, page);
+            for (page_id, page) in &commit.pages {
+                state.pages.insert(*page_id, page.clone());
             }
-            for page_id in commit.deleted_page_ids {
-                state.pages.remove(&page_id);
+            for page_id in &commit.deleted_page_ids {
+                state.pages.remove(page_id);
             }
-            let mut metadata = commit.metadata;
+            let mut metadata = commit.metadata.clone();
             metadata.generation = generation + 1;
             state.metadata = Some(metadata.clone());
             Ok(metadata)
