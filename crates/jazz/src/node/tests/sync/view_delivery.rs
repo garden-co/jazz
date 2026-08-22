@@ -78,6 +78,111 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
     );
 }
 
+/// A fresh subscriber receives the exact immutable node closure of a selected
+/// chunked owner row, so it can materialize the public value without an
+/// out-of-band content fetch.
+///
+/// ```text
+/// core ──owner version + reachable hidden-node rows──► fresh reader
+/// ```
+#[test]
+fn view_updates_ship_reachable_large_value_nodes_to_fresh_reader() {
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let owner = row(0x91);
+    let title = "chunked 🎷 ".repeat(12_000);
+    let domain = crate::large_values::LargeValueOwnerDomain::new("todos", owner.0).unwrap();
+    // First commit a different valid value. Its nodes remain in retained
+    // history after the owner advances, but are unreachable from the selected
+    // current root and therefore must not ride along with the current view.
+    let mut unreachable_nodes = crate::large_values::MemoryLargeValueNodeRows::default();
+    let unreachable_value = crate::large_values::LargeValue::create(
+        crate::large_values::ValueKind::String,
+        &domain,
+        b"superseded value that must not be shipped".repeat(1_000),
+        1,
+        crate::large_values::ContentTree::new(Default::default()).unwrap(),
+        &mut unreachable_nodes,
+    )
+    .unwrap();
+    let table = core.table("todos").unwrap().clone();
+    let value_schema = table.columns[0].large_value.as_ref().unwrap();
+    let unreachable_stored = unreachable_value
+        .encode_storage_value(value_schema)
+        .unwrap();
+    let unreachable_rows = unreachable_nodes.into_rows().collect::<Vec<_>>();
+    let unreachable_row_ids = unreachable_rows
+        .iter()
+        .map(|node| RowUuid(node.row_id))
+        .collect::<BTreeSet<_>>();
+    let mut superseded = vec![MergeableCommit::new("todos", owner, 10).cells(
+        BTreeMap::from([("title".to_owned(), unreachable_stored)]),
+    )];
+    superseded.extend(unreachable_rows.into_iter().map(|node| {
+        MergeableCommit::new(node.table_name(), RowUuid(node.row_id), 10)
+            .cells(node.cells(Default::default()).unwrap())
+    }));
+    let superseded_tx = core.commit_mergeable_many(superseded).unwrap();
+    core.apply_fate_update(
+        superseded_tx,
+        Fate::Accepted,
+        Some(GlobalTime(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    let mut nodes = crate::large_values::MemoryLargeValueNodeRows::default();
+    let value = crate::large_values::LargeValue::create(
+        crate::large_values::ValueKind::String,
+        &domain,
+        title.as_bytes().to_vec(),
+        1,
+        crate::large_values::ContentTree::new(Default::default()).unwrap(),
+        &mut nodes,
+    )
+    .unwrap();
+    let stored = value.encode_storage_value(value_schema).unwrap();
+    let mut commits = vec![MergeableCommit::new("todos", owner, 20).cells(BTreeMap::from([(
+        "title".to_owned(),
+        stored,
+    )]))];
+    commits.extend(nodes.into_rows().map(|node| {
+        MergeableCommit::new(node.table_name(), RowUuid(node.row_id), 20)
+            .cells(node.cells(Default::default()).unwrap())
+    }));
+    let tx_id = core.commit_mergeable_many(commits).unwrap();
+    core.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalTime(2)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    let update = core.view_update_for_current_rows("todos").unwrap();
+    let node_table = crate::large_values::large_value_node_table_name("todos");
+    let shipped_node_rows = version_bundles_for_update(&update)
+            .iter()
+            .flat_map(|bundle| bundle.versions.iter())
+            .filter(|version| version.table() == node_table)
+            .map(|version| version.row_uuid())
+            .collect::<BTreeSet<_>>();
+    assert!(
+        !shipped_node_rows.is_empty(),
+        "the view payload must include generated node-row versions"
+    );
+    assert!(
+        shipped_node_rows.is_disjoint(&unreachable_row_ids),
+        "the view payload must exclude unreachable hidden rows"
+    );
+    reader.apply_sync_message(update).unwrap();
+    let row = reader
+        .local_current_row("todos", owner)
+        .unwrap()
+        .expect("fresh reader receives owner row and closure");
+    assert_eq!(row.cell(&table, "title"), Some(Value::String(title)));
+}
+
 #[test]
 /// A global whole-table rehydration ignores a newer, unacknowledged local write.
 ///

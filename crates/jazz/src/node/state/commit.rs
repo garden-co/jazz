@@ -508,6 +508,97 @@ where
         ))
     }
 
+    /// Return the exact immutable generated-node rows required to materialize
+    /// the chunked large values in `versions`.
+    ///
+    /// The rows remain ordinary, policy-authorized Jazz history rows. This
+    /// merely augments a view-scoped bundle with the transitive data dependency
+    /// of an already-authorized owner version, rather than teaching sync a
+    /// large-value-specific payload format or broadening the hidden table's
+    /// query result set.
+    pub(super) fn large_value_node_closure_for_versions(
+        &mut self,
+        versions: &[VersionRow],
+    ) -> Result<BTreeSet<(String, RowUuid, TxId)>, Error> {
+        let mut roots = Vec::new();
+        for version in versions {
+            if version.deletion().is_some()
+                || version
+                    .table()
+                    .starts_with(crate::large_values::LARGE_VALUE_NODE_TABLE_PREFIX)
+            {
+                continue;
+            }
+            let schema_version = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "large-value owner version schema alias must exist",
+                ))?;
+            let table = self.table_in_schema(version.table(), schema_version)?.clone();
+            let cells = version.cells(&table)?;
+            for column in &table.columns {
+                let Some(large_schema) = &column.large_value else {
+                    continue;
+                };
+                let Some(value) = cells.get(&column.name) else {
+                    continue;
+                };
+                let value = match value {
+                    Value::Nullable(Some(value)) => value.as_ref(),
+                    Value::Nullable(None) => continue,
+                    value => value,
+                };
+                if !crate::large_values::LargeValue::storage_value_is_framed(large_schema, value)
+                {
+                    continue;
+                }
+                let crate::large_values::LargeValue::Chunked(chunked) =
+                    crate::large_values::LargeValue::decode_storage_value(large_schema, value)
+                        .map_err(|_| Error::InvalidStoredValue("invalid large-value owner cell"))?
+                else {
+                    continue;
+                };
+                roots.push((
+                    crate::large_values::LargeValueOwnerDomain::new(
+                        version.table(),
+                        version.row_uuid().0,
+                    )
+                    .map_err(|_| Error::InvalidStoredValue("invalid large-value owner domain"))?,
+                    chunked.root,
+                ));
+            }
+        }
+
+        let mut closure = BTreeSet::new();
+        let mut pending = roots;
+        let mut visited = BTreeSet::new();
+        while let Some((domain, id)) = pending.pop() {
+            if !visited.insert((domain.clone(), id)) {
+                continue;
+            }
+            let payload = {
+                let reader = NodeLargeValueReader::new(self);
+                crate::large_values::LargeValueNodeRows::get(&reader, &domain, id)
+                    .map_err(|_| Error::InvalidStoredValue("missing or invalid large-value node row"))?
+                    .ok_or(Error::InvalidStoredValue("missing large-value node row"))?
+            };
+            let table = crate::large_values::large_value_node_table_name(domain.owner_table());
+            let row = self
+                .local_current_row(&table, RowUuid(id.row_id()))?
+                .ok_or(Error::InvalidStoredValue("missing large-value node current row"))?;
+            let tx_id = self
+                .current_row_tx_id(&row)
+                .ok_or(Error::InvalidStoredValue("large-value node lacks transaction provenance"))?;
+            closure.insert((table, RowUuid(id.row_id()), tx_id));
+            for child in crate::large_values::child_node_ids(&payload)
+                .map_err(|_| Error::InvalidStoredValue("invalid large-value node payload"))?
+            {
+                pending.push((domain.clone(), child));
+            }
+        }
+        Ok(closure)
+    }
+
     /// Commit a local mergeable write and leave its fate pending.
     pub fn commit_mergeable(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
         commit.validate()?;

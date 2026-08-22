@@ -132,6 +132,19 @@ impl LargeValueNodeId {
     }
 }
 
+/// Decode the direct child ids of one canonical tree-node payload.
+///
+/// This is used by the ordinary view-bundle builder to compute the exact
+/// immutable-row closure needed to materialize a selected owner row. It does
+/// not introduce a second transport: callers ship the returned ids as normal
+/// Jazz row versions from the generated node table.
+pub(crate) fn child_node_ids(payload: &[u8]) -> Result<Vec<LargeValueNodeId>, ContentError> {
+    match decode_node(payload, Default::default())? {
+        TreeNode::Leaf { .. } => Ok(Vec::new()),
+        TreeNode::Branch(children) => Ok(children.into_iter().map(|child| child.id).collect()),
+    }
+}
+
 /// Owning application location used to route and interpret node rows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LargeValueOwnerDomain {

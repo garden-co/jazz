@@ -531,7 +531,7 @@ where
             .chain(known_tuple_source_bundle_rows)
             .collect::<BTreeSet<_>>();
         let relation_edge_add_rows = relation_edge_version_rows_for_bundle(&program_fact_adds);
-        let wanted_add_rows_by_tx = row_result_adds
+        let mut wanted_add_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
             .chain(relation_edge_add_rows)
@@ -547,6 +547,39 @@ where
                     by_tx
                 },
             );
+        // A chunked owner cell is not materializable from its descriptor alone:
+        // include precisely the immutable generated-node closure rooted by the
+        // already-selected owner versions. These are normal view-scoped row
+        // versions (with the generated table's inherited Select policy), not a
+        // content-specific sync channel. In particular, do not ship every node
+        // owned by the row: old/unreachable roots may describe superseded data.
+        let mut owner_versions = Vec::new();
+        for (tx_id, rows) in &wanted_add_rows_by_tx {
+            let stored_tx = self
+                .query_transaction_memo(*tx_id, &mut context)?
+                .ok_or(Error::MissingTransaction(*tx_id))?;
+            for (table, row_uuid) in rows {
+                let Some(version) = self.query_version_by_alias(
+                    table,
+                    *row_uuid,
+                    VersionLayer::Content,
+                    tx_id.time,
+                    stored_tx.node_alias,
+                )?
+                else {
+                    continue;
+                };
+                owner_versions.push(version);
+            }
+        }
+        for (table, row_uuid, tx_id) in
+            self.large_value_node_closure_for_versions(&owner_versions)?
+        {
+            wanted_add_rows_by_tx
+                .entry(tx_id)
+                .or_default()
+                .insert((table, row_uuid));
+        }
         self.preload_transaction_memo(wanted_add_rows_by_tx.keys().copied(), &mut context)?;
         let mut version_bundles = Vec::with_capacity(row_result_adds.len());
         let mut peer_payload_inventory_refs = Vec::new();
@@ -562,6 +595,33 @@ where
             let tx_versions = tx_versions_cache
                 .entry(*tx_id)
                 .or_insert_with(|| maintained_facts.versions_by_tx(*tx_id));
+            // The maintained query only witnesses application result rows. A
+            // generated node is an explicit, already-policy-derived closure
+            // dependency instead, so recover its normal history version by
+            // its exact `(table, row, tx)` identity before evaluating the
+            // ordinary bundle completeness check below.
+            let hidden_rows = wanted_rows
+                .iter()
+                .filter(|(table, _)| {
+                    table.starts_with(crate::large_values::LARGE_VALUE_NODE_TABLE_PREFIX)
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if !hidden_rows.is_empty() {
+                let stored_tx = self
+                    .query_transaction_memo(*tx_id, &mut context)?
+                    .ok_or(Error::MissingTransaction(*tx_id))?;
+                let hidden_versions = self.query_versions_for_tx_rows_by_alias(
+                    *tx_id,
+                    stored_tx.node_alias,
+                    &hidden_rows,
+                )?;
+                for version in hidden_versions {
+                    if !maintained_view_tx_versions_contain_winner(tx_versions, &version) {
+                        tx_versions.push(version);
+                    }
+                }
+            }
             let mut needs_storage_fallback = false;
             for (entry_table, row_uuid) in wanted_rows {
                 if maintained_view_find_content_witness(tx_versions, entry_table, *row_uuid)
