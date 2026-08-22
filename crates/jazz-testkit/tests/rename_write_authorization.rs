@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use jazz::db::block_on;
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -84,7 +85,8 @@ fn owner_write_policies(select: PolicyExpr) -> TablePolicies {
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    NodeState::new(node_uuid, schema, MemoryStorage::new(&refs)).expect("open memory node")
+    block_on(NodeState::new(node_uuid, schema, MemoryStorage::new(&refs)))
+        .expect("open memory node")
 }
 
 fn rename_lens(v1: &SchemaVersion, v2: &SchemaVersion) -> MigrationLens {
@@ -167,13 +169,18 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     let mut writer_v1 = open_node(node(0x10), v1.schema.clone());
     let user_row = row(0x77);
 
-    let (insert_tx, insert_unit) = writer_v1
-        .commit_mergeable_unit(
-            MergeableCommit::new("users", user_row, 1_000)
-                .made_by(alice)
-                .cells(cells(user_row, "alice@example.com", alice)),
-        )
-        .expect("writer stages v1 insert");
+    let (insert_tx, insert_unit) = block_on(async {
+        let (published, unit) = writer_v1
+            .commit_mergeable_unit(
+                MergeableCommit::new("users", user_row, 1_000)
+                    .made_by(alice)
+                    .cells(cells(user_row, "alice@example.com", alice)),
+            )
+            .await?;
+        let tx_id = writer_v1.persist_and_settle_transaction(published).await?;
+        Ok::<_, jazz::node::Error>((tx_id, unit))
+    })
+    .expect("writer stages v1 insert");
     let SyncMessage::CommitUnit {
         tx: insert_tx_record,
         versions: insert_versions,
@@ -181,9 +188,13 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     else {
         panic!("expected insert commit unit");
     };
-    let insert_updates = authority
-        .ingest_commit_unit(insert_tx_record, insert_versions, 1_000)
-        .expect("authority ingests v1 insert");
+    let insert_updates = block_on(async {
+        let outcome = authority
+            .ingest_commit_unit(insert_tx_record, insert_versions, 1_000)
+            .await?;
+        authority.persist_and_settle_outcome(outcome).await
+    })
+    .expect("authority ingests v1 insert");
     assert!(insert_updates.iter().any(|message| {
         matches!(
             message,
@@ -199,38 +210,53 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     // Catalogue evolution is a trusted administrative lane, distinct from
     // the untrusted writer whose policy-scoped update we exercise below.
     let catalogue_seq = authority.active_catalogue_seq().saturating_add(1);
-    authority
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
-            catalogue_seq,
-            publication: Box::new(SchemaLineagePublication::new(
-                v2.clone(),
-                lens.clone(),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
-        })
-        .expect("publish v2 rename lineage");
-    authority
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: v2.id,
-            },
-        })
-        .expect("select v2 write schema");
+    block_on(async {
+        let outcome = authority
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+                author: AuthorId::SYSTEM,
+                catalogue_seq,
+                publication: Box::new(SchemaLineagePublication::new(
+                    v2.clone(),
+                    lens.clone(),
+                    Vec::<String>::new(),
+                    Vec::<String>::new(),
+                )),
+            })
+            .await?;
+        authority.persist_and_settle_outcome(outcome).await
+    })
+    .expect("publish v2 rename lineage");
+    block_on(async {
+        let outcome = authority
+            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+                author: AuthorId::SYSTEM,
+                pointer: CurrentWriteSchema {
+                    revision: 1,
+                    schema: v2.id,
+                },
+            })
+            .await?;
+        authority.persist_and_settle_outcome(outcome).await
+    })
+    .expect("select v2 write schema");
 
     let mallory = author(0xa2);
     let mut non_owner_writer_v2 = open_node(node(0x11), v2.schema.clone());
-    let (_rejected_tx, rejected_unit) = non_owner_writer_v2
-        .commit_mergeable_unit(
-            MergeableCommit::new("people", user_row, 2_000)
-                .made_by(mallory)
-                .parents(vec![insert_tx])
-                .cells(cells(user_row, "mallory+renamed@example.com", alice)),
-        )
-        .expect("non-owner stages v2 update");
+    let (_rejected_tx, rejected_unit) = block_on(async {
+        let (published, unit) = non_owner_writer_v2
+            .commit_mergeable_unit(
+                MergeableCommit::new("people", user_row, 2_000)
+                    .made_by(mallory)
+                    .parents(vec![insert_tx])
+                    .cells(cells(user_row, "mallory+renamed@example.com", alice)),
+            )
+            .await?;
+        let tx_id = non_owner_writer_v2
+            .persist_and_settle_transaction(published)
+            .await?;
+        Ok::<_, jazz::node::Error>((tx_id, unit))
+    })
+    .expect("non-owner stages v2 update");
     let SyncMessage::CommitUnit {
         tx: rejected_tx_record,
         versions: rejected_versions,
@@ -239,9 +265,13 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
         panic!("expected rejected update commit unit");
     };
     let rejected_tx = rejected_tx_record.tx_id;
-    let rejected_updates = authority
-        .ingest_commit_unit(rejected_tx_record, rejected_versions, 2_000)
-        .expect("authority rejects non-owner v2 update");
+    let rejected_updates = block_on(async {
+        let outcome = authority
+            .ingest_commit_unit(rejected_tx_record, rejected_versions, 2_000)
+            .await?;
+        authority.persist_and_settle_outcome(outcome).await
+    })
+    .expect("authority rejects non-owner v2 update");
     assert!(rejected_updates.iter().any(|message| {
         matches!(
             message,
@@ -254,14 +284,19 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     }));
 
     let mut writer_v2 = open_node(node(0x10), v2.schema.clone());
-    let (_update_tx, update_unit) = writer_v2
-        .commit_mergeable_unit(
-            MergeableCommit::new("people", user_row, 2_000)
-                .made_by(alice)
-                .parents(vec![insert_tx])
-                .cells(cells(user_row, "alice+renamed@example.com", alice)),
-        )
-        .expect("writer stages v2 update");
+    let (_update_tx, update_unit) = block_on(async {
+        let (published, unit) = writer_v2
+            .commit_mergeable_unit(
+                MergeableCommit::new("people", user_row, 2_000)
+                    .made_by(alice)
+                    .parents(vec![insert_tx])
+                    .cells(cells(user_row, "alice+renamed@example.com", alice)),
+            )
+            .await?;
+        let tx_id = writer_v2.persist_and_settle_transaction(published).await?;
+        Ok::<_, jazz::node::Error>((tx_id, unit))
+    })
+    .expect("writer stages v2 update");
     let SyncMessage::CommitUnit {
         tx: update_tx_record,
         versions: update_versions,
@@ -271,9 +306,13 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     };
 
     let update_tx = update_tx_record.tx_id;
-    let update_updates = authority
-        .ingest_commit_unit(update_tx_record, update_versions, 2_000)
-        .expect("authority ingests v2 update");
+    let update_updates = block_on(async {
+        let outcome = authority
+            .ingest_commit_unit(update_tx_record, update_versions, 2_000)
+            .await?;
+        authority.persist_and_settle_outcome(outcome).await
+    })
+    .expect("authority ingests v2 update");
 
     assert!(update_updates.iter().any(|message| {
         matches!(
