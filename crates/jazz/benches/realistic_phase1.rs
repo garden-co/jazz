@@ -1745,11 +1745,11 @@ fn r10_sync_fanout(c: &mut Criterion) {
                 let subscribed_row = fixture.tasks[0];
 
                 let (writer_transport, server_writer_transport) = byte_duplex();
-                let _writer_upstream = writer.connect_upstream(writer_transport);
+                let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
                 let _writer_subscriber = server.accept_subscriber(server_writer_transport, AUTHOR);
 
                 let (reader_transport, server_reader_transport) = byte_duplex();
-                let _reader_upstream = reader.connect_upstream(reader_transport);
+                let _reader_upstream = block_on(reader.connect_upstream(reader_transport));
                 let _reader_subscriber =
                     server.accept_subscriber(server_reader_transport, READER_AUTHOR);
 
@@ -1833,7 +1833,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
 
                     let (writer_transport, server_writer_transport) =
                         byte_duplex_with_session(AUTHOR, 1);
-                    let writer_upstream = writer.connect_upstream(writer_transport);
+                    let writer_upstream = block_on(writer.connect_upstream(writer_transport));
                     let writer_subscriber =
                         server.accept_subscriber(server_writer_transport, AUTHOR);
                     writer.tick().expect("ship resume seed rows");
@@ -1843,7 +1843,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
 
                     let (client_transport, server_transport) =
                         byte_duplex_with_session(READER_AUTHOR, 2);
-                    let upstream = client.connect_upstream(client_transport);
+                    let upstream = block_on(client.connect_upstream(client_transport));
                     let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
 
                     let mut subscription =
@@ -1895,7 +1895,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
                     );
                     let (writer_transport, server_writer_transport) =
                         byte_duplex_with_session(AUTHOR, 3);
-                    let writer_upstream = writer.connect_upstream(writer_transport);
+                    let writer_upstream = block_on(writer.connect_upstream(writer_transport));
                     let writer_subscriber =
                         server.accept_subscriber(server_writer_transport, AUTHOR);
                     writer.tick().expect("ship disconnected task update");
@@ -1905,7 +1905,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
 
                     let (client_transport, server_transport) =
                         byte_duplex_with_session(READER_AUTHOR, 4);
-                    let _resumed_upstream = client.connect_upstream(client_transport);
+                    let _resumed_upstream = block_on(client.connect_upstream(client_transport));
                     let resumed =
                         server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
 
@@ -1999,7 +1999,7 @@ fn run_permission_filtered_resume(
 
     let (writer_transport, server_writer_transport) =
         byte_duplex_with_session(AuthorId::SYSTEM, 13_001);
-    let writer_upstream = writer.connect_upstream(writer_transport);
+    let writer_upstream = block_on(writer.connect_upstream(writer_transport));
     let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
     writer.tick().expect("ship permission seed rows");
     server.tick().expect("ingest permission seed rows");
@@ -2007,7 +2007,7 @@ fn run_permission_filtered_resume(
     assert!(server.detach_connection(&writer_subscriber));
 
     let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_002);
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
     let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
         .expect("subscribe permission-filtered docs");
@@ -2076,7 +2076,7 @@ fn run_permission_filtered_resume(
     if churn.grants() || churn.revokes() {
         let (writer_transport, server_writer_transport) =
             byte_duplex_with_session(AuthorId::SYSTEM, 13_003);
-        let writer_upstream = writer.connect_upstream(writer_transport);
+        let writer_upstream = block_on(writer.connect_upstream(writer_transport));
         let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
         writer.tick().expect("ship disconnected permission changes");
         server
@@ -2106,7 +2106,7 @@ fn run_permission_filtered_resume(
     assert_permission_resume_docs(&server_rows, &expected_server_rows);
 
     let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_004);
-    let _resumed_upstream = client.connect_upstream(client_transport);
+    let _resumed_upstream = block_on(client.connect_upstream(client_transport));
     let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
 
     let resume_started = Instant::now();
@@ -2189,7 +2189,7 @@ fn run_claim_filtered_resume(
 
     let (writer_transport, server_writer_transport) =
         byte_duplex_with_session(AuthorId::SYSTEM, 13_101);
-    let writer_upstream = writer.connect_upstream(writer_transport);
+    let writer_upstream = block_on(writer.connect_upstream(writer_transport));
     let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
     writer.tick().expect("ship claim-resume seed rows");
     server.tick().expect("ingest claim-resume seed rows");
@@ -2204,7 +2204,7 @@ fn run_claim_filtered_resume(
         )]),
     );
     let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_102);
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
     let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
         .expect("subscribe claim-filtered docs");
@@ -2242,7 +2242,7 @@ fn run_claim_filtered_resume(
         )]),
     );
     let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_103);
-    let _resumed_upstream = client.connect_upstream(client_transport);
+    let _resumed_upstream = block_on(client.connect_upstream(client_transport));
     let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
 
     let resume_started = Instant::now();

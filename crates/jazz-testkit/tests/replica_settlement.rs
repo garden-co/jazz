@@ -107,7 +107,7 @@ mod relay_topology {
         // store stays cold.
         let seeder = open_db(0x41, bob);
         let (seeder_transport, authority_seed_transport) = duplex();
-        let _seeder_connection = seeder.connect_upstream(seeder_transport);
+        let _seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
         let _authority_seed_subscriber = authority.accept_subscriber(authority_seed_transport, bob);
         let seeded =
             block_on(seeder.insert("documents", document_cells("settled at the authority")))
@@ -117,10 +117,10 @@ mod relay_topology {
         tick(&seeder, "apply seeded document fate");
 
         let (client_transport, relay_subscriber_transport) = duplex();
-        let _client_connection = client.connect_upstream(client_transport);
+        let _client_connection = block_on(client.connect_upstream(client_transport));
         let _relay_subscriber = relay.accept_subscriber(relay_subscriber_transport, alice);
         let (relay_upstream_transport, authority_transport) = duplex();
-        let _relay_upstream = relay.connect_upstream(relay_upstream_transport);
+        let _relay_upstream = block_on(relay.connect_upstream(relay_upstream_transport));
         let _authority_subscriber = authority.accept_subscriber(authority_transport, alice);
 
         let documents = client
@@ -201,13 +201,13 @@ mod relay_topology {
         let authority = open_authority(0x32);
 
         let (client_transport, relay_subscriber_transport) = duplex();
-        let _client_connection = client.connect_upstream(client_transport);
+        let _client_connection = block_on(client.connect_upstream(client_transport));
         let _relay_subscriber = relay.accept_subscriber(relay_subscriber_transport, alice);
 
         // Install the relay's upstream transport but leave the far end
         // unattached so the handshake never completes during the hold phase.
         let (relay_upstream_transport, held_authority_transport) = duplex();
-        let _relay_upstream = relay.connect_upstream(relay_upstream_transport);
+        let _relay_upstream = block_on(relay.connect_upstream(relay_upstream_transport));
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -276,7 +276,7 @@ mod relay_topology {
         let client = open_db(0x13, alice);
         client.set_non_durable_client();
         let (client_transport, relay_transport) = duplex();
-        let _client_connection = client.connect_upstream(client_transport);
+        let _client_connection = block_on(client.connect_upstream(client_transport));
         let _relay_subscriber = relay.accept_subscriber(relay_transport, alice);
 
         let documents = client
@@ -325,7 +325,7 @@ mod relay_topology {
         let alice = AuthorId::from_bytes([0xa4; 16]);
         let node = open_db(0x14, alice);
         let (upstream_transport, _held_far_end) = duplex();
-        let _upstream = node.connect_upstream(upstream_transport);
+        let _upstream = block_on(node.connect_upstream(upstream_transport));
 
         let written = block_on(node.insert("documents", document_cells("locally visible")))
             .expect("insert local document");
@@ -371,7 +371,7 @@ mod relay_topology {
         let authority = open_authority(0x35);
 
         let (upstream_transport, held_authority_transport) = duplex();
-        let _upstream = node.connect_upstream(upstream_transport);
+        let _upstream = block_on(node.connect_upstream(upstream_transport));
 
         let documents = node
             .prepare_query(&node.table("documents"))
@@ -459,7 +459,7 @@ mod relay_topology {
         let authority = open_authority(0x37);
 
         let (client_transport, authority_transport) = duplex();
-        let _client_connection = client.connect_upstream(client_transport);
+        let _client_connection = block_on(client.connect_upstream(client_transport));
         let _authority_subscriber = authority.accept_subscriber(authority_transport, alice);
 
         let documents = client
@@ -525,7 +525,7 @@ mod relay_topology {
         let alice = AuthorId::from_bytes([0xa8; 16]);
         let node = open_db(0x18, alice);
         let (upstream_transport, _held_far_end) = duplex();
-        let upstream = node.connect_upstream(upstream_transport);
+        let upstream = block_on(node.connect_upstream(upstream_transport));
 
         let written =
             block_on(node.insert("documents", document_cells("local answer after detach")))
