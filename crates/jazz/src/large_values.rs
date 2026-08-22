@@ -1011,7 +1011,8 @@ impl<'a, S: ImmutableContentStore> StreamingContentBuilder<'a, S> {
 
         // This is the online equivalent of the batch `while level.len() > 1`:
         // an incomplete lower group becomes a branch only when it has siblings
-        // or an already-emitted group at the next level.
+        // or an already-emitted group at any higher level. A completed group
+        // can promote through an otherwise empty immediate parent level.
         let mut level = 0;
         loop {
             let Some(last_nonempty) = self.levels.iter().rposition(|items| !items.is_empty())
@@ -1025,11 +1026,12 @@ impl<'a, S: ImmutableContentStore> StreamingContentBuilder<'a, S> {
                 level += 1;
                 continue;
             }
-            let has_parent = self
+            let has_higher_level = self
                 .levels
-                .get(level + 1)
-                .is_some_and(|items| !items.is_empty());
-            if self.levels[level].len() == 1 && !has_parent {
+                .iter()
+                .skip(level + 1)
+                .any(|items| !items.is_empty());
+            if self.levels[level].len() == 1 && !has_higher_level {
                 let root = self.levels[level].pop().expect("non-empty level");
                 return Ok((root.id, root.byte_len));
             }
@@ -1953,6 +1955,26 @@ mod tests {
                     .unwrap(),
                 bytes,
             );
+        }
+    }
+
+    // Internal because it guards exact content-addressed format identity. The
+    // 68-byte case crosses a tiny-profile branch boundary and used to leave a
+    // promoted group above an empty intermediate level during finalization.
+    #[test]
+    fn streaming_build_exhaustively_matches_batch_around_branch_promotions() {
+        let tree = ContentTree::new(tiny_profile()).unwrap();
+        for len in 0..400 {
+            let bytes = (0..=255).cycle().take(len).collect::<Vec<_>>();
+            let mut expected_store = MemoryContentStore::default();
+            let expected = tree.build(&domain(), &bytes, &mut expected_store).unwrap();
+            for chunk_size in [1, 2, 3, 5, 7, 8, 11, 16, 31, 64, 127, 512] {
+                let mut actual_store = MemoryContentStore::default();
+                let actual = tree
+                    .build_streaming(&domain(), bytes.chunks(chunk_size), &mut actual_store)
+                    .unwrap();
+                assert_eq!(actual, expected, "length {len}, chunk size {chunk_size}");
+            }
         }
     }
 
