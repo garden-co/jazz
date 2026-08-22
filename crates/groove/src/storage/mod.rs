@@ -1578,92 +1578,151 @@ fn snapshot_staged_operations(
         .collect()
 }
 
-impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
-where
-    S: OrderedKvStorage,
-{
-    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let cf = request.cf.clone();
-        let bounds = request.bounds.clone();
-        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
-            operation.cf() == cf
-                && match &bounds {
-                    ScanBounds::Prefix(prefix) => operation.key().starts_with(prefix),
-                    ScanBounds::Range { start, end } => {
-                        operation.key() >= start.as_slice() && operation.key() < end.as_slice()
-                    }
-                }
-        });
+/// Ordered cursor which merges the durable base with the staged transaction
+/// writes as the caller asks for batches.  It intentionally owns only the
+/// in-range staged keys; its base cursor remains lazy, so a logical limit does
+/// not turn a sparse staged overlay into a full base-prefix materialization.
+struct OverlayScanCursor<'a> {
+    base: StorageScan<'a>,
+    staged: VecDeque<(Vec<u8>, Vec<OwnedWriteOperation>)>,
+    base_entries: VecDeque<KeyValue>,
+    base_done: bool,
+    cf: String,
+    direction: ScanDirection,
+    remaining: Option<usize>,
+}
+
+impl OverlayScanCursor<'_> {
+    fn next_entry(&mut self) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
-            // Retain every staged operation per key. In particular, a Delta
-            // is evaluated only when this ordered merge reaches its key, with
-            // that key's base value when one exists. This keeps request bounds
-            // physical: later base rows are never decoded just to apply an
-            // earlier staged delta.
-            let mut staged = BTreeMap::<Vec<u8>, Vec<OwnedWriteOperation>>::new();
-            for operation in operations {
-                staged
-                    .entry(operation.key().to_vec())
-                    .or_default()
-                    .push(operation);
-            }
-            let mut staged = staged.into_iter().collect::<VecDeque<_>>();
-            if request.direction == ScanDirection::Reverse {
-                staged.make_contiguous().reverse();
-            }
-            let mut base = self
-                .base
-                .scan(ScanRequest {
-                    max_items: None,
-                    ..request.clone()
-                })
-                .await?;
-            let mut base_entries = VecDeque::new();
-            let mut base_done = false;
-            let mut values = Vec::new();
-            let limit = request.max_items.unwrap_or(usize::MAX);
-            while values.len() < limit {
-                while base_entries.is_empty() && !base_done {
-                    match base.next_batch().await? {
-                        Some(entries) => base_entries.extend(entries),
-                        None => base_done = true,
+            loop {
+                while self.base_entries.is_empty() && !self.base_done {
+                    match self.base.next_batch().await? {
+                        Some(entries) => self.base_entries.extend(entries),
+                        None => self.base_done = true,
                     }
                 }
-                let choice = match (base_entries.front(), staged.front()) {
-                    (None, None) => break,
+
+                let choice = match (self.base_entries.front(), self.staged.front()) {
+                    (None, None) => return Ok(None),
                     (Some(_), None) => (true, false),
                     (None, Some(_)) => (false, true),
                     (Some((base_key, _)), Some((staged_key, _))) if base_key == staged_key => {
                         (true, true)
                     }
                     (Some((base_key, _)), Some((staged_key, _))) => {
-                        let staged_first = match request.direction {
+                        let staged_first = match self.direction {
                             ScanDirection::Forward => staged_key < base_key,
                             ScanDirection::Reverse => staged_key > base_key,
                         };
                         (!staged_first, staged_first)
                     }
                 };
-                let base_entry = choice.0.then(|| base_entries.pop_front()).flatten();
-                let staged_entry = choice.1.then(|| staged.pop_front()).flatten();
+                let base_entry = choice.0.then(|| self.base_entries.pop_front()).flatten();
+                let staged_entry = choice.1.then(|| self.staged.pop_front()).flatten();
+
                 match staged_entry {
                     Some((key, operations)) => {
                         let base_value = base_entry.map(|(_, value)| value);
                         if let Some(value) =
-                            overlay_point_value(base_value, &operations, &request.cf, &key)?
+                            overlay_point_value(base_value, &operations, &self.cf, &key)?
                         {
-                            values.push((key, value));
+                            return Ok(Some((key, value)));
                         }
                     }
                     None => {
                         if let Some(entry) = base_entry {
-                            values.push(entry);
+                            return Ok(Some(entry));
                         }
                     }
                 }
             }
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
         })
+    }
+}
+
+impl StorageCursor for OverlayScanCursor<'_> {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+        Box::pin(async move {
+            let Some(batch_len) = self.remaining.map_or(Some(256), |remaining| {
+                (remaining > 0).then_some(remaining.min(256))
+            }) else {
+                return Ok(None);
+            };
+
+            let mut values = Vec::with_capacity(batch_len);
+            while values.len() < batch_len {
+                let Some(entry) = self.next_entry().await? else {
+                    break;
+                };
+                values.push(entry);
+                if let Some(remaining) = &mut self.remaining {
+                    *remaining -= 1;
+                }
+            }
+            Ok((!values.is_empty()).then_some(values))
+        })
+    }
+}
+
+fn overlay_scan<'a, S>(
+    base: &'a S,
+    staged_writes: &RefCell<StagedWriteState>,
+    request: ScanRequest,
+) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
+where
+    S: OrderedKvStorage,
+{
+    let cf = request.cf.clone();
+    let bounds = request.bounds.clone();
+    let operations = snapshot_staged_operations(staged_writes, |operation| {
+        operation.cf() == cf
+            && match &bounds {
+                ScanBounds::Prefix(prefix) => operation.key().starts_with(prefix),
+                ScanBounds::Range { start, end } => {
+                    operation.key() >= start.as_slice() && operation.key() < end.as_slice()
+                }
+            }
+    });
+    Box::pin(async move {
+        // A base limit is unsound: staged deletes and deltas can remove or
+        // replace otherwise early durable candidates.  The merged cursor
+        // enforces the logical request limit only after applying staged work.
+        let base = base
+            .scan(ScanRequest {
+                max_items: None,
+                ..request.clone()
+            })
+            .await?;
+        let mut staged = BTreeMap::<Vec<u8>, Vec<OwnedWriteOperation>>::new();
+        for operation in operations {
+            staged
+                .entry(operation.key().to_vec())
+                .or_default()
+                .push(operation);
+        }
+        let mut staged = staged.into_iter().collect::<VecDeque<_>>();
+        if request.direction == ScanDirection::Reverse {
+            staged.make_contiguous().reverse();
+        }
+        Ok(Box::new(OverlayScanCursor {
+            base,
+            staged,
+            base_entries: VecDeque::new(),
+            base_done: false,
+            cf: request.cf,
+            direction: request.direction,
+            remaining: request.max_items,
+        }) as StorageScan<'a>)
+    })
+}
+
+impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        overlay_scan(&*self.base, &self.staged_writes, request)
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
@@ -1734,30 +1793,12 @@ where
     }
 }
 
-/// Materialize the unified overlay scan before a transaction returns its
-/// cursor. The borrowed base and staged state remain the transaction's own
-/// long-lived fields for the whole future; the local adapter never escapes.
-fn transaction_overlay_scan<'a, S>(
-    base: &'a S,
-    staged_writes: &'a RefCell<StagedWriteState>,
-    request: ScanRequest,
-) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
-where
-    S: OrderedKvStorage,
-{
-    Box::pin(async move {
-        let overlay = StagedWriteOverlay::new(base, staged_writes);
-        let values = collect_scan(overlay.scan(request).await?).await?;
-        Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'a>)
-    })
-}
-
 impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
     S: OrderedKvStorage,
 {
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        transaction_overlay_scan(self.base, &self.staged_writes, request)
+        overlay_scan(self.base, &self.staged_writes, request)
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
@@ -2174,6 +2215,50 @@ mod tests {
                 .scan(ScanRequest::prefix("missing".into(), Vec::new()).with_max_items(0))
                 .await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
+        ));
+    }
+
+    // A wrapper must preserve the hard cursor boundary too: once a bounded
+    // scan has produced its final item, later backend batch failures are not
+    // observable because it must not ask the backend for another batch.
+    #[futures_test::test]
+    async fn bounded_scan_stops_before_a_later_wrapped_batch_failure() {
+        let (storage, control) = TestStorage::controlled(&["records"]);
+        for key in [b"a/1".as_slice(), b"a/2".as_slice(), b"a/3".as_slice()] {
+            storage
+                .set("records".into(), key.to_vec(), key.to_vec())
+                .await
+                .unwrap();
+        }
+        control.take_observed();
+
+        let mut scan = storage
+            .scan(ScanRequest::prefix("records".into(), b"a/".to_vec()).with_max_items(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            scan.next_batch().await.unwrap(),
+            Some(vec![(b"a/1".to_vec(), b"a/1".to_vec())])
+        );
+        control.take_observed();
+
+        control.fail_next(TestStorageOperation::ScanBatch);
+        assert_eq!(scan.next_batch().await.unwrap(), None);
+        assert!(
+            control.take_observed().is_empty(),
+            "the wrapper must not open a batch beyond the bounded cursor"
+        );
+
+        let mut next_scan = storage
+            .scan(ScanRequest::prefix("records".into(), b"a/".to_vec()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_scan.next_batch().await,
+            Err(Error::Backend {
+                backend: "test",
+                ..
+            })
         ));
     }
 
@@ -2835,6 +2920,41 @@ mod tests {
                 (b"c".to_vec(), later),
                 (b"a".to_vec(), forward[0].1.clone())
             ]
+        );
+    }
+
+    #[futures_test::test]
+    async fn bounded_transaction_scan_stops_base_cursor_after_logical_output_is_full() {
+        let (storage, control) = TestStorage::controlled(&["records"]);
+        for key in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
+            storage
+                .set("records".into(), key.to_vec(), key.to_vec())
+                .await
+                .unwrap();
+        }
+        control.take_observed();
+
+        let transaction = storage.begin_txn();
+        transaction
+            .delete("records".into(), b"a".to_vec())
+            .await
+            .unwrap();
+        let mut scan = transaction
+            .scan(ScanRequest::prefix("records".into(), Vec::new()).with_max_items(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            scan.next_batch().await.unwrap(),
+            Some(vec![(b"b".to_vec(), b"b".to_vec())]),
+            "a staged delete must not under-fill the logical limit"
+        );
+        control.take_observed();
+
+        control.fail_next(TestStorageOperation::ScanBatch);
+        assert_eq!(scan.next_batch().await.unwrap(), None);
+        assert!(
+            control.take_observed().is_empty(),
+            "a filled overlay limit must not pull another base batch"
         );
     }
 

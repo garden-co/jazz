@@ -381,15 +381,22 @@ struct TestStorageCursor<'a> {
     resident: Rc<RefCell<ResidentState>>,
     region: ResidentRegion,
     rows: Vec<KeyValue>,
+    remaining: Option<usize>,
 }
 
 impl StorageCursor for TestStorageCursor<'_> {
     fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
         Box::pin(async move {
+            if matches!(self.remaining, Some(0)) {
+                return Ok(None);
+            }
             self.control.before(TestStorageOperation::ScanBatch).await?;
             let batch = self.inner.next_batch().await?;
             if let Some(batch) = &batch {
                 self.rows.extend(batch.iter().cloned());
+                if let Some(remaining) = &mut self.remaining {
+                    *remaining = remaining.saturating_sub(batch.len());
+                }
             } else {
                 self.resident
                     .borrow_mut()
@@ -480,6 +487,7 @@ where
     }
 
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        let remaining = request.max_items;
         let region = match &request.bounds {
             ScanBounds::Range { start, end } => ResidentRegion::Range {
                 cf: request.cf.clone(),
@@ -512,6 +520,7 @@ where
                 resident: Rc::clone(&self.resident),
                 region,
                 rows: Vec::new(),
+                remaining,
             }) as StorageScan<'_>)
         })
     }
