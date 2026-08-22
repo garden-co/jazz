@@ -16,13 +16,14 @@ import {
   type RuntimeTokenOptions,
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
-import { DedicatedBrowserWorkerConnection } from "./native-runtime/browser-worker-connection.js";
+import { SharedBrowserWorkerConnection } from "./native-runtime/browser-shared-worker-connection.js";
 import { MessagePortBrowserFollowerConnection } from "./native-runtime/browser-follower-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
 import { parseJwtPayload, resolveClientSessionSync } from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { httpUrlToWs } from "./url.js";
 import { authorBytesForSubject, isUsableSubject } from "./author-id.js";
+import { createBrokerFingerprint } from "./connection-manager/browser-broker-utils.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -152,7 +153,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     onAuthFailure,
     onAuthRestored,
     onFailure,
-    onFollowerPortClosed,
   }: BrowserWorkerConnectionContext<DbConfig>): BrowserWorkerConnection {
     const runtime = client.getRuntime();
     if (!(runtime instanceof NativeRuntimeAdapter)) {
@@ -164,7 +164,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const author = subject
       ? authorBytesForSubject(subject)
       : deterministicBytes(`${identitySeed}:author`);
-    return new DedicatedBrowserWorkerConnection(
+    return new SharedBrowserWorkerConnection(
       runtime,
       {
         runtimeSources: config.runtimeSources,
@@ -182,7 +182,8 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
-      { onAuthFailure, onAuthRestored, onFailure, onFollowerPortClosed },
+      createBrokerFingerprint(config, dbName),
+      { onAuthFailure, onAuthRestored, onFailure },
     );
   }
 

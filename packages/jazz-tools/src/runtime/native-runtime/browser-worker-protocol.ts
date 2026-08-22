@@ -18,6 +18,17 @@ export interface BrowserWorkerInitOptions {
   telemetryCollectorUrl?: string;
 }
 
+export interface BrowserSharedWorkerConnectRequest {
+  type: "connect-runtime";
+  tabId: string;
+  fingerprint: string;
+  options: BrowserWorkerInitOptions;
+}
+
+export type BrowserSharedWorkerConnectResponse =
+  | { type: "runtime-ready" }
+  | { type: "runtime-error"; message: string };
+
 export type BrowserWorkerRequest =
   | ({ type: "init" } & BrowserWorkerInitOptions)
   | { type: "wait-server" }
@@ -53,6 +64,13 @@ export type BrowserFollowerPortRequest =
   | { type: "frames"; frames: Uint8Array[] }
   | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
   | { type: "wait-server"; id: number }
+  | { type: "disconnect"; id: number }
+  | {
+      type: "reconnect";
+      id: number;
+      authJson: string;
+      sessionClaims: Record<string, unknown>;
+    }
   | { type: "close" };
 
 export type BrowserFollowerPortEvent =

@@ -17,7 +17,9 @@ type PendingRequest = {
 
 type BrowserFollowerPortRpcRequest =
   | { type: "init"; sessionClaims: Record<string, unknown> }
-  | { type: "wait-server" };
+  | { type: "wait-server" }
+  | { type: "disconnect" }
+  | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> };
 
 /** Connects one tab's non-durable in-memory runtime to the elected worker. */
 export class MessagePortBrowserFollowerConnection implements BrowserFollowerConnection {
@@ -71,6 +73,16 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   async waitForServerConnection(): Promise<void> {
     await this.ready();
     await this.request({ type: "wait-server" });
+  }
+
+  async disconnect(): Promise<void> {
+    await this.ready();
+    await this.request({ type: "disconnect" });
+  }
+
+  async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {
+    await this.ready();
+    await this.request({ type: "reconnect", authJson, sessionClaims });
   }
 
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void {
