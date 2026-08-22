@@ -66,6 +66,7 @@ export type BrowserFollowerPortRequest =
   | { type: "wait-server"; id: number }
   | { type: "disconnect"; id: number }
   | { type: "delete-storage"; id: number }
+  | { type: "storage-reset-observed"; resetId: number }
   | {
       type: "reconnect";
       id: number;
@@ -79,4 +80,5 @@ export type BrowserFollowerPortEvent =
   | { type: "result"; id: number; error?: string }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }
+  | { type: "storage-reset"; resetId: number }
   | { type: "error"; message: string };

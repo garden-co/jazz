@@ -18,6 +18,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   private connectionReady: Promise<void> | null = null;
   private connectionError: Error | null = null;
   private disconnected = false;
+  private storageReset: Promise<void> | null = null;
 
   constructor(host: DbForConnection) {
     super(host);
@@ -40,6 +41,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         if (this.connection !== connection) return;
         this.connectionError = asError(error);
       },
+      onStorageReset: () => this.beginStorageReset(connection),
       onFollowerPortClosed: () => undefined,
     });
     this.connection = connection;
@@ -51,6 +53,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   async ensureReady(tier?: DurabilityTier): Promise<void> {
+    await this.storageReset;
     if (this.connectionError) throw this.connectionError;
     await this.connectionReady;
     if (this.connectionError) throw this.connectionError;
@@ -97,13 +100,21 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   async deleteClientStorage(): Promise<void> {
     await this.connectionReady;
-    const connection = this.connection;
-    await connection?.deleteStorage();
+    await this.connection?.deleteStorage();
+    await this.storageReset;
+  }
+
+  private beginStorageReset(connection: BrowserWorkerConnection): void {
+    if (this.connection !== connection || this.storageReset) return;
     this.connection = null;
     this.connectionReady = null;
-    await connection?.shutdown();
-    await this.shutdownClient();
-    this.connectionError = null;
+    const client = this.detachClient();
+    this.storageReset = Promise.all([connection.shutdown(), client?.shutdown()])
+      .then(() => undefined)
+      .finally(() => {
+        this.connectionError = null;
+        this.storageReset = null;
+      });
   }
 
   override async shutdown(): Promise<void> {

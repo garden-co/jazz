@@ -143,6 +143,12 @@ export abstract class ConnectionManager {
     this.clientSchema = null;
   }
 
+  protected detachClient(): JazzClient | null {
+    const client = this.client;
+    this.clearClient();
+    return client;
+  }
+
   protected telemetryCollectorUrl(): string | undefined {
     return resolveTelemetryCollectorUrlFromEnv() ?? this.host.config.telemetryCollectorUrl;
   }

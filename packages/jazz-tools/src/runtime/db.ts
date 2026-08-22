@@ -1684,7 +1684,7 @@ export class Db {
   }
 
   /**
-   * Delete browser OPFS storage for this Db's active namespace.
+   * Delete browser IndexedDB storage for this Db's active namespace.
    */
   async deleteClientStorage(): Promise<void> {
     await this.connection.deleteClientStorage();

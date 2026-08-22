@@ -11,6 +11,7 @@ import type {
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 
 type PendingRequest = {
+  type: BrowserFollowerPortRpcRequest["type"];
   resolve: () => void;
   reject: (error: Error) => void;
 };
@@ -37,7 +38,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     sessionClaims: Record<string, unknown>,
     private readonly callbacks: Pick<
       BrowserFollowerConnectionContext,
-      "onAuthFailure" | "onAuthRestored" | "onFailure"
+      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset"
     >,
   ) {
     port.addEventListener("message", this.onMessage);
@@ -120,7 +121,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const id = this.nextRequestId++;
     const message = { ...request, id };
     const promise = new Promise<void>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { type: request.type, resolve, reject });
     });
     this.port.postMessage(message satisfies BrowserFollowerPortRequest);
     return promise;
@@ -138,6 +139,19 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     }
     if (message.type === "auth-restored") {
       this.callbacks.onAuthRestored();
+      return;
+    }
+    if (message.type === "storage-reset") {
+      for (const [id, pending] of this.pending) {
+        if (pending.type !== "delete-storage") continue;
+        this.pending.delete(id);
+        pending.resolve();
+      }
+      this.port.postMessage({
+        type: "storage-reset-observed",
+        resetId: message.resetId,
+      } satisfies BrowserFollowerPortRequest);
+      this.callbacks.onStorageReset?.();
       return;
     }
     if (message.type === "error") {

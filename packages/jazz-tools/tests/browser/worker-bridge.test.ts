@@ -1,8 +1,8 @@
 /**
- * Browser integration tests for Worker Bridge + OPFS persistence.
+ * Browser integration tests for the SharedWorker + IndexedDB runtime.
  *
  * Runs in a real Chromium browser via @vitest/browser + playwright.
- * Uses real jazz-wasm, real dedicated Workers, real OPFS storage.
+ * Uses real jazz-wasm, a real SharedWorker, and real IndexedDB storage.
  *
  * Server sync tests use a real jazz-tools server spawned by global-setup.
  */
@@ -273,7 +273,7 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("Worker Bridge with OPFS", () => {
+describe("SharedWorker bridge with IndexedDB", () => {
   const ctx = new TestCleanup();
   const remoteBrowserDbIds = new Set<string>();
   const errorListeners = new Set<(event: ErrorEvent) => void>();
@@ -675,7 +675,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(rows).toEqual([]);
   });
 
-  it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
+  it("deletes IndexedDB storage for the current namespace and keeps the same Db usable", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
@@ -746,55 +746,7 @@ describe("Worker Bridge with OPFS", () => {
     );
   });
 
-  it("retries OPFS storage deletion after a transient browser lock", async () => {
-    const dbName = uniqueDbName("delete-storage-transient-lock");
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-
-    await db.insert(todos, { title: "Should be deleted after retry", done: false }).wait({
-      tier: "local",
-    });
-    expect(await db.all(allTodos, { tier: "local" })).toHaveLength(1);
-
-    const realRoot = await navigator.storage.getDirectory();
-    const realGetDirectory = navigator.storage.getDirectory.bind(navigator.storage);
-    let lockedAttempts = 0;
-    const proxyRoot = new Proxy(realRoot, {
-      get(target, property, receiver) {
-        if (property === "removeEntry") {
-          return async (name: string, options?: FileSystemRemoveOptions): Promise<void> => {
-            if (name === `${dbName}.opfsbtree` && lockedAttempts === 0) {
-              lockedAttempts += 1;
-              throw new DOMException("OPFS handle is still closing", "NoModificationAllowedError");
-            }
-            return await target.removeEntry(name, options);
-          };
-        }
-
-        const value = Reflect.get(target, property, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-
-    const getDirectorySpy = vi
-      .spyOn(navigator.storage, "getDirectory")
-      .mockResolvedValue(proxyRoot);
-    try {
-      await db.deleteClientStorage();
-    } finally {
-      getDirectorySpy.mockRestore();
-      navigator.storage.getDirectory = realGetDirectory;
-    }
-
-    expect(lockedAttempts).toBe(1);
-    expect(await db.all(allTodos, { tier: "local" })).toEqual([]);
-  });
-
-  it("deletes OPFS storage across leader and follower tabs when requested from a follower", async () => {
+  it("deletes IndexedDB storage across two tabs when requested by either tab", async () => {
     const dbName = uniqueDbName("delete-storage-follower");
     const dbA = track(
       await createDb({
@@ -808,47 +760,45 @@ describe("Worker Bridge with OPFS", () => {
         driver: { type: "persistent", dbName },
       }),
     );
-    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
-
-    await leader
-      .insert(todos, { title: "Leader data before follower wipe", done: false })
+    await dbA
+      .insert(todos, { title: "First tab data before wipe", done: false })
       .wait({ tier: "local" });
-    await follower
+    await dbB
       .insert(todos, {
-        title: "Follower data before follower wipe",
+        title: "Second tab data before wipe",
         done: true,
       })
       .wait({ tier: "local" });
 
     await waitForCondition(
       async () => {
-        const leaderRows = await leader.all(allTodos, { tier: "local" });
-        const followerRows = await follower.all(allTodos, { tier: "local" });
-        return leaderRows.length === 2 && followerRows.length === 2;
+        const firstRows = await dbA.all(allTodos, { tier: "local" });
+        const secondRows = await dbB.all(allTodos, { tier: "local" });
+        return firstRows.length === 2 && secondRows.length === 2;
       },
       8000,
-      "Leader and follower should both observe pre-wipe rows",
+      "Both tabs should observe pre-wipe rows",
     );
 
-    await follower.deleteClientStorage();
+    await dbB.deleteClientStorage();
 
     await waitForCondition(
       async () => {
-        const leaderRows = await leader.all(allTodos, { tier: "local" });
-        const followerRows = await follower.all(allTodos, { tier: "local" });
-        return leaderRows.length === 0 && followerRows.length === 0;
+        const firstRows = await dbA.all(allTodos, { tier: "local" });
+        const secondRows = await dbB.all(allTodos, { tier: "local" });
+        return firstRows.length === 0 && secondRows.length === 0;
       },
       12000,
-      "Follower-initiated storage wipe should clear both leader and follower namespaces",
+      "A storage wipe should clear both tabs",
     );
 
     const marker = `fresh-after-follower-wipe-${Date.now()}`;
-    await leader.insert(todos, { title: marker, done: false }).wait({ tier: "local" });
+    await dbA.insert(todos, { title: marker, done: false }).wait({ tier: "local" });
 
     await waitForCondition(
       async () => {
-        const leaderRows = await leader.all(allTodos, { tier: "local" });
-        const followerRows = await follower.all(allTodos, { tier: "local" });
+        const leaderRows = await dbA.all(allTodos, { tier: "local" });
+        const followerRows = await dbB.all(allTodos, { tier: "local" });
         const leaderHas = leaderRows.some((row) => row.title === marker);
         const followerHas = followerRows.some((row) => row.title === marker);
         return leaderHas && followerHas;

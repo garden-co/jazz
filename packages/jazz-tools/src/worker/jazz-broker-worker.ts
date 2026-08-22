@@ -41,11 +41,13 @@ type RuntimeContext = {
   initialize: Promise<void>;
   pageStore: IndexedDbPageStore | null;
   disposeTelemetry: (() => void) | null;
+  resetBarrier: { id: number; pending: Set<string>; resolve: () => void } | null;
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const contexts = new Map<string, RuntimeContext>();
 let wasmModulePromise: Promise<WasmModule> | null = null;
+let nextResetId = 1;
 
 workerGlobal.onconnect = (event) => {
   const port = event.ports[0];
@@ -96,6 +98,7 @@ function createContext(
     runtime: null,
     pageStore: null,
     disposeTelemetry: null,
+    resetBarrier: null,
     initialize: Promise.resolve(),
   };
   context.initialize = initialize(context);
@@ -166,6 +169,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     closeTab(peer.context, peer.tabId);
     return;
   }
+  if (message.type === "storage-reset-observed") {
+    observeStorageReset(peer, message.resetId);
+    return;
+  }
 
   try {
     const activeRuntime = requireRuntime(peer.context);
@@ -189,6 +196,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     }
     if (message.type === "delete-storage") {
       await deleteContextStorage(peer.context);
+      await notifyStorageReset(peer.context);
       result(peer, message.id);
       setTimeout(() => closeContextPeers(peer.context), 0);
       return;
@@ -222,6 +230,7 @@ function closeTab(context: RuntimeContext, tabId: string): void {
   const peer = context.peers.get(tabId);
   if (!peer) return;
   context.peers.delete(tabId);
+  acknowledgeReset(context, tabId);
   peer.port.removeEventListener("message", peer.onMessage);
   peer.port.removeEventListener("messageerror", peer.onMessageError);
   peer.pump?.close();
@@ -251,6 +260,28 @@ async function deleteContextStorage(context: RuntimeContext): Promise<void> {
 
 function closeContextPeers(context: RuntimeContext): void {
   for (const tabId of [...context.peers.keys()]) closeTab(context, tabId);
+}
+
+async function notifyStorageReset(context: RuntimeContext): Promise<void> {
+  const pending = new Set(context.peers.keys());
+  if (pending.size === 0) return;
+  const id = nextResetId++;
+  await new Promise<void>((resolve) => {
+    context.resetBarrier = { id, pending, resolve };
+    broadcast(context, { type: "storage-reset", resetId: id });
+  });
+}
+
+function observeStorageReset(peer: TabPeer, resetId: number): void {
+  if (peer.context.resetBarrier?.id !== resetId) return;
+  acknowledgeReset(peer.context, peer.tabId);
+}
+
+function acknowledgeReset(context: RuntimeContext, tabId: string): void {
+  const barrier = context.resetBarrier;
+  if (!barrier || !barrier.pending.delete(tabId) || barrier.pending.size !== 0) return;
+  context.resetBarrier = null;
+  barrier.resolve();
 }
 
 function attachPeerTransport(

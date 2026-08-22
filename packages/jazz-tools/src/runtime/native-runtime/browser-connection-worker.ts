@@ -288,6 +288,10 @@ async function handleFollowerMessage(
   message: BrowserFollowerPortRequest,
 ): Promise<void> {
   if (followerPeers.get(peer.followerTabId) !== peer) return;
+  // Storage resets are coordinated by the SharedWorker broker. This legacy
+  // in-page worker never emits reset notifications, so there is nothing to
+  // acknowledge here.
+  if (message.type === "storage-reset-observed") return;
   if (message.type === "frames") {
     if (!peer.pump) {
       peer.port.postMessage({
