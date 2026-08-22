@@ -119,19 +119,33 @@ Required fields cannot be set to `null`.
 ### Editing large values
 
 Passing a `string`, `Uint8Array`, or JSON value replaces the complete column, just as it does for a
-small value. Large text and byte columns additionally accept `$splice`, while append-only workloads
-can use `$append`:
+small value. Large text and byte columns additionally accept `splice`, while append-only workloads
+can use `append`:
 
 ```ts
-db.update(app.documents, documentId, {
-  body: { $splice: { at: 120, delete: 5, insert: "world" } },
-  recording: { $append: nextAudioChunk },
-});
+db.update(
+  app.documents,
+  documentId,
+  {
+    body: {
+      splice: {
+        slice: { from: 1_000, length: 500 },
+        at: 120,
+        delete: 5,
+        insert: "world",
+      },
+    },
+    recording: { append: nextAudioChunk },
+  },
+  { ifVersion: document.$version },
+);
 ```
 
 The edit belongs to the normal row update: it uses the same permissions, transaction, history,
-sync, and conflict semantics. See [Editing without materializing](/docs/schemas/large-values#editing-without-materializing)
-for text, streams, files, and JSON.
+sync, and conflict semantics. `ifVersion` is a general compare-and-swap condition for the complete
+row, preventing an edit calculated against stale contents. See
+[Editing without materializing](/docs/schemas/large-values#editing-without-materializing) for text,
+streams, files, and JSON.
 
 ## Write durability tiers
 

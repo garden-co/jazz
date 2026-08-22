@@ -71,9 +71,8 @@ document?.attachment; // Uint8Array
 document?.metadata; // parsed JSON
 ```
 
-For values that should not be materialized in full, `select(...)` can return an immutable text or
-byte slice, a byte stream, or a JSON-pointer projection. See
-[Partial and streaming reads](/docs/schemas/large-values#partial-and-streaming-reads).
+For values that should not be materialized in full, `select(...)` can return a primitive text or
+byte slice, or a JSON-pointer projection. See [Partial reads](/docs/schemas/large-values#partial-reads).
 
 ## Read durability
 

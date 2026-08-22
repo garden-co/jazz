@@ -7,8 +7,8 @@ Their physical representation switches transparently between inline bytes and
 one atomic large-value descriptor:
 
 ```text
-LargeValue = Inline(bytes) | Chunked { root, byteLength, editTail }
-BytePatch      = Replace { offset, deleteLength, insertBytes }
+LargeValue = Inline(bytes) | Chunked { root, byteLength, utf16Length?, editTail }
+BytePatch = Replace { offset, deleteLength, insertBytes, utf16Effects? }
 ```
 
 The owning application row remains the only mutable identity, history, policy,
@@ -47,14 +47,15 @@ The large root names a recursive tree:
 
 ```text
 Leaf   { bytes }
-Branch { children: [{ id, subtreeByteLength }, ...] }
+Branch { children: [{ id, subtreeByteLength, subtreeUtf16Length? }, ...] }
 ```
 
 A small tree may be one leaf; a shallow branch is naturally a flat chunk array.
 Leaves are selected by a versioned FastCDC-like content-defined byte chunker
 with hard minimum, target, and maximum sizes. Branches are selected by a
-versioned content-defined chunker over complete child descriptors. No boundary
-may split a child descriptor. Applying content-defined grouping recursively
+versioned content-defined chunker over complete child descriptors. Text leaf boundaries MUST be
+valid UTF-8 code-point boundaries. No boundary may split a child descriptor. Applying
+content-defined grouping recursively
 produces one history-independent probabilistic tree (usually called a prolly
 tree): the same bytes produce the same shape and root regardless of edit history.
 
@@ -101,8 +102,10 @@ MUST share one transaction or leave only unreachable immutable objects.
 
 - `bytes` accepts every byte sequence. Full queries return the existing
   usual byte primitive; range queries return an immutable byte subset.
-- `string` requires the final bytes to be UTF-8. Text edit positions exposed by
-  high-level APIs are Unicode-scalar positions and lower to byte offsets.
+- `string` requires the final bytes to be UTF-8. Every text tree edge also carries its aggregate
+  UTF-16 code-unit length. Rust exposes explicit UTF-8 byte and UTF-16 coordinate APIs; TypeScript
+  exposes UTF-16 coordinates. Invalid UTF-8 boundaries and UTF-16 positions that split a surrogate
+  pair fail rather than round.
 - `json` requires final UTF-8 JSON. Its root is literal JSON source bytes, not a
   graph of persistent JSON nodes. Full queries return the usual parsed JSON
   value; path projections return immutable detached JSON subsets.
@@ -110,14 +113,15 @@ MUST share one transaction or leave only unreachable immutable objects.
 - a mutable file is a bytes interpretation admitting insert/delete/replace.
 
 Default queries assemble complete native values efficiently from the
-tree and patch tail. Query options may request a range, JSON projection, or
-native streaming delivery. Those options are projections, not new stored types
-or object-like value handles.
+tree and patch tail. Query options may request a range or JSON projection. Those options are
+projections, not new stored types or object-like value handles. Streaming helpers may be layered
+over successive bounded queries.
 
-Updates take an ordinary immutable row snapshot plus a declarative operation.
-They lower to a replacement patch against that snapshot. Stale snapshots use
-ordinary Jazz branch/conflict semantics. There is no explicit content-value
-reference API.
+Partial results remain ordinary primitives. Updates repeat the selected slice coordinates and
+express their edit relative to that slice. They lower to a replacement patch against the selected
+row version. A general whole-row compare-and-swap option rejects stale edits before mutation; when
+omitted, stale writes use ordinary Jazz branch/conflict semantics. There is no explicit
+content-value reference API.
 
 `INV-CONTENT-5`: equality, policies, indices, projections, subscriptions,
 merges, and application reads MUST observe the assembled logical value.
@@ -158,5 +162,5 @@ projection have passed validation.
   owned by the storage implementation, subject to the invariants above.
 - Formatting policy for a semantic JSON merge remains strategy-defined; stored
   and untouched JSON source bytes otherwise remain exact.
-- Lazy structural indices for JSON and Unicode-scalar indices for text may be
-  added as non-authoritative caches without changing the physical format.
+- Lazy structural indices for JSON may be added as non-authoritative caches without changing the
+  logical format.

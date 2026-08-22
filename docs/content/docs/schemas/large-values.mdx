@@ -4,8 +4,8 @@ description: Read and edit large text, byte streams, files, and JSON without mat
 ---
 
 <Callout type="warn" title="Draft API proposal">
-  The TypeScript calls on this page intentionally describe the API we want, not an API available in
-  Jazz today. This page is being used to design the client API before implementing it.
+  The TypeScript and Rust calls on this page describe the API being implemented on this branch, not
+  an API available in a released Jazz version.
 </Callout>
 
 Large values are ordinary `string`, `bytes`, and `json` columns. They are not a separate content
@@ -18,171 +18,176 @@ subscriptions, and conflicts.
 The schema describes the logical value, not its expected size or access pattern:
 
 ```ts
-import { schema as s } from "jazz-tools";
-
 const schema = {
   documents: s.table({
-    body: s.string(), // text
-    recording: s.bytes(), // append-only byte stream
-    attachment: s.bytes(), // mutable file
-    metadata: s.json(), // JSON document
+    body: s.string(),
+    recording: s.bytes(),
+    attachment: s.bytes(),
+    metadata: s.json(),
   }),
 };
 ```
 
-By default, queries return a complete `string`, `Uint8Array`, or parsed JSON value, and mutations
+Normal queries return a complete `string`, `Uint8Array`, or parsed JSON value. Normal mutations
 accept the same types. This keeps the common case indistinguishable from a small column.
 
-## Partial and streaming reads
+## Partial reads
 
-Use `select(...)` to opt individual columns into a non-default result shape. The returned values are
-immutable primitives or native streams, not handles tied to Jazz.
+A partial query still returns a plain primitive, not a content handle or slice object.
 
 ### Text
 
-`$slice` uses Unicode-scalar offsets, so it cannot split a UTF-8 character. It returns a `string`.
+TypeScript text positions use UTF-16 code units, matching `String.prototype.slice()`, `NSString`,
+and common editor APIs:
 
 ```ts
+const slice = { from: 1_000, length: 2_000 };
 const excerpt = await db.one(
   app.documents.where({ id: documentId }).select({
-    id: true,
-    body: { $slice: { from: 1_000, to: 2_000 } },
+    $version: true,
+    body: { slice },
   }),
 );
 
-excerpt?.body; // string containing scalars 1,000..<2,000
+excerpt?.body; // plain string containing UTF-16 units 1,000..<3,000
 ```
 
-### Append-only byte streams
+Rust exposes both coordinate systems explicitly. UTF-8 byte positions are available for all large
+values; text additionally supports UTF-16 positions for JavaScript and Apple interoperability:
 
-`$stream` returns a native `ReadableStream<Uint8Array>`. A range limits which bytes it yields.
+```rust
+let bytes = columns::body.slice_utf8(1_000..3_000);
+let js_units = columns::body.slice_utf16(1_000..3_000);
+```
+
+UTF-8 text positions must lie on code-point boundaries. UTF-16 positions must not split a surrogate
+pair. Invalid positions are rejected rather than rounded.
+
+### Byte streams and files
+
+Byte slices use byte offsets in every binding and return a detached `Uint8Array` in TypeScript:
 
 ```ts
 const result = await db.one(
   app.documents.where({ id: documentId }).select({
-    recording: { $stream: { from: resumeAt } },
+    $version: true,
+    recording: { slice: { from: resumeAt, length: 64 * 1024 } },
+    attachment: { slice: { from: 0, length: headerLength } },
   }),
 );
-
-for await (const chunk of result!.recording) {
-  await play(chunk);
-}
 ```
 
-Use `{ $slice: { from, to } }` instead when the desired byte range should be returned as one
-detached `Uint8Array`.
-
-### Mutable files
-
-Files use the same byte operations. Stream a download without first allocating the entire file:
-
-```ts
-const { attachment } = await db.one(
-  app.documents.where({ id: documentId }).select({
-    attachment: { $stream: true },
-  }),
-);
-
-return new Response(attachment);
-```
+Applications can build streaming helpers from successive bounded queries. A native streaming API
+is deliberately deferred from this first client surface.
 
 ### JSON
 
-`$pointer` parses and returns the detached JSON value at an
-[RFC 6901](https://www.rfc-editor.org/rfc/rfc6901) JSON pointer:
+`pointer` returns the detached native JSON value at an RFC 6901 JSON pointer:
 
 ```ts
 const result = await db.one(
   app.documents.where({ id: documentId }).select({
-    metadata: { $pointer: "/chapters/3/title" },
+    metadata: { pointer: "/chapters/3/title" },
   }),
 );
-
-result?.metadata; // the native JSON value at that path
 ```
 
 ## Editing without materializing
 
-Edits are values passed directly to `update(...)`. Jazz applies them to the column value read by
-the mutation, then stores the resulting operation in the row update. There is no mutable content
-object and no separate value reference to retain.
+Edits repeat the slice used for the read and express the edit position relative to it. Keeping
+those coordinates together is the caller's responsibility; no provenance is hidden inside the
+returned primitive.
+
+Select the row's `$version` with the slice and pass it as `ifVersion` when updating. This is a
+general row-level compare-and-swap condition. The mutation fails if any part of the row changed
+after the read.
 
 ### Edit text
 
-`$splice` deletes a number of Unicode scalars and inserts a string at the same position:
+In TypeScript, every text position is a UTF-16 code-unit count:
 
 ```ts
-db.update(app.documents, documentId, {
-  body: {
-    $splice: {
-      at: 1_420,
-      delete: 11,
-      insert: "large values",
+const slice = { from: 1_000, length: 500 };
+const document = await db.one(
+  app.documents.where({ id: documentId }).select({
+    $version: true,
+    body: { slice },
+  }),
+);
+
+db.update(
+  app.documents,
+  documentId,
+  {
+    body: {
+      splice: {
+        slice,
+        at: 120,
+        delete: 11,
+        insert: "large values",
+      },
     },
   },
-});
+  { ifVersion: document!.$version },
+);
 ```
 
-Use `delete: 0` to insert, or `insert: ""` to delete. Passing a plain string still replaces the
-whole value.
+Use `delete: 0` to insert or `insert: ""` to delete. Passing a plain string replaces the whole
+value. Rust offers corresponding `splice_utf8(...)` and `splice_utf16(...)` operations.
 
-### Append to a stream
-
-`$append` accepts a `Uint8Array` or a native byte stream. Every append is still a normal row
-mutation and has the row's normal authorization and durability behavior.
+### Append to a byte stream
 
 ```ts
-db.update(app.documents, documentId, {
-  recording: { $append: microphone.readable },
-});
+db.update(
+  app.documents,
+  documentId,
+  { recording: { append: nextAudioChunk } },
+  { ifVersion: document.$version },
+);
 ```
 
 ### Edit a file
 
-For bytes, `$splice` uses byte offsets and accepts bytes or a byte stream as its insertion:
+For bytes, every position is a byte offset:
 
 ```ts
-db.update(app.documents, documentId, {
-  attachment: {
-    $splice: {
-      at: headerLength,
-      delete: oldPreviewLength,
-      insert: newPreviewBytes,
+db.update(
+  app.documents,
+  documentId,
+  {
+    attachment: {
+      splice: {
+        slice: { from: 0, length: headerAndPreviewLength },
+        at: headerLength,
+        delete: oldPreviewLength,
+        insert: newPreviewBytes,
+      },
     },
   },
-});
+  { ifVersion: document.$version },
+);
 ```
 
 The same operation covers insertion, deletion, and replacement. Passing a plain `Uint8Array`
-still replaces the whole file.
+replaces the whole file.
 
 ### Replace JSON
 
-JSON keeps one write shape: pass the desired native JSON value. Jazz can derive a compact byte edit
-without exposing byte offsets in the JSON API.
-
-```ts
-db.update(app.documents, documentId, {
-  metadata: {
-    ...document.metadata,
-    status: "published",
-  },
-});
-```
-
-JSON remains one logical value. Merge strategies may parse the base and both candidates to obtain a
-semantic, side-attributed JSON diff; that does not introduce independently mutable JSON paths.
+JSON keeps one write shape: pass the desired native JSON value. Jazz derives a compact byte edit
+without exposing byte offsets in the JSON API. JSON remains one logical value; merge strategies may
+parse the base and both candidates to obtain a semantic, side-attributed diff.
 
 ## What happens underneath
 
 Small values live inline. Large values use an immutable, content-defined chunk tree plus a short
-tail of recent byte edits. A small insertion usually rewrites nearby chunks while the tree rejoins
-unchanged content, and the tail avoids rebuilding the tree for every keystroke or append.
+tail of recent byte edits. Every tree records aggregate UTF-8 byte lengths. Text trees additionally
+record aggregate UTF-16 lengths. Resolving either coordinate system traverses those metrics in
+logarithmic time and scans only the target chunk.
 
-When the tail reaches a built-in bound, Jazz consolidates it into a new immutable tree. Range reads
-visit only the relevant tree nodes and chunks. Streaming creation and reads keep memory proportional
-to the data currently being processed rather than the total value size.
+An edit tail records its changes in both metrics. When the tail reaches a built-in bound, Jazz
+consolidates it into a new immutable tree and updates metrics only along rewritten paths. Range
+reads visit only relevant nodes and chunks, keeping memory proportional to the data being accessed.
 
-The tree and its edit tail form one atomic cell in the owning row. Readers never combine the tree
-from one row version with edits from another, and all writes continue through normal Jazz row
+The tree and edit tail form one atomic cell in the owning row. Readers never combine the tree from
+one row version with edits from another, and all writes continue through normal Jazz row
 permissions, sync, history, transactions, and conflict handling.

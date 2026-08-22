@@ -14,9 +14,9 @@ use groove::storage::OrderedKvStorage;
 
 // Stable alpha-format domains retain their original bytes across terminology changes.
 const CONTENT_ID_DOMAIN: &[u8] = b"jazz-adaptive-content-v1";
-const OBJECT_FORMAT_VERSION: u8 = 1;
-const CELL_ENVELOPE: &[u8] = b"JAZZ-ADAPTIVE-SCALAR-V2\0";
-const PATCH_FRAME_HEADER_BYTES: usize = 3 * std::mem::size_of::<u64>();
+const OBJECT_FORMAT_VERSION: u8 = 2;
+const CELL_ENVELOPE: &[u8] = b"JAZZ-LARGE-VALUE-V3\0";
+const PATCH_FRAME_HEADER_BYTES: usize = 5 * std::mem::size_of::<u64>() + 1;
 /// Physical column family containing domain-scoped immutable content objects.
 pub const CONTENT_OBJECTS_CF: &str = "jazz_content_objects";
 
@@ -57,11 +57,16 @@ pub struct ChildDescriptor {
     pub id: ContentId,
     /// Exact materialized byte length below the child.
     pub byte_len: u64,
+    /// Exact UTF-16 code-unit length for text trees.
+    pub utf16_len: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ContentObject {
-    Leaf(Vec<u8>),
+    Leaf {
+        bytes: Vec<u8>,
+        utf16_len: Option<u64>,
+    },
     Branch(Vec<ChildDescriptor>),
 }
 
@@ -220,6 +225,17 @@ pub struct BytePatch {
     /// Replacement bytes inserted at `offset`.
     #[serde(with = "serde_bytes")]
     pub insert: Vec<u8>,
+    /// UTF-16 effects when this patch belongs to a text value.
+    pub text_metrics: Option<TextPatchMetrics>,
+}
+
+/// UTF-16 effects of one universal byte patch in a text edit tail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextPatchMetrics {
+    /// UTF-16 code units removed by the patch.
+    pub delete_len: u64,
+    /// UTF-16 code units inserted by the patch.
+    pub insert_len: u64,
 }
 
 impl BytePatch {
@@ -229,6 +245,7 @@ impl BytePatch {
             offset,
             delete_len: 0,
             insert: bytes.into(),
+            text_metrics: None,
         }
     }
 
@@ -238,6 +255,7 @@ impl BytePatch {
             offset,
             delete_len,
             insert: Vec::new(),
+            text_metrics: None,
         }
     }
 
@@ -247,7 +265,16 @@ impl BytePatch {
             offset,
             delete_len,
             insert: bytes.into(),
+            text_metrics: None,
         }
+    }
+
+    fn with_text_metrics(mut self, delete_len: u64, insert_len: u64) -> Self {
+        self.text_metrics = Some(TextPatchMetrics {
+            delete_len,
+            insert_len,
+        });
+        self
     }
 }
 
@@ -276,6 +303,8 @@ pub struct ChunkedValue {
     pub root: ContentId,
     /// Materialized root length before applying the tail.
     pub root_byte_len: u64,
+    /// Materialized UTF-16 length before the tail for text values.
+    pub root_utf16_len: Option<u64>,
     /// Ordered byte replacements.
     pub edit_tail: Vec<BytePatch>,
 }
@@ -323,7 +352,7 @@ impl LargeValueSchema {
             inline_up_to: 8 * 1024,
             max_tail_entries: 64,
             max_tail_bytes: 16 * 1024,
-            tree_format: 1,
+            tree_format: u16::from(OBJECT_FORMAT_VERSION),
         }
     }
 
@@ -360,11 +389,18 @@ pub enum ValueSelection {
         /// Requested byte count.
         len: u64,
     },
-    /// Return one Unicode-scalar text range.
-    TextRange {
-        /// Inclusive Unicode-scalar start.
+    /// Return one UTF-8 byte range from text.
+    TextUtf8Range {
+        /// Inclusive UTF-8 byte start.
         offset: u64,
-        /// Requested Unicode-scalar count.
+        /// Requested UTF-8 byte count.
+        len: u64,
+    },
+    /// Return one UTF-16 code-unit range from text.
+    TextUtf16Range {
+        /// Inclusive UTF-16 start.
+        offset: u64,
+        /// Requested UTF-16 code-unit count.
         len: u64,
     },
     /// Return the detached JSON value selected by one RFC 6901 pointer.
@@ -387,11 +423,28 @@ pub enum ValueSelectionResult {
 pub enum ValueEdit {
     /// Replace an absolute byte range.
     Bytes(BytePatch),
-    /// Replace a Unicode-scalar text range.
-    Text {
-        /// Inclusive Unicode-scalar start.
+    /// Replace a UTF-8 range relative to a selected UTF-8 text slice.
+    TextUtf8 {
+        /// Absolute selected-slice start in UTF-8 bytes.
+        slice_offset: u64,
+        /// Selected-slice length in UTF-8 bytes.
+        slice_len: u64,
+        /// Relative UTF-8 offset within the slice.
         offset: u64,
-        /// Unicode-scalar count to remove.
+        /// UTF-8 bytes to remove.
+        delete_len: u64,
+        /// Replacement text.
+        insert: String,
+    },
+    /// Replace a UTF-16 range relative to a selected UTF-16 text slice.
+    TextUtf16 {
+        /// Absolute selected-slice start in UTF-16 code units.
+        slice_offset: u64,
+        /// Selected-slice length in UTF-16 code units.
+        slice_len: u64,
+        /// Relative UTF-16 offset within the slice.
+        offset: u64,
+        /// UTF-16 code units to remove.
         delete_len: u64,
         /// Replacement text.
         insert: String,
@@ -643,13 +696,15 @@ pub enum ContentError {
     /// A Groove value does not match the column's logical value kind.
     #[error("logical value does not match large-value kind")]
     LogicalTypeMismatch,
-    /// A text scalar position exceeds the string.
-    #[error("text scalar offset {offset} exceeds scalar length {scalar_len}")]
-    ScalarOffsetOutOfBounds {
-        /// Requested scalar offset.
+    /// A text position exceeds the selected coordinate length or splits an encoded character.
+    #[error("text {encoding} offset {offset} is invalid for length {text_len}")]
+    TextOffsetOutOfBounds {
+        /// Coordinate encoding.
+        encoding: &'static str,
+        /// Requested offset.
         offset: u64,
-        /// Current Unicode-scalar length.
-        scalar_len: u64,
+        /// Current length in that encoding.
+        text_len: u64,
     },
 }
 
@@ -695,14 +750,63 @@ impl ContentTree {
         bytes: &[u8],
         store: &mut S,
     ) -> Result<(ContentId, u64), ContentError> {
-        let chunks = leaf_ranges(bytes, self.profile);
+        self.build_with_metrics(domain, bytes, false, store)
+            .map(|descriptor| (descriptor.id, descriptor.byte_len))
+    }
+
+    /// Persist UTF-8 text with aggregate UTF-16 metrics on every tree edge.
+    pub fn build_text<S: ImmutableContentStore>(
+        &self,
+        domain: &ContentDomain,
+        text: &str,
+        store: &mut S,
+    ) -> Result<(ContentId, u64, u64), ContentError> {
+        let descriptor = self.build_with_metrics(domain, text.as_bytes(), true, store)?;
+        Ok((
+            descriptor.id,
+            descriptor.byte_len,
+            descriptor.utf16_len.expect("text tree has UTF-16 metrics"),
+        ))
+    }
+
+    fn build_with_metrics<S: ImmutableContentStore>(
+        &self,
+        domain: &ContentDomain,
+        bytes: &[u8],
+        text: bool,
+        store: &mut S,
+    ) -> Result<ChildDescriptor, ContentError> {
+        let chunks = if text {
+            text_leaf_ranges(
+                std::str::from_utf8(bytes).map_err(|_| ContentError::InvalidUtf8)?,
+                self.profile,
+            )
+        } else {
+            leaf_ranges(bytes, self.profile)
+        };
         let mut level = Vec::with_capacity(chunks.len());
         for range in chunks {
-            let object = ContentObject::Leaf(bytes[range].to_vec());
+            let payload = bytes[range].to_vec();
+            let utf16_len = text
+                .then(|| {
+                    count_utf16(std::str::from_utf8(&payload).expect("text chunks are aligned"))
+                })
+                .transpose()?;
+            let object = ContentObject::Leaf {
+                bytes: payload,
+                utf16_len,
+            };
             level.push(self.persist_object(domain, object, store)?);
         }
         if level.is_empty() {
-            level.push(self.persist_object(domain, ContentObject::Leaf(Vec::new()), store)?);
+            level.push(self.persist_object(
+                domain,
+                ContentObject::Leaf {
+                    bytes: Vec::new(),
+                    utf16_len: text.then_some(0),
+                },
+                store,
+            )?);
         }
         while level.len() > 1 {
             let groups = descriptor_groups(&level, self.profile);
@@ -716,8 +820,7 @@ impl ContentTree {
             }
             level = next;
         }
-        let root = level.pop().expect("tree always has one root");
-        Ok((root.id, root.byte_len))
+        Ok(level.pop().expect("tree always has one root"))
     }
 
     /// Persist a byte stream without retaining the complete logical value.
@@ -798,17 +901,177 @@ impl ContentTree {
         Ok(out)
     }
 
+    fn utf16_prefix<S: ImmutableContentStore>(
+        &self,
+        domain: &ContentDomain,
+        root: ContentId,
+        root_byte_len: u64,
+        root_utf16_len: u64,
+        byte_offset: u64,
+        store: &S,
+    ) -> Result<u64, ContentError> {
+        self.utf16_prefix_object(
+            domain,
+            root,
+            root_byte_len,
+            root_utf16_len,
+            byte_offset,
+            store,
+        )
+    }
+
+    fn utf16_prefix_object<S: ImmutableContentStore>(
+        &self,
+        domain: &ContentDomain,
+        id: ContentId,
+        expected_bytes: u64,
+        expected_utf16: u64,
+        byte_offset: u64,
+        store: &S,
+    ) -> Result<u64, ContentError> {
+        if byte_offset > expected_bytes {
+            return Err(ContentError::PatchOutOfBounds {
+                offset: byte_offset,
+                end: byte_offset,
+                value_len: expected_bytes,
+            });
+        }
+        let object = self.load_object(domain, id, store)?;
+        let metrics = object_metrics(&object)?;
+        if metrics != (expected_bytes, Some(expected_utf16)) {
+            return Err(ContentError::MalformedObject(
+                "text child aggregate metrics do not match descriptor".to_owned(),
+            ));
+        }
+        match object {
+            ContentObject::Leaf {
+                bytes,
+                utf16_len: Some(_),
+            } => {
+                let text = std::str::from_utf8(&bytes).map_err(|_| ContentError::InvalidUtf8)?;
+                let boundary = utf8_boundary(text, byte_offset)?;
+                count_utf16(&text[..boundary])
+            }
+            ContentObject::Branch(children) => {
+                let mut bytes_seen = 0_u64;
+                let mut utf16_seen = 0_u64;
+                for child in children {
+                    let child_end = bytes_seen
+                        .checked_add(child.byte_len)
+                        .ok_or(ContentError::LengthOverflow)?;
+                    let child_utf16 = child.utf16_len.ok_or_else(|| {
+                        ContentError::MalformedObject("text branch lacks UTF-16 metric".to_owned())
+                    })?;
+                    if byte_offset <= child_end {
+                        return utf16_seen
+                            .checked_add(self.utf16_prefix_object(
+                                domain,
+                                child.id,
+                                child.byte_len,
+                                child_utf16,
+                                byte_offset - bytes_seen,
+                                store,
+                            )?)
+                            .ok_or(ContentError::LengthOverflow);
+                    }
+                    bytes_seen = child_end;
+                    utf16_seen = utf16_seen
+                        .checked_add(child_utf16)
+                        .ok_or(ContentError::LengthOverflow)?;
+                }
+                Ok(utf16_seen)
+            }
+            ContentObject::Leaf {
+                utf16_len: None, ..
+            } => Err(ContentError::MalformedObject(
+                "text root references a byte leaf".to_owned(),
+            )),
+        }
+    }
+
+    fn byte_offset_for_utf16<S: ImmutableContentStore>(
+        &self,
+        domain: &ContentDomain,
+        root: ContentId,
+        root_byte_len: u64,
+        root_utf16_len: u64,
+        utf16_offset: u64,
+        store: &S,
+    ) -> Result<u64, ContentError> {
+        if utf16_offset > root_utf16_len {
+            return Err(ContentError::TextOffsetOutOfBounds {
+                encoding: "UTF-16",
+                offset: utf16_offset,
+                text_len: root_utf16_len,
+            });
+        }
+        let object = self.load_object(domain, root, store)?;
+        if object_metrics(&object)? != (root_byte_len, Some(root_utf16_len)) {
+            return Err(ContentError::MalformedObject(
+                "text child aggregate metrics do not match descriptor".to_owned(),
+            ));
+        }
+        match object {
+            ContentObject::Leaf {
+                bytes,
+                utf16_len: Some(_),
+            } => {
+                let text = std::str::from_utf8(&bytes).map_err(|_| ContentError::InvalidUtf8)?;
+                u64::try_from(utf16_to_byte_offset(text, utf16_offset)?)
+                    .map_err(|_| ContentError::LengthOverflow)
+            }
+            ContentObject::Branch(children) => {
+                let mut byte_base = 0_u64;
+                let mut utf16_base = 0_u64;
+                for child in children {
+                    let child_utf16 = child.utf16_len.ok_or_else(|| {
+                        ContentError::MalformedObject("text branch lacks UTF-16 metric".to_owned())
+                    })?;
+                    let child_end = utf16_base
+                        .checked_add(child_utf16)
+                        .ok_or(ContentError::LengthOverflow)?;
+                    if utf16_offset <= child_end {
+                        return byte_base
+                            .checked_add(self.byte_offset_for_utf16(
+                                domain,
+                                child.id,
+                                child.byte_len,
+                                child_utf16,
+                                utf16_offset - utf16_base,
+                                store,
+                            )?)
+                            .ok_or(ContentError::LengthOverflow);
+                    }
+                    byte_base = byte_base
+                        .checked_add(child.byte_len)
+                        .ok_or(ContentError::LengthOverflow)?;
+                    utf16_base = child_end;
+                }
+                Ok(byte_base)
+            }
+            ContentObject::Leaf {
+                utf16_len: None, ..
+            } => Err(ContentError::MalformedObject(
+                "text root references a byte leaf".to_owned(),
+            )),
+        }
+    }
+
     fn persist_object<S: ImmutableContentStore>(
         &self,
         domain: &ContentDomain,
         object: ContentObject,
         store: &mut S,
     ) -> Result<ChildDescriptor, ContentError> {
-        let byte_len = object_len(&object)?;
+        let (byte_len, utf16_len) = object_metrics(&object)?;
         let canonical = encode_object(&object)?;
         let id = object_id(domain, &canonical);
         store.put_if_absent_or_identical(id, &canonical)?;
-        Ok(ChildDescriptor { id, byte_len })
+        Ok(ChildDescriptor {
+            id,
+            byte_len,
+            utf16_len,
+        })
     }
 
     fn load_object<S: ImmutableContentStore>(
@@ -835,14 +1098,14 @@ impl ContentTree {
         out: &mut Vec<u8>,
     ) -> Result<(), ContentError> {
         let object = self.load_object(domain, id, store)?;
-        let actual_len = object_len(&object)?;
+        let (actual_len, _) = object_metrics(&object)?;
         if expected_len.is_some_and(|expected| expected != actual_len) {
             return Err(ContentError::MalformedObject(
                 "child aggregate length does not match descriptor".to_owned(),
             ));
         }
         match object {
-            ContentObject::Leaf(bytes) => {
+            ContentObject::Leaf { bytes, .. } => {
                 let leaf_len =
                     u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)?;
                 if end > leaf_len || start > end {
@@ -968,9 +1231,14 @@ impl<'a, S: ImmutableContentStore> StreamingContentBuilder<'a, S> {
         self.rolling = 0;
         self.window_len = 0;
         self.window_cursor = 0;
-        let descriptor =
-            self.tree
-                .persist_object(self.domain, ContentObject::Leaf(bytes), self.store)?;
+        let descriptor = self.tree.persist_object(
+            self.domain,
+            ContentObject::Leaf {
+                bytes,
+                utf16_len: None,
+            },
+            self.store,
+        )?;
         self.push_descriptor(0, descriptor)
     }
 
@@ -1058,6 +1326,30 @@ impl LargeValue {
         }
     }
 
+    /// Return the assembled UTF-16 code-unit length recorded for text.
+    pub fn utf16_len(&self) -> Result<u64, ContentError> {
+        match self {
+            Self::Inline(bytes) => {
+                count_utf16(std::str::from_utf8(bytes).map_err(|_| ContentError::InvalidUtf8)?)
+            }
+            Self::Chunked(large) => {
+                let mut len = large.root_utf16_len.ok_or(ContentError::InvalidSelection)?;
+                for patch in &large.edit_tail {
+                    let metrics = patch.text_metrics.ok_or_else(|| {
+                        ContentError::MalformedCell(
+                            "text tail patch lacks UTF-16 metrics".to_owned(),
+                        )
+                    })?;
+                    len = len
+                        .checked_sub(metrics.delete_len)
+                        .and_then(|value| value.checked_add(metrics.insert_len))
+                        .ok_or(ContentError::LengthOverflow)?;
+                }
+                Ok(len)
+            }
+        }
+    }
+
     /// Encode the complete atomic physical cell for ordinary Jazz storage and
     /// wire transport.
     pub fn encode_cell(&self) -> Result<Vec<u8>, ContentError> {
@@ -1077,6 +1369,8 @@ impl LargeValue {
                 encoded.push(1);
                 encoded.extend_from_slice(large.root.as_bytes());
                 encoded.extend_from_slice(&large.root_byte_len.to_le_bytes());
+                encoded.push(u8::from(large.root_utf16_len.is_some()));
+                encoded.extend_from_slice(&large.root_utf16_len.unwrap_or(0).to_le_bytes());
                 encoded.extend_from_slice(
                     &u64::try_from(large.edit_tail.len())
                         .map_err(|_| ContentError::LengthOverflow)?
@@ -1090,6 +1384,13 @@ impl LargeValue {
                             .map_err(|_| ContentError::LengthOverflow)?
                             .to_le_bytes(),
                     );
+                    encoded.push(u8::from(patch.text_metrics.is_some()));
+                    let metrics = patch.text_metrics.unwrap_or(TextPatchMetrics {
+                        delete_len: 0,
+                        insert_len: 0,
+                    });
+                    encoded.extend_from_slice(&metrics.delete_len.to_le_bytes());
+                    encoded.extend_from_slice(&metrics.insert_len.to_le_bytes());
                     encoded.extend_from_slice(&patch.insert);
                 }
             }
@@ -1125,6 +1426,14 @@ impl LargeValue {
                 let mut root = [0; 32];
                 root.copy_from_slice(take_cell_bytes(payload, &mut cursor, 32)?);
                 let root_byte_len = read_u64(payload, &mut cursor)?;
+                let root_metric_tag = take_cell_bytes(payload, &mut cursor, 1)?[0];
+                if root_metric_tag > 1 {
+                    return Err(ContentError::MalformedCell(
+                        "invalid root UTF-16 metric tag".to_owned(),
+                    ));
+                }
+                let root_metric = read_u64(payload, &mut cursor)?;
+                let root_utf16_len = (root_metric_tag == 1).then_some(root_metric);
                 let count = read_u64(payload, &mut cursor)?;
                 if count > u64::from(schema.max_tail_entries) {
                     return Err(ContentError::TailTooLarge);
@@ -1154,18 +1463,42 @@ impl LargeValue {
                     {
                         return Err(ContentError::TailTooLarge);
                     }
+                    let metric_tag = take_cell_bytes(payload, &mut cursor, 1)?[0];
+                    if metric_tag > 1 {
+                        return Err(ContentError::MalformedCell(
+                            "invalid patch UTF-16 metric tag".to_owned(),
+                        ));
+                    }
+                    let delete_utf16 = read_u64(payload, &mut cursor)?;
+                    let insert_utf16 = read_u64(payload, &mut cursor)?;
                     let insert = take_cell_bytes(payload, &mut cursor, insert_len)?.to_vec();
                     edit_tail.push(BytePatch {
                         offset,
                         delete_len,
                         insert,
+                        text_metrics: (metric_tag == 1).then_some(TextPatchMetrics {
+                            delete_len: delete_utf16,
+                            insert_len: insert_utf16,
+                        }),
                     });
                 }
                 let large = ChunkedValue {
                     root: ContentId(root),
                     root_byte_len,
+                    root_utf16_len,
                     edit_tail,
                 };
+                let text_metrics = schema.kind == ValueKind::String;
+                if large.root_utf16_len.is_some() != text_metrics
+                    || large
+                        .edit_tail
+                        .iter()
+                        .any(|patch| patch.text_metrics.is_some() != text_metrics)
+                {
+                    return Err(ContentError::MalformedCell(
+                        "UTF-16 metrics do not match the logical value kind".to_owned(),
+                    ));
+                }
                 if !tail_within_bounds(&large.edit_tail, schema.tail_bounds())? {
                     return Err(ContentError::TailTooLarge);
                 }
@@ -1202,10 +1535,18 @@ impl LargeValue {
         if bytes.len() <= inline_up_to {
             return Ok(Self::Inline(bytes));
         }
-        let (root, root_byte_len) = tree.build(domain, &bytes, store)?;
+        let (root, root_byte_len, root_utf16_len) = if kind == ValueKind::String {
+            let text = std::str::from_utf8(&bytes).map_err(|_| ContentError::InvalidUtf8)?;
+            let (root, byte_len, utf16_len) = tree.build_text(domain, text, store)?;
+            (root, byte_len, Some(utf16_len))
+        } else {
+            let (root, byte_len) = tree.build(domain, &bytes, store)?;
+            (root, byte_len, None)
+        };
         Ok(Self::Chunked(ChunkedValue {
             root,
             root_byte_len,
+            root_utf16_len,
             edit_tail: Vec::new(),
         }))
     }
@@ -1231,6 +1572,7 @@ impl LargeValue {
         Ok(Self::Chunked(ChunkedValue {
             root,
             root_byte_len,
+            root_utf16_len: None,
             edit_tail: Vec::new(),
         }))
     }
@@ -1262,14 +1604,62 @@ impl LargeValue {
         tree: ContentTree,
         store: &S,
     ) -> Result<ValueSelectionResult, ContentError> {
-        if let (ValueKind::Bytes, ValueSelection::ByteRange { offset, len }) = (kind, selection) {
-            let selected = match self {
-                Self::Inline(bytes) => checked_slice(bytes, *offset, *len)?.to_vec(),
-                Self::Chunked(large) => {
-                    materialize_large_range(large, domain, tree, store, *offset, *len)?
-                }
-            };
-            return Ok(ValueSelectionResult::Bytes(selected));
+        match (kind, selection) {
+            (ValueKind::Bytes, ValueSelection::ByteRange { offset, len }) => {
+                let selected = match self {
+                    Self::Inline(bytes) => checked_slice(bytes, *offset, *len)?.to_vec(),
+                    Self::Chunked(large) => {
+                        materialize_large_range(large, domain, tree, store, *offset, *len)?
+                    }
+                };
+                return Ok(ValueSelectionResult::Bytes(selected));
+            }
+            (ValueKind::String, ValueSelection::TextUtf8Range { offset, len }) => {
+                let end = offset
+                    .checked_add(*len)
+                    .ok_or(ContentError::LengthOverflow)?;
+                let selected = match self {
+                    Self::Inline(bytes) => {
+                        let text =
+                            std::str::from_utf8(bytes).map_err(|_| ContentError::InvalidUtf8)?;
+                        let start = utf8_boundary(text, *offset)?;
+                        let end = utf8_boundary(text, end)?;
+                        text.as_bytes()[start..end].to_vec()
+                    }
+                    Self::Chunked(large) => {
+                        validate_large_utf8_boundary(large, domain, tree, store, *offset)?;
+                        validate_large_utf8_boundary(large, domain, tree, store, end)?;
+                        materialize_large_range(large, domain, tree, store, *offset, *len)?
+                    }
+                };
+                return String::from_utf8(selected)
+                    .map(ValueSelectionResult::String)
+                    .map_err(|_| ContentError::InvalidUtf8);
+            }
+            (ValueKind::String, ValueSelection::TextUtf16Range { offset, len }) => {
+                let end = offset
+                    .checked_add(*len)
+                    .ok_or(ContentError::LengthOverflow)?;
+                let selected = match self {
+                    Self::Inline(bytes) => {
+                        let text =
+                            std::str::from_utf8(bytes).map_err(|_| ContentError::InvalidUtf8)?;
+                        let start = utf16_to_byte_offset(text, *offset)?;
+                        let end = utf16_to_byte_offset(text, end)?;
+                        text.as_bytes()[start..end].to_vec()
+                    }
+                    Self::Chunked(large) => {
+                        let start =
+                            large_byte_offset_for_utf16(large, domain, tree, store, *offset)?;
+                        let end = large_byte_offset_for_utf16(large, domain, tree, store, end)?;
+                        materialize_large_range(large, domain, tree, store, start, end - start)?
+                    }
+                };
+                return String::from_utf8(selected)
+                    .map(ValueSelectionResult::String)
+                    .map_err(|_| ContentError::InvalidUtf8);
+            }
+            _ => {}
         }
         let bytes = self.materialize(kind, domain, tree, store)?;
         match (kind, selection) {
@@ -1278,15 +1668,8 @@ impl LargeValue {
             (ValueKind::String, ValueSelection::Value) => Ok(ValueSelectionResult::String(
                 String::from_utf8(bytes).map_err(|_| ContentError::InvalidUtf8)?,
             )),
-            (ValueKind::String, ValueSelection::TextRange { offset, len }) => {
-                let text = std::str::from_utf8(&bytes).map_err(|_| ContentError::InvalidUtf8)?;
-                let start = scalar_to_byte_offset(text, *offset)?;
-                let end_scalar = offset
-                    .checked_add(*len)
-                    .ok_or(ContentError::LengthOverflow)?;
-                let end = scalar_to_byte_offset(text, end_scalar)?;
-                Ok(ValueSelectionResult::String(text[start..end].to_owned()))
-            }
+            (ValueKind::String, ValueSelection::TextUtf8Range { .. })
+            | (ValueKind::String, ValueSelection::TextUtf16Range { .. }) => unreachable!(),
             (ValueKind::Json, ValueSelection::Value) => Ok(ValueSelectionResult::Json(
                 serde_json::from_slice(&bytes)
                     .map_err(|error| ContentError::InvalidJson(error.to_string()))?,
@@ -1315,6 +1698,101 @@ impl LargeValue {
         tree: ContentTree,
         store: &S,
     ) -> Result<BytePatch, ContentError> {
+        if let (
+            ValueKind::String,
+            ValueEdit::TextUtf8 {
+                slice_offset,
+                slice_len,
+                offset,
+                delete_len,
+                insert,
+            },
+        ) = (kind, &edit)
+        {
+            validate_relative_range(*slice_len, *offset, *delete_len)?;
+            let absolute = slice_offset
+                .checked_add(*offset)
+                .ok_or(ContentError::LengthOverflow)?;
+            let end = absolute
+                .checked_add(*delete_len)
+                .ok_or(ContentError::LengthOverflow)?;
+            let slice_end = slice_offset
+                .checked_add(*slice_len)
+                .ok_or(ContentError::LengthOverflow)?;
+            let deleted = match self {
+                Self::Inline(bytes) => {
+                    let text = std::str::from_utf8(bytes).map_err(|_| ContentError::InvalidUtf8)?;
+                    utf8_boundary(text, *slice_offset)?;
+                    utf8_boundary(text, slice_end)?;
+                    let start = utf8_boundary(text, absolute)?;
+                    let end = utf8_boundary(text, end)?;
+                    text.as_bytes()[start..end].to_vec()
+                }
+                Self::Chunked(large) => {
+                    validate_large_utf8_boundary(large, domain, tree, store, *slice_offset)?;
+                    validate_large_utf8_boundary(large, domain, tree, store, slice_end)?;
+                    validate_large_utf8_boundary(large, domain, tree, store, absolute)?;
+                    validate_large_utf8_boundary(large, domain, tree, store, end)?;
+                    materialize_large_range(large, domain, tree, store, absolute, *delete_len)?
+                }
+            };
+            let deleted = std::str::from_utf8(&deleted).map_err(|_| ContentError::InvalidUtf8)?;
+            return Ok(BytePatch::replace(absolute, *delete_len, insert.as_bytes())
+                .with_text_metrics(count_utf16(deleted)?, count_utf16(insert)?));
+        }
+        if let (
+            ValueKind::String,
+            ValueEdit::TextUtf16 {
+                slice_offset,
+                slice_len,
+                offset,
+                delete_len,
+                insert,
+            },
+        ) = (kind, &edit)
+        {
+            validate_relative_range(*slice_len, *offset, *delete_len)?;
+            let absolute = slice_offset
+                .checked_add(*offset)
+                .ok_or(ContentError::LengthOverflow)?;
+            let end = absolute
+                .checked_add(*delete_len)
+                .ok_or(ContentError::LengthOverflow)?;
+            let slice_end = slice_offset
+                .checked_add(*slice_len)
+                .ok_or(ContentError::LengthOverflow)?;
+            let (start_byte, end_byte) = match self {
+                Self::Inline(bytes) => {
+                    let text = std::str::from_utf8(bytes).map_err(|_| ContentError::InvalidUtf8)?;
+                    utf16_to_byte_offset(text, *slice_offset)?;
+                    utf16_to_byte_offset(text, slice_end)?;
+                    (
+                        utf16_to_byte_offset(text, absolute)?,
+                        utf16_to_byte_offset(text, end)?,
+                    )
+                }
+                Self::Chunked(large) => {
+                    large_byte_offset_for_utf16(large, domain, tree, store, *slice_offset)?;
+                    large_byte_offset_for_utf16(large, domain, tree, store, slice_end)?;
+                    (
+                        usize::try_from(large_byte_offset_for_utf16(
+                            large, domain, tree, store, absolute,
+                        )?)
+                        .map_err(|_| ContentError::LengthOverflow)?,
+                        usize::try_from(large_byte_offset_for_utf16(
+                            large, domain, tree, store, end,
+                        )?)
+                        .map_err(|_| ContentError::LengthOverflow)?,
+                    )
+                }
+            };
+            return Ok(BytePatch::replace(
+                u64::try_from(start_byte).map_err(|_| ContentError::LengthOverflow)?,
+                u64::try_from(end_byte - start_byte).map_err(|_| ContentError::LengthOverflow)?,
+                insert.as_bytes(),
+            )
+            .with_text_metrics(*delete_len, count_utf16(insert)?));
+        }
         let bytes = self.materialize(kind, domain, tree, store)?;
         match (kind, edit) {
             (ValueKind::Bytes, ValueEdit::Bytes(patch)) => {
@@ -1325,19 +1803,8 @@ impl LargeValue {
                 u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)?,
                 insert,
             )),
-            (
-                ValueKind::String,
-                ValueEdit::Text {
-                    offset,
-                    delete_len,
-                    insert,
-                },
-            ) => text_replace_patch(
-                std::str::from_utf8(&bytes).map_err(|_| ContentError::InvalidUtf8)?,
-                offset,
-                delete_len,
-                &insert,
-            ),
+            (ValueKind::String, ValueEdit::TextUtf8 { .. })
+            | (ValueKind::String, ValueEdit::TextUtf16 { .. }) => unreachable!(),
             (ValueKind::Json, ValueEdit::Json(value)) => {
                 let next = serde_json::to_vec(&value)
                     .map_err(|error| ContentError::InvalidJson(error.to_string()))?;
@@ -1352,13 +1819,16 @@ impl LargeValue {
         &self,
         kind: ValueKind,
         domain: &ContentDomain,
-        patch: BytePatch,
+        mut patch: BytePatch,
         inline_up_to: usize,
         tail_bounds: TailBounds,
         tree: ContentTree,
         store: &mut S,
     ) -> Result<Self, ContentError> {
         let current = self.materialize(kind, domain, tree, store)?;
+        if kind == ValueKind::String && patch.text_metrics.is_none() {
+            patch.text_metrics = Some(text_patch_metrics(&current, &patch)?);
+        }
         let next = apply_patches(&current, std::slice::from_ref(&patch))?;
         kind.validate(&next)?;
 
@@ -1372,13 +1842,23 @@ impl LargeValue {
                     Ok(Self::Chunked(ChunkedValue {
                         root: large.root,
                         root_byte_len: large.root_byte_len,
+                        root_utf16_len: large.root_utf16_len,
                         edit_tail: tail,
                     }))
                 } else {
-                    let (root, root_byte_len) = tree.build(domain, &next, store)?;
+                    let (root, root_byte_len, root_utf16_len) = if kind == ValueKind::String {
+                        let text =
+                            std::str::from_utf8(&next).map_err(|_| ContentError::InvalidUtf8)?;
+                        let (root, byte_len, utf16_len) = tree.build_text(domain, text, store)?;
+                        (root, byte_len, Some(utf16_len))
+                    } else {
+                        let (root, byte_len) = tree.build(domain, &next, store)?;
+                        (root, byte_len, None)
+                    };
                     Ok(Self::Chunked(ChunkedValue {
                         root,
                         root_byte_len,
+                        root_utf16_len,
                         edit_tail: Vec::new(),
                     }))
                 }
@@ -1567,6 +2047,187 @@ fn materialize_large_range<S: ImmutableContentStore>(
     Ok(out)
 }
 
+fn large_utf16_len<S: ImmutableContentStore>(
+    large: &ChunkedValue,
+    domain: &ContentDomain,
+    tree: ContentTree,
+    store: &S,
+) -> Result<u64, ContentError> {
+    let root_utf16 = large.root_utf16_len.ok_or(ContentError::InvalidSelection)?;
+    let mut total = root_utf16;
+    for patch in &large.edit_tail {
+        let metrics = patch.text_metrics.ok_or_else(|| {
+            ContentError::MalformedCell("text tail patch lacks UTF-16 metrics".to_owned())
+        })?;
+        total = total
+            .checked_sub(metrics.delete_len)
+            .and_then(|value| value.checked_add(metrics.insert_len))
+            .ok_or(ContentError::LengthOverflow)?;
+    }
+    // Authenticate the root metric even when the requested position falls in
+    // tail-inserted text and no root payload would otherwise be visited.
+    tree.utf16_prefix(
+        domain,
+        large.root,
+        large.root_byte_len,
+        root_utf16,
+        0,
+        store,
+    )?;
+    Ok(total)
+}
+
+fn large_byte_offset_for_utf16<S: ImmutableContentStore>(
+    large: &ChunkedValue,
+    domain: &ContentDomain,
+    tree: ContentTree,
+    store: &S,
+    target: u64,
+) -> Result<u64, ContentError> {
+    let total = large_utf16_len(large, domain, tree, store)?;
+    if target > total {
+        return Err(ContentError::TextOffsetOutOfBounds {
+            encoding: "UTF-16",
+            offset: target,
+            text_len: total,
+        });
+    }
+    let root_utf16 = large.root_utf16_len.ok_or(ContentError::InvalidSelection)?;
+    let mut logical_bytes = 0_u64;
+    let mut logical_utf16 = 0_u64;
+    for piece in material_pieces(large)? {
+        let (piece_bytes, piece_utf16) = match &piece {
+            MaterialPiece::Root { offset, len } => {
+                let start = tree.utf16_prefix(
+                    domain,
+                    large.root,
+                    large.root_byte_len,
+                    root_utf16,
+                    *offset,
+                    store,
+                )?;
+                let end_offset = offset
+                    .checked_add(*len)
+                    .ok_or(ContentError::LengthOverflow)?;
+                let end = tree.utf16_prefix(
+                    domain,
+                    large.root,
+                    large.root_byte_len,
+                    root_utf16,
+                    end_offset,
+                    store,
+                )?;
+                (
+                    *len,
+                    end.checked_sub(start).ok_or(ContentError::LengthOverflow)?,
+                )
+            }
+            MaterialPiece::Insert(bytes) => {
+                let text = std::str::from_utf8(bytes).map_err(|_| ContentError::InvalidUtf8)?;
+                (
+                    u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)?,
+                    count_utf16(text)?,
+                )
+            }
+        };
+        let piece_end = logical_utf16
+            .checked_add(piece_utf16)
+            .ok_or(ContentError::LengthOverflow)?;
+        if target <= piece_end {
+            let within_utf16 = target - logical_utf16;
+            let within_bytes = match piece {
+                MaterialPiece::Root { offset, .. } => {
+                    let prefix = tree.utf16_prefix(
+                        domain,
+                        large.root,
+                        large.root_byte_len,
+                        root_utf16,
+                        offset,
+                        store,
+                    )?;
+                    let root_target = prefix
+                        .checked_add(within_utf16)
+                        .ok_or(ContentError::LengthOverflow)?;
+                    tree.byte_offset_for_utf16(
+                        domain,
+                        large.root,
+                        large.root_byte_len,
+                        root_utf16,
+                        root_target,
+                        store,
+                    )?
+                    .checked_sub(offset)
+                    .ok_or(ContentError::LengthOverflow)?
+                }
+                MaterialPiece::Insert(bytes) => {
+                    let text =
+                        std::str::from_utf8(&bytes).map_err(|_| ContentError::InvalidUtf8)?;
+                    u64::try_from(utf16_to_byte_offset(text, within_utf16)?)
+                        .map_err(|_| ContentError::LengthOverflow)?
+                }
+            };
+            return logical_bytes
+                .checked_add(within_bytes)
+                .ok_or(ContentError::LengthOverflow);
+        }
+        logical_bytes = logical_bytes
+            .checked_add(piece_bytes)
+            .ok_or(ContentError::LengthOverflow)?;
+        logical_utf16 = piece_end;
+    }
+    Ok(logical_bytes)
+}
+
+fn validate_large_utf8_boundary<S: ImmutableContentStore>(
+    large: &ChunkedValue,
+    domain: &ContentDomain,
+    tree: ContentTree,
+    store: &S,
+    target: u64,
+) -> Result<(), ContentError> {
+    let total = patched_length(large)?;
+    if target > total {
+        return Err(ContentError::TextOffsetOutOfBounds {
+            encoding: "UTF-8",
+            offset: target,
+            text_len: total,
+        });
+    }
+    let root_utf16 = large.root_utf16_len.ok_or(ContentError::InvalidSelection)?;
+    let mut cursor = 0_u64;
+    for piece in material_pieces(large)? {
+        let len = piece.len()?;
+        let end = cursor
+            .checked_add(len)
+            .ok_or(ContentError::LengthOverflow)?;
+        if target <= end {
+            let within = target - cursor;
+            match piece {
+                MaterialPiece::Root { offset, .. } => {
+                    tree.utf16_prefix(
+                        domain,
+                        large.root,
+                        large.root_byte_len,
+                        root_utf16,
+                        offset
+                            .checked_add(within)
+                            .ok_or(ContentError::LengthOverflow)?,
+                        store,
+                    )?;
+                }
+                MaterialPiece::Insert(bytes) => {
+                    let text =
+                        std::str::from_utf8(&bytes).map_err(|_| ContentError::InvalidUtf8)?;
+                    utf8_boundary(text, within)?;
+                }
+            }
+            return Ok(());
+        }
+        cursor = end;
+    }
+    Ok(())
+}
+
 fn checked_slice(bytes: &[u8], offset: u64, len: u64) -> Result<&[u8], ContentError> {
     let end = offset
         .checked_add(len)
@@ -1602,38 +2263,115 @@ fn single_replace_diff(before: &[u8], after: &[u8]) -> BytePatch {
     )
 }
 
-/// Lower one Unicode-scalar text replacement to the universal byte patch.
-pub fn text_replace_patch(
+/// Lower one UTF-8 byte-coordinate text replacement to the universal byte patch.
+pub fn text_replace_patch_utf8(
     text: &str,
-    scalar_offset: u64,
-    delete_scalars: u64,
+    offset: u64,
+    delete_len: u64,
     insert: &str,
 ) -> Result<BytePatch, ContentError> {
-    let start = scalar_to_byte_offset(text, scalar_offset)?;
-    let end_scalar = scalar_offset
-        .checked_add(delete_scalars)
+    let end = offset
+        .checked_add(delete_len)
         .ok_or(ContentError::LengthOverflow)?;
-    let end = scalar_to_byte_offset(text, end_scalar)?;
+    let start = utf8_boundary(text, offset)?;
+    let end = utf8_boundary(text, end)?;
+    Ok(BytePatch::replace(offset, delete_len, insert.as_bytes())
+        .with_text_metrics(count_utf16(&text[start..end])?, count_utf16(insert)?))
+}
+
+/// Lower one UTF-16 code-unit text replacement to the universal byte patch.
+pub fn text_replace_patch_utf16(
+    text: &str,
+    offset: u64,
+    delete_len: u64,
+    insert: &str,
+) -> Result<BytePatch, ContentError> {
+    let start = utf16_to_byte_offset(text, offset)?;
+    let end_offset = offset
+        .checked_add(delete_len)
+        .ok_or(ContentError::LengthOverflow)?;
+    let end = utf16_to_byte_offset(text, end_offset)?;
     Ok(BytePatch::replace(
         u64::try_from(start).map_err(|_| ContentError::LengthOverflow)?,
         u64::try_from(end - start).map_err(|_| ContentError::LengthOverflow)?,
         insert.as_bytes(),
-    ))
+    )
+    .with_text_metrics(delete_len, count_utf16(insert)?))
 }
 
-fn scalar_to_byte_offset(text: &str, offset: u64) -> Result<usize, ContentError> {
-    if offset == 0 {
-        return Ok(0);
+fn utf8_boundary(text: &str, offset: u64) -> Result<usize, ContentError> {
+    let offset_usize = usize::try_from(offset).map_err(|_| ContentError::LengthOverflow)?;
+    if offset_usize <= text.len() && text.is_char_boundary(offset_usize) {
+        Ok(offset_usize)
+    } else {
+        Err(ContentError::TextOffsetOutOfBounds {
+            encoding: "UTF-8",
+            offset,
+            text_len: u64::try_from(text.len()).map_err(|_| ContentError::LengthOverflow)?,
+        })
     }
-    let scalar_len =
-        u64::try_from(text.chars().count()).map_err(|_| ContentError::LengthOverflow)?;
-    if offset == scalar_len {
-        return Ok(text.len());
+}
+
+fn utf16_to_byte_offset(text: &str, offset: u64) -> Result<usize, ContentError> {
+    let mut utf16 = 0_u64;
+    for (byte, character) in text.char_indices() {
+        if utf16 == offset {
+            return Ok(byte);
+        }
+        utf16 = utf16
+            .checked_add(u64::from(character.len_utf16() as u8))
+            .ok_or(ContentError::LengthOverflow)?;
+        if utf16 > offset {
+            return Err(ContentError::TextOffsetOutOfBounds {
+                encoding: "UTF-16",
+                offset,
+                text_len: count_utf16(text)?,
+            });
+        }
     }
-    text.char_indices()
-        .nth(usize::try_from(offset).map_err(|_| ContentError::LengthOverflow)?)
-        .map(|(byte, _)| byte)
-        .ok_or(ContentError::ScalarOffsetOutOfBounds { offset, scalar_len })
+    if utf16 == offset {
+        Ok(text.len())
+    } else {
+        Err(ContentError::TextOffsetOutOfBounds {
+            encoding: "UTF-16",
+            offset,
+            text_len: utf16,
+        })
+    }
+}
+
+fn validate_relative_range(
+    slice_len: u64,
+    offset: u64,
+    delete_len: u64,
+) -> Result<(), ContentError> {
+    let end = offset
+        .checked_add(delete_len)
+        .ok_or(ContentError::LengthOverflow)?;
+    if end <= slice_len {
+        Ok(())
+    } else {
+        Err(ContentError::PatchOutOfBounds {
+            offset,
+            end,
+            value_len: slice_len,
+        })
+    }
+}
+
+fn text_patch_metrics(current: &[u8], patch: &BytePatch) -> Result<TextPatchMetrics, ContentError> {
+    let text = std::str::from_utf8(current).map_err(|_| ContentError::InvalidUtf8)?;
+    let start = utf8_boundary(text, patch.offset)?;
+    let end_offset = patch
+        .offset
+        .checked_add(patch.delete_len)
+        .ok_or(ContentError::LengthOverflow)?;
+    let end = utf8_boundary(text, end_offset)?;
+    let insert = std::str::from_utf8(&patch.insert).map_err(|_| ContentError::InvalidUtf8)?;
+    Ok(TextPatchMetrics {
+        delete_len: count_utf16(&text[start..end])?,
+        insert_len: count_utf16(insert)?,
+    })
 }
 
 fn tail_within_bounds(tail: &[BytePatch], bounds: TailBounds) -> Result<bool, ContentError> {
@@ -1664,24 +2402,51 @@ fn object_id(domain: &ContentDomain, canonical: &[u8]) -> ContentId {
     ContentId(*hasher.finalize().as_bytes())
 }
 
-fn object_len(object: &ContentObject) -> Result<u64, ContentError> {
+fn object_metrics(object: &ContentObject) -> Result<(u64, Option<u64>), ContentError> {
     match object {
-        ContentObject::Leaf(bytes) => {
-            u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)
+        ContentObject::Leaf { bytes, utf16_len } => Ok((
+            u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)?,
+            *utf16_len,
+        )),
+        ContentObject::Branch(children) => {
+            let byte_len = children.iter().try_fold(0_u64, |sum, child| {
+                sum.checked_add(child.byte_len)
+                    .ok_or(ContentError::LengthOverflow)
+            })?;
+            let text = children.first().and_then(|child| child.utf16_len).is_some();
+            if children
+                .iter()
+                .any(|child| child.utf16_len.is_some() != text)
+            {
+                return Err(ContentError::MalformedObject(
+                    "branch mixes byte and text metrics".to_owned(),
+                ));
+            }
+            let utf16_len = text
+                .then(|| {
+                    children.iter().try_fold(0_u64, |sum, child| {
+                        sum.checked_add(child.utf16_len.expect("validated text child"))
+                            .ok_or(ContentError::LengthOverflow)
+                    })
+                })
+                .transpose()?;
+            Ok((byte_len, utf16_len))
         }
-        ContentObject::Branch(children) => children.iter().try_fold(0_u64, |sum, child| {
-            sum.checked_add(child.byte_len)
-                .ok_or(ContentError::LengthOverflow)
-        }),
     }
 }
 
 fn encode_object(object: &ContentObject) -> Result<Vec<u8>, ContentError> {
     let mut bytes = vec![OBJECT_FORMAT_VERSION];
     match object {
-        ContentObject::Leaf(payload) => {
-            bytes.push(0);
+        ContentObject::Leaf {
+            bytes: payload,
+            utf16_len,
+        } => {
+            bytes.push(if utf16_len.is_some() { 2 } else { 0 });
             write_u64(&mut bytes, payload.len())?;
+            if let Some(utf16_len) = utf16_len {
+                bytes.extend_from_slice(&utf16_len.to_le_bytes());
+            }
             bytes.extend_from_slice(payload);
         }
         ContentObject::Branch(children) => {
@@ -1690,6 +2455,8 @@ fn encode_object(object: &ContentObject) -> Result<Vec<u8>, ContentError> {
             for child in children {
                 bytes.extend_from_slice(child.id.as_bytes());
                 bytes.extend_from_slice(&child.byte_len.to_le_bytes());
+                bytes.push(u8::from(child.utf16_len.is_some()));
+                bytes.extend_from_slice(&child.utf16_len.unwrap_or(0).to_le_bytes());
             }
         }
     }
@@ -1706,13 +2473,37 @@ fn decode_object(bytes: &[u8], profile: ChunkingProfile) -> Result<ContentObject
     let count = read_u64(bytes, &mut cursor)?;
     let count = usize::try_from(count).map_err(|_| ContentError::LengthOverflow)?;
     match bytes[1] {
-        0 => {
-            if count > profile.max_leaf_bytes || bytes.len().saturating_sub(cursor) != count {
+        tag @ (0 | 2) => {
+            let utf16_len = if tag == 2 {
+                Some(read_u64(bytes, &mut cursor)?)
+            } else {
+                None
+            };
+            let max_leaf = if tag == 2 {
+                profile.max_leaf_bytes.saturating_add(3)
+            } else {
+                profile.max_leaf_bytes
+            };
+            if count > max_leaf || bytes.len().saturating_sub(cursor) != count {
                 return Err(ContentError::MalformedObject(
                     "leaf length exceeds bounds or payload".to_owned(),
                 ));
             }
-            Ok(ContentObject::Leaf(bytes[cursor..].to_vec()))
+            let payload = bytes[cursor..].to_vec();
+            if let Some(expected) = utf16_len {
+                let text = std::str::from_utf8(&payload).map_err(|_| {
+                    ContentError::MalformedObject("text leaf is not UTF-8".to_owned())
+                })?;
+                if count_utf16(text)? != expected {
+                    return Err(ContentError::MalformedObject(
+                        "text leaf UTF-16 metric is incorrect".to_owned(),
+                    ));
+                }
+            }
+            Ok(ContentObject::Leaf {
+                bytes: payload,
+                utf16_len,
+            })
         }
         1 => {
             if count == 0 || count > profile.max_children {
@@ -1721,7 +2512,7 @@ fn decode_object(bytes: &[u8], profile: ChunkingProfile) -> Result<ContentObject
                 ));
             }
             let expected = cursor
-                .checked_add(count.checked_mul(40).ok_or(ContentError::LengthOverflow)?)
+                .checked_add(count.checked_mul(49).ok_or(ContentError::LengthOverflow)?)
                 .ok_or(ContentError::LengthOverflow)?;
             if expected != bytes.len() {
                 return Err(ContentError::MalformedObject(
@@ -1737,6 +2528,17 @@ fn decode_object(bytes: &[u8], profile: ChunkingProfile) -> Result<ContentObject
                 length.copy_from_slice(&bytes[cursor..cursor + 8]);
                 cursor += 8;
                 let byte_len = u64::from_le_bytes(length);
+                let has_utf16 = bytes[cursor];
+                cursor += 1;
+                if has_utf16 > 1 {
+                    return Err(ContentError::MalformedObject(
+                        "invalid UTF-16 metric tag".to_owned(),
+                    ));
+                }
+                let mut utf16 = [0_u8; 8];
+                utf16.copy_from_slice(&bytes[cursor..cursor + 8]);
+                cursor += 8;
+                let utf16_len = (has_utf16 == 1).then(|| u64::from_le_bytes(utf16));
                 if byte_len == 0 {
                     return Err(ContentError::MalformedObject(
                         "branch child cannot have zero aggregate length".to_owned(),
@@ -1745,6 +2547,7 @@ fn decode_object(bytes: &[u8], profile: ChunkingProfile) -> Result<ContentObject
                 children.push(ChildDescriptor {
                     id: ContentId(id),
                     byte_len,
+                    utf16_len,
                 });
             }
             Ok(ContentObject::Branch(children))
@@ -1829,6 +2632,34 @@ fn leaf_ranges(bytes: &[u8], profile: ChunkingProfile) -> Vec<std::ops::Range<us
     ranges
 }
 
+fn text_leaf_ranges(text: &str, profile: ChunkingProfile) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let raw = leaf_ranges(bytes, profile);
+    if raw.len() < 2 {
+        return raw;
+    }
+    let mut ranges = Vec::with_capacity(raw.len());
+    let mut start = 0;
+    for range in raw.iter().take(raw.len() - 1) {
+        let aligned = (start + 1..=range.end)
+            .rev()
+            .find(|candidate| text.is_char_boundary(*candidate))
+            .unwrap_or_else(|| {
+                (range.end..=bytes.len())
+                    .find(|candidate| text.is_char_boundary(*candidate))
+                    .expect("the end of valid UTF-8 is a boundary")
+            });
+        ranges.push(start..aligned);
+        start = aligned;
+    }
+    ranges.push(start..bytes.len());
+    ranges
+}
+
+fn count_utf16(text: &str) -> Result<u64, ContentError> {
+    u64::try_from(text.encode_utf16().count()).map_err(|_| ContentError::LengthOverflow)
+}
+
 fn descriptor_groups(
     children: &[ChildDescriptor],
     profile: ChunkingProfile,
@@ -1861,6 +2692,8 @@ fn descriptor_boundary(child: &ChildDescriptor, profile: ChunkingProfile) -> boo
         .iter()
         .copied()
         .chain(child.byte_len.to_le_bytes())
+        .chain([u8::from(child.utf16_len.is_some())])
+        .chain(child.utf16_len.unwrap_or(0).to_le_bytes())
     {
         rolling = rolling.rotate_left(1) ^ gear(byte);
     }
@@ -1902,7 +2735,7 @@ mod tests {
         out: &mut Vec<ContentId>,
     ) {
         match tree.load_object(&domain(), id, store).unwrap() {
-            ContentObject::Leaf(_) => out.push(id),
+            ContentObject::Leaf { .. } => out.push(id),
             ContentObject::Branch(children) => {
                 for child in children {
                     collect_leaf_ids(tree, store, child.id, out);
@@ -1982,12 +2815,17 @@ mod tests {
     fn declared_child_lengths_must_match_canonical_objects() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
         let mut store = MemoryContentStore::default();
-        let leaf = encode_object(&ContentObject::Leaf(b"abc".to_vec())).unwrap();
+        let leaf = encode_object(&ContentObject::Leaf {
+            bytes: b"abc".to_vec(),
+            utf16_len: None,
+        })
+        .unwrap();
         let leaf_id = object_id(&domain(), &leaf);
         store.put_if_absent_or_identical(leaf_id, &leaf).unwrap();
         let branch = encode_object(&ContentObject::Branch(vec![ChildDescriptor {
             id: leaf_id,
             byte_len: 2,
+            utf16_len: None,
         }]))
         .unwrap();
         let root = object_id(&domain(), &branch);
@@ -2096,13 +2934,298 @@ mod tests {
 
     #[test]
     fn text_edits_lower_to_utf8_byte_patches() {
-        let patch = text_replace_patch("a🦀z", 1, 1, "é").unwrap();
+        let patch = text_replace_patch_utf16("a🦀z", 1, 2, "é").unwrap();
         assert_eq!(patch.offset, 1);
         assert_eq!(patch.delete_len, 4);
         assert_eq!(
             apply_patches("a🦀z".as_bytes(), &[patch]).unwrap(),
             "aéz".as_bytes()
         );
+    }
+
+    #[test]
+    fn text_ranges_expose_explicit_utf8_and_utf16_coordinates() {
+        let tree = ContentTree::new(tiny_profile()).unwrap();
+        let mut store = MemoryContentStore::default();
+        let source = "a🦀e\u{301}Z—終";
+        let value =
+            LargeValue::create(ValueKind::String, &domain(), source, 1, tree, &mut store).unwrap();
+
+        let boundaries = source
+            .char_indices()
+            .map(|(byte, _)| byte)
+            .chain(std::iter::once(source.len()))
+            .collect::<Vec<_>>();
+        for start_index in 0..boundaries.len() {
+            for end_index in start_index..boundaries.len() {
+                let start = boundaries[start_index];
+                let end = boundaries[end_index];
+                let expected = &source[start..end];
+                assert_eq!(
+                    value
+                        .select(
+                            ValueKind::String,
+                            &ValueSelection::TextUtf8Range {
+                                offset: start as u64,
+                                len: (end - start) as u64,
+                            },
+                            &domain(),
+                            tree,
+                            &store,
+                        )
+                        .unwrap(),
+                    ValueSelectionResult::String(expected.to_owned())
+                );
+
+                let utf16_start = source[..start].encode_utf16().count() as u64;
+                let utf16_len = expected.encode_utf16().count() as u64;
+                assert_eq!(
+                    value
+                        .select(
+                            ValueKind::String,
+                            &ValueSelection::TextUtf16Range {
+                                offset: utf16_start,
+                                len: utf16_len,
+                            },
+                            &domain(),
+                            tree,
+                            &store,
+                        )
+                        .unwrap(),
+                    ValueSelectionResult::String(expected.to_owned())
+                );
+            }
+        }
+
+        assert!(matches!(
+            value.select(
+                ValueKind::String,
+                &ValueSelection::TextUtf8Range { offset: 2, len: 0 },
+                &domain(),
+                tree,
+                &store,
+            ),
+            Err(ContentError::TextOffsetOutOfBounds {
+                encoding: "UTF-8",
+                ..
+            })
+        ));
+        assert!(matches!(
+            value.select(
+                ValueKind::String,
+                &ValueSelection::TextUtf16Range { offset: 2, len: 0 },
+                &domain(),
+                tree,
+                &store,
+            ),
+            Err(ContentError::TextOffsetOutOfBounds {
+                encoding: "UTF-16",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn utf16_slice_relative_edits_survive_tail_materialization_and_consolidation() {
+        let tree = ContentTree::new(tiny_profile()).unwrap();
+        let mut store = MemoryContentStore::default();
+        let original = "zero 🦀 one 🐙 two — end".repeat(40);
+        let mut expected = original.clone();
+        let mut value = LargeValue::create(
+            ValueKind::String,
+            &domain(),
+            original.as_bytes(),
+            4,
+            tree,
+            &mut store,
+        )
+        .unwrap();
+        let bounds = TailBounds {
+            max_entries: 2,
+            max_encoded_bytes: 1024,
+        };
+
+        for (offset, delete_len, insert) in [(5, 2, "é"), (11, 0, "🧑‍🔬"), (1, 3, "XYZ")] {
+            let total = expected.encode_utf16().count() as u64;
+            let edit = ValueEdit::TextUtf16 {
+                slice_offset: 0,
+                slice_len: total,
+                offset,
+                delete_len,
+                insert: insert.to_owned(),
+            };
+            let patch = value
+                .lower_edit(ValueKind::String, edit, &domain(), tree, &store)
+                .unwrap();
+            let start = utf16_to_byte_offset(&expected, offset).unwrap();
+            let end = utf16_to_byte_offset(&expected, offset + delete_len).unwrap();
+            expected.replace_range(start..end, insert);
+            value = value
+                .apply_edit(
+                    ValueKind::String,
+                    &domain(),
+                    patch,
+                    4,
+                    bounds,
+                    tree,
+                    &mut store,
+                )
+                .unwrap();
+            assert_eq!(
+                value
+                    .materialize(ValueKind::String, &domain(), tree, &store)
+                    .unwrap(),
+                expected.as_bytes()
+            );
+            let selected_len = expected.encode_utf16().count().min(40) as u64;
+            assert_eq!(
+                value
+                    .select(
+                        ValueKind::String,
+                        &ValueSelection::TextUtf16Range {
+                            offset: 0,
+                            len: selected_len,
+                        },
+                        &domain(),
+                        tree,
+                        &store,
+                    )
+                    .unwrap(),
+                ValueSelectionResult::String(
+                    expected[..utf16_to_byte_offset(&expected, selected_len).unwrap()].to_owned()
+                )
+            );
+        }
+
+        let LargeValue::Chunked(consolidated) = &value else {
+            panic!("large text remains chunked")
+        };
+        assert!(consolidated.edit_tail.is_empty());
+        assert_eq!(
+            consolidated.root_utf16_len,
+            Some(expected.encode_utf16().count() as u64)
+        );
+    }
+
+    #[test]
+    fn utf16_tail_range_does_not_load_an_unrelated_leaf() {
+        let tree = ContentTree::new(tiny_profile()).unwrap();
+        let mut store = MemoryContentStore::default();
+        let source = "abcdefghijklmnop".repeat(256);
+        let value = LargeValue::create(ValueKind::String, &domain(), source, 4, tree, &mut store)
+            .unwrap()
+            .apply_edit(
+                ValueKind::String,
+                &domain(),
+                BytePatch::insert(0, "🦀".as_bytes()),
+                4,
+                TailBounds::default(),
+                tree,
+                &mut store,
+            )
+            .unwrap();
+        let LargeValue::Chunked(large) = &value else {
+            panic!("value must be chunked")
+        };
+        let mut leaves = Vec::new();
+        collect_leaf_ids(tree, &store, large.root, &mut leaves);
+        store.objects.remove(leaves.last().unwrap());
+
+        assert_eq!(
+            value
+                .select(
+                    ValueKind::String,
+                    &ValueSelection::TextUtf16Range { offset: 0, len: 2 },
+                    &domain(),
+                    tree,
+                    &store,
+                )
+                .unwrap(),
+            ValueSelectionResult::String("🦀".to_owned())
+        );
+        assert!(matches!(
+            value.materialize(ValueKind::String, &domain(), tree, &store),
+            Err(ContentError::MissingObject(_))
+        ));
+    }
+
+    #[test]
+    fn mixed_unicode_edit_tail_matches_plain_string_model_exhaustively() {
+        let tree = ContentTree::new(tiny_profile()).unwrap();
+        let mut store = MemoryContentStore::default();
+        let mut expected = "A🦀e\u{301}—終z".repeat(80);
+        let mut value = LargeValue::create(
+            ValueKind::String,
+            &domain(),
+            expected.as_bytes(),
+            4,
+            tree,
+            &mut store,
+        )
+        .unwrap();
+        let bounds = TailBounds {
+            max_entries: 7,
+            max_encoded_bytes: 512,
+        };
+        let inserts = ["", "x", "é", "🧑‍🔬", "終🙂"];
+
+        for step in 0..100_usize {
+            let mut boundaries = vec![(0_u64, 0_usize)];
+            let mut utf16 = 0_u64;
+            for (byte, character) in expected.char_indices() {
+                if byte != 0 {
+                    boundaries.push((utf16, byte));
+                }
+                utf16 += character.len_utf16() as u64;
+            }
+            boundaries.push((utf16, expected.len()));
+            boundaries.sort_unstable();
+            boundaries.dedup();
+            let start_index = (step * 17) % boundaries.len();
+            let end_index = (start_index + (step % 4)).min(boundaries.len() - 1);
+            let (start_utf16, start_byte) = boundaries[start_index];
+            let (end_utf16, end_byte) = boundaries[end_index];
+            let insert = inserts[step % inserts.len()];
+            let total_utf16 = boundaries.last().unwrap().0;
+            let patch = value
+                .lower_edit(
+                    ValueKind::String,
+                    ValueEdit::TextUtf16 {
+                        slice_offset: 0,
+                        slice_len: total_utf16,
+                        offset: start_utf16,
+                        delete_len: end_utf16 - start_utf16,
+                        insert: insert.to_owned(),
+                    },
+                    &domain(),
+                    tree,
+                    &store,
+                )
+                .unwrap();
+            expected.replace_range(start_byte..end_byte, insert);
+            value = value
+                .apply_edit(
+                    ValueKind::String,
+                    &domain(),
+                    patch,
+                    4,
+                    bounds,
+                    tree,
+                    &mut store,
+                )
+                .unwrap();
+            assert_eq!(
+                value.utf16_len().unwrap(),
+                expected.encode_utf16().count() as u64
+            );
+            assert_eq!(
+                value
+                    .materialize(ValueKind::String, &domain(), tree, &store)
+                    .unwrap(),
+                expected.as_bytes(),
+                "step {step}"
+            );
+        }
     }
 
     #[test]
@@ -2182,7 +3305,7 @@ mod tests {
         assert_eq!(
             text.select(
                 ValueKind::String,
-                &ValueSelection::TextRange { offset: 5, len: 1 },
+                &ValueSelection::TextUtf16Range { offset: 5, len: 2 },
                 &domain(),
                 tree,
                 &store,
@@ -2272,6 +3395,7 @@ mod tests {
         let cell = LargeValue::Chunked(ChunkedValue {
             root: ContentId([7; 32]),
             root_byte_len: 42,
+            root_utf16_len: None,
             edit_tail: vec![BytePatch::insert(4, b"next")],
         });
         let encoded = cell.encode_cell().unwrap();
@@ -2288,6 +3412,7 @@ mod tests {
         let cell = LargeValue::Chunked(ChunkedValue {
             root: ContentId([7; 32]),
             root_byte_len: 42,
+            root_utf16_len: None,
             edit_tail: (0..=schema.max_tail_entries)
                 .map(|_| BytePatch::insert(0, b"x"))
                 .collect(),
@@ -2309,6 +3434,8 @@ mod tests {
         hostile.push(1);
         hostile.extend_from_slice(&[0; 32]);
         hostile.extend_from_slice(&0_u64.to_le_bytes());
+        hostile.push(0);
+        hostile.extend_from_slice(&0_u64.to_le_bytes());
         hostile.extend_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(
             LargeValue::decode_cell(&schema, &hostile),
@@ -2318,6 +3445,7 @@ mod tests {
         let oversized_bytes = LargeValue::Chunked(ChunkedValue {
             root: ContentId([7; 32]),
             root_byte_len: 42,
+            root_utf16_len: None,
             edit_tail: (0..schema.max_tail_entries)
                 .map(|_| BytePatch::insert(0, vec![b'x'; 250]))
                 .collect(),
@@ -2335,6 +3463,7 @@ mod tests {
         let value = LargeValue::Chunked(ChunkedValue {
             root: ContentId([9; 32]),
             root_byte_len: u64::MAX,
+            root_utf16_len: None,
             edit_tail: Vec::new(),
         });
         assert!(matches!(
