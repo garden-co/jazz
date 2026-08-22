@@ -14,6 +14,25 @@ fn mib_per_second(bytes: usize, elapsed: Duration) -> f64 {
     bytes as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64()
 }
 
+fn deterministic_bytes(size: usize) -> Vec<u8> {
+    let mut state = 0x4c61_7267_6556_616c_u64;
+    (0..size)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+
+fn deterministic_text(size: usize) -> String {
+    deterministic_bytes(size)
+        .into_iter()
+        .map(|byte| char::from(b'a' + byte % 26))
+        .collect()
+}
+
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
 
@@ -21,7 +40,7 @@ fn main() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(1024 * 1024);
-    let bytes = (0_u8..=250).cycle().take(size).collect::<Vec<_>>();
+    let bytes = deterministic_bytes(size);
     let domain = ContentDomain::new(b"large-value-benchmark".to_vec()).unwrap();
     let tree = ProllyTree::new(Default::default()).unwrap();
     let mut store = MemoryContentStore::default();
@@ -123,7 +142,7 @@ fn main() {
 
     let json_source = serde_json::to_vec(&serde_json::json!({
         "meta": { "version": 1 },
-        "payload": "x".repeat(size),
+        "payload": deterministic_text(size),
     }))
     .unwrap();
     let mut json_store = MemoryContentStore::default();
@@ -154,7 +173,7 @@ fn main() {
 
     let replacement = serde_json::json!({
         "meta": { "version": 2 },
-        "payload": "x".repeat(size),
+        "payload": deterministic_text(size),
     });
     let start = Instant::now();
     let patch = json_value
