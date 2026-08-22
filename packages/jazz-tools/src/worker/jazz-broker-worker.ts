@@ -263,7 +263,7 @@ async function deleteContextStorage(context: RuntimeContext): Promise<void> {
 }
 
 function closeContextPeers(context: RuntimeContext): void {
-  for (const tabId of [...context.peers.keys()]) closeTab(context, tabId);
+  for (const tabId of context.peers.keys()) closeTab(context, tabId);
 }
 
 function handleStorageInvalidation(context: RuntimeContext): void {
