@@ -1761,18 +1761,30 @@ where
     }
 }
 
+/// Materialize the unified overlay scan before a transaction returns its
+/// cursor. The borrowed base and staged state remain the transaction's own
+/// long-lived fields for the whole future; the local adapter never escapes.
+fn transaction_overlay_scan<'a, S>(
+    base: &'a S,
+    staged_writes: &'a RefCell<StagedWriteState>,
+    request: ScanRequest,
+) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
+where
+    S: OrderedKvStorage,
+{
+    Box::pin(async move {
+        let overlay = StagedWriteOverlay::new(base, staged_writes);
+        let values = collect_scan(overlay.scan(request).await?).await?;
+        Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'a>)
+    })
+}
+
 impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
     S: OrderedKvStorage,
 {
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        // The overlay is local to this future, so consume its borrowed cursor
-        // before returning an owned cursor to the transaction caller.
-        Box::pin(async move {
-            let overlay = StagedWriteOverlay::new(self.base, &self.staged_writes);
-            let values = collect_scan(overlay.scan(request).await?).await?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
+        transaction_overlay_scan(self.base, &self.staged_writes, request)
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
