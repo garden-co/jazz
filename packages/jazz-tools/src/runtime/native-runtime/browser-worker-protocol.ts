@@ -9,11 +9,10 @@ export interface BrowserWorkerInitOptions {
   author: Uint8Array;
   initialSyncFlushEvery: number;
   appId: string;
+  authSessionKey: string;
   serverUrl?: string;
   authJson: string;
   sessionClaims: Record<string, unknown>;
-  leadershipId: number;
-  workerLockName: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
   telemetryCollectorUrl?: string;
 }
@@ -29,36 +28,6 @@ export type BrowserSharedWorkerConnectResponse =
   | { type: "runtime-ready" }
   | { type: "runtime-error"; message: string };
 
-export type BrowserWorkerRequest =
-  | ({ type: "init" } & BrowserWorkerInitOptions)
-  | { type: "wait-server" }
-  | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
-  | { type: "disconnect" }
-  | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> }
-  | {
-      type: "attach-follower";
-      followerTabId: string;
-      leadershipId: number;
-      port: MessagePort;
-    }
-  | { type: "detach-follower"; followerTabId: string; leadershipId: number }
-  | { type: "delete-storage" }
-  | { type: "simulate-crash" }
-  | { type: "simulate-pending-auth-confirmation" }
-  | { type: "close" };
-
-export type BrowserWorkerMessage =
-  | ({ id: number } & BrowserWorkerRequest)
-  | { type: "frames"; frames: Uint8Array[] };
-
-export type BrowserWorkerEvent =
-  | { type: "result"; id: number; error?: string }
-  | { type: "frames"; frames: Uint8Array[] }
-  | { type: "auth-failure"; reason: string }
-  | { type: "auth-restored" }
-  | { type: "follower-port-closed"; followerTabId: string; leadershipId: number }
-  | { type: "error"; message: string };
-
 export type BrowserFollowerPortRequest =
   | { type: "init"; id: number; sessionClaims: Record<string, unknown> }
   | { type: "frames"; frames: Uint8Array[] }
@@ -67,6 +36,7 @@ export type BrowserFollowerPortRequest =
   | { type: "disconnect"; id: number }
   | { type: "delete-storage"; id: number }
   | { type: "storage-reset-observed"; resetId: number }
+  | { type: "open-inspector-control"; id: number; port: MessagePort }
   | {
       type: "reconnect";
       id: number;
@@ -74,6 +44,28 @@ export type BrowserFollowerPortRequest =
       sessionClaims: Record<string, unknown>;
     }
   | { type: "close" };
+
+export interface BrowserInspectorContext {
+  key: string;
+  appId: string;
+  dbName: string;
+  schema: WasmSchema;
+}
+
+export type BrowserInspectorControlRequest =
+  | { type: "list-contexts"; id: number }
+  | {
+      type: "attach-context";
+      id: number;
+      contextKey: string;
+      tabId: string;
+      port: MessagePort;
+    }
+  | { type: "close" };
+
+export type BrowserInspectorControlEvent =
+  | { type: "contexts"; id: number; contexts: BrowserInspectorContext[] }
+  | { type: "result"; id: number; error?: string };
 
 export type BrowserFollowerPortEvent =
   | { type: "frames"; frames: Uint8Array[] }

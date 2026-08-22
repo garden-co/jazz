@@ -28,11 +28,11 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       options.runtimeSources?.brokerWorkerUrl || options.runtimeSources?.baseUrl
         ? new SharedWorker(resolveBrowserWorkerUrl(options.runtimeSources), {
             type: "module",
-            name: `jazz-runtime:${options.appId}:${options.dbName}`,
+            name: `jazz-runtime:${options.authSessionKey}`,
           })
         : new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
             type: "module",
-            name: "jazz-runtime",
+            name: `jazz-runtime:${options.authSessionKey}`,
           });
     const port = this.worker.port;
     port.start();
@@ -118,14 +118,14 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     this.worker.port.close();
   }
 
-  async attachFollowerPort(): Promise<void> {
-    throw new Error("Shared browser runtime attaches tabs directly");
-  }
-
-  async detachFollowerPort(): Promise<void> {}
-
   async deleteStorage(): Promise<void> {
     await this.ready();
     await this.connection?.deleteStorage();
+  }
+
+  async openInspectorControlPort(): Promise<MessagePort> {
+    await this.ready();
+    if (!this.connection) throw new Error("Shared browser runtime is not connected");
+    return this.connection.openInspectorControlPort();
   }
 }

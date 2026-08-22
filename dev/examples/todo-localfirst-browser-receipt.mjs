@@ -15,8 +15,12 @@ const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext();
 const page = await context.newPage();
 const consoleMessages = [];
+const pageErrors = [];
 page.on("console", (message) => {
   consoleMessages.push({ type: message.type(), text: message.text() });
+});
+page.on("pageerror", (error) => {
+  pageErrors.push(error.message);
 });
 
 try {
@@ -43,6 +47,13 @@ try {
   const deletedCount = await item.count();
   if (deletedCount !== 0) {
     throw new Error(`Expected deleted todo to be absent, found ${deletedCount}`);
+  }
+  // SharedWorker initialization can finish after the immediate CRUD path.
+  // Keep the page alive long enough to turn late bootstrap failures into a
+  // deterministic end-to-end failure rather than dev-server console noise.
+  await page.waitForTimeout(1_000);
+  if (pageErrors.length > 0) {
+    throw new Error(`Unexpected browser error: ${pageErrors.join("; ")}`);
   }
   await page.screenshot({ path: screenshotPath, fullPage: true });
   console.log(

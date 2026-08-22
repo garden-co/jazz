@@ -32,10 +32,6 @@ export class BrowserConnectionManager extends ConnectionManager {
       config: { ...this.host.config },
       schema,
       client,
-      // Retained only until the generic runtime-source contract is renamed.
-      // The SharedWorker topology has no leadership generation or lock.
-      leadershipId: 1,
-      workerLockName: "",
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
       onAuthRestored: () => this.host.clearAuthError(),
       onFailure: (error) => {
@@ -44,7 +40,6 @@ export class BrowserConnectionManager extends ConnectionManager {
       },
       onStorageReset: () => this.beginStorageReset(connection),
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
-      onFollowerPortClosed: () => undefined,
     });
     this.connection = connection;
     this.connectionReady = connection.ready().catch((error: unknown) => {
@@ -104,6 +99,12 @@ export class BrowserConnectionManager extends ConnectionManager {
     await this.connectionReady;
     await this.connection?.deleteStorage();
     await this.storageReset;
+  }
+
+  override async openInspectorControlPort(): Promise<MessagePort> {
+    await this.connectionReady;
+    if (!this.connection) throw new Error("Shared browser runtime is not connected");
+    return this.connection.openInspectorControlPort();
   }
 
   private beginStorageReset(connection: BrowserWorkerConnection): void {

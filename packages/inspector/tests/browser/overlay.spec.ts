@@ -26,7 +26,7 @@ function extOf(path: string): string {
   return i === -1 ? "" : path.slice(i);
 }
 
-test.describe("inspector overlay (embedded, own worker connection end-to-end)", () => {
+test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", () => {
   test.beforeAll(() => {
     // The embedded entry is a separate Vite build. Build it on demand so
     // `pnpm test:browser` works from a clean checkout; rebuild manually with
@@ -39,9 +39,11 @@ test.describe("inspector overlay (embedded, own worker connection end-to-end)", 
     }
   });
 
-  test("embedded inspector opens its own worker connection from the published host handle", async ({
+  test("embedded inspector discovers and switches between host runtime contexts", async ({
     page,
   }) => {
+    const browserErrors: string[] = [];
+    page.on("pageerror", (error) => browserErrors.push(error.message));
     // Serve dist-embedded/ to the iframe at the path it expects. The embedded
     // build uses base "./", so embedded.html requests `./assets/*`, which
     // resolve under /__jazz/embedded/assets/* — all matched here.
@@ -64,27 +66,34 @@ test.describe("inspector overlay (embedded, own worker connection end-to-end)", 
     await page.goto("/tests/browser/overlay-host.html");
 
     // Host app stands up its real Jazz client and publishes the host handle.
-    await expect(page.getByText("Host ready")).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText("Host ready"))
+      .toBeVisible({ timeout: 20_000 })
+      .catch((error) => {
+        throw new Error(`${String(error)}\nBrowser errors: ${browserErrors.join("; ")}`);
+      });
 
     const inspector = page.frameLocator('iframe[title="jazz-inspector"]');
 
-    // The host publishes the resolved broker-worker URL, so the overlay's
-    // persistent browser config joins the host's SharedWorker/OPFS store rather
-    // than creating a separate local store.
-    const overlayConfig = await page.evaluate(() =>
-      (
+    // The host publishes persistent coordinates plus a control-port factory.
+    // The separately bundled overlay never constructs a second SharedWorker.
+    const overlayConfig = await page.evaluate(() => {
+      const host = (
         window as unknown as {
           __jazzInspectorHost?: {
             getConnectionConfig(): {
               driver?: { type?: string };
-              runtimeSources?: { brokerWorkerUrl?: string };
             };
+            openControlPort?: unknown;
           };
         }
-      ).__jazzInspectorHost?.getConnectionConfig(),
-    );
-    expect(overlayConfig?.driver?.type).toBe("persistent");
-    expect(overlayConfig?.runtimeSources?.brokerWorkerUrl).toBeTruthy();
+      ).__jazzInspectorHost;
+      return {
+        driverType: host?.getConnectionConfig().driver?.type,
+        hasControlPort: typeof host?.openControlPort === "function",
+      };
+    });
+    expect(overlayConfig.driverType).toBe("persistent");
+    expect(overlayConfig.hasControlPort).toBe(true);
 
     // The overlay reads the handle, opens its connection joining that store, and
     // leaves the connecting state.
@@ -97,11 +106,18 @@ test.describe("inspector overlay (embedded, own worker connection end-to-end)", 
     await expect(inspector.getByRole("link", { name: "View todos data" })).toBeVisible({
       timeout: 30_000,
     });
+    await expect(inspector.getByLabel("Runtime context")).toBeVisible({ timeout: 10_000 });
+    await expect(inspector.getByLabel("Runtime context").locator("option")).toHaveCount(2);
+    await inspector.getByLabel("Runtime context").selectOption({ index: 1 });
+    await expect(inspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
+      timeout: 10_000,
+    });
 
     // The host's `useAll(app.todos)` subscription is pushed to the Subscriptions tab.
     await inspector.getByRole("link", { name: "Subscriptions" }).click();
     await expect(inspector.getByRole("cell", { name: "todos", exact: true })).toBeVisible({
       timeout: 30_000,
     });
+    expect(browserErrors).toEqual([]);
   });
 });

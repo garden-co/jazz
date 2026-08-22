@@ -41,6 +41,21 @@ export function createBrowserWorkerFingerprint(
   });
 }
 
+/** Stable, non-secret namespace for one browser authentication session. */
+export function createBrowserAuthSessionKey(config: DbConfig): string {
+  const value = resolveAuthClass(config);
+  let hash = 0x811c9dc5;
+  let output = "";
+  for (let round = 0; round < 4; round += 1) {
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index) + round;
+      hash = Math.imul(hash, 0x01000193);
+    }
+    output += (hash >>> 0).toString(16).padStart(8, "0");
+  }
+  return output;
+}
+
 function resolveAuthClass(config: DbConfig): string {
   if (config.adminSecret) return "admin";
   const session = resolveClientSessionSync({

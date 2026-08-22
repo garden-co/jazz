@@ -11,7 +11,7 @@ import type {
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 
 type PendingRequest = {
-  type: BrowserFollowerPortRpcRequest["type"];
+  type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
   resolve: () => void;
   reject: (error: Error) => void;
 };
@@ -85,6 +85,25 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   async deleteStorage(): Promise<void> {
     await this.ready();
     await this.request({ type: "delete-storage" });
+  }
+
+  async openInspectorControlPort(): Promise<MessagePort> {
+    await this.ready();
+    const channel = new MessageChannel();
+    const id = this.nextRequestId++;
+    const promise = new Promise<void>((resolve, reject) => {
+      this.pending.set(id, { type: "open-inspector-control", resolve, reject });
+    });
+    this.port.postMessage(
+      {
+        type: "open-inspector-control",
+        id,
+        port: channel.port2,
+      } satisfies BrowserFollowerPortRequest,
+      [channel.port2],
+    );
+    await promise;
+    return channel.port1;
   }
 
   async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {

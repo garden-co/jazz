@@ -2,8 +2,8 @@
 // the test sync server, publishes the `window.__jazzInspectorHost` handle (the
 // same shape the loader's installInspectorHost builds), pushes its active
 // subscription list to the embedded inspector iframe, and the overlay opens an
-// independent browser client that joins the host's broker SharedWorker from the
-// published config. No devtools bridge.
+// independent browser client that joins a selected context through a peer port
+// minted by the host's SharedWorker. No devtools bridge.
 //
 // Exercised by overlay.spec.ts.
 import { StrictMode, useEffect, useRef } from "react";
@@ -46,6 +46,11 @@ function HostInner() {
   );
 }
 
+function SecondaryRuntime() {
+  useAll(app.todos);
+  return <p hidden>Secondary runtime ready</p>;
+}
+
 function HostApp() {
   const { secret, isLoading } = useLocalFirstAuth();
 
@@ -66,13 +71,24 @@ function HostApp() {
   };
 
   return (
-    <JazzProvider
-      config={config}
-      autoAttachDevTools={false}
-      fallback={<p id="host-status">Connecting...</p>}
-    >
-      <HostInner />
-    </JazzProvider>
+    <>
+      <JazzProvider
+        config={config}
+        autoAttachDevTools={false}
+        fallback={<p id="host-status">Connecting...</p>}
+      >
+        <HostInner />
+      </JazzProvider>
+      <JazzProvider
+        config={{
+          ...config,
+          driver: { type: "persistent", dbName: "inspector-secondary-context" },
+        }}
+        autoAttachDevTools={false}
+      >
+        <SecondaryRuntime />
+      </JazzProvider>
+    </>
   );
 }
 

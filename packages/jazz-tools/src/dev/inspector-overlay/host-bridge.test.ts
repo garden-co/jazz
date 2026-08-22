@@ -15,6 +15,7 @@ function makeFakeDb(overrides: Record<string, unknown> = {}) {
         adminSecret: "sek",
       }),
       getRuntimeSchema: () => ({ todos: { columns: [] } }),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
       getActiveQuerySubscriptions: () => [
         {
           id: "s1",
@@ -91,7 +92,7 @@ describe("installInspectorHost", () => {
     expect((window as any)[INSPECTOR_HOST_GLOBAL]).toBeUndefined();
   });
 
-  it("publishes a persistent config that joins the host broker", () => {
+  it("publishes persistent coordinates and forwards inspector control-port requests", async () => {
     const iframeWindow = { postMessage: () => {} } as unknown as Window;
     const fake = makeFakeDb({
       getConfig: () => ({
@@ -113,6 +114,8 @@ describe("installInspectorHost", () => {
       driver: { type: "persistent", dbName: "a" },
     });
     expect(config.cookieSession).toBeUndefined();
-    expect(typeof config.runtimeSources.brokerWorkerUrl).toBe("string");
+    expect(config.runtimeSources).toBeUndefined();
+    await (window as any)[INSPECTOR_HOST_GLOBAL].openControlPort();
+    expect((fake.db as any).openInspectorControlPort).toHaveBeenCalledOnce();
   });
 });

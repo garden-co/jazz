@@ -8,6 +8,8 @@ import {
 import type {
   BrowserFollowerPortEvent,
   BrowserFollowerPortRequest,
+  BrowserInspectorControlEvent,
+  BrowserInspectorControlRequest,
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
@@ -48,6 +50,7 @@ type RuntimeContext = {
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const contexts = new Map<string, RuntimeContext>();
 let wasmModulePromise: Promise<WasmModule> | null = null;
+let contextInitializationTail: Promise<void> = Promise.resolve();
 let nextResetId = 1;
 
 workerGlobal.onconnect = (event) => {
@@ -103,7 +106,9 @@ function createContext(
     storageInvalidated: false,
     initialize: Promise.resolve(),
   };
-  context.initialize = initialize(context);
+  const initializeContext = contextInitializationTail.then(() => initialize(context));
+  contextInitializationTail = initializeContext.catch(() => undefined);
+  context.initialize = initializeContext;
   return context;
 }
 
@@ -177,6 +182,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     observeStorageReset(peer, message.resetId);
     return;
   }
+  if (message.type === "open-inspector-control") {
+    attachInspectorControl(peer.context.options.authSessionKey, message.port);
+    result(peer, message.id);
+    return;
+  }
 
   try {
     const activeRuntime = requireRuntime(peer.context);
@@ -219,6 +229,61 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     if ("id" in message) result(peer, message.id, asError(error));
     else failPeer(peer, asError(error));
   }
+}
+
+function attachInspectorControl(authSessionKey: string, port: MessagePort): void {
+  const onMessage = (event: MessageEvent<BrowserInspectorControlRequest>) => {
+    const message = event.data;
+    if (message.type === "close") {
+      dispose();
+      return;
+    }
+    if (message.type === "list-contexts") {
+      const available = [...contexts.values()]
+        .filter(
+          (context) =>
+            context.options.authSessionKey === authSessionKey &&
+            !context.storageInvalidated &&
+            context.runtime !== null,
+        )
+        .map((context) => ({
+          key: context.key,
+          appId: context.options.appId,
+          dbName: context.options.dbName,
+          schema: context.options.schema,
+        }));
+      port.postMessage({
+        type: "contexts",
+        id: message.id,
+        contexts: available,
+      } satisfies BrowserInspectorControlEvent);
+      return;
+    }
+    const context = contexts.get(message.contextKey);
+    if (
+      !context ||
+      context.options.authSessionKey !== authSessionKey ||
+      context.storageInvalidated ||
+      !context.runtime
+    ) {
+      port.postMessage({
+        type: "result",
+        id: message.id,
+        error: "Inspector context is no longer available",
+      } satisfies BrowserInspectorControlEvent);
+      return;
+    }
+    attachTab(context, message.tabId, message.port);
+    port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
+  };
+  const dispose = () => {
+    port.removeEventListener("message", onMessage);
+    port.removeEventListener("messageerror", dispose);
+    port.close();
+  };
+  port.addEventListener("message", onMessage);
+  port.addEventListener("messageerror", dispose);
+  port.start();
 }
 
 function result(peer: TabPeer, id: number, error?: Error): void {
