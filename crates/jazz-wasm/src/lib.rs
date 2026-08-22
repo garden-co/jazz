@@ -3387,6 +3387,7 @@ fn subscription_chunk_to_js(
             added,
             updated,
             removed,
+            ordered_suffix_start,
             terminal_operations,
             terminal_layout,
             settled,
@@ -3465,6 +3466,13 @@ fn subscription_chunk_to_js(
                     .map_err(to_js_error)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
+            if let Some(start) = ordered_suffix_start {
+                set_prop(
+                    &object,
+                    "orderedSuffixStart",
+                    JsValue::from_f64(start as f64),
+                )?;
+            }
             set_prop(&object, "publishable", JsValue::from_bool(publishable))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;

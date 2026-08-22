@@ -5060,6 +5060,32 @@ it("keeps a remove/add root replacement in place without a terminal move", () =>
   ]);
 });
 
+it("preserves the producer position for an ordered suffix over lazy relation state", () => {
+  const rowId = new Uint8Array(16);
+  rowId[15] = 3;
+  const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
+  const applied = applySubscriptionDeltaWithWireDelta(
+    [],
+    new Map(),
+    decode(
+      encodeSubscriptionDelta({
+        added: [{ table: "todos", rowId, title: "third" }],
+        updated: [],
+        removed: [],
+      }),
+    ),
+    testSchema,
+    false,
+    null,
+    undefined,
+    2,
+  );
+
+  expect(decodeNativeDelta(applied.wireDelta, testSchema.todos.columns)).toEqual([
+    expect.objectContaining({ id: formatUuid(rowId), index: 2 }),
+  ]);
+});
+
 function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
   rowId: Uint8Array;

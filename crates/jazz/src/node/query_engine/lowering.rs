@@ -3,7 +3,7 @@ mod collect_layout;
 use collect_layout::*;
 use groove::ivm::{
     AggregateExpr as GrooveAggregateExpr, AggregateFunction as GrooveAggregateFunction,
-    CollectByField, CollectBySlotBuilder, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH,
+    CollectByField, CollectBySlotBuilder, FieldRef, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH,
     PlanExpr as GroovePlanExpr, PredicateExpr as GroovePredicateExpr, PredicateKind, ProjectField,
     TopByLimit, TopByOrder,
 };

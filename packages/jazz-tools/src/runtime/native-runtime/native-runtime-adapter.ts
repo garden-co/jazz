@@ -2099,6 +2099,7 @@ export class NativeRuntimeAdapter implements Runtime {
             chunk.reset === true,
             subscription.outputColumns,
             chunk.terminalOperations,
+            chunk.orderedSuffixStart,
           );
         } catch (error) {
           const buffered = applySubscriptionDeltaToState(
@@ -4193,6 +4194,7 @@ export function applySubscriptionDeltaWithWireDelta(
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
   terminalOperations?: readonly NativeTerminalOperation[],
+  orderedSuffixStart?: number,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const { addedRows, updatedRows, removedEntries, rows, rowIndexByKey } =
     applySubscriptionDeltaToState(
@@ -4205,27 +4207,29 @@ export function applySubscriptionDeltaWithWireDelta(
       terminalOperations,
     );
   const wireIndexByKey = new Map(rowIndexByKey);
-  // Relation storage order is not public terminal order. An authoritative
-  // echo can replace an already-visible occurrence without emitting a
-  // terminal edit; keep that occurrence in its current public slot. Actual
-  // Insert/Move terminal operations are applied by SubscriptionManager after
-  // the payload update.
-  const removedIndices = removedEntries
-    .map((entry) => entry.index)
-    .sort((left, right) => left - right);
+  if (orderedSuffixStart !== undefined) {
+    for (const [index, row] of subscriptionOutputRows(addedRows, outputColumns).entries()) {
+      wireIndexByKey.set(rowStateKey(row), orderedSuffixStart + index);
+    }
+  }
+  // Relation storage order is not public terminal order. A local replacement
+  // carrying terminal edits retains its current slot until SubscriptionManager
+  // applies the edit. An edit-free remove/add pair is instead an authoritative
+  // ordered-suffix reconciliation and must use the producer's new order.
+  const replacedKeys = new Set(
+    delta.removed.map((removed, index) => {
+      const id = formatUuid(removed.rowId);
+      const occurrenceKey = delta.removedOccurrenceKeys[index];
+      return occurrenceKey
+        ? occurrenceStateKey(occurrenceKey, removed.table, id)
+        : rowKey(removed.table, id);
+    }),
+  );
   for (const row of addedRows.concat(updatedRows)) {
     const key = rowStateKey(row);
     const currentIndex = currentIndexByKey.get(key);
-    if (currentIndex !== undefined) {
-      let low = 0;
-      let high = removedIndices.length;
-      while (low < high) {
-        const middle = (low + high) >>> 1;
-        if (removedIndices[middle]! < currentIndex) low = middle + 1;
-        else high = middle;
-      }
-      const precedingRemovals = low;
-      wireIndexByKey.set(key, currentIndex - precedingRemovals);
+    if (currentIndex !== undefined && replacedKeys.has(key) && terminalOperations?.length) {
+      wireIndexByKey.set(key, currentIndex);
     }
   }
   return {
@@ -4294,12 +4298,14 @@ function applySubscriptionDeltaToState(
   attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
   attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
 
-  // A changed row can arrive as a remove/add pair because relational record
-  // bytes include the changed value. It remains the same public occurrence,
-  // though, and must retain its slot until an explicit terminal Move says
-  // otherwise. Deleting it first makes Map insertion order spuriously turn a
-  // title-only edit into a sort reorder.
-  const replacementKeys = new Set(addedRows.concat(updatedRows).map((row) => rowStateKey(row)));
+  // A locally changed row can arrive as a remove/add pair because relational
+  // record bytes include the changed value. When the frame also carries
+  // terminal edits, it remains the same public occurrence and must retain its
+  // slot until those edits are applied. Edit-free remove/add pairs are ordered
+  // authority suffixes and intentionally fall through to deletion/reinsertion.
+  const replacementKeys = terminalOperations?.length
+    ? new Set(addedRows.concat(updatedRows).map((row) => rowStateKey(row)))
+    : new Set<string>();
   for (const [removedIndex, removed] of delta.removed.entries()) {
     const id = formatUuid(removed.rowId);
     const resultKeyBytes = delta.removedOccurrenceKeys[removedIndex];
@@ -4697,6 +4703,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
       terminalLayouts?: NativeTerminalRootLayout[];
+      orderedSuffixStart?: number;
       settled?: boolean;
       publishable?: boolean;
     }
@@ -4719,6 +4726,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     publishable?: unknown;
     terminalOperations?: unknown;
     terminalLayouts?: unknown;
+    orderedSuffixStart?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -4743,6 +4751,12 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalLayouts: Array.isArray(record.terminalLayouts)
         ? (record.terminalLayouts as NativeTerminalRootLayout[])
         : undefined,
+      orderedSuffixStart:
+        typeof record.orderedSuffixStart === "number" &&
+        Number.isSafeInteger(record.orderedSuffixStart) &&
+        record.orderedSuffixStart >= 0
+          ? record.orderedSuffixStart
+          : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
       publishable: typeof record.publishable === "boolean" ? record.publishable : undefined,
     };

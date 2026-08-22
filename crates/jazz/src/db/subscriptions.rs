@@ -614,6 +614,7 @@ where
                 added: initial_outputs,
                 updated: Vec::new(),
                 removed: Vec::new(),
+                ordered_suffix_start: None,
                 terminal_operations: Vec::new(),
                 terminal_layout: None,
                 settled,

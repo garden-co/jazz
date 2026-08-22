@@ -207,6 +207,8 @@ pub struct SubscriptionDeltaEvent {
     pub event_type: String,
     pub reset: bool,
     pub delta: Uint8Array,
+    #[napi(js_name = "orderedSuffixStart")]
+    pub ordered_suffix_start: Option<u32>,
     #[napi(js_name = "terminalOperations")]
     pub terminal_operations: Vec<SubscriptionTerminalOperation>,
     #[napi(js_name = "terminalLayouts")]
@@ -2942,6 +2944,7 @@ fn core_subscription_event_to_napi(
             added,
             updated,
             removed,
+            ordered_suffix_start,
             terminal_operations,
             terminal_layout,
             settled,
@@ -2996,6 +2999,8 @@ fn core_subscription_event_to_napi(
                 event_type: "delta".to_string(),
                 reset: *reset,
                 delta: Uint8Array::new(delta),
+                ordered_suffix_start: ordered_suffix_start
+                    .map(|start| u32::try_from(start).unwrap_or(u32::MAX)),
                 terminal_operations,
                 terminal_layouts,
                 settled: *settled,
