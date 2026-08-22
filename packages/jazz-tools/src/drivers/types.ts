@@ -205,13 +205,13 @@ export type WasmSchema = Schema;
 /**
  * Interface for storage backend implementations.
  *
- * - `persistent`: local persistence enabled (OPFS in browser, Fjall in backend)
+ * - `persistent`: local persistence enabled (IndexedDB in browser, Fjall in backend)
  * - `memory`: non-persistent in-memory runtime only
  */
 export type StorageDriver =
   | {
       type: "persistent";
-      /** Browser OPFS namespace when persistence is enabled (default: appId). */
+      /** Browser IndexedDB namespace when persistence is enabled (default: appId). */
       dbName?: string;
     }
   | {

@@ -223,7 +223,7 @@ export class TestCleanup {
 // ---------------------------------------------------------------------------
 
 /**
- * Create a Db connected to the testing server with OPFS persistence.
+ * Create a Db connected to the testing server with IndexedDB persistence.
  *
  * Equivalent of Rust `TestingClient::builder().with_server(...).connect()`.
  * The returned Db is automatically tracked by `ctx` for cleanup.

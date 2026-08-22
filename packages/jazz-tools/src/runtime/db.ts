@@ -87,12 +87,12 @@ export type DbConfig = {
   adminSecret?: string;
   /** Backend secret for backend-scoped sync auth with cookieSession. */
   backendSecret?: string;
-  /** Database name for OPFS persistence (browser only, default: appId) */
+  /** IndexedDB database name for browser persistence (default: appId). */
   dbName?: string;
   /**
    * Initial-sync durability boundary, in writes (default: 512 for clients).
-   * A crash can lose up to M - 1 writes since the previous boundary; older
-   * boundaries recover from the storage WAL.
+   * A crash can lose up to M - 1 writes since the previous durable IndexedDB
+   * page commit.
    */
   initialSyncFlushEvery?: number;
   /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */

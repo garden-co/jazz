@@ -2,7 +2,7 @@
  * Browser integration tests for history & conflict management.
  *
  * Exercises the full browser stack: WASM bindings,
- * OPFS persistence, and binary sync transport — layers the Rust E2E
+ * SharedWorker-owned IndexedDB persistence and binary sync transport — layers the Rust E2E
  * tests don't cover.
  *
  * All tests assert **convergence** (both clients see the same final value)

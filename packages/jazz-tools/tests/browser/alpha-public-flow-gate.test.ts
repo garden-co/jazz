@@ -111,7 +111,7 @@ describe("alpha public package flow", () => {
 
   it("opens public createDb with persistent core locally, then runs todo CRUD and subscriptions", async () => {
     const appId = uniqueDbName("alpha-public-local-flow");
-    const persistentDbName = uniqueDbName("alpha-public-local-opfs");
+    const persistentDbName = uniqueDbName("alpha-public-local-indexeddb");
     const sharedSecret = generateAuthSecret();
     let db = ctx.track(
       await createDb({
@@ -162,9 +162,9 @@ describe("alpha public package flow", () => {
     ).toBe(true);
   });
 
-  it("reopens public persistent OPFS data after local writes", async () => {
+  it("reopens public persistent IndexedDB data after local writes", async () => {
     const appId = uniqueDbName("alpha-public-local-reopen");
-    const persistentDbName = uniqueDbName("alpha-public-local-reopen-opfs");
+    const persistentDbName = uniqueDbName("alpha-public-local-reopen-indexeddb");
     const sharedSecret = generateAuthSecret();
     let db = ctx.track(
       await createDb({
@@ -196,7 +196,7 @@ describe("alpha public package flow", () => {
 
   it("moves rows into and out of a filtered public subscription after local updates", async () => {
     const appId = uniqueDbName("alpha-public-local-predicate-move");
-    const persistentDbName = uniqueDbName("alpha-public-local-predicate-move-opfs");
+    const persistentDbName = uniqueDbName("alpha-public-local-predicate-move-indexeddb");
     const db = ctx.track(
       await createDb({
         appId,
@@ -270,7 +270,7 @@ describe("alpha public package flow", () => {
 
   it("gates richer public row shapes through local core queries and subscriptions", async () => {
     const appId = uniqueDbName("alpha-public-rich-local-flow");
-    const persistentDbName = uniqueDbName("alpha-public-rich-local-opfs");
+    const persistentDbName = uniqueDbName("alpha-public-rich-local-indexeddb");
     const db = ctx.track(
       await createDb({
         appId,
@@ -374,7 +374,7 @@ describe("alpha public package flow", () => {
     await createRemoteBrowserDb({
       id: remoteBrowserDbId,
       appId,
-      dbName: uniqueDbName("alpha-public-remote-browser-opfs"),
+      dbName: uniqueDbName("alpha-public-remote-browser-indexeddb"),
       table: "todos",
       schemaJson: JSON.stringify(app.wasmSchema),
       serverUrl,
@@ -495,14 +495,14 @@ describe("alpha public package flow", () => {
   });
 
   it(
-    "converges memory writer to persistent OPFS reader over websocket and reopens locally",
+    "converges memory writer to persistent IndexedDB reader over websocket and reopens locally",
     async () => {
       const requestedAppId = uniqueDbName("alpha-public-mixed-websocket-flow");
       const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
       await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
 
       const sharedSecret = generateAuthSecret();
-      const readerDbName = uniqueDbName("alpha-public-mixed-reader-opfs");
+      const readerDbName = uniqueDbName("alpha-public-mixed-reader-indexeddb");
       const writer = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
       let reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
         uniqueLabel: false,
@@ -594,7 +594,7 @@ describe("alpha public package flow", () => {
       await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
 
       const sharedSecret = generateAuthSecret();
-      const readerDbName = uniqueDbName("alpha-public-reconnect-reader-opfs");
+      const readerDbName = uniqueDbName("alpha-public-reconnect-reader-indexeddb");
       const writer = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
       let reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
         uniqueLabel: false,
@@ -659,13 +659,13 @@ describe("alpha public package flow", () => {
     MULTI_STAGE_REMOTE_FLOW_TIMEOUT_MS,
   );
 
-  it("opens public createDb with persistent OPFS and websocket server config, then converges todo CRUD", async () => {
+  it("opens public createDb with persistent IndexedDB and websocket server config, then converges todo CRUD", async () => {
     const requestedAppId = uniqueDbName("alpha-public-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
-    const persistentDbName = uniqueDbName("alpha-public-opfs");
+    const persistentDbName = uniqueDbName("alpha-public-indexeddb");
     let db = await openAlphaDb(appId, serverUrl, adminSecret, persistentDbName, sharedSecret, {
       uniqueLabel: false,
     });

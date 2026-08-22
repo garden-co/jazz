@@ -34,7 +34,7 @@ const allowAllPermissions = s.definePermissions(app, ({ policy }) => [
 
 const PENDING_ASSERTION_MS = 750;
 const LOCAL_OPERATION_TIMEOUT_MS = 2_000;
-// Persistent browser operations cross the OPFS worker boundary even when the
+// Persistent browser operations cross the SharedWorker boundary even when the
 // public operation is local-only. Keep the direct-runtime responsiveness
 // target above as a soft diagnostic, but allow for worker scheduling under the
 // full browser suite before treating the operation as stuck.
