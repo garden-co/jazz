@@ -1730,7 +1730,7 @@ describe("NAPI integration", () => {
     } | null = null;
     let seedRuntime: {
       insert(table: string, values: unknown): { id: string };
-      close(): void;
+      close(): Promise<undefined>;
     } | null = null;
 
     try {
@@ -1741,7 +1741,7 @@ describe("NAPI integration", () => {
         env: "dev",
       })) as unknown as {
         insert(table: string, values: unknown): { id: string };
-        close(): void;
+        close(): Promise<undefined>;
       };
 
       // Seed via the raw N-API shape so this test isolates the update path.
@@ -1749,7 +1749,7 @@ describe("NAPI integration", () => {
         label: { type: "Text", value: "beta" },
         data: { type: "Bytea", value: [1, 2, 3] },
       });
-      seedRuntime.close();
+      await seedRuntime.close();
       seedRuntime = null;
 
       context = createJazzContext({
@@ -1770,7 +1770,7 @@ describe("NAPI integration", () => {
       expect(reloaded).not.toBeNull();
       expect(Array.from(reloaded?.data ?? [])).toEqual([4, 5, 6]);
     } finally {
-      seedRuntime?.close();
+      await seedRuntime?.close();
       if (context) {
         await context.shutdown();
       }
