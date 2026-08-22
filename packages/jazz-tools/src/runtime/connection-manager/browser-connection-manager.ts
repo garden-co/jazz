@@ -8,6 +8,7 @@ import {
   type ConnectionManagerClientInput,
   type DbForConnection,
 } from "./types.js";
+import { registerBrowserInspectorControl } from "../../dev/inspector-overlay/browser-control-registry.js";
 
 /**
  * Every persistent browser tab is an in-memory client of one SharedWorker
@@ -21,6 +22,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   private disconnected = false;
   private readonly reconnectWaiters = new Set<() => void>();
   private storageReset: Promise<void> | null = null;
+  private unregisterInspectorControl: (() => void) | null = null;
 
   constructor(host: DbForConnection) {
     super(host);
@@ -43,6 +45,10 @@ export class BrowserConnectionManager extends ConnectionManager {
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
     });
     this.connection = connection;
+    this.unregisterInspectorControl?.();
+    this.unregisterInspectorControl = registerBrowserInspectorControl(() =>
+      connection.openInspectorControlPort(),
+    );
     this.connectionReady = connection.ready().catch((error: unknown) => {
       this.connectionError = asError(error);
       throw error;
@@ -138,7 +144,14 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.connection = null;
     this.connectionReady = null;
     this.resolveReconnectWaiters();
+    this.unregisterInspectorControl?.();
+    this.unregisterInspectorControl = null;
     await connection?.flushLocal();
+    // The tab runtime is explicitly non-durable; once its worker peer has
+    // flushed, graceful evaluator teardown cannot add durability and may wait
+    // on suspended recursive/include work. Abandon that view and let the
+    // durable worker own orderly persistence shutdown.
+    this.detachClient()?.discard();
     await super.shutdown();
     await connection?.shutdown();
   }

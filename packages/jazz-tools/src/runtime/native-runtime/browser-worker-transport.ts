@@ -11,7 +11,9 @@ export class BrowserWorkerTransportPump {
   private running = false;
   private runAgain = false;
   private closed = false;
-  private readonly idleWaiters = new Set<() => void>();
+  private requestedGeneration = 0;
+  private completedGeneration = 0;
+  private readonly flushWaiters = new Set<{ target: number; resolve: () => void }>();
   private readonly removeWorkListener: () => void;
 
   constructor(
@@ -42,6 +44,7 @@ export class BrowserWorkerTransportPump {
 
   schedule(runAgainIfRunning = true): void {
     if (this.closed) return;
+    this.requestedGeneration += 1;
     if (this.running) {
       this.runAgain ||= runAgainIfRunning;
       return;
@@ -61,17 +64,22 @@ export class BrowserWorkerTransportPump {
     this.closed = true;
     this.removeWorkListener();
     this.transport.close();
+    for (const waiter of this.flushWaiters) waiter.resolve();
+    this.flushWaiters.clear();
   }
 
   async flush(): Promise<void> {
     if (this.closed) return;
     this.schedule();
-    await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
+    const target = this.requestedGeneration;
+    if (this.completedGeneration >= target) return;
+    await new Promise<void>((resolve) => this.flushWaiters.add({ target, resolve }));
   }
 
   private async pump(): Promise<void> {
     if (this.closed || this.running) return;
     this.running = true;
+    const generation = this.requestedGeneration;
     let exhausted = true;
     try {
       for (let round = 0; round < 32; round += 1) {
@@ -86,6 +94,12 @@ export class BrowserWorkerTransportPump {
       }
     } finally {
       this.running = false;
+      this.completedGeneration = Math.max(this.completedGeneration, generation);
+      for (const waiter of [...this.flushWaiters]) {
+        if (waiter.target > this.completedGeneration) continue;
+        this.flushWaiters.delete(waiter);
+        waiter.resolve();
+      }
     }
     if (this.closed) return;
     if (this.runAgain) {
@@ -93,10 +107,6 @@ export class BrowserWorkerTransportPump {
       this.schedule();
     } else if (exhausted) {
       setTimeout(() => this.schedule(), 0);
-    } else {
-      const waiters = [...this.idleWaiters];
-      this.idleWaiters.clear();
-      for (const resolve of waiters) resolve();
     }
   }
 }

@@ -292,7 +292,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       return;
     }
     if (message.type === "flush-local") {
-      await activeRuntime.progressPeerTransport();
+      await peer.pump?.flush();
       await activeRuntime.flushLocalSettlements();
       peer.flushedLocal = true;
       result(peer, message.id);

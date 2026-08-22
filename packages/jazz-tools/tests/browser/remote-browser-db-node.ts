@@ -54,7 +54,7 @@ export async function createRemoteBrowserDb(
   currentContext: BrowserContext,
   currentPage: Page,
   input: RemoteBrowserDbCreateInput,
-): Promise<void> {
+): Promise<string> {
   await closeRemoteBrowserDb(input.id);
 
   const browser = getBrowserFromContext(currentContext);
@@ -146,11 +146,25 @@ export async function insertRemoteBrowserDbRow(
   id: string,
   tabIndex: number,
   row: Record<string, unknown>,
+  table?: string,
 ): Promise<void> {
   const handle = remoteBrowserDbs.get(id);
   const page = handle?.pages[tabIndex];
   if (!page) throw new Error(`Remote browser db "${id}" tab ${tabIndex} is not open`);
-  await evaluateHarness(page, "insertRemoteBrowserDbRow", { id, row });
+  return evaluateHarness(page, "insertRemoteBrowserDbRow", { id, row, table });
+}
+
+export async function updateRemoteBrowserDbRow(
+  id: string,
+  tabIndex: number,
+  rowId: string,
+  patch: Record<string, unknown>,
+  table?: string,
+): Promise<void> {
+  const handle = remoteBrowserDbs.get(id);
+  const page = handle?.pages[tabIndex];
+  if (!page) throw new Error(`Remote browser db "${id}" tab ${tabIndex} is not open`);
+  await evaluateHarness(page, "updateRemoteBrowserDbRow", { id, rowId, patch, table });
 }
 
 export async function queryRemoteBrowserDbRows(

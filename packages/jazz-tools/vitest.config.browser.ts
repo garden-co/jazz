@@ -16,6 +16,7 @@ import {
   createRemoteBrowserDb,
   deleteRemoteBrowserIndexedDbAndWaitForReload,
   insertRemoteBrowserDbRow,
+  updateRemoteBrowserDbRow,
   queryRemoteBrowserDbRows,
   restartRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
@@ -96,8 +97,10 @@ export default defineConfig({
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>
           waitForRemoteBrowserDbTitle(input),
         closeRemoteBrowserDb: async (_commandContext, id) => closeRemoteBrowserDb(id),
-        insertRemoteBrowserDbRow: async (_commandContext, id, tabIndex, row) =>
-          insertRemoteBrowserDbRow(id, tabIndex, row),
+        insertRemoteBrowserDbRow: async (_commandContext, id, tabIndex, row, table) =>
+          insertRemoteBrowserDbRow(id, tabIndex, row, table),
+        updateRemoteBrowserDbRow: async (_commandContext, id, tabIndex, rowId, patch, table) =>
+          updateRemoteBrowserDbRow(id, tabIndex, rowId, patch, table),
         queryRemoteBrowserDbRows: async (_commandContext, id, tabIndex, tier) =>
           queryRemoteBrowserDbRows(id, tabIndex, tier),
         restartRemoteBrowserDb: async (_commandContext, id) => restartRemoteBrowserDb(id),

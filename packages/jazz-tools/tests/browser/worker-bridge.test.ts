@@ -33,6 +33,7 @@ import {
   deleteRemoteBrowserIndexedDbAndWaitForReload,
   insertRemoteBrowserDbRow,
   queryRemoteBrowserDbRows,
+  updateRemoteBrowserDbRow,
   restartRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
@@ -1965,6 +1966,127 @@ describe("SharedWorker bridge with IndexedDB", () => {
       expect(snapshot).toHaveLength(rows.length);
       expect(snapshot.map((row) => row.title).sort()).toEqual(rows.map((row) => row.title).sort());
     }
+  });
+
+  it("converges conflicting updates across tabs to one exact row", async () => {
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("three-tab-conflict"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId: "test-app",
+      dbName: uniqueDbName("three-tab-conflict-store"),
+      table: "todos",
+      schemaJson: JSON.stringify(app.wasmSchema),
+      tabCount: 3,
+      initialize: true,
+    });
+    const rowId = await insertRemoteBrowserDbRow(remoteDbId, 0, {
+      title: "before-conflict",
+      done: false,
+    });
+    await waitForCondition(
+      async () => (await queryRemoteBrowserDbRows(remoteDbId, 2)).some((row) => row.id === rowId),
+      8_000,
+      "Seed row should reach every tab before conflicting updates",
+    );
+
+    await Promise.all([
+      updateRemoteBrowserDbRow(remoteDbId, 0, rowId, {
+        title: "conflict-from-a",
+        done: true,
+        projectId: null,
+        tags: null,
+      }),
+      updateRemoteBrowserDbRow(remoteDbId, 1, rowId, {
+        title: "conflict-from-b",
+        done: true,
+        projectId: null,
+        tags: null,
+      }),
+    ]);
+    await waitForCondition(
+      async () => {
+        const snapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        );
+        const titles = snapshots.map((rows) => rows[0]?.title);
+        return (
+          snapshots.every((rows) => rows.length === 1 && rows[0]?.id === rowId) &&
+          new Set(titles).size === 1
+        );
+      },
+      10_000,
+      "Every tab should converge to the same conflict winner without duplicating the row",
+    );
+
+    const snapshots = await Promise.all(
+      [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+    );
+    expect(snapshots.every((rows) => rows.length === 1 && rows[0]?.id === rowId)).toBe(true);
+    expect(new Set(snapshots.map((rows) => rows[0]?.title))).toHaveLength(1);
+    expect(["conflict-from-a", "conflict-from-b"]).toContain(snapshots[0]![0]!.title);
+  });
+
+  it("hydrates and updates an included row consistently across tabs", async () => {
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("three-tab-include"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId: "test-app",
+      dbName: uniqueDbName("three-tab-include-store"),
+      table: "todos",
+      queryJson: app.todos.include({ project: true })._build(),
+      schemaJson: JSON.stringify(app.wasmSchema),
+      tabCount: 3,
+      initialize: true,
+    });
+    const projectId = await insertRemoteBrowserDbRow(
+      remoteDbId,
+      0,
+      { name: "Shared project" },
+      "projects",
+    );
+    const todoId = await insertRemoteBrowserDbRow(remoteDbId, 1, {
+      title: "Cross-tab include",
+      done: false,
+      projectId,
+    });
+
+    await waitForCondition(
+      async () => {
+        const snapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        );
+        return snapshots.every(
+          (rows) =>
+            rows.length === 1 &&
+            rows[0]?.id === todoId &&
+            (rows[0]?.project as Record<string, unknown> | undefined)?.name === "Shared project",
+        );
+      },
+      10_000,
+      "Every tab should hydrate the same included project exactly once",
+    );
+
+    await updateRemoteBrowserDbRow(
+      remoteDbId,
+      2,
+      projectId,
+      { name: "Updated project" },
+      "projects",
+    );
+    await waitForCondition(
+      async () => {
+        const snapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        );
+        return snapshots.every(
+          (rows) =>
+            rows.length === 1 &&
+            (rows[0]?.project as Record<string, unknown> | undefined)?.name === "Updated project",
+        );
+      },
+      10_000,
+      "Included project updates should reach every tab without cardinality drift",
+    );
   });
 
   it("rehydrates exact multi-tab state after the SharedWorker restarts", async () => {

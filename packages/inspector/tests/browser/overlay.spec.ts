@@ -39,7 +39,7 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     }
   });
 
-  test("embedded inspector discovers and switches between host runtime contexts", async ({
+  test("embedded inspector discovers and switches across auth-session runtimes", async ({
     page,
   }) => {
     const browserErrors: string[] = [];
@@ -71,6 +71,13 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
       .catch((error) => {
         throw new Error(`${String(error)}\nBrowser errors: ${browserErrors.join("; ")}`);
       });
+    const registeredSessions = await page.evaluate(() => {
+      const state = (globalThis as Record<PropertyKey, unknown>)[
+        Symbol.for("jazz.browser-inspector-control-registry")
+      ] as { factories?: Map<unknown, unknown> } | undefined;
+      return state?.factories?.size ?? 0;
+    });
+    expect(registeredSessions).toBe(2);
 
     const inspector = page.frameLocator('iframe[title="jazz-inspector"]');
 

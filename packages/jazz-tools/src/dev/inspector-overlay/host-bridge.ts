@@ -7,6 +7,7 @@ import {
   serializeActiveSubscriptions,
   type JazzInspectorHost,
 } from "./inspector-host-types.js";
+import { openAggregatedBrowserInspectorControlPort } from "./browser-control-registry.js";
 
 /**
  * Build the ready-to-use browser config in the host bundle, where the host's
@@ -46,7 +47,7 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
       return buildOverlayDbConfig(db.getConfig());
     },
     openControlPort() {
-      return db.openInspectorControlPort();
+      return openAggregatedBrowserInspectorControlPort(() => db.openInspectorControlPort());
     },
     getWasmSchema() {
       const live = db.getRuntimeSchema();

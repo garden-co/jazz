@@ -15,6 +15,14 @@ declare module "vitest/internal/browser" {
       id: string,
       tabIndex: number,
       row: Record<string, unknown>,
+      table?: string,
+    ) => Promise<string>;
+    updateRemoteBrowserDbRow: (
+      id: string,
+      tabIndex: number,
+      rowId: string,
+      patch: Record<string, unknown>,
+      table?: string,
     ) => Promise<void>;
     queryRemoteBrowserDbRows: (
       id: string,
@@ -44,8 +52,19 @@ export function insertRemoteBrowserDbRow(
   id: string,
   tabIndex: number,
   row: Record<string, unknown>,
+  table?: string,
+): Promise<string> {
+  return commands.insertRemoteBrowserDbRow(id, tabIndex, row, table);
+}
+
+export function updateRemoteBrowserDbRow(
+  id: string,
+  tabIndex: number,
+  rowId: string,
+  patch: Record<string, unknown>,
+  table?: string,
 ): Promise<void> {
-  return commands.insertRemoteBrowserDbRow(id, tabIndex, row);
+  return commands.updateRemoteBrowserDbRow(id, tabIndex, rowId, patch, table);
 }
 
 export function queryRemoteBrowserDbRows(
