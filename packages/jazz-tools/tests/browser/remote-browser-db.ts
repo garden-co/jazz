@@ -11,6 +11,7 @@ declare module "vitest/internal/browser" {
       input: RemoteBrowserDbWaitForTitleInput,
     ) => Promise<Record<string, unknown>[]>;
     closeRemoteBrowserDb: (id: string) => Promise<void>;
+    deleteRemoteBrowserIndexedDbAndWaitForReload: (id: string, dbName: string) => Promise<void>;
   }
 }
 
@@ -26,4 +27,11 @@ export function waitForRemoteBrowserDbTitle(
 
 export function closeRemoteBrowserDb(id: string): Promise<void> {
   return commands.closeRemoteBrowserDb(id);
+}
+
+export function deleteRemoteBrowserIndexedDbAndWaitForReload(
+  id: string,
+  dbName: string,
+): Promise<void> {
+  return commands.deleteRemoteBrowserIndexedDbAndWaitForReload(id, dbName);
 }

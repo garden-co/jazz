@@ -31,6 +31,7 @@ import {
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
+  deleteRemoteBrowserIndexedDbAndWaitForReload,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s } from "../../src/";
@@ -806,6 +807,21 @@ describe("SharedWorker bridge with IndexedDB", () => {
       12000,
       "Both tabs should recover cleanly after follower-initiated storage wipe",
     );
+  });
+
+  it("reloads a tab when IndexedDB is externally deleted", async () => {
+    const dbName = uniqueDbName("external-indexeddb-delete");
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("external-indexeddb-delete-page"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId: "test-app",
+      dbName,
+      table: "todos",
+      schemaJson: JSON.stringify(app.wasmSchema),
+      initialize: true,
+    });
+
+    await deleteRemoteBrowserIndexedDbAndWaitForReload(remoteDbId, dbName);
   });
 
   it("logout with wipeData clears browser storage before the next session opens", async () => {

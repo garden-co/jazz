@@ -14,6 +14,7 @@ import {
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
+  deleteRemoteBrowserIndexedDbAndWaitForReload,
   waitForRemoteBrowserDbTitle,
 } from "./tests/browser/remote-browser-db-node.js";
 import {
@@ -82,6 +83,8 @@ export default defineConfig({
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>
           waitForRemoteBrowserDbTitle(input),
         closeRemoteBrowserDb: async (_commandContext, id) => closeRemoteBrowserDb(id),
+        deleteRemoteBrowserIndexedDbAndWaitForReload: async (_commandContext, id, dbName) =>
+          deleteRemoteBrowserIndexedDbAndWaitForReload(id, dbName),
         jazzServerJwtForUser: async (_context, userId, claims, appId) =>
           jazzServerJwtForUser(userId, claims, appId),
         writeRealisticBrowserReport: async (_context, runId, report) => {

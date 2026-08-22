@@ -99,6 +99,31 @@ describe("IndexedDbPageStore", () => {
     expect(await store.readPage(4)).toEqual(new Uint8Array([8, 6, 7, 5, 3, 0, 9]));
     store.close();
   });
+
+  it("invalidates an open store when its IndexedDB database is externally deleted", async () => {
+    const name = databaseName();
+    const invalidations: Error[] = [];
+    const store = await IndexedDbPageStore.open(name, (error) => invalidations.push(error));
+    await store.commit({
+      expectedGeneration: 0,
+      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 2 },
+      pages: new Map([[1, new Uint8Array([1])]]),
+    });
+
+    await IndexedDbPageStore.destroy(name);
+
+    expect(invalidations).toHaveLength(1);
+    expect(invalidations[0]?.message).toContain(name);
+    await expect(store.metadata()).rejects.toThrow("storage was invalidated");
+    await expect(store.readPage(1)).rejects.toThrow("storage was invalidated");
+    await expect(
+      store.commit({
+        expectedGeneration: 1,
+        metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 2 },
+        pages: new Map([[1, new Uint8Array([2])]]),
+      }),
+    ).rejects.toThrow("storage was invalidated");
+  });
 });
 
 function databaseName(): string {

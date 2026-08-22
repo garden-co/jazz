@@ -12,6 +12,7 @@ export interface RemoteBrowserDbCreateInput {
   adminSecret?: string;
   localFirstSecret?: string;
   logLevel?: DbConfig["logLevel"];
+  initialize?: boolean;
 }
 
 export interface RemoteBrowserDbWaitForTitleInput {
@@ -76,9 +77,12 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     logLevel: input.logLevel,
   });
 
+  const query = makeAllRowsQuery(input.table, schema);
+  if (input.initialize) await db.all(query, { tier: "local" });
+
   store.set(input.id, {
     db,
-    query: makeAllRowsQuery(input.table, schema),
+    query,
   });
 }
 

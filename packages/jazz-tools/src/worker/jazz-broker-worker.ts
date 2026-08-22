@@ -42,6 +42,7 @@ type RuntimeContext = {
   pageStore: IndexedDbPageStore | null;
   disposeTelemetry: (() => void) | null;
   resetBarrier: { id: number; pending: Set<string>; resolve: () => void } | null;
+  storageInvalidated: boolean;
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
@@ -99,6 +100,7 @@ function createContext(
     pageStore: null,
     disposeTelemetry: null,
     resetBarrier: null,
+    storageInvalidated: false,
     initialize: Promise.resolve(),
   };
   context.initialize = initialize(context);
@@ -116,7 +118,9 @@ async function initialize(context: RuntimeContext): Promise<void> {
     appId: options.appId,
     runtimeThread: "worker",
   });
-  context.pageStore = await IndexedDbPageStore.open(options.dbName);
+  context.pageStore = await IndexedDbPageStore.open(options.dbName, () =>
+    handleStorageInvalidation(context),
+  );
   const db = await wasmModule.WasmDb.openBrowser(
     context.pageStore,
     encodeSchema(options.schema),
@@ -260,6 +264,19 @@ async function deleteContextStorage(context: RuntimeContext): Promise<void> {
 
 function closeContextPeers(context: RuntimeContext): void {
   for (const tabId of [...context.peers.keys()]) closeTab(context, tabId);
+}
+
+function handleStorageInvalidation(context: RuntimeContext): void {
+  if (context.storageInvalidated) return;
+  context.storageInvalidated = true;
+  contexts.delete(context.key);
+  context.pageStore = null;
+  context.runtime?.discard();
+  context.runtime = null;
+  context.disposeTelemetry?.();
+  context.disposeTelemetry = null;
+  broadcast(context, { type: "storage-invalidated" });
+  setTimeout(() => closeContextPeers(context), 0);
 }
 
 async function notifyStorageReset(context: RuntimeContext): Promise<void> {

@@ -155,6 +155,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     onAuthRestored,
     onFailure,
     onStorageReset,
+    onStorageInvalidated,
   }: BrowserWorkerConnectionContext<DbConfig>): BrowserWorkerConnection {
     const runtime = client.getRuntime();
     if (!(runtime instanceof NativeRuntimeAdapter)) {
@@ -185,7 +186,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
       createBrokerFingerprint(config, dbName, getRuntimeSchemaCacheKey(schema)),
-      { onAuthFailure, onAuthRestored, onFailure, onStorageReset },
+      { onAuthFailure, onAuthRestored, onFailure, onStorageReset, onStorageInvalidated },
     );
   }
 

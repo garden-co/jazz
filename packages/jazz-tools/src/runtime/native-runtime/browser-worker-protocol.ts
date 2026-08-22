@@ -81,4 +81,5 @@ export type BrowserFollowerPortEvent =
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }
   | { type: "storage-reset"; resetId: number }
+  | { type: "storage-invalidated" }
   | { type: "error"; message: string };

@@ -2,6 +2,7 @@ import type { DurabilityTier } from "../client.js";
 import { resolveClientSessionSync } from "../client-session.js";
 import type { Session } from "../context.js";
 import type { BrowserWorkerConnection } from "../runtime-source.js";
+import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
@@ -42,6 +43,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         this.connectionError = asError(error);
       },
       onStorageReset: () => this.beginStorageReset(connection),
+      onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
       onFollowerPortClosed: () => undefined,
     });
     this.connection = connection;
@@ -115,6 +117,12 @@ export class BrowserConnectionManager extends ConnectionManager {
         this.connectionError = null;
         this.storageReset = null;
       });
+  }
+
+  private reloadAfterStorageInvalidation(connection: BrowserWorkerConnection): void {
+    if (this.connection !== connection) return;
+    this.connectionError = new Error("IndexedDB storage was externally invalidated");
+    reloadAfterStorageInvalidation();
   }
 
   override async shutdown(): Promise<void> {

@@ -20,6 +20,13 @@ export interface IndexedDbPageCommit {
   deletedPageIds?: readonly number[];
 }
 
+export class IndexedDbStorageInvalidatedError extends Error {
+  constructor(readonly databaseName: string) {
+    super(`IndexedDB storage was invalidated: ${databaseName}`);
+    this.name = "IndexedDbStorageInvalidatedError";
+  }
+}
+
 /**
  * Dumb, atomic page persistence for the browser B-tree.
  *
@@ -28,22 +35,32 @@ export interface IndexedDbPageCommit {
  * advances the small root metadata record in the same relaxed transaction.
  */
 export class IndexedDbPageStore {
+  private invalidated = false;
+
   private constructor(
     private readonly db: IDBDatabase,
     readonly name: string,
-  ) {}
+    private readonly onInvalidated?: (error: IndexedDbStorageInvalidatedError) => void,
+  ) {
+    db.addEventListener("versionchange", this.handleVersionChange);
+    db.addEventListener("close", this.handleUnexpectedClose);
+  }
 
-  static async open(name: string): Promise<IndexedDbPageStore> {
+  static async open(
+    name: string,
+    onInvalidated?: (error: IndexedDbStorageInvalidatedError) => void,
+  ): Promise<IndexedDbPageStore> {
     const request = indexedDB.open(name, 1);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(PAGES_STORE)) db.createObjectStore(PAGES_STORE);
       if (!db.objectStoreNames.contains(METADATA_STORE)) db.createObjectStore(METADATA_STORE);
     };
-    return new IndexedDbPageStore(await requestResult(request), name);
+    return new IndexedDbPageStore(await requestResult(request), name, onInvalidated);
   }
 
   async metadata(): Promise<IndexedDbBtreeMetadata | null> {
+    this.assertValid();
     const tx = this.db.transaction(METADATA_STORE, "readonly");
     const value = await requestResult(tx.objectStore(METADATA_STORE).get(CURRENT_METADATA_KEY));
     await transactionDone(tx);
@@ -53,6 +70,7 @@ export class IndexedDbPageStore {
   }
 
   async readPage(pageId: number): Promise<Uint8Array | null> {
+    this.assertValid();
     assertPageId(pageId);
     const tx = this.db.transaction(PAGES_STORE, "readonly");
     const value = await requestResult(tx.objectStore(PAGES_STORE).get(pageId));
@@ -69,6 +87,7 @@ export class IndexedDbPageStore {
   }
 
   async commit(commit: IndexedDbPageCommit): Promise<IndexedDbBtreeMetadata> {
+    this.assertValid();
     const tx = relaxedReadWriteTransaction(this.db, [PAGES_STORE, METADATA_STORE]);
     const pages = tx.objectStore(PAGES_STORE);
     const metadataStore = tx.objectStore(METADATA_STORE);
@@ -129,10 +148,12 @@ export class IndexedDbPageStore {
   }
 
   close(): void {
+    this.removeInvalidationListeners();
     this.db.close();
   }
 
   async clear(): Promise<void> {
+    this.assertValid();
     const tx = relaxedReadWriteTransaction(this.db, [PAGES_STORE, METADATA_STORE]);
     tx.objectStore(PAGES_STORE).clear();
     tx.objectStore(METADATA_STORE).clear();
@@ -142,6 +163,33 @@ export class IndexedDbPageStore {
   static async destroy(name: string): Promise<void> {
     const request = indexedDB.deleteDatabase(name);
     await requestResult(request);
+  }
+
+  private readonly handleVersionChange = (): void => {
+    // An upgrade and a deletion both replace the storage epoch underneath the
+    // cached B-tree. Close promptly so the external operation is not blocked.
+    this.invalidate();
+    this.db.close();
+  };
+
+  private readonly handleUnexpectedClose = (): void => {
+    this.invalidate();
+  };
+
+  private invalidate(): void {
+    if (this.invalidated) return;
+    this.invalidated = true;
+    this.removeInvalidationListeners();
+    this.onInvalidated?.(new IndexedDbStorageInvalidatedError(this.name));
+  }
+
+  private assertValid(): void {
+    if (this.invalidated) throw new IndexedDbStorageInvalidatedError(this.name);
+  }
+
+  private removeInvalidationListeners(): void {
+    this.db.removeEventListener("versionchange", this.handleVersionChange);
+    this.db.removeEventListener("close", this.handleUnexpectedClose);
   }
 }
 

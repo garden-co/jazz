@@ -646,6 +646,15 @@ export class NativeRuntimeAdapter implements Runtime {
     this.db.free?.();
   }
 
+  /** Discard a runtime whose persistence epoch is no longer usable. */
+  discard(): void {
+    // Do not explicitly free the WASM wrapper here. A forced IndexedDB close
+    // can reject a storage Promise while a WASM future is still unwinding;
+    // freeing its receiver in that window is unsafe. Sever all runtime work
+    // and let the now-unreferenced wrapper be garbage-collected instead.
+    this.closeRuntimeState();
+  }
+
   private closeRuntimeState(): boolean {
     if (this.closed) return false;
     this.closed = true;

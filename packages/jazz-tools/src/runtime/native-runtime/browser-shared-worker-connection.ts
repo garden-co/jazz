@@ -20,7 +20,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     fingerprint: string,
     private readonly callbacks: Pick<
       BrowserWorkerConnectionContext,
-      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset"
+      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset" | "onStorageInvalidated"
     >,
   ) {
     this.worker =
@@ -53,6 +53,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             onAuthRestored: callbacks.onAuthRestored,
             onFailure: callbacks.onFailure,
             onStorageReset: callbacks.onStorageReset,
+            onStorageInvalidated: callbacks.onStorageInvalidated,
           },
         );
         void this.connection.ready().then(resolve, reject);

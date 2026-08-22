@@ -38,7 +38,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     sessionClaims: Record<string, unknown>,
     private readonly callbacks: Pick<
       BrowserFollowerConnectionContext,
-      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset"
+      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset" | "onStorageInvalidated"
     >,
   ) {
     port.addEventListener("message", this.onMessage);
@@ -152,6 +152,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         resetId: message.resetId,
       } satisfies BrowserFollowerPortRequest);
       this.callbacks.onStorageReset?.();
+      return;
+    }
+    if (message.type === "storage-invalidated") {
+      this.callbacks.onStorageInvalidated?.();
+      this.dispose(new Error("IndexedDB storage was externally invalidated"));
       return;
     }
     if (message.type === "error") {
