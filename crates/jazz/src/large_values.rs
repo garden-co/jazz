@@ -1499,6 +1499,25 @@ impl LargeValue {
                         "UTF-16 metrics do not match the logical value kind".to_owned(),
                     ));
                 }
+                if text_metrics {
+                    for patch in &large.edit_tail {
+                        let insert = std::str::from_utf8(&patch.insert).map_err(|_| {
+                            ContentError::MalformedCell(
+                                "text tail insertion is not valid UTF-8".to_owned(),
+                            )
+                        })?;
+                        if patch
+                            .text_metrics
+                            .expect("validated text metric")
+                            .insert_len
+                            != count_utf16(insert)?
+                        {
+                            return Err(ContentError::MalformedCell(
+                                "text tail insertion UTF-16 metric is incorrect".to_owned(),
+                            ));
+                        }
+                    }
+                }
                 if !tail_within_bounds(&large.edit_tail, schema.tail_bounds())? {
                     return Err(ContentError::TailTooLarge);
                 }
@@ -1826,8 +1845,19 @@ impl LargeValue {
         store: &mut S,
     ) -> Result<Self, ContentError> {
         let current = self.materialize(kind, domain, tree, store)?;
-        if kind == ValueKind::String && patch.text_metrics.is_none() {
-            patch.text_metrics = Some(text_patch_metrics(&current, &patch)?);
+        if kind == ValueKind::String {
+            let actual_metrics = text_patch_metrics(&current, &patch)?;
+            if patch
+                .text_metrics
+                .is_some_and(|claimed| claimed != actual_metrics)
+            {
+                return Err(ContentError::MalformedCell(
+                    "text patch UTF-16 metrics are incorrect".to_owned(),
+                ));
+            }
+            patch.text_metrics = Some(actual_metrics);
+        } else if patch.text_metrics.is_some() {
+            return Err(ContentError::InvalidEdit);
         }
         let next = apply_patches(&current, std::slice::from_ref(&patch))?;
         kind.validate(&next)?;
@@ -3456,6 +3486,49 @@ mod tests {
             LargeValue::decode_cell(&schema, &oversized_bytes),
             Err(ContentError::TailTooLarge)
         );
+    }
+
+    #[test]
+    fn text_metrics_are_validated_at_cell_and_edit_boundaries() {
+        let schema = LargeValueSchema::built_in(ValueKind::String);
+        let bad_cell = LargeValue::Chunked(ChunkedValue {
+            root: ContentId([7; 32]),
+            root_byte_len: 10,
+            root_utf16_len: Some(10),
+            edit_tail: vec![BytePatch::insert(0, "🦀".as_bytes()).with_text_metrics(0, 1)],
+        })
+        .encode_cell()
+        .unwrap();
+        assert!(matches!(
+            LargeValue::decode_cell(&schema, &bad_cell),
+            Err(ContentError::MalformedCell(message))
+                if message.contains("insertion UTF-16 metric")
+        ));
+
+        let tree = ContentTree::new(tiny_profile()).unwrap();
+        let mut store = MemoryContentStore::default();
+        let value = LargeValue::create(
+            ValueKind::String,
+            &domain(),
+            "abcdefghijklmnop",
+            4,
+            tree,
+            &mut store,
+        )
+        .unwrap();
+        let bad_patch = BytePatch::replace(0, 1, "🦀".as_bytes()).with_text_metrics(7, 2);
+        assert!(matches!(
+            value.apply_edit(
+                ValueKind::String,
+                &domain(),
+                bad_patch,
+                4,
+                TailBounds::default(),
+                tree,
+                &mut store,
+            ),
+            Err(ContentError::MalformedCell(message)) if message.contains("patch UTF-16 metrics")
+        ));
     }
 
     #[test]
