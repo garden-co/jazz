@@ -359,7 +359,7 @@ where
     /// but a known schema must never accept a descriptor borrowed from another
     /// version: that would make the omitted trailing columns indistinguishable
     /// from an authored value and reintroduce partial-row sync semantics.
-    fn malformed_authored_version_reason(&self, versions: &[VersionRecord]) -> Option<String> {
+    fn malformed_authored_version_reason(&mut self, versions: &[VersionRecord]) -> Option<String> {
         for version in versions {
             let Some(schema) = self
                 .catalogue
@@ -392,6 +392,9 @@ where
             ) {
                 return Some(reason);
             }
+        }
+        if let Err(error) = self.validate_generated_large_value_version_shape(versions) {
+            return Some(format!("invalid generated large-value node transaction: {error}"));
         }
         None
     }

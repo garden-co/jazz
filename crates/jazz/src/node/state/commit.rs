@@ -144,10 +144,302 @@ where
     }
 }
 
+/// Validate the system-owned half of a large-value transaction before any
+/// version enters local history.  Hidden node tables are ordinary Jazz tables
+/// for storage, sync, and policy purposes, but they are not an application
+/// mutation surface: their rows are admitted only as the exact immutable
+/// closure of framed owner cells in this same transaction.
+fn validate_generated_large_value_commit_shape<S>(
+    state: &mut NodeState<S>,
+    commits: &[(SchemaVersionId, MergeableCommit)],
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage,
+{
+    let mut pending = BTreeMap::<
+        (
+            crate::large_values::LargeValueOwnerDomain,
+            crate::large_values::LargeValueNodeId,
+        ),
+        crate::large_values::LargeValueNodeRow,
+    >::new();
+    let mut roots = Vec::<(
+        crate::large_values::LargeValueOwnerDomain,
+        crate::large_values::LargeValueNodeId,
+    )>::new();
+
+    for (schema_version, commit) in commits {
+        let Some(owner_table_name) =
+            crate::large_values::large_value_node_owner_table(&commit.table)
+        else {
+            let table = state.table_in_schema(&commit.table, *schema_version)?;
+            if commit.deletion.is_some() {
+                continue;
+            }
+            let domain = crate::large_values::LargeValueOwnerDomain::new(
+                table.name.clone(),
+                commit.row_uuid.0,
+            )
+            .map_err(|_| Error::InvalidMergeableCommit("invalid large-value owner domain"))?;
+            for column in &table.columns {
+                let Some(schema) = &column.large_value else {
+                    continue;
+                };
+                let Some(stored) = commit.cells.get(&column.name).and_then(large_value_leaf)
+                else {
+                    continue;
+                };
+                if !crate::large_values::LargeValue::storage_value_is_framed(schema, stored) {
+                    continue;
+                }
+                let value = crate::large_values::LargeValue::decode_storage_value(schema, stored)
+                    .map_err(|_| Error::InvalidMergeableCommit("invalid large-value descriptor"))?;
+                if let crate::large_values::LargeValue::Chunked(value) = value {
+                    roots.push((domain.clone(), value.root));
+                }
+            }
+            continue;
+        };
+
+        let owner_table = state.table_in_schema(&owner_table_name, *schema_version)?;
+        if !owner_table
+            .columns
+            .iter()
+            .any(|column| column.large_value.is_some())
+        {
+            return Err(Error::InvalidMergeableCommit(
+                "generated large-value table does not name a large-value owner table",
+            ));
+        }
+        if commit.deletion.is_some() || !commit.parents.is_empty() || commit.branch != BranchSelector::default() {
+            return Err(Error::InvalidMergeableCommit(
+                "generated large-value nodes are insert-only and unbranched",
+            ));
+        }
+        let Some(Value::Uuid(owner_row)) = commit.cells.get("owner") else {
+            return Err(Error::InvalidMergeableCommit(
+                "generated large-value node lacks its owner row",
+            ));
+        };
+        let Some(Value::Bytes(content_id)) = commit.cells.get("content_id") else {
+            return Err(Error::InvalidMergeableCommit(
+                "generated large-value node lacks its content id",
+            ));
+        };
+        let content_id = crate::large_values::LargeValueNodeId::from_bytes(content_id)
+            .map_err(|_| Error::InvalidMergeableCommit("invalid generated large-value node id"))?;
+        let Some(Value::Bytes(payload)) = commit.cells.get("payload") else {
+            return Err(Error::InvalidMergeableCommit(
+                "generated large-value node lacks its payload",
+            ));
+        };
+        let owner = crate::large_values::LargeValueOwnerDomain::new(owner_table_name, *owner_row)
+            .map_err(|_| Error::InvalidMergeableCommit("invalid generated large-value owner"))?;
+        let node = crate::large_values::LargeValueNodeRow {
+            row_id: commit.row_uuid.0,
+            owner: owner.clone(),
+            content_id,
+            payload: payload.clone(),
+        };
+        let expected = node
+            .cells(Default::default())
+            .map_err(|_| Error::InvalidMergeableCommit("generated large-value node is not canonical"))?;
+        if commit.cells != expected
+            || commit.authored_columns.as_ref().is_some_and(|authored| {
+                *authored != expected.keys().cloned().collect()
+            })
+        {
+            return Err(Error::InvalidMergeableCommit(
+                "generated large-value node does not carry its exact canonical cells",
+            ));
+        }
+        if pending.insert((owner, content_id), node).is_some() {
+            return Err(Error::InvalidMergeableCommit(
+                "generated large-value transaction repeats a node identity",
+            ));
+        }
+    }
+
+    validate_generated_large_value_node_closure(state, pending, roots)
+}
+
+fn validate_generated_large_value_node_closure<S>(
+    state: &mut NodeState<S>,
+    pending: BTreeMap<
+        (
+            crate::large_values::LargeValueOwnerDomain,
+            crate::large_values::LargeValueNodeId,
+        ),
+        crate::large_values::LargeValueNodeRow,
+    >,
+    roots: Vec<(
+        crate::large_values::LargeValueOwnerDomain,
+        crate::large_values::LargeValueNodeId,
+    )>,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage,
+{
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let reader = NodeLargeValueReader::new(state);
+    let mut reachable = BTreeSet::new();
+    let mut stack = roots;
+    while let Some((owner, id)) = stack.pop() {
+        if !reachable.insert((owner.clone(), id)) {
+            continue;
+        }
+        if let Some(node) = pending.get(&(owner.clone(), id)) {
+            for child in node
+                .child_ids(Default::default())
+                .map_err(|_| Error::InvalidMergeableCommit("generated large-value node payload is malformed"))?
+            {
+                stack.push((owner.clone(), child));
+            }
+        } else if crate::large_values::LargeValueNodeRows::get(&reader, &owner, id)
+            .map_err(|_| Error::InvalidMergeableCommit("large-value descriptor references an invalid stored node"))?
+            .is_none()
+        {
+            return Err(Error::InvalidMergeableCommit(
+                "large-value descriptor references a missing node",
+            ));
+        }
+    }
+    if pending.keys().any(|key| !reachable.contains(key)) {
+        return Err(Error::InvalidMergeableCommit(
+            "generated large-value transaction contains an orphan node",
+        ));
+    }
+    Ok(())
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Apply the generated-node admission invariant to an arriving complete
+    /// wire transaction.  This is intentionally independent of local commit
+    /// construction: peers can serialize `VersionRecord`s directly.
+    fn validate_generated_large_value_version_shape(
+        &mut self,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        let mut pending = BTreeMap::<
+            (
+                crate::large_values::LargeValueOwnerDomain,
+                crate::large_values::LargeValueNodeId,
+            ),
+            crate::large_values::LargeValueNodeRow,
+        >::new();
+        let mut roots = Vec::<(
+            crate::large_values::LargeValueOwnerDomain,
+            crate::large_values::LargeValueNodeId,
+        )>::new();
+
+        for version in versions {
+            let Some(schema) = self.catalogue.catalogue_schemas.get(&version.schema_version()) else {
+                // Unknown authored schemas are parked until their catalogue
+                // lineage arrives, at which point this validation runs again.
+                continue;
+            };
+            let Some(table) = schema.schema.tables.iter().find(|table| table.name == version.table()) else {
+                continue;
+            };
+            let cells = table
+                .columns
+                .iter()
+                .enumerate()
+                .filter_map(|(index, column)| {
+                    version.cell_at(index).map(|value| (column.name.clone(), value))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let Some(owner_table_name) =
+                crate::large_values::large_value_node_owner_table(&table.name)
+            else {
+                if version.deletion().is_some() {
+                    continue;
+                }
+                let domain = crate::large_values::LargeValueOwnerDomain::new(
+                    table.name.clone(),
+                    version.row_uuid().0,
+                )
+                .map_err(|_| Error::InvalidStoredValue("invalid large-value owner domain"))?;
+                for column in &table.columns {
+                    let Some(large_schema) = &column.large_value else {
+                        continue;
+                    };
+                    let Some(stored) = cells.get(&column.name).and_then(large_value_leaf) else {
+                        continue;
+                    };
+                    if !crate::large_values::LargeValue::storage_value_is_framed(large_schema, stored) {
+                        continue;
+                    }
+                    let value = crate::large_values::LargeValue::decode_storage_value(large_schema, stored)
+                        .map_err(|_| Error::InvalidStoredValue("invalid large-value descriptor"))?;
+                    if let crate::large_values::LargeValue::Chunked(value) = value {
+                        roots.push((domain.clone(), value.root));
+                    }
+                }
+                continue;
+            };
+
+            let owner_table = schema
+                .schema
+                .tables
+                .iter()
+                .find(|candidate| candidate.name == owner_table_name)
+                .ok_or(Error::InvalidStoredValue(
+                    "generated large-value node table lacks its owner table",
+                ))?;
+            if !owner_table
+                .columns
+                .iter()
+                .any(|column| column.large_value.is_some())
+                || version.deletion().is_some()
+                || !version.parents().is_empty()
+                || version.branch_key() != &BranchKey::default()
+            {
+                return Err(Error::InvalidStoredValue(
+                    "generated large-value node is not an unbranched insert",
+                ));
+            }
+            let Some(Value::Uuid(owner_row)) = cells.get("owner") else {
+                return Err(Error::InvalidStoredValue("generated large-value node lacks owner"));
+            };
+            let Some(Value::Bytes(content_id)) = cells.get("content_id") else {
+                return Err(Error::InvalidStoredValue("generated large-value node lacks content id"));
+            };
+            let content_id = crate::large_values::LargeValueNodeId::from_bytes(content_id)
+                .map_err(|_| Error::InvalidStoredValue("invalid generated large-value node id"))?;
+            let Some(Value::Bytes(payload)) = cells.get("payload") else {
+                return Err(Error::InvalidStoredValue("generated large-value node lacks payload"));
+            };
+            let owner = crate::large_values::LargeValueOwnerDomain::new(owner_table_name, *owner_row)
+                .map_err(|_| Error::InvalidStoredValue("invalid generated large-value owner"))?;
+            let node = crate::large_values::LargeValueNodeRow {
+                row_id: version.row_uuid().0,
+                owner: owner.clone(),
+                content_id,
+                payload: payload.clone(),
+            };
+            let expected = node
+                .cells(Default::default())
+                .map_err(|_| Error::InvalidStoredValue("generated large-value node is not canonical"))?;
+            if cells != expected {
+                return Err(Error::InvalidStoredValue(
+                    "generated large-value node does not carry canonical cells",
+                ));
+            }
+            if pending.insert((owner, content_id), node).is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "generated large-value transaction repeats a node identity",
+                ));
+            }
+        }
+        validate_generated_large_value_node_closure(self, pending, roots)
+    }
+
     #[cfg(feature = "runtime")]
     pub(crate) fn prepare_large_value_edit(
         &mut self,
@@ -458,6 +750,7 @@ where
         made_at: TxTime,
         contribution_merge: Option<ContributionMergeProvenance>,
     ) -> Result<TxId, Error> {
+        validate_generated_large_value_commit_shape(self, &commits)?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();

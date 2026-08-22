@@ -35,6 +35,17 @@ pub fn large_value_node_table_name(owner_table: &str) -> String {
     )
 }
 
+/// Recover the application table represented by a generated node-table name.
+///
+/// The check is deliberately round-tripped through [`large_value_node_table_name`]
+/// so a non-canonical spelling cannot enter the system namespace.
+pub(crate) fn large_value_node_owner_table(table: &str) -> Option<String> {
+    let encoded = table.strip_prefix(LARGE_VALUE_NODE_TABLE_PREFIX)?;
+    let bytes = hex::decode(encoded).ok()?;
+    let owner = String::from_utf8(bytes).ok()?;
+    (large_value_node_table_name(&owner) == table).then_some(owner)
+}
+
 /// Build the hidden ordinary Jazz table used by large columns on `owner`.
 ///
 /// Returning `None` keeps schemas without large-capable columns byte-for-byte
@@ -161,6 +172,7 @@ impl LargeValueNodeRow {
         &self,
         profile: ChunkingProfile,
     ) -> Result<BTreeMap<String, GrooveValue>, ContentError> {
+        self.validate_identity()?;
         let node = decode_node(&self.payload, profile)?;
         let (byte_len, utf16_len) = node_metrics(&node)?;
         Ok(BTreeMap::from([
@@ -193,6 +205,33 @@ impl LargeValueNodeRow {
                 GrooveValue::Nullable(utf16_len.map(|value| Box::new(GrooveValue::U64(value)))),
             ),
         ]))
+    }
+
+    /// Validate the immutable identity and return direct child identities.
+    ///
+    /// Admission uses this before a generated row becomes a normal Jazz row;
+    /// read paths use [`Self::cells`] and consequently perform the same check.
+    pub(crate) fn child_ids(
+        &self,
+        profile: ChunkingProfile,
+    ) -> Result<Vec<LargeValueNodeId>, ContentError> {
+        self.validate_identity()?;
+        match decode_node(&self.payload, profile)? {
+            TreeNode::Leaf { .. } => Ok(Vec::new()),
+            TreeNode::Branch(children) => Ok(children.into_iter().map(|child| child.id).collect()),
+        }
+    }
+
+    fn validate_identity(&self) -> Result<(), ContentError> {
+        if self.row_id != self.content_id.row_id() {
+            return Err(ContentError::MalformedNode(
+                "node row id does not match its content id".to_owned(),
+            ));
+        }
+        if node_id(&self.owner, &self.payload) != self.content_id {
+            return Err(ContentError::NodeIdMismatch(self.content_id));
+        }
+        Ok(())
     }
 }
 

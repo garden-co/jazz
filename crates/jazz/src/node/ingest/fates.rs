@@ -353,6 +353,17 @@ where
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<bool, Error> {
+        // A generated node inherits its owner write policy declaratively, but
+        // an owner insert in this same unit is not yet current when that query
+        // runs.  Validate the transaction-wide descriptor closure first, then
+        // authorize its owner mutation; the closure makes every skipped node a
+        // canonical, reachable dependency of that authorized owner write.
+        if self
+            .validate_generated_large_value_version_shape(versions)
+            .is_err()
+        {
+            return Ok(false);
+        }
         let permission_subject = match ingest_context {
             Some(context) => {
                 if context.trust == CommitUnitTrust::Session && tx.made_by != context.identity {
@@ -366,6 +377,9 @@ where
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
         for version in versions {
+            if crate::large_values::large_value_node_owner_table(version.table()).is_some() {
+                continue;
+            }
             if !self.version_satisfies_write_policy(version, permission_subject)? {
                 return Ok(false);
             }
