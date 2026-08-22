@@ -14,7 +14,8 @@ use groove::storage::OrderedKvStorage;
 
 const CONTENT_ID_DOMAIN: &[u8] = b"jazz-adaptive-content-v1";
 const OBJECT_FORMAT_VERSION: u8 = 1;
-const CELL_ENVELOPE: &[u8] = b"JAZZ-ADAPTIVE-SCALAR-V1\0";
+const CELL_ENVELOPE: &[u8] = b"JAZZ-ADAPTIVE-SCALAR-V2\0";
+const PATCH_FRAME_HEADER_BYTES: usize = 3 * std::mem::size_of::<u64>();
 /// Physical column family containing domain-scoped immutable content objects.
 pub const CONTENT_OBJECTS_CF: &str = "jazz_content_objects";
 
@@ -944,6 +945,7 @@ impl AdaptiveScalar {
                 }
                 let count = usize::try_from(count).map_err(|_| ContentError::LengthOverflow)?;
                 let mut edit_tail = Vec::with_capacity(count);
+                let mut tail_frame_bytes = std::mem::size_of::<u64>();
                 for _ in 0..count {
                     let offset = read_u64(payload, &mut cursor)?;
                     let delete_len = read_u64(payload, &mut cursor)?;
@@ -951,6 +953,16 @@ impl AdaptiveScalar {
                     let insert_len =
                         usize::try_from(insert_len).map_err(|_| ContentError::LengthOverflow)?;
                     if insert_len
+                        > usize::try_from(schema.max_tail_bytes)
+                            .map_err(|_| ContentError::LengthOverflow)?
+                    {
+                        return Err(ContentError::TailTooLarge);
+                    }
+                    tail_frame_bytes = tail_frame_bytes
+                        .checked_add(PATCH_FRAME_HEADER_BYTES)
+                        .and_then(|bytes| bytes.checked_add(insert_len))
+                        .ok_or(ContentError::LengthOverflow)?;
+                    if tail_frame_bytes
                         > usize::try_from(schema.max_tail_bytes)
                             .map_err(|_| ContentError::LengthOverflow)?
                     {
@@ -1420,9 +1432,15 @@ fn tail_within_bounds(tail: &[BytePatch], bounds: TailBounds) -> Result<bool, Co
     if tail.len() > bounds.max_entries {
         return Ok(false);
     }
-    let encoded = postcard::to_allocvec(tail)
-        .map_err(|error| ContentError::MalformedObject(error.to_string()))?;
-    Ok(encoded.len() <= bounds.max_encoded_bytes)
+    let encoded_len = tail
+        .iter()
+        .try_fold(std::mem::size_of::<u64>(), |bytes, patch| {
+            bytes
+                .checked_add(PATCH_FRAME_HEADER_BYTES)
+                .and_then(|bytes| bytes.checked_add(patch.insert.len()))
+                .ok_or(ContentError::LengthOverflow)
+        })?;
+    Ok(encoded_len <= bounds.max_encoded_bytes)
 }
 
 fn object_id(domain: &ContentDomain, canonical: &[u8]) -> ContentId {
@@ -2008,6 +2026,20 @@ mod tests {
         hostile.extend_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(
             AdaptiveScalar::decode_cell(&schema, &hostile),
+            Err(ContentError::TailTooLarge)
+        );
+
+        let oversized_bytes = AdaptiveScalar::Large(LargeScalar {
+            root: ContentId([7; 32]),
+            root_byte_len: 42,
+            edit_tail: (0..schema.max_tail_entries)
+                .map(|_| BytePatch::insert(0, vec![b'x'; 250]))
+                .collect(),
+        })
+        .encode_cell()
+        .unwrap();
+        assert_eq!(
+            AdaptiveScalar::decode_cell(&schema, &oversized_bytes),
             Err(ContentError::TailTooLarge)
         );
     }
