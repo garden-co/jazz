@@ -850,13 +850,6 @@ impl LayoutStorage {
         let strip_len = 4 + logical_prefix.len();
         (mapping.physical_cf.to_owned(), physical_prefix, strip_len)
     }
-
-    #[cfg(any())]
-    fn strip_key<'a>(&self, key: &'a [u8], strip_len: usize) -> Result<&'a [u8], Error> {
-        key.get(strip_len..).ok_or_else(|| {
-            Error::InvalidStorageKey("physical layout key shorter than logical prefix".to_owned())
-        })
-    }
 }
 
 impl OrderedKvStorage for LayoutStorage {
@@ -1842,20 +1835,6 @@ where
 
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.base.column_family_names()
-    }
-}
-
-#[cfg(any())]
-fn exclusive_upper_bound(key: &[u8]) -> Vec<u8> {
-    let mut upper = key.to_vec();
-    if let Some(index) = upper.iter().rposition(|byte| *byte != 0xFF) {
-        upper[index] += 1;
-        upper.truncate(index + 1);
-        upper
-    } else {
-        let mut end = key.to_vec();
-        end.push(0);
-        end
     }
 }
 
