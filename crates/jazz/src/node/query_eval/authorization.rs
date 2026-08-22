@@ -36,6 +36,7 @@ fn empty_policy_filtered_current_source_graph(
                     .collect::<Vec<_>>(),
             ),
         route_fields: BTreeSet::new(),
+        access_paths: BTreeMap::new(),
     }
 }
 
@@ -196,9 +197,9 @@ where
         }
 
         let result = async {
-            let access_paths = self.policy_authorization_access_paths(&request)?;
+            let access_paths = self.query_program_access_paths(&request)?;
             let program = Box::pin(
-                self.compile_query_program_request_with_access_paths(request, access_paths),
+                self.compile_query_program_request_with_access_paths(request, access_paths.clone()),
             )
             .await?;
             let graph = lowered_terminal_graph(&program, "policy.authorized_rows")?;
@@ -218,6 +219,7 @@ where
             let graph = PolicyAuthorizationGraph {
                 graph,
                 route_fields,
+                access_paths,
             };
             self.query
                 .policy_authorization_graph_cache
@@ -617,6 +619,7 @@ where
                 graph: GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
                     .project_fields(fields),
                 route_fields: binding_route_fields,
+                access_paths: BTreeMap::new(),
             });
         }
         let mut fields = output_fields
@@ -639,6 +642,7 @@ where
             graph: GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
                 .project_fields(fields),
             route_fields: binding_route_fields,
+            access_paths: BTreeMap::new(),
         })
     }
 

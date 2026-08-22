@@ -282,6 +282,10 @@ pub(super) fn fact_public_fields(
 pub(crate) struct PolicyAuthorizationGraph {
     pub(super) graph: GraphBuilder,
     pub(super) route_fields: BTreeSet<String>,
+    /// Physical source narrowing derived while compiling this policy program.
+    /// This is only an optimization hint: the policy graph remains the sole
+    /// authorization decision.
+    pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
 }
 
 pub(super) fn policy_authorization_graph_cache_key(request: &QueryProgramRequest) -> String {
@@ -500,6 +504,7 @@ where
                         PolicyAuthorizationGraph {
                             graph: empty_authorized_row_id_graph(),
                             route_fields: BTreeSet::new(),
+                            access_paths: BTreeMap::new(),
                         },
                     );
                 }

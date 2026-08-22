@@ -406,7 +406,6 @@ where
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
-        let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
         let request = self.current_query_program_request(
             shape,
             binding,
@@ -417,6 +416,7 @@ where
             settled_binding_view,
             authorization_mode,
         )?;
+        let access_paths = self.query_program_access_paths(&request)?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
     }
